@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
+import {webcrypto} from 'node:crypto';
 
 export function collectionFixtureDocument() {
   return {contract_version:1,document_kind:'api-collection',generation:3,updated_at_ms:1000,
@@ -14,6 +15,7 @@ export function collectionFixtureDocument() {
 export async function checkCollectionController(root, fixtureOnly = false) {
   const app = await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const models = await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8');
+  const experimentContext = app.slice(app.indexOf('      function experimentLifetimeKey('), app.indexOf('      function currentExperimentReceipt('));
   const section = app.slice(app.indexOf('      function collectionFolder('),app.indexOf('      const analystExactKeys'));
   const document = {activeElement:null};
   class Node {
@@ -47,9 +49,9 @@ export async function checkCollectionController(root, fixtureOnly = false) {
     isPlainObject:value=>value!==null&&typeof value==='object'&&!Array.isArray(value),utf8ByteLength:value=>Buffer.byteLength(value),parseExperimentHeaders:value=>value.trim()?JSON.parse(value):{},repeaterHeaderObject:headers=>Object.fromEntries(headers.map(header=>[header.name,header.value])),
     textElement,emptyListboxOption:(_,text)=>textElement('div','',text),experimentFact:(label,value)=>textElement('div','',label+value),
     requestInterception:()=>state.debuggerSession.request_interception,repeaterState:()=>state.debuggerSession.repeater,
-    runExperimentAction:request=>actionHandler(request),fetch:(url,options)=>new Promise((resolve,reject)=>{pending.push({url,options,resolve});options.signal?.addEventListener('abort',()=>reject(new Error('Aborted')),{once:true});})};
-  const ui=runInNewContext(models+'\n'+section+'\n;({renderApiCollection,renderCollectionExecution,selectCollectionFolder,selectCollectionRequest,saveCollectionRequest,saveCollectionFolder,refreshApiCollection,runCollectionRequest,createCollectionRequest,deleteCollectionRequest,moveCollectionTreeSelection,collectionNextRequestId,collectionHistoryEntries,isApiCollection,createCollectionFolder,duplicateCollectionRequest,deleteCollectionFolder})',context);
-  if (fixtureOnly) return {ui,state,elements,pending,actions,document,setActionHandler:handler=>actionHandler=handler};
+    currentExperimentReceipt:response=>response,runExperimentAction:request=>actionHandler(request),fetch:(url,options)=>new Promise((resolve,reject)=>{pending.push({url,options,resolve});options.signal?.addEventListener('abort',()=>reject(new Error('Aborted')),{once:true});})};
+  const ui=runInNewContext(models+'\n'+experimentContext+'\n'+section+'\n;({renderApiCollection,renderCollectionExecution,selectCollectionFolder,selectCollectionRequest,saveCollectionRequest,saveCollectionFolder,refreshApiCollection,runCollectionRequest,createCollectionRequest,deleteCollectionRequest,moveCollectionTreeSelection,collectionNextRequestId,collectionHistoryEntries,isApiCollection,createCollectionFolder,duplicateCollectionRequest,deleteCollectionFolder})',context);
+  if (fixtureOnly) return {ui,state,elements,pending,actions,document,context,setActionHandler:handler=>actionHandler=handler};
   assert(ui.isApiCollection(state.apiCollection));
   state.debuggerSession.repeater.history=[{collection_request_id:4,started_at_ms:1000},{collection_request_id:1,started_at_ms:999},{collection_request_id:1,started_at_ms:1001}];
   assert.equal(ui.collectionNextRequestId(),5,'Deleted recipe IDs must not be reused while their runs exist');
@@ -98,14 +100,114 @@ export async function checkCollectionController(root, fixtureOnly = false) {
   state.debuggerSession.repeater.state='running';state.debuggerSession.repeater.active_execution={collection_request_id:2,started_at_ms:3000};ui.renderCollectionExecution();
   assert.equal(elements.collectionResponse.children[1],body);assert.equal(elements.collectionResponse.scrollTop,80);assert.match(elements.collectionResponseMeta.textContent,/another run in progress/);
   assert.equal(body.textContent,'<script>inert()</script>');assert.match(elements.collectionResponse.textContent,/truncated/);
+  await checkCollectionReceiptTransport(root);
   await checkCollectionOwnership(root);
   await checkCollectionPreAcknowledgement(root);
   await checkCollectionRetiredSubmission(root);
   console.log('PASS Collection selected-draft guard, folder moves, focus, failed/conflicting/removed saves, stale load, explicit Save & Run, repeat suppression and submitted identity (DOM/controller fixture; not rendered QA)');
 }
 
-export function collectionBrowserFixture() {
-  const fixture={document:collectionFixtureDocument(),mode:'ready',saveMode:'ready',writes:[],pending:[]};
+// This function is installed verbatim in both Chromium and the browser-free
+// regression. Only fetch is replaced: action receipts, ownership and polling
+// continue through the production controllers and validators.
+function installCollectionDebuggerFixture(empty) {
+  clearTimeout(state.debuggerRefreshTimer);
+  const server = structuredClone(empty);
+  const target = {id:'fixture-target',type:'page',title:'Collection fixture',url:'about:blank'};
+  Object.assign(server,{generation:10,state:'running',target,targets:[target]});
+  Object.assign(server.request_interception,{experiment_id:1,created_at_ms:1000,state:'ready',isolated:true,target_id:target.id});
+  for (const group of ['object_experiment','runtime_hooks','automation_recipes','repeater']) {
+    Object.assign(server[group],{session_id:1,state:'ready'});
+    if (group !== 'repeater') Object.assign(server[group],{isolated:true,target_id:target.id});
+  }
+  const validate = () => {
+    if (!isDebuggerResponse(server)) throw new Error('Malformed Collection debugger fixture');
+  };
+  validate();
+  state.debuggerSession = structuredClone(server);
+  state.debuggerEtag = null;
+  window.collectionActions = [];
+  window.collectionRunCounter = 0;
+  window.collectionTransportMode = 'ready';
+  const originalFetch = window.fetch.bind(window);
+  const receipt = () => ({ok:true,generation:server.generation,repeater:structuredClone(server.repeater)});
+  const publish = async () => {
+    validate();
+    while (state.debuggerRefreshing) await new Promise(resolve => setTimeout(resolve, 0));
+    await refreshDebugger(true);
+    if (state.debuggerRefreshFailed) throw new Error(state.debuggerError);
+    renderApiCollection();
+  };
+  window.collectionPublishExternalRun = async entry => {
+    const retained = structuredClone(entry);
+    delete retained.stored_bytes;
+    retained.stored_bytes = new TextEncoder().encode(JSON.stringify(retained)).length;
+    server.repeater.history.push(retained);
+    server.repeater.history_bytes += retained.stored_bytes;
+    server.generation++;
+    await publish();
+  };
+  window.fetch = async (url, options = {}) => {
+    if (String(url).startsWith('/api/debugger?')) {
+      validate();
+      return Response.json(server,{headers:{ETag:`"collection-${server.generation}"`}});
+    }
+    if (url !== '/api/debugger/actions') return originalFetch(url, options);
+    const request = JSON.parse(options.body);
+    window.collectionActions.push(structuredClone(request));
+    if (window.collectionTransportMode === 'refused') return Response.json({ok:false,error:'Authored fixture refusal'});
+    if (window.collectionTransportMode === 'malformed') return Response.json({ok:true});
+    if (request.action === 'configure_repeater_variables') {
+      server.repeater.variables = Object.entries(request.variables).map(([name,value]) => ({name,value}));
+      server.generation++;
+      validate();
+      return Response.json(receipt());
+    }
+    if (request.action === 'cancel_repeater_request') {
+      server.repeater.state = 'cancelling';
+      server.repeater.active_execution.cancel_requested = true;
+      server.generation++;
+      validate();
+      return Response.json(receipt());
+    }
+    if (request.action !== 'run_repeater_request') throw new Error(`Unexpected Collection fixture action: ${request.action}`);
+    const id = ++window.collectionRunCounter;
+    const template = {url:request.url,method:request.method,headers:Object.entries(request.headers).map(([name,value]) => ({name,value})),
+      body:request.body,timeout_ms:request.timeout_ms,collection_request_id:request.collection_request_id};
+    const resolved = {...structuredClone(template),url:template.url.replace('{{host}}','fixture.invalid')};
+    const variableNames = template.url.includes('{{host}}') ? ['host'] : [];
+    server.repeater.state = 'running';
+    server.repeater.active_execution = {execution_id:id,started_at_ms:4000+id,collection_request_id:request.collection_request_id,
+      request:template,resolved_url:resolved.url,resolved_method:resolved.method,variable_names:variableNames,cancel_requested:false};
+    server.generation++;
+    validate();
+    window.collectionRelease = async () => {
+      const body = '<script>window.collectionUnsafe=true</script>\n'+Array.from({length:80},(_,i) => 'Response line '+i).join('\n');
+      const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body))),byte => byte.toString(16).padStart(2,'0')).join('');
+      const entry = {id,collection_request_id:request.collection_request_id,state:'complete',started_at_ms:4000+id,completed_at_ms:4001+id,
+        variable_names:variableNames,request:template,resolved_request:resolved,response:{protocol_version:1,ok:true,status:200,status_text:'OK',
+          url:resolved.url,duration_ms:17,body,body_truncated:true,headers_truncated:false,error:null,cancelled:false,timed_out:false,body_sha256:hash,
+          headers:[{name:'content-type',value:'text/plain'},{name:'x-synthetic',value:'one'}]}};
+      entry.stored_bytes = new TextEncoder().encode(JSON.stringify(entry)).length;
+      Object.assign(server.repeater,{state:'ready',active_execution:null,history:[...server.repeater.history,entry],
+        history_bytes:server.repeater.history_bytes+entry.stored_bytes});
+      server.generation++;
+      await publish();
+    };
+    const acknowledged = receipt();
+    if (window.collectionHoldAcknowledgement) return new Promise(resolve => {
+      window.collectionAcknowledge = success => resolve(success ? Response.json(acknowledged)
+        : Response.json({error:'Authored lost acknowledgement'},{status:503}));
+    });
+    return Response.json(acknowledged);
+  };
+  renderApiCollection();
+}
+
+export async function collectionBrowserFixture(root) {
+  const empty=JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
+  const fixture={document:collectionFixtureDocument(),mode:'ready',saveMode:'ready',writes:[],pending:[],
+    debuggerScript:`(${installCollectionDebuggerFixture.toString()})(${JSON.stringify(empty)})`};
   fixture.handle=async(request,response)=>{
     const path=new URL(request.url,'http://127.0.0.1').pathname;
     if(!['/api/api-collection','/api/api-collection/actions'].includes(path))return false;
@@ -188,20 +290,10 @@ export async function checkCollectionInteractions({evaluate,viewport,click,key,w
   assert.equal(await evaluate('elements.collectionSaveRequest.disabled'),true);assert.match(await evaluate('elements.collectionNotice.textContent'),/removed or replaced/);
   await screenshot('collection-replaced-draft-owner');await click('#collection-discard-request');await click('#collection-retry');await wait('!state.apiCollectionRefreshing');
   assert.equal(await evaluate('elements.collectionRequestName.value'),'Replacement recipe');
-  // Simulate only the debugger transport; the actual Collection controls and
-  // controller still own save/run ordering, response rendering and selection.
+  // Replace only fetch with schema-valid authored responses. Production action,
+  // receipt and poll owners still govern the actual Collection controls.
   await wait('!state.debuggerRefreshing');
-  await evaluate(`clearTimeout(state.debuggerRefreshTimer);refreshDebugger=async()=>{};
-    state.debuggerSession={state:'running',target:{id:'fixture-target'},settings:{},scripts:[],targets:[],breakpoints:[],watches:[],console:[],paused:null,request_interception:{experiment_id:1,state:'ready',isolated:true,target_id:'fixture-target'},repeater:{state:'ready',history:[]}};
-    window.collectionActions=[];window.collectionRunCounter=0;
-    runExperimentAction=async request=>{collectionActions.push(structuredClone(request));
-      if(request.action==='configure_repeater_variables')return {};
-      if(request.action==='cancel_repeater_request'){state.debuggerSession.repeater.state='cancelling';renderApiCollection();return {};}
-      const id=++collectionRunCounter;state.debuggerSession.repeater.state='running';state.debuggerSession.repeater.active_execution={execution_id:id,started_at_ms:4000+id,collection_request_id:request.collection_request_id};renderApiCollection();
-      window.collectionRelease=()=>{const entry={id,collection_request_id:request.collection_request_id,state:'complete',started_at_ms:4000+id,completed_at_ms:4001+id,resolved_request:{...request,url:request.url.replace('{{host}}','fixture.invalid')},response:{ok:true,status:200,status_text:'OK',duration_ms:17,body:'<script>window.collectionUnsafe=true</script>\\n'+Array.from({length:80},(_,i)=>'Response line '+i).join('\\n'),body_truncated:true,headers:[{name:'content-type',value:'text/plain'},{name:'x-synthetic',value:'one'}]}};
-      state.debuggerSession.repeater={state:'ready',active_execution:null,history:[...state.debuggerSession.repeater.history,entry]};renderApiCollection();};
-      if(window.collectionHoldAcknowledgement)return await new Promise(resolve=>window.collectionAcknowledge=success=>resolve(success?{repeater:state.debuggerSession.repeater}:null));
-      return {repeater:state.debuggerSession.repeater};};renderApiCollection();`);
+  await evaluate(fixture.debuggerScript);
   await fill('#collection-request-url','https://{{host}}/saved-and-run');await click('#collection-run');await wait('typeof collectionRelease === "function"');
   assert.equal(await evaluate('state.collectionDraftDirty'),false);assert.equal(await evaluate('elements.collectionRun.disabled'),true);
   await click('#collection-run');assert.equal(await evaluate('collectionActions.length'),2);
@@ -239,7 +331,7 @@ export async function checkCollectionInteractions({evaluate,viewport,click,key,w
   await evaluate('collectionRelease()');assert.equal(await evaluate('collectionHistoryEntries().length'),1);assert.equal(await evaluate('state.collectionSelectedHistoryId'),5);
   fixture.document.generation++;fixture.document.requests[0]={...fixture.document.requests[0],name:'Later replacement',url:'https://fixture.invalid/later-replacement',created_at_ms:4006,updated_at_ms:4006};
   await evaluate('refreshApiCollection(true)');
-  await evaluate("const externalRun=structuredClone(state.debuggerSession.repeater.history.at(-1));Object.assign(externalRun,{id:6,started_at_ms:5000,completed_at_ms:5001});externalRun.resolved_request.url='https://fixture.invalid/later-replacement';state.debuggerSession.repeater.history.push(externalRun);renderApiCollection()");
+  await evaluate("const externalRun=structuredClone(state.debuggerSession.repeater.history.at(-1));Object.assign(externalRun,{id:6,started_at_ms:5000,completed_at_ms:5001});externalRun.resolved_request.url='https://fixture.invalid/later-replacement';collectionPublishExternalRun(externalRun)");
   assert.equal(await evaluate('collectionHistoryEntries().length'),1);assert.equal(await evaluate('state.collectionSelectedHistoryId'),6);
   assert.match(await evaluate('elements.collectionResponseMeta.textContent'),/later-replacement/);await screenshot('collection-retired-owner-new-run');
   // Read-only load failures preserve the current request and response.
@@ -406,4 +498,95 @@ async function checkCollectionRetiredSubmission(root) {
     assert.equal(fixture.state.collectionSelectedHistoryId,2);assert.match(fixture.elements.collectionResponseMeta.textContent,/new-recipe/);
   }
   console.log('PASS Collection acknowledgement/poll resolution retires open dispatch claims while preserving exact owners, lost-ack protection and later replacement history');
+}
+
+async function checkCollectionReceiptTransport(root) {
+  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const productionFunction=name=>{
+    const start=app.search(new RegExp(`^      (?:async )?function ${name}\\(`,'m'));
+    assert(start>=0,name);const end=/^      }$/m.exec(app.slice(start));assert(end,name);
+    return app.slice(start,start+end.index+end[0].length);
+  };
+  const names=['experimentLifetimeKey','experimentContextKey','currentExperimentReceipt','experimentActionGroups',
+    'experimentReceiptBounded','experimentRecordMatches','isExperimentReceipt','clearExperimentLifetime',
+    'syncExperimentSession','runExperimentAction','debuggerAction','debuggerScriptCatalogSignature','refreshDebugger'];
+  const fixtureScript=(await collectionBrowserFixture(root)).debuggerScript;
+  const make=async()=>{
+    const f=await checkCollectionController(root,true),c=f.context;
+    Object.assign(f.state,{debuggerRefreshing:false,debuggerActionPending:false,debuggerEtag:null,openScriptIds:[],
+      requests:[],selectedRequestId:null,selectedScriptId:null,editingBreakpointId:null});
+    Object.assign(c,{Response,structuredClone,crypto:webcrypto,memoryOriginTraceActive:()=>false});
+    c.window=c;
+    c.document.hidden=false;c.document.querySelector=()=>({hidden:true});
+    for(const name of ['renderDebugger','renderExperiment','scheduleDebuggerRefresh','rebuildTrafficRequests','syncMemorySession',
+      'applyMemoryOriginTrace','renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice',
+      'renderMemory','renderFieldProvenance'])c[name]=()=>{};
+    const production=runInNewContext(names.map(productionFunction).join('\n')+'\n({'+names.join(',')+'})',c);
+    runInNewContext(fixtureScript,c);
+    for(const name of names)assert.equal(runInNewContext(name,c),production[name],`${name} must remain production code`);
+    assert(runInNewContext('isDebuggerResponse(state.debuggerSession)',c));
+    return {...f,c,production};
+  };
+  for(const mode of ['refused','malformed']){
+    const f=await make();f.c.collectionTransportMode=mode;await f.ui.runCollectionRequest();
+    assert.equal(f.c.collectionActions.length,1,'Rejected configuration cannot send');
+    assert.equal(typeof f.c.collectionRelease,'undefined');assert.equal(f.state.collectionRunPending,false);
+    assert.match(f.state.apiCollectionMessage,/refusal|invalid acknowledgement/);
+  }
+  const f=await make();
+  f.elements.collectionRequestUrl.value='https://{{host}}/saved-and-run';f.state.collectionDraftDirty=true;
+  const run=f.ui.runCollectionRequest();await f.ui.runCollectionRequest();
+  assert.equal(f.pending.length,1,'Repeated Save & Run must retain one save');
+  const save=f.pending.shift(),body=JSON.parse(save.options.body),saved={...f.state.apiCollection,
+    generation:f.state.apiCollection.generation+1,folders:body.folders,
+    requests:body.requests.map(request=>({...request,created_at_ms:1000,updated_at_ms:3000}))};
+  save.resolve(Response.json(saved));await run;
+  assert.deepEqual(Array.from(f.c.collectionActions,item=>item.action),['configure_repeater_variables','run_repeater_request']);
+  assert.equal(f.state.collectionDraftDirty,false);assert.equal(f.state.collectionPendingRunSelection.executionId,1);
+  assert.equal(typeof f.c.collectionRelease,'function');
+  assert(f.state.experimentReceiptOwners instanceof WeakMap || Object.prototype.toString.call(f.state.experimentReceiptOwners)==='[object WeakMap]');
+  f.elements.collectionRequestUrl.value='https://fixture.invalid/newer-unsaved';f.state.collectionDraftDirty=true;
+  await f.c.collectionRelease();
+  assert.equal(f.state.collectionSelectedHistoryId,1);assert.match(f.elements.collectionResponseMeta.textContent,/saved-and-run/);
+  assert.equal(f.elements.collectionRequestUrl.value,'https://fixture.invalid/newer-unsaved');assert(f.state.collectionDraftDirty);
+  assert.equal(f.c.collectionUnsafe,undefined);assert(runInNewContext('isDebuggerResponse(state.debuggerSession)',f.c));
+  // A late/lost receipt still passes through real transport and ownership while
+  // completion is read through the production debugger GET/poll path.
+  const late=await make();late.c.collectionHoldAcknowledgement=true;
+  const pending=late.ui.runCollectionRequest();
+  for(let index=0;index<100&&typeof late.c.collectionAcknowledge!=='function';index++)await Promise.resolve();
+  assert.equal(typeof late.c.collectionAcknowledge,'function');
+  await late.c.collectionRelease();late.c.collectionAcknowledge(false);await pending;
+  assert.equal(late.state.collectionRunPending,false);assert.equal(late.ui.collectionHistoryEntries().length,1);
+  assert.equal(late.c.collectionActions.length,2,'Lost acknowledgement must not retry');
+  const sequential=await make();
+  await sequential.ui.runCollectionRequest();sequential.ui.selectCollectionRequest(2);await sequential.c.collectionRelease();
+  assert.equal(sequential.state.collectionSelectedRequestId,2);assert.equal(sequential.ui.collectionHistoryEntries().length,0);
+  sequential.ui.selectCollectionRequest(1);await sequential.ui.runCollectionRequest();
+  assert.equal(sequential.state.collectionSelectedHistoryId,1);await sequential.c.collectionRelease();
+  assert.equal(sequential.state.collectionSelectedHistoryId,2);
+  await sequential.ui.runCollectionRequest();
+  sequential.elements.collectionHistory.querySelector('[data-run-id="1"]').click();await sequential.c.collectionRelease();
+  assert.equal(sequential.state.collectionSelectedHistoryId,1,'Explicit history selection survives the real poll');
+  sequential.c.collectionHoldAcknowledgement=true;const oldRun=sequential.ui.runCollectionRequest();
+  for(let index=0;index<100&&typeof sequential.c.collectionAcknowledge!=='function';index++)await Promise.resolve();
+  assert.equal(typeof sequential.c.collectionAcknowledge,'function');
+  const request=sequential.state.apiCollection.requests[0];
+  Object.assign(request,{name:'New incarnation',url:'https://fixture.invalid/new-incarnation',created_at_ms:4003,updated_at_ms:4003});
+  sequential.ui.renderApiCollection();await sequential.c.collectionRelease();
+  assert.equal(sequential.ui.collectionHistoryEntries().length,0);
+  sequential.c.collectionAcknowledge(false);await oldRun;sequential.c.collectionHoldAcknowledgement=false;
+  await sequential.ui.runCollectionRequest();await sequential.c.collectionRelease();
+  assert.equal(sequential.state.collectionSelectedHistoryId,5);
+  Object.assign(request,{name:'Later replacement',created_at_ms:4006,updated_at_ms:4006});
+  const external=structuredClone(sequential.state.debuggerSession.repeater.history.at(-1));
+  Object.assign(external,{id:6,started_at_ms:5000,completed_at_ms:5001});external.resolved_request.url='https://fixture.invalid/later-replacement';
+  await sequential.c.collectionPublishExternalRun(external);
+  assert.equal(sequential.ui.collectionHistoryEntries().length,1);assert.equal(sequential.state.collectionSelectedHistoryId,6);
+  assert.match(sequential.elements.collectionResponseMeta.textContent,/later-replacement/);
+  const cancelled=await make();await cancelled.ui.runCollectionRequest();
+  const cancel=await cancelled.production.runExperimentAction({action:'cancel_repeater_request'});
+  assert(cancelled.production.currentExperimentReceipt(cancel));
+  assert.equal(cancelled.state.debuggerSession.repeater.state,'cancelling');
+  console.log('PASS exact Collection browser transport fixture through production action/receipt/poll owners: valid Save & Run, double-submit, retained draft, completion, refusal/malformed no-Send, lost acknowledgement and cancellation (not rendered QA)');
 }

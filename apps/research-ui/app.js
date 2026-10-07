@@ -1427,6 +1427,7 @@
         if (match?.side) state.inspectorTab = match.mode === 'headers' ? 'headers' : match.side === 'Request' ? 'payload' : 'response';
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
+        if (state.selectedRequestId !== id) state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.selectedRequestId = id;
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
@@ -2391,6 +2392,7 @@
       }
 
       function markRepeaterDraftChanged() {
+        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.repeaterDraftDirty = true;
         state.experimentError = null;
         renderRepeaterVariableStatus();
@@ -2519,6 +2521,7 @@
 
       function loadRepeaterHistoryEntry(entry, focus = false) {
         if (!entry) return;
+        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.repeaterSelectedHistoryId = entry.id;
         state.repeaterExpectedHistoryId = null;
         elements.repeaterRequestUrl.value = entry.request.url;
@@ -3247,7 +3250,7 @@
           ? 'Disarm to test a value' : 'Test a request value';
         testField.addEventListener('click', async () => {
           if (['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state)) {
-            const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
+            const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_runtime_hooks'}));
             if (!response) return;
           }
           elements.hooksFieldUrl.value = request.url;
@@ -3455,7 +3458,7 @@
           const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove';
           remove.disabled = !libraryEditable;
           remove.addEventListener('click', async () => {
-            const response = await runExperimentAction({action: 'remove_automation_recipe', recipe_id: recipe.id});
+            const response = currentExperimentReceipt(await runExperimentAction({action: 'remove_automation_recipe', recipe_id: recipe.id}));
             if (response && state.automationEditingRecipeId === recipe.id) resetAutomationEditor();
           });
           actions.append(run, edit, remove);
@@ -3679,35 +3682,304 @@
         renderExperimentAudit(experiment);
       }
 
+      function experimentLifetimeKey(session) {
+        const experiment = session?.request_interception;
+        return JSON.stringify([experiment?.experiment_id ?? 0, experiment?.created_at_ms ?? 0,
+          experiment?.isolated ?? false, experiment?.target_id ?? null,
+          ...['repeater', 'object_experiment', 'runtime_hooks', 'automation_recipes'].flatMap(group =>
+            [session?.[group]?.session_id ?? 0, session?.[group]?.target_id ?? null])]);
+      }
+
+      function experimentContextKey() {
+        return JSON.stringify([state.experimentContextEpoch ?? 0, experimentLifetimeKey(state.debuggerSession),
+          state.debuggerSession?.target?.id ?? null]);
+      }
+
+      function currentExperimentReceipt(response) {
+        const owner = response && state.experimentReceiptOwners?.get(response);
+        if (!owner || owner.context !== experimentContextKey()) return null;
+        const generation = Math.max(state.debuggerSession?.generation ?? 0, state.experimentReceipt?.generation ?? 0);
+        if (response.generation < generation && owner.groups.some(group =>
+            !experimentRecordMatches(state.debuggerSession[group === 'experiment' ? 'request_interception' : group], response[group]))) return null;
+        return response;
+      }
+
+      function experimentEditorKey(names, selection = null) {
+        return JSON.stringify([selection, ...names.map(name => [elements[name]?.value, elements[name]?.checked])]);
+      }
+
+      function repeaterSubmissionKey() {
+        return JSON.stringify([experimentContextKey(), state.repeaterDraftRevision ?? 0, state.selectedRequestId,
+          ...['repeaterRequestUrl', 'repeaterRequestMethod', 'repeaterRequestTimeout', 'repeaterRequestHeaders',
+            'repeaterRequestBody', 'repeaterVariables'].map(name => elements[name].value)]);
+      }
+
+      function experimentActionGroups(action) {
+        const families = [
+          [['experiment', 'action_scope', 'object_experiment', 'runtime_hooks', 'automation_recipes', 'repeater'],
+            ['create_request_interception_experiment', 'dispose_request_interception_experiment']],
+          [['action_scope'], ['set_action_scope', 'close_experiment_page', 'create_experiment_page']],
+          [['experiment'], ['configure_request_interception', 'run_request_interception', 'clear_request_interception_result']],
+          [['object_experiment'], ['navigate_object_experiment', 'search_object_experiment', 'mutate_object_experiment']],
+          [['runtime_hooks'], ['add_runtime_hook', 'remove_runtime_hook', 'arm_runtime_hooks', 'disarm_runtime_hooks',
+            'clear_runtime_hook_hits', 'configure_runtime_field_test', 'compare_runtime_field_test']],
+          [['automation_recipes'], ['add_automation_recipe', 'update_automation_recipe', 'remove_automation_recipe',
+            'arm_automation_recipes', 'disarm_automation_recipes', 'cancel_automation_recipe', 'clear_automation_runs', 'run_automation_recipe']],
+          [['repeater'], ['configure_repeater_variables', 'run_repeater_request', 'cancel_repeater_request',
+            'compare_repeater_history', 'clear_repeater_history']]
+        ];
+        return families.find(([, actions]) => actions.includes(action))?.[0] ?? null;
+      }
+
+      function experimentReceiptBounded(value) {
+        // Validators allow additive fields. Bound those fields as well before
+        // retaining or comparing a receipt; never recurse over untrusted JSON.
+        const pending = [[value, 0]];
+        let nodes = 0, characters = 0;
+        while (pending.length) {
+          const [item, depth] = pending.pop();
+          if (++nodes > 65536 || depth > 64) return false;
+          if (typeof item === 'string') characters += item.length;
+          if (characters > 4 * 1024 * 1024) return false;
+          if (item && typeof item === 'object') {
+            const keys = Object.keys(item);
+            if (nodes + pending.length + keys.length > 65536) return false;
+            for (const key of keys) {
+              characters += key.length;
+              if (characters > 4 * 1024 * 1024) return false;
+              pending.push([item[key], depth + 1]);
+            }
+          }
+        }
+        return true;
+      }
+
+      function experimentRecordMatches(record, candidate) {
+        if (!experimentReceiptBounded(record) || !experimentReceiptBounded(candidate)) return false;
+        const pending = [[record, candidate]];
+        while (pending.length) {
+          const [left, right] = pending.pop();
+          if (left === null || typeof left !== 'object') {
+            if (left !== right) return false;
+          } else {
+            if (right === null || typeof right !== 'object' || Array.isArray(left) !== Array.isArray(right) ||
+                (Array.isArray(left) && left.length !== right.length)) return false;
+            // Additional alias fields are harmless; every authoritative field
+            // must still be present and equal to the validated group record.
+            for (const key of Object.keys(left)) {
+              if (!Object.hasOwn(right, key)) return false;
+              pending.push([left[key], right[key]]);
+            }
+          }
+        }
+        return true;
+      }
+
+      function isExperimentReceipt(response, request, submittedGeneration) {
+        const groups = experimentActionGroups(request.action);
+        if (!groups || !isPlainObject(response) || response.ok !== true ||
+            !isSafeIntegerInRange(response.generation, submittedGeneration, Number.MAX_SAFE_INTEGER) ||
+            !experimentReceiptBounded(response)) return false;
+        const validators = {experiment: isRequestInterception, action_scope: isActionScope,
+          object_experiment: isObjectExperiment, runtime_hooks: isRuntimeHooks,
+          automation_recipes: isAutomationRecipes, repeater: isRepeater};
+        if (groups.some(group => !validators[group](response[group]))) return false;
+        if (['create_request_interception_experiment', 'dispose_request_interception_experiment'].includes(request.action)) {
+          const experiment = response.experiment;
+          const isolated = request.action === 'create_request_interception_experiment';
+          if (experiment.isolated !== isolated || (isolated ? experiment.state !== 'ready' : experiment.state !== 'disposed') ||
+              ['repeater', 'object_experiment', 'runtime_hooks', 'automation_recipes'].some(group =>
+                response[group].session_id !== experiment.experiment_id || (group !== 'repeater' &&
+                  (response[group].isolated !== isolated || response[group].target_id !== experiment.target_id)))) return false;
+        }
+        if (request.action === 'create_experiment_page' &&
+            (!isBoundedText(response.target_id, 4096) || !response.target_id ||
+             !response.action_scope.targets.some(target => target.id === response.target_id))) return false;
+        if (['add_automation_recipe', 'update_automation_recipe'].includes(request.action)) {
+          const recipe = response.automation_recipes.recipes.find(item => item.id === response.recipe?.id);
+          if (!recipe || !experimentRecordMatches(recipe, response.recipe) ||
+              (request.action === 'update_automation_recipe' && recipe.id !== request.recipe_id)) return false;
+        }
+        if (request.action === 'run_automation_recipe') {
+          if (!Array.isArray(response.runs) || response.runs.length > 8 ||
+              response.runs.some((run, index) => !run || run.recipe_id !== request.recipe_id ||
+                response.runs.findIndex(other => other?.id === run.id) !== index ||
+                !response.automation_recipes.runs.some(record => experimentRecordMatches(record, run))) ||
+              !(response.runs.length ? experimentRecordMatches(response.runs.at(-1), response.run) : response.run === null)) return false;
+        }
+        return true;
+      }
+
+      function clearExperimentLifetime() {
+        for (const name of ['objectConfirm', 'hooksConfirm', 'hooksFieldConfirm', 'automationConfirm']) {
+          if (elements[name]) elements[name].checked = false;
+        }
+        for (const name of ['actionScopeNewUrl', 'actionScopeTarget', 'repeaterRequestUrl', 'repeaterRequestHeaders',
+          'repeaterRequestBody', 'repeaterVariables', 'experimentRequestUrl', 'experimentRequestHeaders',
+          'experimentRequestBody', 'experimentMethodFilter', 'experimentRewriteUrl', 'experimentRewriteMethod',
+          'experimentRewriteHeaders', 'experimentRewriteBody', 'experimentResponseHeaders', 'experimentResponseBody',
+          'objectPageUrl', 'objectPropertyQuery', 'objectValueQuery', 'objectClassQuery', 'objectShapeQuery',
+          'objectMutationProperty', 'objectMutationValue', 'hooksPageUrl', 'hooksLabel', 'hooksScript',
+          'hooksCondition', 'hooksEntryLogic', 'hooksReturnLogic', 'hooksReturnValue', 'hooksFunctionExpression',
+          'hooksFieldUrl', 'hooksFieldPointer', 'automationPageUrl', 'automationVariables', 'automationLabel', 'automationSource']) {
+          if (elements[name]) elements[name].value = '';
+        }
+        const defaults = {repeaterRequestMethod: 'GET', repeaterRequestTimeout: '15000', experimentRequestMethod: 'GET',
+          experimentUrlPattern: '*', experimentRuleMode: 'continue', experimentResponseCode: '200', objectOperation: 'set',
+          objectSimilarityThreshold: '0.75', hooksEntryMode: 'source', hooksLine: '1', hooksColumn: '1',
+          hooksReturnMode: 'none', hooksFieldMethod: 'POST', hooksFieldKind: 'json', automationTrigger: 'manual'};
+        for (const [name, value] of Object.entries(defaults)) if (elements[name]) elements[name].value = value;
+        for (const [name, checked] of Object.entries({objectRegex: false, objectCaseSensitive: false, objectShapeValues: false,
+          hooksEntryEnabled: true, hooksReturnEnabled: false, automationEnabled: true})) {
+          if (elements[name]) elements[name].checked = checked;
+        }
+        // Hidden workspaces also own disposable previews and text. Erase them
+        // immediately; polling only renders the currently visible workspace.
+        for (const name of ['repeaterHeaderRows', 'repeaterQueryRows', 'repeaterHistory', 'repeaterResponse', 'repeaterResponseMeta',
+          'repeaterComparison', 'repeaterBodyDiff', 'repeaterCompareBaseline', 'repeaterCompareCurrent', 'repeaterVariableStatus',
+          'repeaterActiveRequest', 'experimentResult', 'experimentResultMeta', 'experimentAudit', 'experimentArmedRule',
+          'objectResults', 'objectPreview', 'objectMutationResult', 'objectAudit', 'objectSearchMeta', 'objectSelectionMeta',
+          'hooksDefinitions', 'hooksHits', 'hooksHitMeta', 'hooksFieldObservations', 'hooksFieldBaseline', 'hooksFieldVariant',
+          'hooksFieldResult', 'hooksFieldStatus', 'sourceHooksNotice', 'runtimeHookTraffic', 'automationRuns', 'automationRunMeta',
+          'automationResult', 'automationResultMeta', 'actionScopeTargets']) {
+          const node = elements[name];
+          if (!node) continue;
+          node.textContent = ''; node.title = '';
+          if (node.dataset) { delete node.dataset.renderKey; delete node.dataset.optionKey; }
+        }
+        if (elements.runtimeHookTraffic) elements.runtimeHookTraffic.hidden = true;
+        // Collection definitions/drafts are durable, but these claims identify
+        // executions in the disposable lifetime and may not survive reused IDs.
+        state.collectionRunOwners?.clear();
+        Object.assign(state, {collectionSubmittedOwners: [], collectionPendingRunSelection: null,
+          collectionPendingSubmission: null, collectionRunPending: false, collectionSelectedHistoryId: null});
+        Object.assign(state, {experimentError: null, repeaterDraftDirty: false, repeaterVariablesDirty: false, repeaterVariablesKey: null,
+          repeaterSelectedHistoryId: null, repeaterExpectedHistoryId: null, experimentPrefillKey: null, repeaterPrefillKey: null,
+          repeaterHeadersSource: null, repeaterQuerySource: null, repeaterCompareBaselineId: null, repeaterCompareCurrentId: null,
+          repeaterComparisonKey: null, objectSelectedResultId: null, objectSelectionSearchId: 0, automationEditingRecipeId: null,
+          automationSelectedRunId: null, actionScopeDraftMode: null, actionScopeDraftRevision: -1,
+          selectedRuntimeHookRequest: null, runtimeHookTrafficKey: null, runtimeHookHitsKey: null, runtimeFieldTestKey: null});
+      }
+
+      function syncExperimentSession(previous, current, receiptAtPollStart = null, acknowledgement = false) {
+        const receipt = state.experimentReceipt;
+        state.experimentNeedsRefresh = false;
+        if (!acknowledgement && receipt && current.generation < receipt.generation && receiptAtPollStart !== receipt) {
+          // This GET was already in flight when the action was acknowledged.
+          // Keep its unrelated state, but do not roll back the applied groups.
+          state.experimentNeedsRefresh = true;
+          current = {...current};
+          for (const group of receipt.groups) current[group] = previous[group];
+          return current;
+        }
+        const restarted = current.generation < previous?.generation || (!acknowledgement && receipt && current.generation < receipt.generation);
+        const changed = experimentLifetimeKey(previous) !== experimentLifetimeKey(current);
+        const targetChanged = (previous?.target?.id ?? null) !== (current.target?.id ?? null);
+        if (restarted || changed || targetChanged) {
+          state.experimentContextEpoch = (state.experimentContextEpoch ?? 0) + 1;
+          state.repeaterSubmissionOwner = null;
+          const before = previous?.request_interception, after = current.request_interception;
+          let expired = false;
+          for (const owner of state.experimentActionOwners ?? []) {
+            let expected = false;
+            if (!restarted && owner.action === 'create_request_interception_experiment' && !owner.initialIsolated) {
+              const creation = JSON.stringify([after.experiment_id, after.created_at_ms]);
+              if (after.experiment_id > 0 && after.created_at_ms > 0 && ['creating', 'ready', 'error'].includes(after.state)) {
+                owner.creation ??= creation;
+                expected = owner.creation === creation;
+              }
+            }
+            if (!restarted && owner.action === 'dispose_request_interception_experiment') {
+              expected = before?.experiment_id === after.experiment_id && before?.created_at_ms === after.created_at_ms &&
+                (!owner.disposed || !after.isolated);
+              owner.disposed ||= !after.isolated;
+            }
+            if (!expected) {
+              expired = true;
+              owner.expired = true;
+              owner.transport?.retire?.('The disposable session ended. Native completion is unknown; no cancellation or retry was requested.');
+              if (state.debuggerActionOwner === owner.transport) {
+                state.debuggerActionOwner = null;
+                state.debuggerActionPending = false;
+              }
+              if (state.experimentPrimaryOwner === owner) {
+                state.experimentPrimaryOwner = null;
+                state.experimentPending = false;
+              }
+            }
+          }
+          if ((restarted || changed) && previous?.request_interception?.experiment_id > 0) clearExperimentLifetime();
+          if (expired) state.experimentError = 'The disposable session changed. Its pending action acknowledgement is unavailable; native completion is unknown. No cancellation or retry was sent.';
+        }
+        state.experimentReceipt = null;
+        return current;
+      }
+
       async function runExperimentAction(request) {
         const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
         if (state.experimentPending && !parallelControl) return null;
-        if (!parallelControl) state.experimentPending = true;
+        const session = state.debuggerSession;
+        if (!session || !experimentActionGroups(request.action)) return null;
+        const owner = {action: request.action, initialIsolated: session.request_interception.isolated, expired: false,
+          initialCreation: JSON.stringify([session.request_interception.experiment_id, session.request_interception.created_at_ms])};
+        if (state.experimentNeedsRefresh) {
+          state.experimentError = 'Waiting for a current debugger snapshot before another experiment action. No request was sent.';
+          renderExperiment();
+          return null;
+        }
+        state.experimentActionOwners ??= new Set();
+        state.experimentActionOwners.add(owner);
+        const generation = Math.max(session.generation, state.experimentReceipt?.generation ?? 0);
+        if (!parallelControl) {
+          state.experimentPending = true;
+          state.experimentPrimaryOwner = owner;
+        }
         state.experimentError = null;
         renderExperiment();
-        const response = await debuggerAction(request);
-        if (response?.experiment && isRequestInterception(response.experiment) && state.debuggerSession) {
-          state.debuggerSession.request_interception = response.experiment;
+        let result = null;
+        try {
+          const response = await debuggerAction(request, null, owner);
+          if (owner.expired) throw new Error('The disposable session changed while awaiting this action. Its acknowledgement is unavailable.');
+          if (!response) throw new Error(state.debuggerError || 'The experiment action acknowledgement is unavailable.');
+          if (response.ok === false) throw new Error(isBoundedText(response.error, 512) && response.error || 'The experiment action was rejected.');
+          if (!isExperimentReceipt(response, request, generation)) throw new Error('The experiment action returned an invalid acknowledgement.');
+          const current = state.debuggerSession;
+          const next = {...current};
+          const groups = experimentActionGroups(request.action).map(group => group === 'experiment' ? 'request_interception' : group);
+          for (const group of experimentActionGroups(request.action)) next[group === 'experiment' ? 'request_interception' : group] = response[group];
+          const lifecycle = ['create_request_interception_experiment', 'dispose_request_interception_experiment'].includes(request.action);
+          const receiptCreation = JSON.stringify([response.experiment?.experiment_id, response.experiment?.created_at_ms]);
+          if ((request.action === 'create_request_interception_experiment' && owner.creation && owner.creation !== receiptCreation) ||
+              (request.action === 'dispose_request_interception_experiment' && owner.initialCreation !== receiptCreation) ||
+              (!lifecycle && experimentLifetimeKey(next) !== experimentLifetimeKey(current))) {
+            throw new Error('The experiment acknowledgement belongs to another disposable session.');
+          }
+          const latestGeneration = Math.max(current.generation, state.experimentReceipt?.generation ?? 0);
+          if (response.generation < latestGeneration && experimentActionGroups(request.action).some(group =>
+              !experimentRecordMatches(current[group === 'experiment' ? 'request_interception' : group], response[group]))) {
+            throw new Error('Newer experiment state arrived before this acknowledgement. The current result and draft are retained.');
+          }
+          if (response.generation >= latestGeneration) {
+            const retainedGroups = state.experimentReceipt?.groups ?? [];
+            state.debuggerSession = syncExperimentSession(current, next, null, true);
+            state.experimentReceipt = {generation: response.generation, groups: [...new Set([...retainedGroups, ...groups])]};
+          }
+          result = response;
+        } catch (error) {
+          if (!owner.expired) state.experimentError = `${error.message} No automatic retry was sent.`;
+        } finally {
+          state.experimentActionOwners.delete(owner);
+          if (state.experimentPrimaryOwner === owner) {
+            state.experimentPrimaryOwner = null;
+            state.experimentPending = false;
+          }
+          if (!owner.expired) renderExperiment();
         }
-        if (response?.action_scope && isActionScope(response.action_scope) && state.debuggerSession) {
-          state.debuggerSession.action_scope = response.action_scope;
+        if (result && !owner.expired) {
+          state.experimentReceiptOwners ??= new WeakMap();
+          state.experimentReceiptOwners.set(result, {context: experimentContextKey(), groups: experimentActionGroups(request.action)});
         }
-        if (response?.object_experiment && isObjectExperiment(response.object_experiment) && state.debuggerSession) {
-          state.debuggerSession.object_experiment = response.object_experiment;
-        }
-        if (response?.runtime_hooks && isRuntimeHooks(response.runtime_hooks) && state.debuggerSession) {
-          state.debuggerSession.runtime_hooks = response.runtime_hooks;
-        }
-        if (response?.automation_recipes && isAutomationRecipes(response.automation_recipes) && state.debuggerSession) {
-          state.debuggerSession.automation_recipes = response.automation_recipes;
-        }
-        if (response?.repeater && isRepeater(response.repeater) && state.debuggerSession) {
-          state.debuggerSession.repeater = response.repeater;
-        }
-        if (!response) state.experimentError = state.debuggerError || 'The experiment action did not complete.';
-        if (!parallelControl) state.experimentPending = false;
-        renderExperiment();
-        return response;
+        return owner.expired ? null : result;
       }
 
       async function configureExperimentRule() {
@@ -3763,7 +4035,7 @@
           elements.objectPageUrl.focus();
           return;
         }
-        const response = await runExperimentAction({action: 'navigate_object_experiment', url});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'navigate_object_experiment', url}));
         if (response) {
           state.objectSelectedResultId = null;
           state.objectSelectionSearchId = 0;
@@ -3797,7 +4069,7 @@
           elements.objectPropertyQuery.focus();
           return;
         }
-        const response = await runExperimentAction(request);
+        const response = currentExperimentReceipt(await runExperimentAction(request));
         if (response?.object_experiment) {
           state.objectSelectionSearchId = response.object_experiment.search_id;
           state.objectSelectedResultId = response.object_experiment.results[0]?.id ?? null;
@@ -3842,7 +4114,7 @@
             return;
           }
         }
-        const response = await runExperimentAction(request);
+        const response = currentExperimentReceipt(await runExperimentAction(request));
         if (response) {
           elements.objectConfirm.checked = false;
           elements.objectMutationValue.value = '';
@@ -3858,7 +4130,7 @@
           elements.hooksPageUrl.focus();
           return;
         }
-        const response = await runExperimentAction({action: 'navigate_object_experiment', url});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'navigate_object_experiment', url}));
         if (response) {
           elements.hooksConfirm.checked = false;
           renderRuntimeHooks();
@@ -3877,6 +4149,8 @@
       }
 
       async function saveAutomationRecipe() {
+        const draft = () => experimentEditorKey(['automationLabel', 'automationTrigger', 'automationEnabled', 'automationSource'], state.automationEditingRecipeId);
+        const submittedDraft = draft();
         const request = {
           action: state.automationEditingRecipeId === null ? 'add_automation_recipe' : 'update_automation_recipe',
           label: elements.automationLabel.value.trim(),
@@ -3891,8 +4165,8 @@
           (!request.label ? elements.automationLabel : elements.automationSource).focus();
           return;
         }
-        const response = await runExperimentAction(request);
-        if (response) resetAutomationEditor();
+        const response = currentExperimentReceipt(await runExperimentAction(request));
+        if (response && draft() === submittedDraft) resetAutomationEditor();
       }
 
       async function runAutomationRecipe(recipeId) {
@@ -3903,10 +4177,10 @@
           return;
         }
         try {
-          const response = await runExperimentAction({
+          const response = currentExperimentReceipt(await runExperimentAction({
             action: 'run_automation_recipe', recipe_id: recipeId, confirmed: true,
             variables: parseAutomationVariables()
-          });
+          }));
           if (response?.run) state.automationSelectedRunId = response.run.id;
           if (response) elements.automationConfirm.checked = false;
         } catch (error) {
@@ -3916,6 +4190,10 @@
       }
 
       async function addRuntimeHook() {
+        const draft = () => experimentEditorKey(['hooksLabel', 'hooksScript', 'hooksLine', 'hooksColumn', 'hooksEntryMode',
+          'hooksFunctionExpression', 'hooksEntryEnabled', 'hooksReturnEnabled', 'hooksCondition', 'hooksEntryLogic',
+          'hooksReturnLogic', 'hooksReturnMode', 'hooksReturnValue'], state.selectedScriptId);
+        const submittedDraft = draft();
         try {
           const line = Number(elements.hooksLine.value);
           const column = Number(elements.hooksColumn.value);
@@ -3952,8 +4230,8 @@
             request.return_expression = elements.hooksReturnValue.value.trim();
             if (!request.return_expression) throw new TypeError('Enter one return-frame expression.');
           }
-          const response = await runExperimentAction(request);
-          if (response) {
+          const response = currentExperimentReceipt(await runExperimentAction(request));
+          if (response && draft() === submittedDraft) {
             elements.hooksConfirm.checked = false;
             elements.hooksLabel.value = '';
             elements.hooksFunctionExpression.value = '';
@@ -4031,13 +4309,13 @@
 
       async function applyRepeaterVariables() {
         try {
-          const variables = parseRepeaterVariables(elements.repeaterVariables.value);
-          const response = await runExperimentAction({action: 'configure_repeater_variables', variables});
-          if (response) {
-            state.repeaterVariablesDirty = false;
-            state.repeaterVariablesKey = JSON.stringify(variables);
-            renderRepeaterVariableStatus();
-          }
+          const draft = elements.repeaterVariables.value;
+          const variables = parseRepeaterVariables(draft);
+          const response = currentExperimentReceipt(await runExperimentAction({action: 'configure_repeater_variables', variables}));
+          if (!response || elements.repeaterVariables.value !== draft) return null;
+          state.repeaterVariablesDirty = false;
+          state.repeaterVariablesKey = JSON.stringify(variables);
+          renderRepeaterVariableStatus();
           return response;
         } catch (error) {
           state.experimentError = error.message;
@@ -4047,9 +4325,11 @@
       }
 
       async function runRepeaterRequest() {
+        if (state.repeaterSubmissionOwner) return;
+        const owner = {key: repeaterSubmissionKey()};
+        state.repeaterSubmissionOwner = owner;
+        const current = () => state.repeaterSubmissionOwner === owner && owner.key === repeaterSubmissionKey();
         try {
-          const applied = await applyRepeaterVariables();
-          if (!applied) return;
           const previousHistoryId = repeaterState()?.history.at(-1)?.id ?? 0;
           const method = elements.repeaterRequestMethod.value.trim();
           const body = elements.repeaterRequestBody.value;
@@ -4061,24 +4341,25 @@
           if (!Number.isInteger(timeout) || timeout < 100 || timeout > 30000) {
             throw new TypeError('Repeater timeout must be between 100 and 30000 ms.');
           }
-          const response = await runExperimentAction({
-            action: 'run_repeater_request',
-            url: elements.repeaterRequestUrl.value.trim(),
-            method,
-            headers: parseExperimentHeaders(elements.repeaterRequestHeaders.value, 'Request headers'),
-            body,
-            timeout_ms: timeout
-          });
-          const executionId = response?.repeater?.active_execution?.execution_id ??
-            response?.repeater?.history.at(-1)?.id;
+          const payload = {action: 'run_repeater_request', url: elements.repeaterRequestUrl.value.trim(), method,
+            headers: parseExperimentHeaders(elements.repeaterRequestHeaders.value, 'Request headers'), body, timeout_ms: timeout};
+          const applied = currentExperimentReceipt(await applyRepeaterVariables());
+          if (!applied || !current() || state.repeaterVariablesDirty) return;
+          const response = currentExperimentReceipt(await runExperimentAction(payload));
+          if (!response || !current()) return;
+          const executionId = response.repeater.active_execution?.execution_id ?? response.repeater.history.at(-1)?.id;
           if (Number.isSafeInteger(executionId) && executionId > previousHistoryId) {
             state.repeaterExpectedHistoryId = executionId;
             renderExperiment();
           }
           state.repeaterDraftDirty = false;
         } catch (error) {
-          state.experimentError = error.message;
-          renderExperiment();
+          if (current()) {
+            state.experimentError = error.message;
+            renderExperiment();
+          }
+        } finally {
+          if (state.repeaterSubmissionOwner === owner) state.repeaterSubmissionOwner = null;
         }
       }
 
@@ -4940,21 +5221,31 @@
         const historySelection = state.collectionHistorySelectionVersion;
         const targetId = state.debuggerSession?.target?.id;
         const experimentId = requestInterception()?.experiment_id;
-        const ready = () => ['running', 'paused'].includes(state.debuggerSession?.state) && targetId === state.debuggerSession?.target?.id &&
+        const context = experimentContextKey();
+        const ready = () => context === experimentContextKey() && ['running', 'paused'].includes(state.debuggerSession?.state) && targetId === state.debuggerSession?.target?.id &&
           experimentId === requestInterception()?.experiment_id && requestInterception()?.target_id === targetId && requestInterception()?.isolated &&
           ['ready', 'error'].includes(requestInterception()?.state) && ['ready', 'error'].includes(repeaterState()?.state);
         if (!ready()) { setCollectionNotice('error', 'Create an isolated context before running.'); return; }
         state.collectionRunPending = true;
-        state.collectionPendingSubmission = {requestId: request.id, createdAt: request.created_at_ms, targetId, experimentId};
+        const pendingOwner = {requestId: request.id, createdAt: request.created_at_ms, targetId, experimentId};
+        state.collectionPendingSubmission = pendingOwner;
         renderCollectionExecution();
         let savedEdits = false;
         try {
+          const expected = state.collectionDraftDirty ? collectionRequestDraft() : request;
+          const draftRevision = state.collectionDraftRevision ?? 0;
           if (state.collectionDraftDirty) {
             // The button explicitly says Save & Run. Selection and plain saves never send.
             if (!(await saveCollectionRequest())) return;
             savedEdits = true;
           }
           const saved = collectionRequest(request.id);
+          if (!ready()) throw new Error('The isolated context changed before the request could run.');
+          if (!saved || Object.keys(expected).some(key => !['created_at_ms', 'updated_at_ms'].includes(key) &&
+              JSON.stringify(expected[key]) !== JSON.stringify(saved[key])) || (state.collectionDraftRevision ?? 0) !== draftRevision) {
+            throw new Error('The submitted request draft changed before sending. No request was sent.');
+          }
+          const savedKey = JSON.stringify([saved, collectionFolderLineage(saved.folder_id)]);
           const variables = {};
           collectionFolderLineage(saved.folder_id).forEach(folder => folder.variables.forEach(variable => {
             variables[variable.name] = variable.value;
@@ -4964,19 +5255,25 @@
             headers: repeaterHeaderObject(saved.headers), body: saved.body, timeout_ms: saved.timeout_ms,
             collection_request_id: saved.id};
           if (!ready()) throw new Error('The isolated context changed before the request could run.');
-          if (!await runExperimentAction({action: 'configure_repeater_variables', variables})) {
+          const configured = currentExperimentReceipt(await runExperimentAction({action: 'configure_repeater_variables', variables}));
+          if (!configured) {
             throw new Error(state.experimentError || 'Request variables could not be configured.');
           }
           if (!ready()) throw new Error('The isolated context changed before the request could run.');
           if (state.apiCollectionNeedsReload || collectionRequest(saved.id)?.created_at_ms !== saved.created_at_ms) {
             throw new Error('The saved request was removed or replaced before sending. No request was sent.');
           }
+          if (savedKey !== JSON.stringify([collectionRequest(saved.id), collectionFolderLineage(saved.folder_id)]) ||
+              ((state.collectionDraftRevision ?? 0) !== draftRevision) ||
+              (state.collectionSelectedRequestId === saved.id && state.collectionDraftDirty)) {
+            throw new Error('The submitted request or its variables changed before sending. No request was sent.');
+          }
           const previousId = repeaterState()?.history.at(-1)?.id ?? 0;
           const submittedOwners = state.collectionSubmittedOwners ??= [];
           const submission = {...state.collectionPendingSubmission, afterExecutionId: previousId};
           submittedOwners.push(submission);
           if (submittedOwners.length > 25) submittedOwners.shift();
-          const response = await runExperimentAction(payload);
+          const response = currentExperimentReceipt(await runExperimentAction(payload));
           if (!response) throw new Error(state.experimentError || 'The run could not be confirmed. It was not automatically retried.');
           const acknowledgement = response.repeater?.active_execution?.collection_request_id === saved.id
             ? response.repeater.active_execution : response.repeater?.history.findLast(entry => entry.collection_request_id === saved.id && entry.id > previousId);
@@ -4993,11 +5290,13 @@
           }
           setCollectionNotice('ready', `${savedEdits ? 'Edits saved. ' : ''}Run submitted for “${saved.name}”. Responses remain tied to that submitted request.`);
         } catch (error) {
-          setCollectionNotice('error', `${savedEdits ? 'Edits saved. ' : ''}${error.message}`);
+          if (state.collectionPendingSubmission === pendingOwner) setCollectionNotice('error', `${savedEdits ? 'Edits saved. ' : ''}${error.message}`);
         } finally {
-          state.collectionPendingSubmission = null;
-          state.collectionRunPending = false;
-          renderApiCollection();
+          if (state.collectionPendingSubmission === pendingOwner) {
+            state.collectionPendingSubmission = null;
+            state.collectionRunPending = false;
+            renderApiCollection();
+          }
         }
       }
 
@@ -9235,23 +9534,24 @@
         renderConsole();
       }
 
-      async function debuggerAction(request, memoryOwner = null) {
+      async function debuggerAction(request, memoryOwner = null, experimentOwner = null) {
         const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
         if ((state.debuggerActionPending && !parallelControl) || (memoryOriginTraceActive() && request.action !== 'stop_memory_origin_trace')) return null;
         const deadline = memoryOwner ? memoryActionDeadline(request.action) : 0;
         if (memoryOwner && (!deadline || memoryOwner.action !== request.action)) return null;
-        const owner = {memoryOwner, request, retire: null};
+        const owner = {memoryOwner, experimentOwner, request, retire: null};
+        if (experimentOwner) experimentOwner.transport = owner;
         if (!parallelControl) {
           state.debuggerActionOwner = owner;
           state.debuggerActionPending = true;
         }
-        const current = () => parallelControl || state.debuggerActionOwner === owner;
+        const current = () => (parallelControl || state.debuggerActionOwner === owner) && !experimentOwner?.expired;
         state.debuggerError = null;
         renderDebugger();
         let result = null, timer = null, controller = null, retired = false;
         try {
           let retirement;
-          if (memoryOwner) {
+          if (memoryOwner || experimentOwner) {
             controller = new AbortController();
             retirement = new Promise((_, reject) => {
               owner.retire = message => {
@@ -9262,7 +9562,7 @@
                 reject(new Error(message));
                 controller.abort();
               };
-              timer = setTimeout(() => owner.retire?.(`Memory action acknowledgement exceeded ${deadline / 1000} seconds. Native completion is unknown; no cancellation or retry was requested.`), deadline);
+              if (memoryOwner) timer = setTimeout(() => owner.retire?.(`Memory action acknowledgement exceeded ${deadline / 1000} seconds. Native completion is unknown; no cancellation or retry was requested.`), deadline);
             });
           }
           const transport = (async () => {
@@ -9270,9 +9570,9 @@
               method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
               ...(controller ? {signal: controller.signal} : {})
             });
-            if (memoryOwner && (retired || !current())) return null;
+            if ((memoryOwner || experimentOwner) && (retired || !current())) return null;
             const body = await response.json();
-            if (memoryOwner && (retired || !current())) return null;
+            if ((memoryOwner || experimentOwner) && (retired || !current())) return null;
             if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
             return body;
           })();
@@ -9318,13 +9618,14 @@
       async function refreshDebugger(force = false) {
         if (state.debuggerRefreshing || location.protocol === 'file:') return;
         state.debuggerRefreshing = true;
+        const experimentReceiptAtStart = state.experimentReceipt;
         try {
           const headers = !force && state.debuggerEtag ? { 'If-None-Match': state.debuggerEtag } : {};
           const wait = !force && state.debuggerEtag && state.debuggerSession?.state !== 'unavailable' ? 25000 : 0;
           const response = await fetch(`/api/debugger?wait_ms=${wait}`, { cache: 'no-store', headers });
           if (response.status === 304) return;
           if (!response.ok) throw new Error(`Debugger returned ${response.status}`);
-          const body = await response.json();
+          let body = await response.json();
           if (!isDebuggerResponse(body)) throw new TypeError('Malformed debugger response');
           const previousSession = state.debuggerSession;
           const previousSelectedScript = previousSession?.scripts.find(script => script.script_id === state.selectedScriptId);
@@ -9335,11 +9636,12 @@
           const previousBreakpoints = JSON.stringify(previousSession?.breakpoints ?? []);
           const previousOpenScripts = state.openScriptIds.join('\u0000');
           const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
+          body = syncExperimentSession(previousSession, body, experimentReceiptAtStart);
           state.debuggerSession = body;
           rebuildTrafficRequests();
           syncMemorySession(previousSession, body);
           applyMemoryOriginTrace(body.memory_origin_trace);
-          state.debuggerEtag = response.headers.get('ETag');
+          state.debuggerEtag = state.experimentNeedsRefresh ? null : response.headers.get('ETag');
           state.debuggerError = null;
           state.debuggerRefreshFailed = false;
           renderLiveBrowserTabCount();
@@ -10112,7 +10414,7 @@
             return;
           }
         }
-        const response = await runExperimentAction({action: 'create_experiment_page', url});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'create_experiment_page', url}));
         if (response) elements.actionScopeNewUrl.value = '';
       });
       elements.experimentCreate.addEventListener('click', () => runExperimentAction({
@@ -10122,7 +10424,7 @@
         action: 'dispose_request_interception_experiment'
       }));
       elements.experimentClear.addEventListener('click', async () => {
-        const response = await runExperimentAction({ action: 'clear_request_interception_result' });
+        const response = currentExperimentReceipt(await runExperimentAction({ action: 'clear_request_interception_result' }));
         if (response) {
           state.experimentPrefillKey = null;
           prefillExperimentRequest();
@@ -10152,7 +10454,7 @@
         action: 'create_request_interception_experiment'
       }));
       elements.objectDispose.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
         if (response) {
           state.objectSelectedResultId = null;
           state.objectSelectionSearchId = 0;
@@ -10197,7 +10499,7 @@
         action: 'create_request_interception_experiment'
       }));
       elements.hooksDispose.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
         if (response) {
           elements.hooksConfirm.checked = false;
           elements.hooksDefinitionForm.reset();
@@ -10244,11 +10546,11 @@
       });
       elements.hooksConfirm.addEventListener('change', renderRuntimeHooks);
       elements.hooksArm.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'arm_runtime_hooks', confirmed: elements.hooksConfirm.checked});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'arm_runtime_hooks', confirmed: elements.hooksConfirm.checked}));
         if (response) elements.hooksConfirm.checked = false;
       });
       elements.hooksDisarm.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_runtime_hooks'}));
         if (response) elements.hooksConfirm.checked = false;
       });
       bindRuntimeFieldTest();
@@ -10256,7 +10558,7 @@
         action: 'create_request_interception_experiment'
       }));
       elements.automationDispose.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
         if (response) {
           state.automationSelectedRunId = null;
           elements.automationConfirm.checked = false;
@@ -10265,7 +10567,7 @@
         }
       });
       elements.automationClear.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'clear_automation_runs'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'clear_automation_runs'}));
         if (response) state.automationSelectedRunId = null;
       });
       elements.automationNavigationForm.addEventListener('submit', event => {
@@ -10287,10 +10589,10 @@
       elements.automationConfirm.addEventListener('change', renderAutomationRecipes);
       elements.automationArm.addEventListener('click', async () => {
         try {
-          const response = await runExperimentAction({
+          const response = currentExperimentReceipt(await runExperimentAction({
             action: 'arm_automation_recipes', confirmed: elements.automationConfirm.checked,
             variables: parseAutomationVariables()
-          });
+          }));
           if (response) elements.automationConfirm.checked = false;
         } catch (error) {
           state.experimentError = error.message;
@@ -10298,7 +10600,7 @@
         }
       });
       elements.automationDisarm.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'disarm_automation_recipes'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_automation_recipes'}));
         if (response) elements.automationConfirm.checked = false;
       });
       elements.automationCancel.addEventListener('click', () => runExperimentAction({
@@ -10318,7 +10620,7 @@
         action: 'create_request_interception_experiment'
       }));
       elements.repeaterDispose.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
         if (response) {
           state.repeaterSelectedHistoryId = null;
           state.repeaterExpectedHistoryId = null;
@@ -10328,7 +10630,7 @@
         }
       });
       elements.repeaterClearHistory.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'clear_repeater_history'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'clear_repeater_history'}));
         if (response) {
           state.repeaterSelectedHistoryId = null;
           state.repeaterExpectedHistoryId = null;
@@ -10340,6 +10642,7 @@
         applyRepeaterVariables();
       });
       elements.repeaterVariables.addEventListener('input', () => {
+        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.repeaterVariablesDirty = true;
         state.experimentError = null;
         renderRepeaterVariableStatus();
@@ -10439,6 +10742,7 @@
         event.preventDefault(); saveCollectionRequest();
       });
       elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionDraftRevision = (state.collectionDraftRevision ?? 0) + 1;
         state.collectionDraftDirty = true;
         state.collectionDeleteRequestId = null;
         elements.collectionDraftStatus.textContent = 'Unsaved edits · Save or discard before switching.';
@@ -10451,7 +10755,7 @@
       elements.collectionCreateContext.addEventListener('click', async () => {
         if (state.experimentPending || elements.collectionCreateContext.disabled) return;
         elements.collectionCreateContext.disabled = true;
-        const result = await runExperimentAction({action: 'create_request_interception_experiment'});
+        const result = currentExperimentReceipt(await runExperimentAction({action: 'create_request_interception_experiment'}));
         if (!result) setCollectionNotice('error', state.experimentError || 'Isolated context could not be created.');
         renderApiCollection();
       });
@@ -10459,7 +10763,7 @@
       elements.collectionCancel.addEventListener('click', async () => {
         if (elements.collectionCancel.disabled) return;
         elements.collectionCancel.disabled = true;
-        const result = await runExperimentAction({action: 'cancel_repeater_request'});
+        const result = currentExperimentReceipt(await runExperimentAction({action: 'cancel_repeater_request'}));
         if (!result) setCollectionNotice('error', state.experimentError || 'Cancellation could not be confirmed.');
         renderApiCollection();
       });

@@ -103,11 +103,7 @@ impl Debugger {
             ));
         }
         let id = self.experiment.sequence.fetch_add(1, Ordering::Relaxed);
-        self.update(|s| {
-            s["request_interception"]["experiment_id"] = json!(id);
-            s["request_interception"]["created_at_ms"] = json!(validation::now_ms());
-            s["request_interception"]["state"] = json!("creating");
-        });
+        self.update(|s| begin_experiment(s, id, validation::now_ms()));
         let context = self
             .browser_command("Target.createBrowserContext", json!({}))
             .await?;
@@ -877,6 +873,17 @@ if let Some(bytes)=bytes {s[group]["source_bytes"]=bytes;}
         });
     }
 }
+// Disposed Interceptor results remain inspectable until a new lifetime starts.
+// Reset the whole group before browser creation, including on creation failure.
+fn begin_experiment(state: &mut Value, id: u64, created_at_ms: u64) {
+    let empty: Value = serde_json::from_str(include_str!("../../assets/debugger-empty.json"))
+        .expect("Debugger initial state");
+    state["request_interception"] = empty["request_interception"].clone();
+    state["request_interception"]["experiment_id"] = json!(id);
+    state["request_interception"]["created_at_ms"] = json!(created_at_ms);
+    state["request_interception"]["state"] = json!("creating");
+}
+
 fn scope_matches(mode: &Value, selected: &Value, id: &str) -> bool {
     mode == "global" || *selected == id
 }
@@ -931,4 +938,30 @@ fn preflight(request: &Value, rule: &Value) -> Option<Value> {
         out.push(json!({"name":"access-control-allow-headers","value":entries.join(", ")}));
     }
     Some(json!(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_experiment_erases_prior_interceptor_lifetime() {
+        let mut state: Value =
+            serde_json::from_str(include_str!("../../assets/debugger-empty.json")).unwrap();
+        let empty = state["request_interception"].clone();
+        state["request_interception"]["result"] = json!({"body": "authored old result"});
+        state["request_interception"]["last_request"] = json!({"url": "https://fixture.invalid/"});
+        state["request_interception"]["audit"] = json!([{"detail": "authored old audit"}]);
+        state["request_interception"]["audit_evictions"] = json!(4);
+        state["request_interception"]["disposed_at_ms"] = json!(99);
+        state["request_interception"]["rule"]["mode"] = json!("block");
+        let other_groups = state["automation_recipes"].clone();
+        begin_experiment(&mut state, 1, 100);
+        let mut expected = empty;
+        expected["experiment_id"] = json!(1);
+        expected["created_at_ms"] = json!(100);
+        expected["state"] = json!("creating");
+        assert_eq!(state["request_interception"], expected);
+        assert_eq!(state["automation_recipes"], other_groups);
+    }
 }

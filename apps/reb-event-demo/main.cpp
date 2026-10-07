@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "components/reverse_engineering_browser/common/native_worker_observation.h"
 #include "components/reverse_engineering_browser/common/native_worker_source.h"
 #include "reb/event.hpp"
 #include "reb/spsc_ring.hpp"
@@ -588,6 +589,337 @@ bool CheckNativeWorkerSourceConcurrency() {
          taken + stats.dropped == stats.attempted && stats.queued == 0;
 }
 
+bool CheckNativeWorkerObservations() {
+  using Status = reb::NativeWorkerCaptureStatus;
+  using Operation = reb::NativeWorkerOperation;
+  using Direction = reb::NativeWorkerDirection;
+  reb::NativeWorkerObservationQueue queue;
+  reb::NativeWorkerObservationProjection projection;
+  reb::NativeWorkerObservationPolicy policy{71, 1, 1000, {1, 2}, {3, 4}, {5, 6}, {7, 8}};
+  reb::NativeWorkerCaptureTicket ticket;
+  reb::NativeWorkerObservation record;
+  const auto begin = [&] {
+    return queue.Begin(reb::NativeWorkerKind::kDedicated, policy.worker, policy.creator,
+                       policy.creator_kind, 1, ticket);
+  };
+  const auto emit = [&](reb::NativeWorkerObservationInput input) {
+    return queue.Capture(ticket, input, 2);
+  };
+  const auto project = [&] {
+    return queue.Take(record, 3) == Status::kAccepted && projection.Apply(record, 3);
+  };
+  if (begin() != Status::kDisabled || queue.Take(record, 1) != Status::kDisabled ||
+      queue.Configure({}, 1) != Status::kInvalid || queue.IsEnabled() ||
+      queue.Configure(policy, 1) != Status::kAccepted || !projection.Reset(policy) ||
+      queue.Begin(reb::NativeWorkerKind::kShared, policy.worker, policy.creator,
+                  policy.creator_kind, 1, ticket) != Status::kUnsupportedWorker ||
+      queue.Begin(reb::NativeWorkerKind::kService, policy.worker, policy.creator,
+                  policy.creator_kind, 1, ticket) != Status::kUnsupportedWorker ||
+      queue.Begin(reb::NativeWorkerKind::kDedicated, {99, 6}, policy.creator, policy.creator_kind,
+                  1, ticket) != Status::kWrongWorker ||
+      queue.Begin(reb::NativeWorkerKind::kDedicated, policy.worker, {99, 8}, policy.creator_kind, 1,
+                  ticket) != Status::kWrongWorker ||
+      queue.Begin(reb::NativeWorkerKind::kDedicated, policy.worker, policy.creator,
+                  reb::NativeWorkerCreatorKind::kDedicatedWorker, 1,
+                  ticket) != Status::kWrongWorker ||
+      begin() != Status::kAccepted) {
+    return false;
+  }
+  for (const auto operation : {Operation::kObjectCreated, Operation::kGlobalScopeStarted,
+                               Operation::kTerminateRequested, Operation::kGlobalScopeDisposed}) {
+    if (emit({operation}) != Status::kAccepted || !project()) {
+      return false;
+    }
+  }
+  reb::NativeWorkerMessageTag send_tag;
+  const auto receive = [&](Direction direction, std::uint64_t native_id,
+                           reb::NativeWorkerMessageTag tag, bool error = false) {
+    return emit({error ? Operation::kMessageError : Operation::kMessageReceived, direction,
+                 native_id, 0, reb::NativeWorkerSourceKind::kClassic, tag});
+  };
+  if (queue.Capture(ticket, {Operation::kMessageSent, Direction::kToWorker, 0}, 2, &send_tag) !=
+          Status::kAccepted ||
+      send_tag.send_sequence == 0 || !project() || projection.messages()[0].observed() ||
+      receive(Direction::kToWorker, 0, send_tag) != Status::kAccepted || !project() ||
+      !projection.messages()[0].observed() ||
+      queue.Capture(ticket, {Operation::kMessageSent, Direction::kToCreator, 0}, 2, &send_tag) !=
+          Status::kAccepted ||
+      !project() || receive(Direction::kToCreator, 0, send_tag, true) != Status::kAccepted ||
+      !project() || !projection.messages()[1].observed() ||
+      !projection.messages()[1].receive_error ||
+      receive(Direction::kToCreator, 0, send_tag) != Status::kAccepted || !project() ||
+      projection.messages()[1].observed() || !projection.messages()[1].ambiguous ||
+      receive(Direction::kToWorker, 999, {}) != Status::kAccepted || !project() ||
+      projection.stats().untagged_receives != 1 ||
+      emit({Operation::kScriptCompiled, Direction::kNone, 0, 19,
+            reb::NativeWorkerSourceKind::kModule}) != Status::kAccepted ||
+      !project() || projection.scripts()[0].script_id != 19 ||
+      emit({Operation::kScriptCompiled, Direction::kNone, 0, 19}) != Status::kAccepted ||
+      !project() || !projection.scripts()[0].ambiguous || projection.stats().ambiguous_ids != 2) {
+    return false;
+  }
+  // Reject copied records from different epochs/contexts or malformed ABI.
+  const auto valid = record;
+  for (int mutation = 0; mutation < 12; ++mutation) {
+    auto forged = valid;
+    ++forged.sequence;
+    switch (mutation) {
+      case 0:
+        ++forged.session_id;
+        break;
+      case 1:
+        ++forged.generation;
+        break;
+      case 2:
+        ++forged.worker.high;
+        break;
+      case 3:
+        ++forged.creator.high;
+        break;
+      case 4:
+        ++forged.browser_context.high;
+        break;
+      case 5:
+        ++forged.renderer_instance.high;
+        break;
+      case 6:
+        ++forged.version;
+        break;
+      case 7:
+        ++forged.record_size;
+        break;
+      case 8:
+        forged.reserved[0] = std::byte{1};
+        break;
+      case 9:
+        forged.worker_kind = reb::NativeWorkerKind::kService;
+        break;
+      case 10:
+        forged.creator_kind = reb::NativeWorkerCreatorKind::kDedicatedWorker;
+        break;
+      case 11:
+        forged.monotonic_time_ns = 4;
+        break;
+    }
+    if (projection.Apply(forged, 3)) {
+      return false;
+    }
+  }
+  if (projection.Apply(valid, 3) || projection.stats().out_of_order != 1 ||
+      emit({Operation::kMessageSent, Direction::kNone, 1}) != Status::kInvalid ||
+      emit({Operation::kScriptCompiled}) != Status::kInvalid ||
+      emit({static_cast<Operation>(999)}) != Status::kInvalid ||
+      emit({Operation::kObjectCreated}) != Status::kAccepted || !project() ||
+      record.dropped_before != 3 || projection.stats().missing_sequences != 3 ||
+      projection.stats().reported_drops != 3) {
+    return false;
+  }
+  for (std::size_t index = 0; index < reb::kNativeWorkerObservationCapacity; ++index) {
+    if (emit({Operation::kObjectCreated}) != Status::kAccepted) {
+      return false;
+    }
+  }
+  if (emit({Operation::kObjectCreated}) != Status::kFull || !project() ||
+      emit({Operation::kObjectCreated}) != Status::kAccepted) {
+    return false;
+  }
+  while (queue.Stats().queued != 0) {
+    if (!project()) {
+      return false;
+    }
+  }
+  if (record.dropped_before != 1 || queue.Stats().dropped != 4) {
+    return false;
+  }
+  const auto old_ticket = ticket;
+  ++policy.generation;
+  if (queue.Configure(policy, 1) != Status::kAccepted || !projection.Reset(policy) ||
+      queue.Capture(old_ticket, {}, 2) != Status::kStaleGeneration ||
+      begin() != Status::kAccepted) {
+    return false;
+  }
+  queue.Retire(old_ticket);
+  auto wrong_ticket = ticket;
+  ++wrong_ticket.worker.high;
+  queue.Retire(wrong_ticket);
+  if (!queue.IsEnabled()) {
+    return false;
+  }
+  // Never evict a completed key and accidentally pair a later reuse.
+  reb::NativeWorkerMessageTag retained_send_tag;
+  for (std::uint64_t id = 0; id < reb::kNativeWorkerProjectionCapacity; ++id) {
+    if (emit({Operation::kMessageSent, Direction::kToWorker, id}) != Status::kAccepted ||
+        !project()) {
+      return false;
+    }
+    if (id == 1) {
+      retained_send_tag = {record.session_id, record.generation, record.send_sequence};
+    }
+  }
+  if (emit({Operation::kMessageSent, Direction::kToWorker, 999}) != Status::kAccepted ||
+      project() || projection.stats().capacity_drops != 1 ||
+      receive(Direction::kToWorker, 999,
+              {record.session_id, record.generation, record.send_sequence}) != Status::kAccepted ||
+      project() || projection.stats().capacity_drops != 2 ||
+      receive(Direction::kToWorker, 1, retained_send_tag) != Status::kAccepted || !project() ||
+      !projection.messages()[1].observed() ||
+      emit({Operation::kObjectCreated}) != Status::kAccepted) {
+    return false;
+  }
+  queue.Retire(ticket);
+  if (queue.IsEnabled() || queue.Stats().queued != 1 || queue.Stats().retired != 0 ||
+      queue.Capture(ticket, {}, 2) != Status::kDisabled ||
+      queue.Take(record, 3) != Status::kAccepted || record.operation != Operation::kObjectCreated ||
+      queue.Take(record, 3) != Status::kEmpty || queue.Configure(policy, 1) != Status::kInvalid) {
+    return false;
+  }
+  ++policy.generation;
+  if (queue.Configure(policy, 1) != Status::kAccepted || begin() != Status::kAccepted ||
+      emit({}) != Status::kAccepted || queue.Capture(ticket, {}, 1000) != Status::kExpired ||
+      queue.Take(record, 1000) != Status::kDisabled || queue.Stats().queued != 0 ||
+      queue.Stats().retired != 1 || (!projection.Expire(1000)) || !projection.messages().empty() ||
+      projection.Reset({}) || projection.Apply(valid, 3) || !projection.messages().empty() ||
+      !projection.scripts().empty()) {
+    return false;
+  }
+  queue.Disable();
+  std::cout << "Native worker metadata: identity=passed lifecycle=passed zero_trace_id=passed "
+               "message_error=passed ambiguity=passed bounded_projection=passed gaps=passed "
+               "retirement=passed expiry=passed no_payload_fields=passed\n";
+  return true;
+}
+
+bool CheckNativeWorkerMessageTags() {
+  using Status = reb::NativeWorkerCaptureStatus;
+  using Operation = reb::NativeWorkerOperation;
+  using Direction = reb::NativeWorkerDirection;
+  reb::NativeWorkerObservationQueue queue;
+  reb::NativeWorkerObservationProjection projection;
+  reb::NativeWorkerObservationPolicy policy{71, 1, 1000, {1, 2}, {3, 4}, {5, 6}, {7, 8}};
+  reb::NativeWorkerCaptureTicket ticket;
+  reb::NativeWorkerObservation record;
+  reb::NativeWorkerMessageTag first, second;
+  const auto project = [&] {
+    return queue.Take(record, 3) == Status::kAccepted && projection.Apply(record, 3);
+  };
+  const auto receive = [&](reb::NativeWorkerMessageTag tag,
+                           Direction direction = Direction::kToWorker) {
+    return queue.Capture(
+        ticket,
+        {Operation::kMessageReceived, direction, 0, 0, reb::NativeWorkerSourceKind::kClassic, tag},
+        2);
+  };
+  if (queue.Configure(policy, 1) != Status::kAccepted || !projection.Reset(policy) ||
+      queue.Begin(reb::NativeWorkerKind::kDedicated, policy.worker, policy.creator,
+                  policy.creator_kind, 1, ticket) != Status::kAccepted ||
+      queue.Capture(ticket, {Operation::kMessageSent, Direction::kToWorker, 0}, 2, &first) !=
+          Status::kAccepted ||
+      !project() || queue.Capture(ticket, {Operation::kObjectCreated}, 2) != Status::kAccepted ||
+      !project()) {
+    return false;
+  }
+  // A tag naming a lifecycle observation must never pair with an unrelated send
+  // merely because both upstream trace IDs are zero.
+  auto absent = first;
+  ++absent.send_sequence;
+  if (receive(absent) != Status::kAccepted || !project() || projection.messages().size() != 2 ||
+      projection.messages()[0].observed() || projection.messages()[1].observed() ||
+      receive(first) != Status::kAccepted || !project() || !projection.messages()[0].observed() ||
+      queue.Capture(ticket, {Operation::kMessageSent, Direction::kToWorker, 0}, 2, &second) !=
+          Status::kAccepted ||
+      !project() || receive(second) != Status::kAccepted || !project() ||
+      projection.messages().size() != 3 || !projection.messages()[2].observed()) {
+    return false;
+  }
+  for (int mutation = 0; mutation < 4; ++mutation) {
+    auto stale = second;
+    if (mutation == 0)
+      ++stale.session_id;
+    if (mutation == 1)
+      ++stale.generation;
+    if (mutation == 2)
+      stale.send_sequence = 0;
+    if (mutation == 3)
+      stale.send_sequence = std::numeric_limits<std::uint64_t>::max();
+    if (receive(stale) != Status::kInvalid)
+      return false;
+  }
+  if (receive(second, Direction::kToCreator) != Status::kAccepted || !project() ||
+      projection.messages()[2].observed() || !projection.messages()[2].ambiguous ||
+      record.dropped_before != 4 ||
+      queue.Capture(ticket, {Operation::kGlobalScopeDisposed}, 2) != Status::kAccepted) {
+    return false;
+  }
+  queue.Retire(ticket);
+  if (queue.IsEnabled() || !project() || record.operation != Operation::kGlobalScopeDisposed ||
+      queue.Take(record, 3) != Status::kEmpty ||
+      queue.Capture(ticket, {}, 2, &second) != Status::kDisabled || second.send_sequence != 0) {
+    return false;
+  }
+  projection.Retire();
+  if (!projection.messages().empty() || projection.stats().retired_entries != 3 ||
+      projection.Apply(record, 3))
+    return false;
+  ++policy.generation;
+  if (queue.Configure(policy, 1) != Status::kAccepted ||
+      queue.Begin(reb::NativeWorkerKind::kDedicated, policy.worker, policy.creator,
+                  policy.creator_kind, 1, ticket) != Status::kAccepted ||
+      queue.Capture(ticket, {}, 2) != Status::kAccepted)
+    return false;
+  queue.Disable();
+  if (queue.Stats().retired != 1 || queue.Take(record, 3) != Status::kDisabled)
+    return false;
+  std::cout
+      << "Native worker tags: full_epoch=passed reused_zero_trace=passed false_pair=prevented "
+         "direction_mismatch=ambiguous dispose_drain=passed explicit_revoke=passed\n";
+  return true;
+}
+
+bool CheckNativeWorkerObservationConcurrency() {
+  using Status = reb::NativeWorkerCaptureStatus;
+  reb::NativeWorkerObservationQueue queue;
+  reb::NativeWorkerObservationPolicy policy{71, 1, 1000, {1, 2}, {3, 4}, {5, 6}, {7, 8}};
+  reb::NativeWorkerCaptureTicket ticket;
+  if (queue.Configure(policy, 1) != Status::kAccepted ||
+      queue.Begin(reb::NativeWorkerKind::kDedicated, policy.worker, policy.creator,
+                  policy.creator_kind, 1, ticket) != Status::kAccepted) {
+    return false;
+  }
+  constexpr std::uint64_t kAttempts = 20000;
+  std::atomic<bool> done{false};
+  std::atomic<bool> valid{true};
+  std::thread producer([&] {
+    for (std::uint64_t index = 0; index < kAttempts; ++index) {
+      const auto status = queue.Capture(ticket, {}, 2);
+      if (status != Status::kAccepted && status != Status::kFull && status != Status::kBusy) {
+        valid.store(false);
+      }
+    }
+    done.store(true, std::memory_order_release);
+  });
+  std::uint64_t taken = 0;
+  std::uint64_t last = 0;
+  while (!done.load(std::memory_order_acquire) || queue.Stats().queued != 0) {
+    reb::NativeWorkerObservation record;
+    const auto status = queue.Take(record, 3);
+    if (status == Status::kAccepted) {
+      ++taken;
+      if (record.sequence <= last) {
+        valid.store(false);
+      }
+      last = record.sequence;
+    } else if (status != Status::kBusy && status != Status::kEmpty) {
+      valid.store(false);
+    }
+  }
+  producer.join();
+  const auto stats = queue.Stats();
+  std::cout << "Native worker metadata concurrency: attempts=" << kAttempts << " taken=" << taken
+            << " dropped=" << stats.dropped << " contended=" << stats.contended << '\n';
+  return valid.load() && stats.attempted + stats.contended == kAttempts &&
+         taken + stats.dropped == stats.attempted && stats.queued == 0;
+}
+
 bool ParseIterations(const int argc, char* argv[], std::uint64_t& iterations) {
   if (argc == 1) {
     return true;
@@ -609,9 +941,11 @@ int main(const int argc, char* argv[]) {
     return 2;
   }
   if (!RunEventDemo() || !CheckEventJson() || !CheckNativeQueueLimits() ||
-      !CheckNativeWorkerSources() || !CheckNativeWorkerSourceUrls() ||
-      !CheckNativeWorkerSourceConcurrency() || !CheckNativeQueueProducers() ||
-      !MeasureNativeQueueReuse(iterations) || !CheckNativeQueueNotifications(iterations)) {
+      !CheckNativeWorkerObservations() || !CheckNativeWorkerMessageTags() ||
+      !CheckNativeWorkerObservationConcurrency() || !CheckNativeWorkerSources() ||
+      !CheckNativeWorkerSourceUrls() || !CheckNativeWorkerSourceConcurrency() ||
+      !CheckNativeQueueProducers() || !MeasureNativeQueueReuse(iterations) ||
+      !CheckNativeQueueNotifications(iterations)) {
     std::cerr << "Native event queue validation failed\n";
     return 1;
   }

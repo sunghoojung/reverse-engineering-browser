@@ -782,6 +782,155 @@ function appSection(start, end) {
   assert(offset >= 0 && boundary > offset, `Missing fixture boundary: ${start}`);
   return appSource.slice(offset, boundary);
 }
+
+// Request profiles belong to an exact retained request, even while headers or
+// JSON bodies are pending. Exercise production selection, validation and commit.
+const signalProfileSource = (await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8')) +
+  appSection('      function requestSignalRoot(', '      function signalEventKey(') +
+  appSection('      function requestSignalProfileSelection(', '      function renderFields(') +
+  ';({refresh:refreshRequestSignalProfile,selection:requestSignalProfileSelection,validate:isRequestSignalProfile})';
+function signalProfileFixture() {
+  const requests = [1, 2].map(id => ({id:`r${id}`, origin:'live', events:[{
+    session_id:'11', request_id:String(id), process_id:17, sequence_number:String(id), type:'request_started'
+  }]}));
+  const state = {requests, selectedRequestId:'r1', signalProfileGeneration:0, inspectorTab:'signals',
+    signalProfile:null, signalProfileKey:null, signalProfileEtag:null, signalProfileStatus:'idle', signalProfileError:null};
+  const calls = [], renders = [], location = {protocol:'http:'};
+  const fixture = {state, calls, renders, location, reply:() => signalProfileResponse(signalProfileBody(1))};
+  Object.assign(fixture, runInNewContext(signalProfileSource, {
+    state, location, URLSearchParams, TextDecoder,
+    document:{querySelector:() => ({hidden:false})},
+    renderInspector:() => renders.push('inspector'), renderFingerprintActivity:() => renders.push('fingerprinting'),
+    fetch:(url, options) => {calls.push({url, options}); return fixture.reply();}
+  }));
+  return fixture;
+}
+function signalProfileBody(id, category = id === 1 ? 'canvas' : 'webgl') {
+  return {protocol_version:1, document_kind:'request-signal-profile', session_id:'11', request_id:String(id),
+    root_event:{process_id:17, sequence_number:String(id)}, initiator_event:null, navigation_id:'1', frame_id:'1',
+    signals:[{category, relation:'parent_chain', confidence:'observed', event_count:'1',
+      first_event:{process_id:17, sequence_number:'7'}, last_event:{process_id:17, sequence_number:'7'}}],
+    coverage:{parent_depth:1, parent_depth_limit:32, copied_from_initiator:false, retention_truncated:false,
+      parent_depth_limited:false, count_saturated:false}};
+}
+function signalProfileResponse(body, status = 200, etag = 'profile-etag') {
+  return {status, ok:status === 200, headers:{get:() => etag}, json:async () => body};
+}
+function signalProfileDeferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
+  return {promise, resolve, reject};
+}
+for (const sameRequest of [false, true]) {
+  for (const outcome of ['valid', 'malformed', 'rejected']) {
+    const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+    fixture.reply = () => ({...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}});
+    const pending = fixture.refresh(); await reading.promise;
+    const next = signalProfileBody(sameRequest ? 1 : 2, 'webgl');
+    fixture.state.selectedRequestId = sameRequest ? 'r1' : 'r2';
+    fixture.reply = () => signalProfileResponse(next, 200, 'new-etag');
+    await fixture.refresh();
+    const renders = fixture.renders.length, key = fixture.state.signalProfileKey;
+    if (outcome === 'rejected') held.reject(new Error('Old JSON read failed'));
+    else held.resolve(outcome === 'valid' ? signalProfileBody(1) : {});
+    await pending;
+    assert.equal(fixture.state.signalProfile, next, 'A superseded JSON body cannot replace current request evidence');
+    assert.equal(fixture.state.signalProfileStatus, 'ready');
+    assert.equal(fixture.state.signalProfileError, null);
+    assert.equal(fixture.state.signalProfileEtag, 'new-etag');
+    assert.equal(fixture.state.signalProfileKey, key);
+    assert.equal(fixture.renders.length, renders, 'Superseded completion does not render');
+  }
+}
+for (const status of [200, 304, 404, 500, 'rejected']) {
+  const fixture = signalProfileFixture(), held = signalProfileDeferred();
+  fixture.reply = () => held.promise;
+  const pending = fixture.refresh(); fixture.state.selectedRequestId = 'r2';
+  const next = signalProfileBody(2); fixture.reply = () => signalProfileResponse(next);
+  await fixture.refresh(); const renders = fixture.renders.length;
+  if (status === 'rejected') held.reject(new Error('Old fetch failed'));
+  else held.resolve(signalProfileResponse(signalProfileBody(1), status));
+  await pending;
+  assert.equal(fixture.state.signalProfile, next); assert.equal(fixture.state.signalProfileStatus, 'ready');
+  assert.equal(fixture.renders.length, renders);
+}
+for (const phase of ['headers', 'body', 'failure']) {
+  for (const change of ['selection', 'session_id', 'request_id', 'process_id', 'sequence_number', 'evicted', 'ambiguous']) {
+    const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+    await fixture.refresh();
+    fixture.reply = () => phase === 'headers' ? held.promise
+      : {...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}};
+    const pending = fixture.refresh(); if (phase !== 'headers') await reading.promise;
+    if (change === 'selection') fixture.state.selectedRequestId = 'r2';
+    else if (change === 'evicted') fixture.state.requests = [];
+    else if (change === 'ambiguous') fixture.state.requests.push(structuredClone(fixture.state.requests[0]));
+    else fixture.state.requests[0].events[0][change] = change === 'process_id' ? 18 : '99';
+    if (phase === 'failure') held.reject(new Error('Old body failed'));
+    else held.resolve(phase === 'headers' ? signalProfileResponse(signalProfileBody(1)) : signalProfileBody(1));
+    await pending;
+    assert.equal(fixture.state.signalProfile, null, `${phase}/${change} retires evidence owned by the prior tuple`);
+    assert.equal(fixture.state.signalProfileKey, null); assert.equal(fixture.state.signalProfileEtag, null);
+    assert.equal(fixture.state.signalProfileStatus, 'error');
+    assert.match(fixture.state.signalProfileError, /selected request.*changed/i);
+  }
+}
+for (const field of ['session_id', 'request_id', 'process_id', 'sequence_number']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  const foreign = signalProfileBody(1); foreign.signals = [];
+  if (field === 'process_id' || field === 'sequence_number') foreign.root_event[field] = field === 'process_id' ? 18 : '99';
+  else foreign[field] = '99';
+  assert(fixture.validate(foreign), 'Foreign profile is structurally valid');
+  fixture.reply = () => signalProfileResponse(foreign); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.match(fixture.state.signalProfileError, /different.*request|different.*event/i);
+  assert.equal(fixture.state.signalProfileEtag, null);
+}
+for (const outcome of ['malformed', 'json', 'fetch', 'http']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  fixture.reply = () => outcome === 'fetch' ? Promise.reject(new Error('Disconnected'))
+    : outcome === 'json' ? {...signalProfileResponse(null), json:async () => {throw new SyntaxError('Invalid JSON');}}
+      : signalProfileResponse({}, outcome === 'http' ? 500 : 200);
+  await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.equal(fixture.state.signalProfileEtag, null, 'A failed refresh requires a full validated retry');
+  fixture.reply = () => signalProfileResponse(signalProfileBody(1)); await fixture.refresh();
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], undefined);
+  assert.equal(fixture.state.signalProfileStatus, 'ready'); assert.equal(fixture.state.signalProfileError, null);
+}
+{
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  fixture.reply = () => signalProfileResponse(null, 304); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'ready');
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], 'profile-etag');
+  fixture.state.selectedRequestId = 'r2'; fixture.reply = () => signalProfileResponse(null, 404); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'empty');
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], undefined);
+  fixture.reply = () => signalProfileResponse(null, 304); await fixture.refresh();
+  assert.equal(fixture.state.signalProfileStatus, 'empty');
+  fixture.state.selectedRequestId = 'r1'; await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.equal(fixture.state.signalProfileEtag, null, 'An unsolicited 304 cannot authenticate a cache entry');
+}
+for (const unavailable of ['missing', 'sample', 'file']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const calls = fixture.calls.length;
+  if (unavailable === 'missing') fixture.state.selectedRequestId = null;
+  else if (unavailable === 'sample') fixture.state.requests[0].origin = 'sample';
+  else fixture.location.protocol = 'file:';
+  await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'empty');
+  assert.equal(fixture.state.signalProfileKey, null); assert.equal(fixture.state.signalProfileEtag, null);
+  assert.equal(fixture.calls.length, calls);
+}
+{
+  const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+  fixture.reply = () => ({...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}});
+  const pending = fixture.refresh(); await reading.promise;
+  fixture.state.requests = structuredClone(fixture.state.requests);
+  held.resolve(signalProfileBody(1)); await pending;
+  assert.equal(fixture.state.signalProfileStatus, 'ready', 'Unchanged exact tuples survive catalog object replacement');
+}
+console.log('PASS request signal profile late headers/bodies/errors, exact owner and response identity, cache recovery and unavailable states (production functions; not rendered QA)');
+
 // Additive machine-readable failure reasons must not make the bundled UI
 // reject its existing application result envelope. Exercise the actual validators.
 const applicationResults = runInNewContext(

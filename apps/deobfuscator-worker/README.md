@@ -63,6 +63,31 @@ preflight and Oxc parser with the original parse goal. Derived text is capped at
 all rewrite receipts. This establishes syntax acceptance, not semantic equivalence.
 Object shorthand properties retain their original spelling and are not folded.
 
+All modeled values share a monotonic 8 MiB allocation-work allowance and
+250,000-node allowance across the whole analysis, including closed decoder
+calls. Owned arrays cache their full clone cost and depth; copies reserve the
+complete cost before allocation and have no unrestricted `Clone` implementation.
+Array slots, string copies/coercions, primitive spelling, and nested value copies
+consume the allowance, and dropping a temporary does not refund it. Value depth
+is capped at 64. These are conservative model-work limits, not a measured process
+RSS ceiling; parser, source, mapping and transport bounds remain separate.
+Exhaustion preserves unresolved calls and sets `transformations_truncated`.
+
+Intrinsic modeling is suppressed for member updates, deletion, exposed
+prototype/constructor paths, `Reflect`/`Proxy`/`Function` references and unmodeled
+member calls, as well as existing property writes, shadowing and dynamic-scope
+conflicts. Computed calls remain unsupported.
+
+With the explicit, effective standard-intrinsics assumption, ordinary
+expressions can reuse the closed interpreter's existing `String.fromCharCode`,
+string `charCodeAt`, `charAt`, `indexOf` and literal-separator `split` model.
+Only recognized, non-optional static-member shapes are admitted; aliases,
+computed calls, unknown receivers/arguments, getters and coercion hooks remain
+unresolved. Direct primitive results are labelled `intrinsic-call`; enclosing
+concatenation or index reductions retain their own transformation family.
+Intermediate split arrays are never emitted. Default mode is unchanged, and
+all existing Unicode, arity, value, loop and shared allocation bounds apply.
+
 `make deob-benchmark` runs the worker against the versioned technique corpus in
 `tools/fixtures/deobfuscation-benchmark/`.
 Each reviewed fixture in `corpus-v2.json` compares original and derived typed
@@ -79,11 +104,18 @@ NaN and infinities. JSON string escapes preserve UTF-16 units. Fixtures can
 explicitly report `completion` (normal or throw) and an ordered `effects` array;
 the harness does not wrap the source or catch its exceptions. Accessors, exotic
 objects, symbols, cycles and shared-object identity are unsupported observations.
+The Node observer is preloaded before each fixture, capturing descriptor,
+prototype, array, number-bit, serialization and output operations before the
+fixture can replace them. Observation containers have null prototypes, so
+inherited `toJSON` hooks cannot change the report. This preserves leading strict
+directives and top-level scope. The non-enumerable `__rebObserveFixtureV2` name
+is reserved for the test protocol; fixtures must not target the harness itself.
 Descriptor attributes and runtime behavior beyond these authored observations
 are not compared. The oracle has depth, property, string, output, time and Node
 heap limits; these do not make execution of untrusted JavaScript safe.
 Run `python3 tools/run-deobfuscation-benchmark.py --oracle-self-test` without a
-worker to verify that ten deliberately wrong observations are rejected. Every
+worker to verify that deliberately wrong observations, including mutated-host
+helpers, are rejected. Every
 full benchmark also runs those controls. Reported source coverage is changed
 original bytes, and child peak RSS includes both Node and worker processes.
 

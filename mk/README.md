@@ -23,6 +23,10 @@ local tools automatically. `make deob-benchmark` builds the Rust worker and runs
 the bounded semantic corpus with timing, memory, transformation, and
 changed-source coverage evidence.
 
+`make lint` checks formatting and Clippy warnings for both Rust manifests.
+The deobfuscation worker includes all targets so its regression-test code is
+checked along with the production executable.
+
 Use a separate build directory for a different compiler or set of flags:
 
 ```sh

@@ -2,7 +2,7 @@
 mod decoder;
 mod value;
 use std::collections::{HashMap, HashSet};
-use value::Value;
+use value::{Value, ValueBudget};
 
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
@@ -31,6 +31,7 @@ pub struct Folder<'s> {
     pub rewrites: Vec<Transformation>,
     pub truncated: bool,
     steps: usize,
+    value_budget: ValueBudget,
     // Only preceding primitive const bindings in the SAME straight-line list.
     // Nested execution/scope boundaries never inherit these bindings.
     constants: HashMap<String, Value>,
@@ -58,6 +59,7 @@ impl<'s> Folder<'s> {
             rewrites: vec![],
             truncated: false,
             steps: 0,
+            value_budget: ValueBudget::default(),
             constants: HashMap::new(),
             tables: HashMap::new(),
             proxies: HashMap::new(),
@@ -68,12 +70,17 @@ impl<'s> Folder<'s> {
             assume_intrinsics,
         }
     }
+    pub fn is_truncated(&self) -> bool {
+        self.truncated || self.value_budget.exhausted
+    }
+
     fn eval(&mut self, expression: &Expression<'_>, depth: usize) -> Option<Value> {
         if depth >= MAX_DEPTH || self.steps >= MAX_STEPS {
             self.truncated = true;
             return None;
         }
         self.steps += 1;
+        self.value_budget.reserve(1, std::mem::size_of::<Value>())?;
         let next = depth + 1;
         let value = match expression {
             Expression::AssignmentExpression(_)
@@ -88,7 +95,7 @@ impl<'s> Folder<'s> {
             Expression::StringLiteral(s)
                 if !s.lone_surrogates && s.value.len() <= MAX_VALUE_BYTES =>
             {
-                Value::String(s.value.to_string())
+                Value::string(s.value.as_str(), &mut self.value_budget)?
             }
             Expression::BooleanLiteral(b) => Value::Bool(b.value),
             Expression::NullLiteral(_) => Value::Null,
@@ -97,31 +104,36 @@ impl<'s> Folder<'s> {
                     self.truncated = true;
                     return None;
                 }
-                let mut values = Vec::new();
+                let mut values = self.value_budget.array(array.elements.len())?;
                 for element in &array.elements {
                     values.push(match element {
                         ArrayExpressionElement::Elision(_) => None,
                         element => Some(self.eval(element.as_expression()?, next)?),
                     });
                 }
-                Value::Array(values)
+                Value::array(values, &mut self.value_budget)?
             }
             Expression::ObjectExpression(object)
                 if self.assume_intrinsics && object.properties.is_empty() =>
             {
                 Value::EmptyObject
             }
-            Expression::Identifier(id) => self.constants.get(id.name.as_str())?.clone(),
+            Expression::Identifier(id) => self
+                .constants
+                .get(id.name.as_str())?
+                .try_clone(&mut self.value_budget)?,
             Expression::UnaryExpression(e) => {
                 // Even void must prove its argument free of effects and exceptions.
                 let v = self.eval(&e.argument, next)?;
                 match e.operator {
-                    U::UnaryPlus => Value::Number(v.number()?),
-                    U::UnaryNegation => Value::Number(-v.number()?),
+                    U::UnaryPlus => Value::Number(v.number(&mut self.value_budget)?),
+                    U::UnaryNegation => Value::Number(-v.number(&mut self.value_budget)?),
                     U::LogicalNot => Value::Bool(!v.truthy()),
-                    U::BitwiseNot => Value::Number(f64::from(!int32(v.number()?))),
+                    U::BitwiseNot => {
+                        Value::Number(f64::from(!int32(v.number(&mut self.value_budget)?)))
+                    }
                     U::Void => Value::Undefined,
-                    U::Typeof => Value::String(
+                    U::Typeof => Value::string(
                         match v {
                             Value::Number(_) => "number",
                             Value::String(_) => "string",
@@ -129,9 +141,9 @@ impl<'s> Folder<'s> {
                             Value::Null => "object",
                             Value::Undefined => "undefined",
                             Value::Array(_) | Value::EmptyObject => "object",
-                        }
-                        .into(),
-                    ),
+                        },
+                        &mut self.value_budget,
+                    )?,
                     _ => return None,
                 }
             }
@@ -142,12 +154,15 @@ impl<'s> Folder<'s> {
                     e.operator,
                     B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
                 ) {
-                    (left.primitive()?, right.primitive()?)
+                    (
+                        left.primitive(&mut self.value_budget)?,
+                        right.primitive(&mut self.value_budget)?,
+                    )
                 } else {
                     (left, right)
                 };
                 match e.operator {
-                    B::Addition => match left.add(&right) {
+                    B::Addition => match left.add(&right, &mut self.value_budget) {
                         Some(value) => value,
                         None => {
                             self.truncated = true;
@@ -159,9 +174,10 @@ impl<'s> Folder<'s> {
                     {
                         Value::Bool((left == right) == (e.operator == B::StrictEquality))
                     }
-                    B::Equality | B::Inequality => {
-                        Value::Bool(left.loose_equal(&right)? == (e.operator == B::Equality))
-                    }
+                    B::Equality | B::Inequality => Value::Bool(
+                        left.loose_equal(&right, &mut self.value_budget)?
+                            == (e.operator == B::Equality),
+                    ),
                     B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
                         if matches!((&left, &right), (Value::String(_), Value::String(_))) =>
                     {
@@ -177,7 +193,10 @@ impl<'s> Folder<'s> {
                         })
                     }
                     op => {
-                        let (a, b) = (left.number()?, right.number()?);
+                        let (a, b) = (
+                            left.number(&mut self.value_budget)?,
+                            right.number(&mut self.value_budget)?,
+                        );
                         match op {
                             B::Addition => Value::Number(a + b),
                             B::Subtraction => Value::Number(a - b),
@@ -251,7 +270,9 @@ impl<'s> Folder<'s> {
                 }
             }
             Expression::CallExpression(call)
-                if self.in_proxy && self.assume_intrinsics && !call.optional =>
+                if self.assume_intrinsics
+                    && !call.optional
+                    && (self.in_proxy || Self::intrinsic_call_shape(call)) =>
             {
                 self.intrinsic(call, next)?
             }
@@ -305,12 +326,16 @@ impl<'s> Folder<'s> {
                 };
                 match object {
                     Value::Array(values) if self.assume_intrinsics => values
-                        .get(index)
-                        .cloned()
+                        .into_values()
+                        .into_iter()
+                        .nth(index)
                         .flatten()
                         .unwrap_or(Value::Undefined),
                     Value::String(s) => match s.encode_utf16().nth(index) {
-                        Some(unit) => Value::String(char::from_u32(u32::from(unit))?.to_string()),
+                        Some(unit) => Value::character(
+                            char::from_u32(u32::from(unit))?,
+                            &mut self.value_budget,
+                        )?,
                         None if self.assume_intrinsics => Value::Undefined,
                         None => return None,
                     },
@@ -323,7 +348,7 @@ impl<'s> Folder<'s> {
                 let key = self.eval(&e.expression, next)?;
                 if self.assume_intrinsics {
                     let object = self.eval(&e.object, next);
-                    let primitive_key = key.primitive()?;
+                    let primitive_key = key.primitive(&mut self.value_budget)?;
                     let index = match &primitive_key {
                         Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as usize),
                         Value::String(s)
@@ -340,8 +365,9 @@ impl<'s> Folder<'s> {
                             if let Some(index) = index {
                                 return Some(
                                     values
-                                        .get(index)
-                                        .cloned()
+                                        .into_values()
+                                        .into_iter()
+                                        .nth(index)
                                         .flatten()
                                         .unwrap_or(Value::Undefined),
                                 );
@@ -354,9 +380,10 @@ impl<'s> Folder<'s> {
                             if let Some(index) = index {
                                 return Some(match text.encode_utf16().nth(index) {
                                     None => Value::Undefined,
-                                    Some(unit) => {
-                                        Value::String(char::from_u32(u32::from(unit))?.to_string())
-                                    }
+                                    Some(unit) => Value::character(
+                                        char::from_u32(u32::from(unit))?,
+                                        &mut self.value_budget,
+                                    )?,
                                 });
                             }
                         }
@@ -384,10 +411,10 @@ impl<'s> Folder<'s> {
                         .tables
                         .get(id.name.as_str())?
                         .get(index as usize)?
-                        .clone(),
+                        .try_clone(&mut self.value_budget)?,
                     Expression::StringLiteral(s) if !s.lone_surrogates => {
                         let unit = s.value.encode_utf16().nth(index as usize)?;
-                        Value::String(char::from_u32(u32::from(unit))?.to_string())
+                        Value::character(char::from_u32(u32::from(unit))?, &mut self.value_budget)?
                     }
                     _ => return None,
                 }
@@ -441,42 +468,55 @@ impl<'a> Visit<'a> for Folder<'_> {
                     for declarator in &declaration.declarations {
                         if let Some(init) = &declarator.init {
                             self.visit_expression(init);
-                            if declaration.kind == VariableDeclarationKind::Const {
-                                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
-                                    if let Some(value) = self.eval(init, 0) {
-                                        if value.is_primitive() && self.constants.len() < 64 {
-                                            self.constants.insert(id.name.to_string(), value);
-                                        }
-                                    }
-                                    if self.proxies.len() < 64 {
-                                        if let Some(proxy) = Proxy::expression(init, self.source) {
-                                            self.proxies.insert(id.name.to_string(), proxy);
-                                        }
-                                    }
-                                    if let Expression::ArrayExpression(array) = init {
-                                        let name = id.name.as_str();
-                                        if self.list_depth > 1
-                                            && self.tables.len() < 16
-                                            && array.elements.len() <= 256
-                                            && self.table_uses.safe(name, array.elements.len())
-                                        {
-                                            let values: Option<Vec<_>> = array
-                                                .elements
+                            if declaration.kind == VariableDeclarationKind::Const
+                                && let BindingPattern::BindingIdentifier(id) = &declarator.id
+                            {
+                                if let Some(value) = self.eval(init, 0)
+                                    && value.is_primitive()
+                                    && self.constants.len() < 64
+                                {
+                                    self.constants.insert(id.name.to_string(), value);
+                                }
+                                if self.proxies.len() < 64
+                                    && let Some(proxy) = Proxy::expression(init, self.source)
+                                {
+                                    self.proxies.insert(id.name.to_string(), proxy);
+                                }
+                                if let Expression::ArrayExpression(array) = init {
+                                    let name = id.name.as_str();
+                                    if self.list_depth > 1
+                                        && self.tables.len() < 16
+                                        && array.elements.len() <= 256
+                                        && self.table_uses.safe(name, array.elements.len())
+                                        && self
+                                            .value_budget
+                                            .reserve(
+                                                0,
+                                                array.elements.len()
+                                                    * std::mem::size_of::<Value>()
+                                                    * 2,
+                                            )
+                                            .is_some()
+                                    {
+                                        let values: Option<Vec<_>> = array
+                                            .elements
+                                            .iter()
+                                            .map(|e| self.eval(e.as_expression()?, 0))
+                                            .collect();
+                                        if let Some(values) = values
+                                            .filter(|values| values.iter().all(Value::is_primitive))
+                                            && values
                                                 .iter()
-                                                .map(|e| self.eval(e.as_expression()?, 0))
-                                                .collect();
-                                            if let Some(values) = values.filter(|values| {
-                                                values.iter().all(Value::is_primitive)
-                                            }) {
-                                                if values
-                                                    .iter()
-                                                    .map(|v| v.code().len())
-                                                    .sum::<usize>()
-                                                    <= MAX_VALUE_BYTES
-                                                {
-                                                    self.tables.insert(name.to_string(), values);
-                                                }
-                                            }
+                                                .try_fold(0, |size, v| {
+                                                    Some(
+                                                        size + v
+                                                            .code(&mut self.value_budget)?
+                                                            .len(),
+                                                    )
+                                                })
+                                                .is_some_and(|size| size <= MAX_VALUE_BYTES)
+                                        {
+                                            self.tables.insert(name.to_string(), values);
                                         }
                                     }
                                 }
@@ -490,14 +530,13 @@ impl<'a> Visit<'a> for Folder<'_> {
                     }
                 }
                 Statement::FunctionDeclaration(function) => {
-                    if self.list_depth > 1 && self.proxies.len() < 64 {
-                        if let Some(id) = &function.id {
-                            if self.table_uses.proxy_safe(id.name.as_str()) {
-                                if let Some(proxy) = Proxy::function(function, self.source) {
-                                    self.proxies.insert(id.name.to_string(), proxy);
-                                }
-                            }
-                        }
+                    if self.list_depth > 1
+                        && self.proxies.len() < 64
+                        && let Some(id) = &function.id
+                        && self.table_uses.proxy_safe(id.name.as_str())
+                        && let Some(proxy) = Proxy::function(function, self.source)
+                    {
+                        self.proxies.insert(id.name.to_string(), proxy);
                     }
                     walk::walk_statement(self, statement);
                 }
@@ -586,44 +625,49 @@ impl<'a> Visit<'a> for Folder<'_> {
                 | Expression::BooleanLiteral(_)
                 | Expression::NullLiteral(_)
         );
-        if eligible {
-            if let Some(value) = self.eval(expression, 0).filter(Value::is_primitive) {
-                let kind = match expression {
-                    Expression::Identifier(_) => "constant-propagation",
-                    Expression::CallExpression(call) => match &call.callee {
-                        Expression::Identifier(id)
-                            if self
-                                .proxies
-                                .get(id.name.as_str())
-                                .is_some_and(|p| p.control_flow) =>
-                        {
-                            "control-flow"
-                        }
-                        Expression::Identifier(id)
-                            if self.proxies.get(id.name.as_str()).is_some_and(|p| p.block) =>
-                        {
-                            "custom-decoder"
-                        }
-                        _ => "proxy-call",
-                    },
-                    Expression::StringLiteral(_) => "literal-normalization",
-                    Expression::ComputedMemberExpression(_) => "literal-index",
-                    Expression::ConditionalExpression(_) | Expression::LogicalExpression(_) => {
-                        "dead-expression"
-                    }
-                    _ => "constant-fold",
-                };
-                // Parentheses preserve grammar, directive prologues, exponentiation,
-                // numeric member access, and short-circuit reference semantics.
-                let code = value.code();
-                if let Expression::StringLiteral(s) = expression {
-                    if !self.source[s.span.start as usize..s.span.end as usize].contains('\\') {
-                        return;
-                    }
+        if eligible && let Some(value) = self.eval(expression, 0).filter(Value::is_primitive) {
+            let kind = match expression {
+                Expression::Identifier(_) => "constant-propagation",
+                Expression::CallExpression(call)
+                    if self.assume_intrinsics && Self::intrinsic_call_shape(call) =>
+                {
+                    "intrinsic-call"
                 }
-                if self.rewrite(expression.span(), format!("({code})"), kind) {
-                    return;
+                Expression::CallExpression(call) => match &call.callee {
+                    Expression::Identifier(id)
+                        if self
+                            .proxies
+                            .get(id.name.as_str())
+                            .is_some_and(|p| p.control_flow) =>
+                    {
+                        "control-flow"
+                    }
+                    Expression::Identifier(id)
+                        if self.proxies.get(id.name.as_str()).is_some_and(|p| p.block) =>
+                    {
+                        "custom-decoder"
+                    }
+                    _ => "proxy-call",
+                },
+                Expression::StringLiteral(_) => "literal-normalization",
+                Expression::ComputedMemberExpression(_) => "literal-index",
+                Expression::ConditionalExpression(_) | Expression::LogicalExpression(_) => {
+                    "dead-expression"
                 }
+                _ => "constant-fold",
+            };
+            // Parentheses preserve grammar, directive prologues, exponentiation,
+            // numeric member access, and short-circuit reference semantics.
+            let Some(code) = value.code(&mut self.value_budget) else {
+                return;
+            };
+            if let Expression::StringLiteral(s) = expression
+                && !self.source[s.span.start as usize..s.span.end as usize].contains('\\')
+            {
+                return;
+            }
+            if self.rewrite(expression.span(), format!("({code})"), kind) {
+                return;
             }
         }
         // `delete name` is a Reference operation, not a value computation.
@@ -693,6 +737,16 @@ impl TableUses {
     }
 }
 impl<'a> Visit<'a> for TableUses {
+    fn visit_update_expression(&mut self, expression: &UpdateExpression<'a>) {
+        if !matches!(
+            expression.argument,
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(_)
+        ) {
+            self.intrinsics_conflict = true;
+        }
+        walk::walk_update_expression(self, expression);
+    }
+
     fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
         if !matches!(
             expression.left,
@@ -713,52 +767,73 @@ impl<'a> Visit<'a> for TableUses {
     fn visit_expression(&mut self, expression: &Expression<'a>) {
         if let Expression::CallExpression(call) = expression {
             if let Expression::StaticMemberExpression(member) = &call.callee {
-                if member.property.name == "fromCharCode" {
-                    if let Expression::Identifier(id) = &member.object {
-                        if id.name == "String" {
-                            self.intrinsic_reads.insert(id.span.start);
-                        }
-                    }
+                if !matches!(
+                    member.property.name.as_str(),
+                    "fromCharCode" | "charCodeAt" | "charAt" | "indexOf" | "split"
+                ) {
+                    // Unknown member calls may mutate literal-reachable prototypes.
+                    self.intrinsics_conflict = true;
                 }
-            }
-            if let Expression::Identifier(id) = &call.callee {
-                if !call.optional {
-                    self.proxy_reads.insert(id.span.start);
+                if member.property.name == "fromCharCode"
+                    && let Expression::Identifier(id) = &member.object
+                    && id.name == "String"
+                {
+                    self.intrinsic_reads.insert(id.span.start);
                 }
+            } else if matches!(call.callee, Expression::ComputedMemberExpression(_)) {
+                self.intrinsics_conflict = true;
             }
+            if let Expression::Identifier(id) = &call.callee
+                && !call.optional
+            {
+                self.proxy_reads.insert(id.span.start);
+            }
+        }
+        if let Expression::StaticMemberExpression(member) = expression
+            && matches!(
+                member.property.name.as_str(),
+                "__proto__" | "prototype" | "constructor"
+            )
+        {
+            self.intrinsics_conflict = true;
         }
         if let Expression::ComputedMemberExpression(member) = expression {
+            if matches!(&member.expression, Expression::StringLiteral(key) if matches!(key.value.as_str(), "__proto__" | "prototype" | "constructor"))
+            {
+                self.intrinsics_conflict = true;
+            }
             if let (Expression::Identifier(id), Expression::NumericLiteral(index)) =
                 (&member.object, &member.expression)
+                && !self.deleting
+                && !member.optional
+                && index.value >= 0.0
+                && index.value < 256.0
+                && index.value.fract() == 0.0
             {
-                if !self.deleting
-                    && !member.optional
-                    && index.value >= 0.0
-                    && index.value < 256.0
-                    && index.value.fract() == 0.0
-                {
-                    self.allowed.insert(id.span.start);
-                    self.reads
-                        .entry(id.name.to_string())
-                        .or_default()
-                        .push(index.value as usize);
-                }
+                self.allowed.insert(id.span.start);
+                self.reads
+                    .entry(id.name.to_string())
+                    .or_default()
+                    .push(index.value as usize);
             }
         }
-        if let Expression::UnaryExpression(e) = expression {
-            if e.operator == U::Delete {
-                let previous = self.deleting;
-                self.deleting = true;
-                walk::walk_expression(self, expression);
-                self.deleting = previous;
-                return;
-            }
+        if let Expression::UnaryExpression(e) = expression
+            && e.operator == U::Delete
+        {
+            self.intrinsics_conflict = true;
+            let previous = self.deleting;
+            self.deleting = true;
+            walk::walk_expression(self, expression);
+            self.deleting = previous;
+            return;
         }
         walk::walk_expression(self, expression);
     }
     fn visit_identifier_reference(&mut self, id: &IdentifierReference<'a>) {
-        if matches!(id.name.as_str(), "Array" | "Object" | "Number" | "Boolean")
-            || (id.name == "String" && !self.intrinsic_reads.contains(&id.span.start))
+        if matches!(
+            id.name.as_str(),
+            "Array" | "Object" | "Number" | "Boolean" | "Reflect" | "Proxy" | "Function"
+        ) || (id.name == "String" && !self.intrinsic_reads.contains(&id.span.start))
         {
             self.intrinsics_conflict = true;
         }
@@ -787,5 +862,42 @@ impl<'a> Visit<'a> for Declarations {
     }
     fn visit_class(&mut self, _: &Class<'a>) {
         self.found = true;
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn direct_intrinsic_reserves_shared_budget_before_result_allocation() {
+        let source = "String.fromCharCode(65);";
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
+        let mut folder = Folder::new(source, &parsed.program, true);
+        // Call frame, argument vector and argument frame fit; output does not.
+        folder.value_budget = ValueBudget::limited(std::mem::size_of::<Value>() * 3 + 5, 100, 64);
+        folder.visit_program(&parsed.program);
+        assert!(folder.is_truncated());
+        assert!(folder.rewrites.is_empty());
+    }
+
+    #[test]
+    fn tiny_shared_budget_preserves_a_small_decoder_call() {
+        let source = "const f=function(){var a=[0];for(var i=0;i<3;i++){a=[a,a]}return a.length};const result=f();";
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
+        assert!(parsed.diagnostics.is_empty());
+        let mut folder = Folder::new(source, &parsed.program, true);
+        folder.value_budget = ValueBudget::limited(512, 1000, 64);
+        folder.visit_program(&parsed.program);
+        assert!(folder.is_truncated());
+        let call_start = source.rfind("f()").unwrap() as u32;
+        assert!(
+            folder
+                .rewrites
+                .iter()
+                .all(|rewrite| rewrite.original_start != call_start)
+        );
     }
 }

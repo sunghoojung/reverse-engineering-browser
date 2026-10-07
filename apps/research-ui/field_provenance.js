@@ -46,6 +46,7 @@ function decodeProvenanceValue() {
     selection.error = 'This string cannot be represented as UTF-8 without changing it.';
     renderFieldProvenance(); return;
   }
+  if (!investigationAllowDecoderReplace()) return;
   resetDecoderChain('Original request string copied. Choose each transformation explicitly.');
   toolsElements.inputEncoding.value = 'text';
   toolsElements.input.value = selection.value;
@@ -53,8 +54,12 @@ function decodeProvenanceValue() {
   // root, and use the displayed input key only to detect subsequent edits.
   state.decoderInputSnapshot = {key: decoderCurrentInputKey(), base64: decoderBytesToBase64(bytes), bytes: bytes.length};
   decoderFieldOrigin = {selection, key: decoderCurrentInputKey()};
+  const requestIdentity = investigationRequestIdentity(selection.request);
+  investigationDecoderOrigin = {route: requestIdentity ? {kind:'request', identity:requestIdentity, inspectorTab:'payload'} : null, key:decoderCurrentInputKey(),
+    description:`Selected request string · ${selection.selector}. UTF-8 string bytes preserved; raw HTTP byte offsets are unavailable.${requestIdentity ? '' : ' Exact request identity is unavailable.'}`};
   showScreen('tools'); setToolsTab('decoder');
-  requestAnimationFrame(() => toolsElements.operation.focus({preventScroll: true}));
+  const revision = investigationRevision;
+  requestAnimationFrame(() => {if (revision === investigationRevision && investigationScreen() === 'tools') toolsElements.operation.focus({preventScroll: true});});
 }
 
 function decodedFieldCandidate() {

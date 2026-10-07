@@ -36,6 +36,7 @@ export async function checkFloat32Model(root) {
   for(const fetcher of [async()=>new Response('failure',{status:503}),async()=>new Response('{broken'),async()=>new Response(new Uint8Array(524289)),async()=>new Response(JSON.stringify({...report,profile:'other'}))]) {
     let fail=false;const c=ui.createFloat32Controller({fetcher:()=>fail?fetcher():response()});await c.run(request);const retained=c.snapshot().report;fail=true;await c.run(request);assert.equal(c.snapshot().status,'error');assert.equal(c.snapshot().report,retained);assert.equal(c.snapshot().stale,true);
   }
+  await checkFloat32RevealModel();
   await checkFloat32HostLifecycle(root,fixture);
   await checkFloat32NativeBridge(root);
   console.log('PASS Float32 exact identity, closed report shapes, finite/nonfinite display, stale/latest/cancel/deadline and bounded transport models (not rendered QA)');
@@ -80,15 +81,71 @@ export async function checkFloat32Fixture(fixture,root) {
   await checkFloat32NativeBridge(root,fixture.url);
   console.log('PASS Float32 original fixture through the actual loopback backend (not rendered QA)');
 }
+// Keep Float32 on the shared driver's hit-tested, settled native wheel path.
+// Pane centers can belong to the nested sample list or a textarea instead.
+export function createFloat32Revealer({evaluate,wheel,record=()=>{}}) {
+  return async selector=>{
+    for(let n=0;n<18;n++) {
+      const movement=await evaluate(`(()=>{
+        const node=document.querySelector(${JSON.stringify(selector)});
+        if(!node)throw new Error('Missing Float32 control: '+${JSON.stringify(selector)});
+        const r=node.getBoundingClientRect();
+        for(let p=node.parentElement;p;p=p.parentElement){
+          const s=getComputedStyle(p),b=p.getBoundingClientRect();
+          if(!['auto','scroll'].includes(s.overflowY)||p.scrollHeight<=p.clientHeight+1)continue;
+          const top=Math.max(0,b.top)+8,bottom=Math.min(innerHeight,b.bottom)-8;
+          if(r.top>=top&&r.bottom<=bottom)continue;
+          if(p.id!=='tools-panel-float32')throw new Error('Unexpected Float32 scroll owner: '+p.id);
+          return {owner:'#'+p.id,deltaY:r.top<top?r.top-top:r.bottom-bottom,scrollTop:p.scrollTop,
+            control:{top:r.top,bottom:r.bottom},clip:{top,bottom},
+            samples:[...p.querySelectorAll('.float32-rows')].map(child=>child.scrollTop)};
+        }
+        return null;
+      })()`);
+      if(!movement)return;
+      // Integral wheel pixels prevent a fractional border deficit from rounding
+      // to no movement; the full control plus eight-pixel margin stays required.
+      const deltaY=Math.sign(movement.deltaY)*Math.ceil(Math.abs(movement.deltaY));
+      const receipt=await wheel(movement.owner,deltaY,'scrollbar');
+      assert.equal(receipt.point.nested.length,0,'Float32 wheel landed in a nested scroller');
+      const after=await evaluate(`(()=>{const p=document.querySelector(${JSON.stringify(movement.owner)});return {scrollTop:p.scrollTop,samples:[...p.querySelectorAll('.float32-rows')].map(child=>child.scrollTop)};})()`);
+      record({selector,before:movement,deltaY,point:receipt.point,after});
+      assert((after.scrollTop-movement.scrollTop)*deltaY>0,'Float32 owning pane did not move: '+JSON.stringify({selector,movement,after,point:receipt.point}));
+      assert.deepEqual(after.samples,movement.samples,'Revealing a Float32 control scrolled the nested sample list');
+    }
+    assert.fail('Float32 control could not be reached through its owning scroll pane: '+selector);
+  };
+}
+
+async function checkFloat32RevealModel() {
+  const state={scrollTop:100,sampleTop:17,controlTop:840.25,controlHeight:28,wheels:0};
+  const samples={get scrollTop(){return state.sampleTop;}};
+  const pane={id:'tools-panel-float32',parentElement:null,scrollHeight:1200,clientHeight:686,
+    get scrollTop(){return state.scrollTop;},getBoundingClientRect:()=>({top:190,bottom:876}),querySelectorAll:()=>[samples]};
+  const control={parentElement:pane,getBoundingClientRect:()=>({top:state.controlTop-(state.scrollTop-100),bottom:state.controlTop+state.controlHeight-(state.scrollTop-100)})};
+  const evaluate=async expression=>JSON.parse(JSON.stringify(runInNewContext(expression,{document:{querySelector:selector=>selector==='#tools-panel-float32'?pane:control},getComputedStyle:()=>({overflowY:'auto'}),innerHeight:900})));
+  const wheel=async(owner,deltaY,mode)=>{
+    assert.equal(owner,'#tools-panel-float32');assert.equal(mode,'scrollbar');assert(Number.isInteger(deltaY));state.wheels++;
+    state.scrollTop=Math.min(514,Math.max(0,state.scrollTop+deltaY));
+    return {point:{nested:[],mode}};
+  };
+  const receipts=[],reveal=createFloat32Revealer({evaluate,wheel,record:value=>receipts.push(value)});
+  await reveal('#float32-run');assert.equal(state.wheels,1);assert.equal(receipts[0].deltaY,1);assert.equal(state.sampleTop,17);
+  await reveal('#float32-run');assert.equal(state.wheels,1,'Visible control should not scroll');
+  state.controlTop=100;await reveal('[data-float32-input="input"]');assert(state.scrollTop<100,'Input above the pane must use upward wheel movement');
+  state.scrollTop=514;state.controlTop=1500;await assert.rejects(reveal('#float32-run'),/owning pane did not move/,'An unreachable margin must still fail at the scroll limit');
+  state.scrollTop=100;state.controlTop=900;
+  await assert.rejects(createFloat32Revealer({evaluate,wheel:async()=>({point:{nested:[]}})})('#float32-run'),/owning pane did not move/);
+  await assert.rejects(createFloat32Revealer({evaluate,wheel:async()=>{state.sampleTop++;state.scrollTop++;return {point:{nested:[]}};}})('#float32-run'),/nested sample list/);
+  await assert.rejects(createFloat32Revealer({evaluate,wheel:async()=>({point:{nested:[{id:'wrong-owner'}]}})})('#float32-run'),/landed in a nested/);
+  console.log('PASS Float32 reveal owning-pane progress, independent nested-list offsets, fractional edges, upward motion and blocked-wheel controls (geometry model; not rendered QA)');
+}
+
 export async function checkFloat32Interactions({evaluate,viewport,click,key,command,wheel,screenshot,fixture}) {
   const until=async(check,message)=>{const start=Date.now();while(!await(typeof check==='function'?check():evaluate(check))){assert(Date.now()-start<8000,message);await delay(25);}};
   const press=async(value,modifiers=0)=>{const codes={Enter:13,Home:36,End:35,ArrowDown:40,ArrowUp:38,ArrowRight:39,Tab:9,a:65};await key(value,value==='a'?'KeyA':value,{windowsVirtualKeyCode:codes[value],modifiers,...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});};
-  const reveal=async selector=>{
-    for(let n=0;n<18;n++){
-      const movement=await evaluate(`(()=>{const node=document.querySelector(${JSON.stringify(selector)}),r=node.getBoundingClientRect();for(let p=node.parentElement;p;p=p.parentElement){const s=getComputedStyle(p),b=p.getBoundingClientRect();if(!['auto','scroll'].includes(s.overflowY)||p.scrollHeight<=p.clientHeight+1)continue;const top=Math.max(0,b.top)+8,bottom=Math.min(innerHeight,b.bottom)-8;if(r.top<top||r.bottom>bottom)return {x:Math.max(1,Math.min(innerWidth-2,b.left+b.width/2)),y:Math.max(top,Math.min(bottom,(top+bottom)/2)),deltaY:r.top<top?r.top-top:r.bottom-bottom};}return null;})()`);
-      if(!movement)return;await command('Input.dispatchMouseEvent',{type:'mouseWheel',deltaX:0,...movement});await delay(100);
-    }assert.fail('Float32 control could not be reached through its owning scroll pane: '+selector);
-  };
+  const scrollChecks=[];
+  const reveal=createFloat32Revealer({evaluate,wheel,record:receipt=>scrollChecks.push(receipt)});
   const use=async selector=>{await reveal(selector);await click(selector);};
   const type=async(selector,text)=>{await use(selector);await press('a',process.platform==='darwin'?4:2);await command('Input.insertText',{text});await until(`document.querySelector(${JSON.stringify(selector)}).value===${JSON.stringify(text)}`,'Typed input did not stick');};
   const snapshot=()=>evaluate('float32Panel.controller.snapshot()');
@@ -102,6 +159,15 @@ export async function checkFloat32Interactions({evaluate,viewport,click,key,comm
   await evaluate("window.float32RetainedDetails=document.querySelector('.float32-identity');window.float32RetainedRows=document.querySelector('.float32-rows');float32Panel.refresh()");
   assert(await evaluate("document.querySelector('.float32-identity')===float32RetainedDetails && float32RetainedDetails.open && document.querySelector('.float32-rows')===float32RetainedRows"),'Routine refresh replaced immutable report nodes/disclosures');
   const originalWords=await evaluate(`document.querySelector('[data-float32-input="input"]').value`);
+  // Establish that the sample list has a distinct native wheel owner, then
+  // revisit the input and Run controls through their parent pane.
+  await reveal('.float32-rows');
+  const nestedBefore=await evaluate("({outer:document.querySelector('#tools-panel-float32').scrollTop,inner:document.querySelector('.float32-rows').scrollTop,limit:document.querySelector('.float32-rows').scrollHeight-document.querySelector('.float32-rows').clientHeight})");
+  assert(nestedBefore.limit>nestedBefore.inner,'Sample-list fixture must have remaining native scroll range');
+  await wheel('.float32-rows',Math.min(32,nestedBefore.limit-nestedBefore.inner));
+  const nestedAfter=await evaluate("({outer:document.querySelector('#tools-panel-float32').scrollTop,inner:document.querySelector('.float32-rows').scrollTop,limit:document.querySelector('.float32-rows').scrollHeight-document.querySelector('.float32-rows').clientHeight})");
+  assert.equal(nestedAfter.outer,nestedBefore.outer,'Sample-list wheel moved the outer Float32 pane');
+  assert(nestedAfter.inner>nestedBefore.inner,'Sample-list wheel did not move its own pane');
   await type('[data-float32-input="input"]','not-hex');await use('#float32-run');await until("float32Panel.controller.snapshot().status==='error'",'Preflight failure did not enter controller state');
   const preflightMessage=(await snapshot()).message;assert.match(preflightMessage,/eight lowercase/);await use('#tools-tab-jwt');await use('#tools-tab-float32');assert.equal(await evaluate("document.querySelector('#float32-status').textContent"),preflightMessage,'Refresh erased the local preflight error');
   await type('[data-float32-input="input"]',originalWords);await compare();
@@ -123,8 +189,8 @@ export async function checkFloat32Interactions({evaluate,viewport,click,key,comm
   await use('#tools-tab-jwt');await press('ArrowRight');await until("state.toolsTab==='float32'",'Keyboard Float32 tab selection failed');
   for(const [width,height] of [[600,800],[360,740]]){await viewport(width,height);await use('#float32-run');await until("!float32Panel.controller.snapshot().pending",'Narrow compare remained pending');assert.equal((await snapshot()).status,'ready');await reveal('.float32-receipt');assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Float32 causes horizontal page overflow');await screenshot(`float32-${width}-report`);await use('#float32-next');await until("float32Panel.controller.snapshot().report.detail.start===64 && !float32Panel.controller.snapshot().pending",'Narrow paging failed');}
   await use('#float32-clear');assert.equal((await snapshot()).report,null);await screenshot('float32-cleared');
-  void wheel;
-  return {status:'passed',path:'browser development UI with actual Rust backend',source:'original synthetic buffers; only held responses/503 are synthetic',viewports:[[1440,900],[600,800],[360,740]],checks:['explicit input and reference','actual backend result identity','exceptional values and signed zero','visible tolerances','stale/retry retention','cancel and late responses','newer result wins','sample pagination','keyboard tabs','narrow scrolling and pointer controls','clear']};
+  assert(scrollChecks.some(check=>check.selector==='#float32-run'&&check.before.samples.length===1&&check.after.scrollTop>check.before.scrollTop),'Float32 Run reveal must exercise the outer pane with a retained nested sample list');
+  return {status:'passed',path:'browser development UI with actual Rust backend',source:'original synthetic buffers; only held responses/503 are synthetic',viewports:[[1440,900],[600,800],[360,740]],scrollChecks,nestedWheel:{before:nestedBefore,after:nestedAfter},checks:['explicit input and reference','actual backend result identity','exceptional values and signed zero','visible tolerances','stale/retry retention','cancel and late responses','newer result wins','sample pagination','keyboard tabs','narrow scrolling and pointer controls','clear']};
 }
 
 async function checkFloat32HostLifecycle(root, fixture) {
@@ -161,7 +227,7 @@ async function checkFloat32HostLifecycle(root, fixture) {
   const document={activeElement:null,createElement:()=>new Node(),querySelector:selector=>selector==='#tools-panel-float32'?container:selector==='#screen-tools'?screen:{hidden:true}};
   const env={TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},document,
     Option:function(text,value){const option=new Node(value);option.textContent=text;return option;},state,isArtifactResponse:body=>body.valid!==false,
-    renderShellStatus(){},renderSourceHealth(){},renderSources(){},loadArtifactContent(){},nativeCanvasCaptureDisplayLimit:20,evidencePackagePanel:{sync(){}},renderFingerprintActivity(){},
+    renderShellStatus(){},renderSourceHealth(){},renderSources(){},loadArtifactContent(){},nativeCanvasCaptureDisplayLimit:20,evidencePackagePanel:{sync(){}},evidenceWorkspace:{sync(){}},renderFingerprintActivity(){},
     fetch:async(url,options)=>{
       if(url.startsWith('/api/artifacts'))return {status:catalogStatus,ok:catalogStatus===200,headers:new Headers(),json:async()=>({artifacts:catalog,valid:catalogValid})};
       assert.equal(url,'/api/float32/compare');analysisCalls++;const request=JSON.parse(options.body);

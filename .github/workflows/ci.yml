@@ -95,7 +95,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: Exercise Evidence metadata in installed Chrome
+      - name: Exercise linked Evidence in installed Chrome
+        env:
+          REB_UI_REQUIRE_EVIDENCE_NAVIGATION: "1"
         if: ${{ !cancelled() }}
         run: |
           REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
@@ -111,6 +113,23 @@ jobs:
         with:
           name: evidence-ui-${{ github.run_id }}
           path: build/evidence-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Exercise Memory workflow in installed Chrome
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --memory-ui-browser
+
+      - name: Upload rendered Memory QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: memory-ui-${{ github.run_id }}
+          path: build/memory-ui-qa
           if-no-files-found: ignore
           retention-days: 3
 
@@ -170,6 +189,29 @@ jobs:
         with:
           name: collection-ui-${{ github.run_id }}
           path: build/collection-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
+  investigation-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Exercise connected investigation workflow
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --investigation-ui-browser
+
+      - name: Upload rendered investigation QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: investigation-ui-${{ github.run_id }}
+          path: build/investigation-ui-qa
           if-no-files-found: ignore
           retention-days: 3
 

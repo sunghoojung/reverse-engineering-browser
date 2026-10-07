@@ -351,7 +351,7 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
     }
     const newSignature = JSON.stringify([scope.value, [...next.values()].map(row => [row.id, row.label])]);
     if (signature !== newSignature) { signature = newSignature; rows = [...next.values()]; renderCandidates(); }
-    host.querySelector('[data-package-context]').textContent = `${rows.length} selectable keys in this view. ${context.eventsLimited && scope.value !== 'artifacts' ? 'Latest 5,000-event window; older records may be absent.' : 'Retained window may be incomplete.'}`;
+    host.querySelector('[data-package-context]').textContent = `${rows.length} selectable keys in this view. ${context.requestCorrelated && scope.value === 'request' ? 'Native association with the debugger request is correlated, not exact. ' : ''}${context.eventsLimited && scope.value !== 'artifacts' ? 'Latest 5,000-event window; older records may be absent.' : 'Retained window may be incomplete.'}`;
   };
   scope.addEventListener('change', () => { page = 0; signature = null; sync(); });
   host.querySelector('[data-package-previous]').addEventListener('click', () => { page -= 1; renderCandidates(); });
@@ -390,4 +390,358 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
   });
   renderStatus(controller.model); renderSelection();
   return {sync, controller, setVisible(value) { if (visible !== value) viewRevision += 1; visible = value; if (!value) controller.cancel(); sync(); }};
+}
+
+// Investigation is a read-only projection of the already retained broker window.
+// Keep it separate from package selection: highlighting a record never exports it.
+const evidenceObservationLimit = 5000;
+const evidenceObservationPage = 50;
+const evidenceRelationshipGroups = [
+  ['request', 'Request records', 'Native lifecycle records attached to this request'],
+  ['parent', 'Recorded parent links', 'Explicit parent identifiers; no value-flow claim'],
+  ['context', 'Same captured context', 'Correlation only; no recorded request link'],
+  ['unlinked', 'Unlinked records', 'No demonstrated relationship to the selected request']
+];
+function evidenceEventKey(event) {
+  const key = evidencePackageKey('event', event);
+  return key ? `${key.session_id}:${key.process_id}:${key.sequence_number}` : null;
+}
+function evidenceDebuggerRequest(request) {
+  return Boolean(request?.protocolRequestId || String(request?.operation).startsWith('cdp_'));
+}
+function evidenceRequestKey(request) {
+  if (!request) return null;
+  if (evidenceDebuggerRequest(request)) return JSON.stringify(['debugger', request.id, request.tabId, request.protocolRequestId, String(request.firstTimestamp)]);
+  const events = request.events ?? [];
+  const root = events.find(event => event.type === 'request_started') ?? events.find(event => event.type === 'request_initiated') ?? events[0];
+  return JSON.stringify(['native', request.id, evidenceEventKey(root), root?.request_id ?? null]);
+}
+function evidenceArtifactReference(event, artifacts, index = null) {
+  if (!event.artifact_id || event.artifact_id === '0') return {status: 'none', message: 'No artifact reference was recorded.'};
+  const matches = index?.byKey.get(`${event.session_id}:${event.artifact_id}`) ?? (index ? [] : artifacts.filter(value => value.session_id === event.session_id && value.artifact_id === event.artifact_id));
+  if (matches.length !== 1) return {status: matches.length ? 'ambiguous' : 'missing', message: matches.length ? 'More than one descriptor has this exact artifact identity.' : 'The referenced artifact is absent from the retained catalog.'};
+  const stored = matches[0];
+  // Source controllers attach cached text and analyses to descriptors. None of
+  // those payloads belong in this metadata projection or its render signatures.
+  const artifact = {session_id: stored.session_id, artifact_id: stored.artifact_id, sha256: stored.sha256, byte_size: stored.byte_size,
+    kind: artifactKinds.has(stored.kind) ? stored.kind : 'unknown', url: typeof stored.url === 'string' ? stored.url.slice(0, 2048) : '',
+    urlTruncated: typeof stored.url === 'string' && stored.url.length > 2048, capture_origin: artifactCaptureOrigins.has(stored.capture_origin) ? stored.capture_origin : 'unknown'};
+  const key = evidencePackageKey('artifact', artifact);
+  if (!key || !/^[0-9a-f]{64}$/.test(artifact.sha256) || !Number.isSafeInteger(artifact.byte_size) || artifact.byte_size < 0) return {status: 'unknown', message: 'The artifact hash or original byte size is unknown.'};
+  const identity = {type: 'captured-artifact', session: key.session_id, artifact: key.artifact_id, sha256: artifact.sha256, bytes: artifact.byte_size};
+  const ambiguous = (index?.idCounts.get(event.artifact_id) ?? artifacts.filter(value => value.artifact_id === event.artifact_id).length) !== 1;
+  return {status: ambiguous ? 'ambiguous' : 'ready', artifact, identity,
+    message: ambiguous ? 'The artifact ID is reused across retained sessions. Sources cannot select it unambiguously.' : 'Exact session and artifact reference. This does not establish which source produced the operation.'};
+}
+function evidencePayload(event) {
+  try {
+    const bytes = bytesFromHex(event.payload);
+    const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+    return /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text) ? {text: event.payload, encoding: 'hex'} : {text, encoding: 'UTF-8'};
+  } catch { return {text: event.payload ?? '', encoding: 'hex'}; }
+}
+function evidenceObservationLabel(event, payload) {
+  const labels = {request_initiated: 'Request initiated', request_started: 'Request started', request_redirected: 'Request redirected', response_started: 'Response started', response_completed: 'Response completed', request_completed: 'Request completed', request_failed: 'Request failed', artifact_captured: 'Artifact retained', artifact_capture_failed: 'Artifact capture failed', module_compiled: 'Module compiled', module_instantiated: 'Module instantiated', vm_finding: 'VM finding recorded', property_read: 'Property read', api_call: 'API operation marker'};
+  return ['api_call', 'property_read'].includes(event.type) && payload.encoding === 'UTF-8' && payload.text
+    ? payload.text.slice(0, 160) : labels[event.type] ?? event.type.replaceAll('_', ' ');
+}
+function evidenceObservationOutcome(event) {
+  if (event.type === 'api_call' || event.type === 'property_read') return 'Outcome not recorded';
+  if (event.type === 'request_failed') return `Failure recorded · error ${event.error_code}`;
+  if (event.type === 'request_completed' || event.type === 'response_completed') return `Completion record${event.status_code > 0 ? ` · HTTP ${event.status_code}` : ''}`;
+  if (event.type === 'artifact_captured') return 'Receiver acknowledgment recorded';
+  if (event.type === 'artifact_capture_failed') return 'Capture failure recorded';
+  return 'This observation does not establish completion';
+}
+function evidenceMonotonicLabel(value) {
+  const ns = BigInt(value);
+  return `${ns / 1000000n}.${String(ns % 1000000n / 1000n).padStart(3, '0')} ms`;
+}
+function evidenceSequenceObservations(events) {
+  const streams = new Map();
+  let arrivalDiscontinuities = 0, outOfOrderArrivals = 0, holes = 0n;
+  for (const event of events) {
+    const key = `${event.session_id}:${event.process_id}`, sequence = BigInt(event.sequence_number);
+    const stream = streams.get(key) ?? {ids: new Set(), high: null};
+    if (stream.high !== null && sequence > stream.high + 1n) arrivalDiscontinuities += 1;
+    if (stream.high !== null && sequence < stream.high) outOfOrderArrivals += 1;
+    stream.high = stream.high === null || sequence > stream.high ? sequence : stream.high;
+    stream.ids.add(sequence); streams.set(key, stream);
+  }
+  // Arrival order can be out of sequence. Only sorted unique retained identities
+  // establish numeric holes, and even these are not proof of capture loss.
+  for (const stream of streams.values()) {
+    const ids = [...stream.ids].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+    for (let index = 1; index < ids.length; index += 1) holes += ids[index] - ids[index - 1] - 1n;
+  }
+  return {holes: String(holes), arrivalDiscontinuities, outOfOrderArrivals};
+}
+
+function evidenceObservationModel(context) {
+  const window = (context.events ?? []).slice(-evidenceObservationLimit);
+  const artifacts = (context.artifacts ?? []).slice(0, 500);
+  const artifactIndex = {byKey: new Map(), idCounts: new Map()}, artifactReferences = new Map();
+  for (const artifact of artifacts) {
+    const key = `${artifact.session_id}:${artifact.artifact_id}`;
+    const matches = artifactIndex.byKey.get(key) ?? []; matches.push(artifact); artifactIndex.byKey.set(key, matches);
+    artifactIndex.idCounts.set(artifact.artifact_id, (artifactIndex.idCounts.get(artifact.artifact_id) ?? 0) + 1);
+  }
+  const records = new Map(), duplicates = new Set();
+  let omitted = 0, queueMarkers = 0;
+  for (const event of window) {
+    if (!isBrokerEvent(event) || ![2, 3].includes(event.protocol_version)) { omitted += 1; continue; }
+    if (event.type === 'gap') { queueMarkers += 1; continue; }
+    const key = evidenceEventKey(event);
+    if (!key) { omitted += 1; continue; }
+    if (records.has(key)) { duplicates.add(key); continue; }
+    records.set(key, Object.fromEntries(['protocol_version', 'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id', 'frame_id', 'artifact_id', 'parent_event_id', 'request_id', 'process_id', 'thread_id', 'browser_context_id_high', 'browser_context_id_low', 'tab_id', 'status_code', 'error_code', 'category', 'type', 'payload', 'payload_truncated'].filter(field => Object.hasOwn(event, field)).map(field => [field, event[field]])));
+  }
+  const request = context.request;
+  const correlatedRequest = evidenceDebuggerRequest(request);
+  const requestKeys = new Set((['live', 'demo'].includes(request?.origin) ? request.events ?? [] : []).slice(-5000).filter(event => event.category === 'network' && networkLifecycleTypes.has(event.type)).map(evidenceEventKey).filter(Boolean));
+  const retainedRequest = new Set([...requestKeys].filter(key => records.has(key) && !duplicates.has(key)));
+  const parents = new Set(), missing = new Set();
+  let parentLimit = false, parentCycle = false;
+  // Only inspect ancestors of attached native request records. The selected
+  // debugger request association remains correlated for every such ancestor.
+  for (const start of retainedRequest) {
+    let key = start; const seen = new Set([key]);
+    for (let depth = 0; depth < 32; depth += 1) {
+      const event = records.get(key);
+      if (!event?.parent_event_id || event.parent_event_id === '0') break;
+      const parent = `${event.session_id}:${event.process_id}:${event.parent_event_id}`;
+      if (seen.has(parent)) { parentCycle = true; break; }
+      if (!records.has(parent) || duplicates.has(parent)) { missing.add(parent); break; }
+      seen.add(parent); parents.add(parent); key = parent;
+      if (depth === 31 && records.get(key).parent_event_id !== '0') parentLimit = true;
+    }
+  }
+  const contexts = new Set([...retainedRequest].map(key => records.get(key)).filter(event => event.navigation_id !== '0' && event.frame_id !== '0')
+    .map(event => `${event.session_id}:${event.process_id}:${event.navigation_id}:${event.frame_id}`));
+  const rows = [...records].map(([key, event]) => {
+    const group = duplicates.has(key) ? 'unlinked' : retainedRequest.has(key) ? 'request' : parents.has(key) ? 'parent'
+      : event.navigation_id !== '0' && event.frame_id !== '0' && contexts.has(`${event.session_id}:${event.process_id}:${event.navigation_id}:${event.frame_id}`) ? 'context' : 'unlinked';
+    const artifactKey = `${event.session_id}:${event.artifact_id}`;
+    if (!artifactReferences.has(artifactKey)) artifactReferences.set(artifactKey, evidenceArtifactReference(event, artifacts, artifactIndex));
+    const payload = evidencePayload(event), artifact = artifactReferences.get(artifactKey);
+    return {key, event, group, payload, artifact, duplicate: duplicates.has(key), title: evidenceObservationLabel(event, payload), outcome: evidenceObservationOutcome(event)};
+  });
+  const related = rows.filter(row => row.group !== 'unlinked');
+  return {request: request ? {id: request.id, origin: request.origin, method: request.method, path: String(request.path ?? '').slice(0, 2048), hostOnly: request.hostOnly} : null,
+    requestKey: evidenceRequestKey(request), correlatedRequest, rows, related, omitted, queueMarkers,
+    missingParents: missing.size, unavailableRequest: requestKeys.size - retainedRequest.size,
+    duplicates: duplicates.size, parentLimit, parentCycle, limited: Boolean(context.eventsLimited || (context.events?.length ?? 0) > 5000),
+    sequence: evidenceSequenceObservations([...records.values()]),
+    linkedArtifacts: new Set(related.filter(row => row.artifact.status === 'ready').map(row => JSON.stringify(row.artifact.identity))).size};
+}
+
+function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, onSource, canOpenSource}) {
+  const find = id => document.querySelector(`#${id}`);
+  const host = find('evidence-investigation'), list = find('evidence-rows'), inspector = find('evidence-inspector');
+  const search = find('evidence-search'), scope = find('evidence-scope'), notice = find('evidence-workspace-notice');
+  const layout = host.querySelector('.evidence-investigation-layout');
+  const toggle = find('evidence-package-toggle'), packageHost = find('evidence-package-mode');
+  const paneTabs = [...host.querySelectorAll('button[data-evidence-pane]')];
+  let visible = false, packages = false, requestKey = undefined, selectedKey = null, page = 0, model = null;
+  let listSignature = '', detailSignature = '', filtered = [], pane = 'observations';
+  let selectionNotice = '', refreshNotice = '', outsideFilterNotice = false;
+  const coverageDetails = find('evidence-coverage-details');
+  const node = (tag, text = '', className = '') => {const result = document.createElement(tag); result.textContent = String(text); result.className = className; return result;};
+  const button = (label, action, key) => {const result = node('button', label, 'secondary-button'); result.type = 'button'; if (key) result.dataset.evidenceAction = key; result.addEventListener('click', action); return result;};
+  const renderNotice = () => {notice.textContent = [refreshNotice, selectionNotice].filter(Boolean).join(' '); notice.hidden = !notice.textContent;};
+  const message = (text, outside = false) => {selectionNotice = text; outsideFilterNotice = outside; renderNotice();};
+  const facts = entries => {const dl = node('dl', '', 'evidence-record-facts'); for (const [label, value] of entries) dl.append(node('dt', label), node('dd', value)); return dl;};
+  const setPane = (value, focus = false) => {
+    pane = value; layout.dataset.evidencePane = value;
+    for (const tab of paneTabs) {const active = tab.dataset.evidencePane === value; tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;}
+    if (focus) (value === 'detail' ? inspector : list.querySelector('[aria-current="true"]') ?? list).focus({preventScroll: true});
+  };
+  const relation = row => row.duplicate ? 'Ambiguous identity' : row.group === 'request' ? model.correlatedRequest ? 'Associated native record · request correlation only' : 'Native request record'
+    : row.group === 'parent' ? model.correlatedRequest ? 'Recorded parent · request association correlated' : 'Recorded parent relationship'
+      : row.group === 'context' ? 'Same context · correlation only' : 'No recorded request relationship';
+  function renderDetail() {
+    const row = model.rows.find(candidate => candidate.key === selectedKey);
+    const signature = JSON.stringify([row, model.requestKey, model.correlatedRequest, canOpenSource()]);
+    if (signature === detailSignature) return;
+    detailSignature = signature;
+    const sameRecord = inspector.dataset.evidenceKey === row?.key;
+    const open = sameRecord && inspector.querySelector('details')?.open;
+    const focused = inspector.contains(document.activeElement) ? document.activeElement.dataset.evidenceAction : null;
+    const top = sameRecord ? inspector.scrollTop : 0;
+    inspector.dataset.evidenceKey = row?.key ?? '';
+    if (!row) {
+      inspector.replaceChildren(node('div', 'Select a recorded observation', 'evidence-detail-empty'), node('p', 'Inspect its operation, captured payload, request relationship and exact artifact reference here.', 'evidence-detail-hint'));
+      return;
+    }
+    const event = row.event;
+    const head = node('div', '', 'evidence-detail-head');
+    head.append(node('div', `${event.category.replaceAll('_', ' ')} · ${event.type.replaceAll('_', ' ')}`, 'evidence-eyebrow'), node('h2', row.title), node('p', relation(row), `evidence-relation evidence-relation-${row.group}`));
+    const observation = node('section', '', 'evidence-detail-section');
+    observation.append(node('h3', 'What was recorded'));
+    const marker = ['api_call', 'property_read'].includes(event.type);
+    observation.append(node('div', row.payload.text || 'No inline payload was recorded.', 'evidence-value'));
+    observation.append(node('p', marker ? 'An operation marker was seen. Arguments, returned values, exceptions and Promise settlement are not recorded by this marker.'
+      : `Bounded ${row.payload.encoding} payload${event.payload_truncated ? ' · truncated at capture' : ''}. This is retained evidence, not reconstructed content.`, 'evidence-detail-hint'));
+    if (marker && event.payload_truncated) observation.append(node('p', 'The operation payload was truncated at capture.', 'evidence-detail-hint'));
+    observation.append(facts([['Outcome', row.outcome], ['Recorded time', `${evidenceMonotonicLabel(event.monotonic_time_ns)} · monotonic`], ['Observer / placement', 'Unknown']]));
+    const source = node('section', '', 'evidence-detail-section'); source.append(node('h3', 'Referenced artifact'));
+    if (row.artifact.artifact) {
+      const artifact = row.artifact.artifact, card = node('div', '', 'evidence-artifact-card');
+      card.append(node('span', artifact.kind.replaceAll('_', ' '), 'evidence-eyebrow'), node('strong', artifact.url || 'Captured artifact'), node('p', `${artifact.byte_size.toLocaleString()} original bytes · ${artifact.capture_origin?.replaceAll('_', ' ') || 'capture origin unknown'}`));
+      const sourceButton = button('Open captured source ↗', () => {
+        const current = evidenceObservationModel(getContext()).rows.find(candidate => candidate.key === selectedKey);
+        if (!current || current.key !== row.key || current.duplicate || current.artifact.status !== 'ready' || JSON.stringify(current.artifact.identity) !== JSON.stringify(row.artifact.identity)) {message('The selected event or its exact artifact is no longer unambiguous. No source was opened.'); sync(); return;}
+        if (!onSource(current.artifact.identity)) message('The exact source could not be opened. No other artifact or URL was substituted.');
+      }, 'source');
+      sourceButton.id = 'evidence-open-source';
+      const supported = ['javascript', 'wasm', 'source_map', 'response_body'].includes(artifact.kind);
+      sourceButton.disabled = row.artifact.status !== 'ready' || row.duplicate || !supported || !canOpenSource();
+      card.append(sourceButton); source.append(card);
+      if (artifact.urlTruncated) source.append(node('p', 'Artifact URL display is limited to 2,048 characters. Navigation uses exact identity, never this text.', 'evidence-detail-hint'));
+      if (!supported) source.append(node('p', 'This artifact kind has no Sources view.', 'evidence-detail-hint'));
+      else if (!canOpenSource()) source.append(node('p', 'Safe source navigation is unavailable in this build. The exact reference is preserved below.', 'evidence-detail-hint'));
+    }
+    source.append(node('p', row.artifact.message, 'evidence-detail-hint'));
+    const connection = node('section', '', 'evidence-detail-section'); connection.append(node('h3', 'Relationship to this request'));
+    connection.append(node('p', row.group === 'parent' ? 'A retained record names this event as a parent. That records a link between native observations; it does not establish how a value was computed.'
+      : row.group === 'request' ? model.correlatedRequest ? 'These native records were associated by method, host and time. There is no producer-provided key proving that they belong to the selected debugger request.' : 'This event is part of the selected native request’s recorded lifecycle.'
+        : row.group === 'context' ? 'Session, renderer process, navigation and frame match. No parent or request link was recorded for this observation.' : 'No link to the selected request is established in this retained window.', 'evidence-detail-hint'));
+    if (model.correlatedRequest && row.group === 'parent') connection.append(node('p', 'The selected debugger request is only correlated with the native records. Its association does not become exact through a native parent link.', 'evidence-detail-hint'));
+    const actions = node('div', '', 'evidence-record-actions');
+    if (model.request) actions.append(button('View request', onRequest, 'request'));
+    const parentKey = event.parent_event_id !== '0' ? `${event.session_id}:${event.process_id}:${event.parent_event_id}` : null;
+    if (parentKey) {
+      const parent = model.rows.find(candidate => candidate.key === parentKey && !candidate.duplicate);
+      if (parent) actions.append(button('Inspect recorded parent', () => select(parent.key, true, 'parent'), 'parent'));
+      else connection.append(node('p', 'The recorded parent is absent or ambiguous in this retained window.', 'evidence-detail-hint'));
+    }
+    connection.append(actions);
+    const provenance = node('details', '', 'evidence-provenance'); provenance.open = Boolean(open);
+    const summary = node('summary', 'Provenance & exact identifiers'); summary.dataset.evidenceAction = 'provenance'; provenance.append(summary);
+    provenance.append(facts([['Native event', evidencePackageKeyText('event', evidencePackageKey('event', event))], ['Protocol', event.protocol_version], ['Monotonic time', `${event.monotonic_time_ns} ns`], ['Parent event', event.parent_event_id === '0' ? 'Not recorded' : event.parent_event_id], ['Request', event.request_id === '0' ? 'Not recorded' : event.request_id], ['Navigation / frame', `${event.navigation_id} / ${event.frame_id} (zero means unknown)`], ['Thread', event.thread_id], ['Tab', event.tab_id || 'Unknown'], ['Browser context', browserContextToken(event) || 'Unknown'], ['Artifact', event.artifact_id === '0' ? 'Not recorded' : `${event.session_id} / ${event.artifact_id}`], ['Artifact SHA-256', row.artifact.artifact?.sha256 || 'Unknown'], ['Producer / historical build', 'Unknown']]));
+    inspector.replaceChildren(head, observation, source, connection, provenance);
+    if (focused) (inspector.querySelector(`[data-evidence-action="${focused}"]`) ?? inspector).focus({preventScroll: true});
+    inspector.scrollTop = top;
+  }
+  function select(key, focus = false, kind = 'observation') {
+    if (!model.rows.some(row => row.key === key)) return;
+    selectedKey = key;
+    const index = filtered.findIndex(row => row.key === key);
+    if (index >= 0) page = Math.floor(index / evidenceObservationPage);
+    message(index < 0 ? `The selected ${kind} is outside the current filter. Its details remain visible; your filter is unchanged.` : '', index < 0);
+    listSignature = ''; renderList(); renderDetail();
+    if (focus) {
+      const narrowDetail = window.matchMedia('(max-width: 760px)').matches && pane === 'detail';
+      const row = !narrowDetail && [...list.querySelectorAll('[data-evidence-key]')].find(candidate => candidate.dataset.evidenceKey === key);
+      (row || inspector).focus({preventScroll: true});
+      if (row) row.scrollIntoView({block: 'nearest'});
+    }
+  }
+  function renderList() {
+    page = Math.min(page, Math.max(0, Math.ceil(filtered.length / evidenceObservationPage) - 1));
+    const start = page * evidenceObservationPage, rows = filtered.slice(start, start + evidenceObservationPage);
+    const signature = JSON.stringify([rows, selectedKey, page, model.correlatedRequest]);
+    if (signature !== listSignature) {
+      listSignature = signature;
+      const focused = list.contains(document.activeElement) ? document.activeElement.dataset.evidenceKey : null;
+      const top = list.scrollTop, nodes = [];
+      for (const [group, name, description] of evidenceRelationshipGroups) {
+        const members = rows.filter(row => row.group === group); if (!members.length) continue;
+        const section = node('section', '', 'evidence-observation-group');
+        const title = group === 'request' && model.correlatedRequest ? 'Associated native records' : group === 'parent' && model.correlatedRequest ? 'Parents of associated records' : name;
+        const heading = node('h3', `${title} · ${filtered.filter(row => row.group === group).length}`);
+        section.append(heading, node('p', group === 'request' && model.correlatedRequest ? 'Debugger request association is correlated, not exact' : description, 'evidence-group-note'));
+        for (const row of members) {
+          const element = node('button', '', 'evidence-observation'); element.type = 'button'; element.dataset.evidenceKey = row.key; element.dataset.relationship = row.group;
+          element.setAttribute('aria-current', String(row.key === selectedKey));
+          const line = node('span', '', 'evidence-observation-meta'); line.append(node('span', row.event.category.replaceAll('_', ' ')), node('time', evidenceMonotonicLabel(row.event.monotonic_time_ns)));
+          element.append(line, node('strong', row.title), node('span', row.duplicate ? 'Duplicate event identity · relationship unknown' : row.artifact.artifact?.url || (row.payload.text === row.title ? row.outcome : row.payload.text) || row.outcome, 'evidence-observation-preview'));
+          element.addEventListener('click', () => {select(row.key); if (window.matchMedia('(max-width: 760px)').matches) setPane('detail', true);});
+          element.addEventListener('keydown', event => {
+            if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault(); const index = filtered.findIndex(candidate => candidate.key === row.key);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? filtered.length - 1 : Math.max(0, Math.min(filtered.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+            select(filtered[next].key, true);
+          });
+          section.append(element);
+        }
+        nodes.push(section);
+      }
+      if (!nodes.length) nodes.push(node('div', search.value ? 'No retained observations match this filter.' : model.rows.length ? 'No linked observations are retained for this request. Choose Retained window to inspect unlinked records.' : 'No native observations are retained in this window.', 'evidence-list-empty'));
+      list.replaceChildren(...nodes);
+      if (focused) ([...list.querySelectorAll('[data-evidence-key]')].find(candidate => candidate.dataset.evidenceKey === focused) ?? list).focus({preventScroll: true});
+      list.scrollTop = top;
+    }
+    find('evidence-window-count').textContent = filtered.length ? `${start + 1}–${Math.min(start + evidenceObservationPage, filtered.length)} of ${filtered.length}` : '0 records';
+    find('evidence-previous').disabled = page === 0; find('evidence-next').disabled = start + evidenceObservationPage >= filtered.length;
+  }
+  function rebuild() {
+    const needle = search.value.trim().toLowerCase().slice(0, 256);
+    filtered = evidenceRelationshipGroups.flatMap(([group]) => model.rows.filter(row => row.group === group && (scope.value === 'all' || !model.request || group !== 'unlinked') && (!needle || `${row.title}\n${row.payload.text}\n${row.artifact.artifact?.url ?? ''}\n${row.event.category}`.toLowerCase().includes(needle))));
+    if (outsideFilterNotice && selectedKey && filtered.some(row => row.key === selectedKey)) message('');
+  }
+  function sync() {
+    packagePanel.sync();
+    if (!visible) return;
+    const context = getContext(); model = evidenceObservationModel(context);
+    if (requestKey !== model.requestKey) {
+      const changed = requestKey !== undefined;
+      requestKey = model.requestKey; selectedKey = null; page = 0; listSignature = ''; detailSignature = ''; search.value = ''; scope.value = model.request ? 'related' : 'all';
+      setPane('observations'); if (changed) message(model.request ? 'Request context changed. Observation selection was reset.' : 'The selected request is no longer retained. Showing the retained window.');
+    }
+    if (selectedKey && !model.rows.some(row => row.key === selectedKey)) {selectedKey = null; message('The selected observation left the retained window. No neighboring record was substituted.');}
+    if (!selectedKey && !detailSignature) selectedKey = model.related[0]?.key ?? model.rows[0]?.key ?? null;
+    find('evidence-context-kind').textContent = model.request ? model.correlatedRequest ? 'Debugger request · correlated native context' : model.related.length ? model.request.origin === 'demo' ? 'Demo native request' : 'Selected native request' : 'Selected request · native identity unavailable' : 'Retained evidence window';
+    find('evidence-context-title').textContent = model.request ? `${model.request.method} ${model.request.path}` : 'Explore recorded observations';
+    find('evidence-context-title').title = find('evidence-context-title').textContent;
+    find('evidence-context-note').textContent = model.request ? model.correlatedRequest ? 'Matched by method, host and time. No exact producer request key.' : `${model.request.hostOnly ? 'Host-only metadata · ' : ''}${model.related.length} related observations · ${model.linkedArtifacts} exact artifact references` : 'Choose a request in Traffic to separate recorded links from context-only correlations.';
+    find('evidence-count').textContent = `${model.rows.length} retained observations`;
+    find('evidence-coverage-summary').textContent = `${model.missingParents} missing parent${model.missingParents === 1 ? '' : 's'} · coverage unknown`;
+    find('evidence-gap-details').textContent = `${model.limited ? 'Latest 5,000-record window; earlier records may be evicted. ' : 'Retained window only; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references; ${model.unavailableRequest} attached request records outside this window; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentLimit ? ' Parent lookup stopped at its 32-link bound.' : ''}${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, sequence holes and missing references can overlap and are not added into a loss total.`;
+    find('evidence-trace').disabled = model.request?.origin !== 'live' || model.correlatedRequest || !model.related.length;
+    find('evidence-trace').title = model.correlatedRequest ? 'A correlated debugger request has no exact native trace root.' : 'Inspect the selected request’s recorded predecessor chain.';
+    refreshNotice = context.error ? `Evidence refresh ${context.error === 'malformed' ? 'returned malformed records' : 'is unavailable'}. Retained observations remain visible.` : '';
+    renderNotice();
+    rebuild(); renderList(); renderDetail();
+  }
+  function showPackages(value, focus = true) {
+    packages = value; host.hidden = value; packageHost.hidden = !value; toggle.setAttribute('aria-expanded', String(value));
+    packagePanel.setVisible(visible && value);
+    if (focus) (value ? find('evidence-return') : toggle).focus({preventScroll: true});
+    if (!value) sync();
+  }
+  coverageDetails.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !coverageDetails.open) return;
+    event.preventDefault(); event.stopPropagation(); coverageDetails.open = false; coverageDetails.querySelector('summary').focus({preventScroll: true});
+  });
+  host.addEventListener('pointerdown', event => {if (coverageDetails.open && !coverageDetails.contains(event.target)) coverageDetails.open = false;});
+  toggle.addEventListener('click', () => showPackages(!packages));
+  find('evidence-return').addEventListener('click', () => showPackages(false));
+  find('evidence-trace').addEventListener('click', onTrace);
+  for (const tab of paneTabs) {
+    tab.addEventListener('click', () => setPane(tab.dataset.evidencePane));
+    tab.addEventListener('keydown', event => {if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const value = event.key === 'Home' ? 'observations' : event.key === 'End' ? 'detail' : pane === 'detail' ? 'observations' : 'detail'; setPane(value); paneTabs.find(candidate => candidate.dataset.evidencePane === value).focus();});
+  }
+  search.maxLength = 256;
+  search.addEventListener('input', () => {page = 0; rebuild(); renderList();});
+  scope.addEventListener('change', () => {page = 0; rebuild(); renderList();});
+  find('evidence-previous').addEventListener('click', () => {page -= 1; renderList(); list.scrollTop = 0;});
+  find('evidence-next').addEventListener('click', () => {page += 1; renderList(); list.scrollTop = 0;});
+  return {sync, setVisible(value) {visible = value; packagePanel.setVisible(value && packages); sync();}, showPackages,
+    // Bounded view state only. Shared navigation may restore this without
+    // retaining payloads, source text, reports or package bytes in history.
+    snapshot: () => ({requestKey, selectedKey, page, pane, packages}),
+    canRestore(value, request = getContext().request) {const current = evidenceObservationModel({...getContext(), request}); return Boolean(value && value.requestKey === current.requestKey && (!value.selectedKey || current.rows.some(row => row.key === value.selectedKey && !row.duplicate)));},
+    restore(value) {
+      if (!this.canRestore(value)) return false;
+      // Shared return may run while hidden. Adopt the verified context before
+      // ordinary visibility reconciliation, preserving the current filter draft.
+      model = evidenceObservationModel(getContext()); requestKey = model.requestKey;
+      selectedKey = value.selectedKey; page = Number.isSafeInteger(value.page) ? Math.max(0, Math.min(99, value.page)) : 0;
+      listSignature = ''; rebuild();
+      detailSignature = 'restoring'; setPane(value.pane === 'detail' ? 'detail' : 'observations'); showPackages(Boolean(value.packages), false); sync();
+      const outside = Boolean(selectedKey && !filtered.some(row => row.key === selectedKey));
+      message(outside ? 'The restored observation is outside the current filter. Its details remain visible.' : '', outside);
+      return true;
+    }};
 }

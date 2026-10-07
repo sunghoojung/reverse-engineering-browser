@@ -9,11 +9,16 @@ import {runInNewContext} from 'node:vm';
 export async function canvasBrowserFixture(root, {artifact, png, pngUrl, chunk}) {
   const pixels=Buffer.concat(Array.from({length:16},()=>Buffer.from([0,...Array.from({length:16},()=>[255,0,0,255]).flat()])));
   const valid=pngUrl(png({width:16,height:16,idat:[chunk('IDAT',deflateSync(pixels))]}));
+  // A truncated zlib stream can load as a partial image in Chrome. Use a
+  // complete one-row stream with an invalid PNG filter type instead: method 0
+  // permits only 0..4 (https://www.w3.org/TR/png-3/ section 9.2). The browser
+  // must produce the error event; production admission still checks structure.
+  const invalidScanline=deflateSync(Buffer.from([255,255,0,0,255]));
   const documents=new Map([
     ['5',valid],
     ['4',pngUrl(png({width:100000,height:100000}))],
     ['3',valid.replace('image/png','image/webp')],
-    ['2',pngUrl(png({idat:[chunk('IDAT',Buffer.from([0]))]}))],
+    ['2',pngUrl(png({idat:[chunk('IDAT',invalidScanline)]}))],
     ['1',valid],
   ]);
   const artifacts=await Promise.all([...documents].map(([id,text])=>artifact(id,text)));
@@ -87,6 +92,10 @@ export async function checkCanvasFixture(fixture, models, inspect) {
   assert.match(inspect(fixture.documents.get('4')).reason,/4096-pixel/);
   assert.match(inspect(fixture.documents.get('3')).reason,/only static PNG/);
   assert.equal(inspect(fixture.documents.get('2')).reason,undefined,'The small corrupt IDAT must reach the real decoder');
+  const rejected=Buffer.from(fixture.documents.get('2').split(',')[1],'base64'),badOffset=rejected.indexOf(Buffer.from('IDAT'));
+  assert.deepEqual({...inspect(fixture.documents.get('2'))},{width:1,height:1,pixels:1});
+  assert.deepEqual([...inflateSync(rejected.subarray(badOffset+4,badOffset+4+rejected.readUInt32BE(badOffset-4)))],[255,255,0,0,255],
+    'The rejection fixture is a complete five-byte RGBA scanline with invalid filter 255, not truncated compressed input');
   const valid=Buffer.from(fixture.documents.get('5').split(',')[1],'base64'),offset=valid.indexOf(Buffer.from('IDAT'));
   const scanlines=inflateSync(valid.subarray(offset+4,offset+4+valid.readUInt32BE(offset-4)));
   assert.equal(scanlines.length,16*(1+16*4));assert.deepEqual([...scanlines.subarray(1,5)],[255,0,0,255]);

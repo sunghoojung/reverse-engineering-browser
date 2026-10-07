@@ -629,6 +629,19 @@ chunk rules](https://www.w3.org/TR/png-3/). The native capture still does not re
 drawing arguments or a canvas object identifier, so local replay remains
 unavailable and the earlier-call relationship stays renderer-scoped.
 
+Rendered Canvas regression coverage runs with
+`REB_UI_CHROMIUM=/path/to/chrome node tools/check-origin-trace-debugger.mjs --canvas-ui-browser`
+and in the installed-Chrome `canvas-ui` CI job. It serves authored artifact
+metadata and bytes through the real application routes, decodes a 16 × 16 PNG,
+and exercises refusal/error labels, explicit retry, gallery retirement and
+reopening, pending-body cancellation, keyboard controls and narrow/wide layouts.
+Screenshots, browser diagnostics and fixture receipts are written under
+`build/canvas-ui-qa/`. A fail-closed observer at the native image source setter
+records assignments and fails the test before any rejected giant-header fixture
+can enter decoding; accepted tiny images use Chrome's real decoder. No product
+admission or ownership function is replaced. These receipts do not establish
+native capture, macOS behavior, decoder-memory reclamation or process RSS bounds.
+
 The fingerprint workspace scopes Rendering and Activity to a captured browser
 tab, all tabs, or explicitly unattributed events. The selected tab is a stable
 top-level frame-tree identifier; renderer events without a live frame context

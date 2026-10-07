@@ -26,8 +26,12 @@ jobs:
 
       - name: Install lightweight linters
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes shellcheck
+          # Hosted images include ShellCheck; avoid an unnecessary apt mirror dependency.
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes shellcheck
+          fi
+          shellcheck --version
           python3 -m venv /tmp/reb-ci-tools
           /tmp/reb-ci-tools/bin/pip install --disable-pip-version-check \
             clang-format==18.1.8 ruff==0.12.8
@@ -209,6 +213,29 @@ jobs:
           name: collection-ui-${{ github.run_id }}
           path: build/collection-ui-qa
           if-no-files-found: ignore
+          retention-days: 3
+
+  canvas-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Exercise Canvas previews in installed Chrome
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --canvas-ui-browser
+
+      - name: Upload rendered Canvas QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: canvas-ui-${{ github.run_id }}
+          path: build/canvas-ui-qa
+          if-no-files-found: error
           retention-days: 3
 
   investigation-ui:

@@ -1,3 +1,4 @@
+import {canvasBrowserFixture,checkCanvasFixture,checkCanvasInteractions} from './check-canvas-ui.mjs';
 import {checkConsoleDOM, createConsoleFixture, checkConsoleInteractions} from './check-console-workspace.mjs';
 import {checkFloat32Model,float32BrowserFixture,checkFloat32Fixture,checkFloat32Interactions} from './check-float32-ui.mjs';
 import { spawn } from "node:child_process";
@@ -18,6 +19,7 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
 import {checkInvestigationCore, investigationFixture, checkInvestigationInteractions} from "./check-investigation-navigation.mjs";
+const canvasBrowser = process.argv[2] === "--canvas-ui-browser";
 const investigationBrowser = process.argv[2] === "--investigation-ui-browser";
 const collectionBrowser = process.argv[2] === "--collection-ui-browser";
 const consoleBrowser = process.argv[2] === "--console-ui-browser";
@@ -29,7 +31,7 @@ const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || canvasBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
@@ -5278,13 +5280,18 @@ async function checkEvidenceComparisonInteractions({evaluate,viewport,click,key,
   return {status:'passed',path:'actual observation-first Evidence product host',viewports:[[1440,900],[760,560],[360,740]],entryModes:['browser HTTP','native=1 live HTTP marker in Chromium; not macOS runtime'],sourcePivot:sourceSupported?'shared adapter present':'explicitly unavailable in standalone preview',checks:['real scripts and lazy secondary package action','two real File inputs','backend-produced equal and changed fixtures','ordinary refresh preserves files/DOM','strict rejected-success retention','wide/narrow product geometry','keyboard Close/Escape/reopen focus','late real File read after Return','shared Back cancels service ownership','exact Source Back preserves filters focus scroll and file drafts','actual page disposal/remount and stale handle','existing export and original-byte validation retained','observations selection retained','native live HTTP stays supported'],limitations:['Synthetic HTTP fixture is not new backend semantic or lease evidence.','Stored reb:// unavailability is covered by host/static tests, not native runtime.','No macOS or shared-navigation acceptance is implied.']};
 }
 
+const canvasFixtureOptions={artifact:canvasArtifact,png:canvasPngFixture,pngUrl:canvasPngUrl,chunk:canvasPngChunk};
+await checkCanvasFixture(await canvasBrowserFixture(root,canvasFixtureOptions),sourcesFixtureModels,canvasProductionRules.inspectCanvasPng);
+
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(float32FixtureOnly || executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : float32Browser || float32FixtureOnly ? "reb-float32-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : comparisonBrowser ? "reb-comparison-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : float32Browser || float32FixtureOnly ? "float32-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : comparisonBrowser ? "comparison-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), canvasBrowser ? "reb-canvas-ui-" : memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : float32Browser || float32FixtureOnly ? "reb-float32-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : comparisonBrowser ? "reb-comparison-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", canvasBrowser ? "canvas-ui-qa" : memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : float32Browser || float32FixtureOnly ? "float32-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : comparisonBrowser ? "comparison-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
+  const canvasFixture = canvasBrowser ? await canvasBrowserFixture(root,canvasFixtureOptions) : null;
+  const canvasReceipts = [];
   const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
   const collectionFixture = collectionBrowser ? await collectionBrowserFixture(root) : null;
   let floatFixture;
@@ -5298,6 +5305,7 @@ async function checkTrafficBrowser() {
   }
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (canvasFixture && await canvasFixture.handle(request, response)) return;
     if (collectionFixture && await collectionFixture.handle(request, response)) return;
     if (memoryFixture && await memoryFixture.handle(request, response)) return;
     if (floatFixture?.handle && await floatFixture.handle(request, response)) return;
@@ -5310,7 +5318,7 @@ async function checkTrafficBrowser() {
   });
   const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank"];
-  let lifecycle, socket, validation, failure, captureFailure;
+  let lifecycle, socket, validation, failure, captureFailure, captureCanvasReceipt;
   let diagnostics = {executable, args, phase: "fixture server"};
   const commands = new Map();
   const downloads = trafficBrowserDownloadObserver();
@@ -5375,6 +5383,7 @@ async function checkTrafficBrowser() {
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
       return result.result.value;
     };
+    if (canvasFixture) captureCanvasReceipt = async () => canvasReceipts.push({label:"terminal native image sink",...await evaluate("window.canvasBrowserReceipt")});
     const viewport = async (width, height) => {
       await command("Emulation.setDeviceMetricsOverride", {width, height, deviceScaleFactor: 1, mobile: false});
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
@@ -5534,17 +5543,21 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : float32Browser ? "float32-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : comparisonBrowser ? "comparison-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, canvasBrowser ? "canvas-failure.png" : memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : float32Browser ? "float32-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : comparisonBrowser ? "comparison-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
-    await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
+    if (canvasFixture) await command("Page.addScriptToEvaluateOnNewDocument", {source:canvasFixture.installObserver});
+    await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/${canvasBrowser ? "?canvas_images=1" : ""}`});
     for (let attempt = 0; attempt < 100; attempt += 1) {
       if (await evaluate("typeof renderRequests === 'function' && typeof state !== 'undefined'")) break;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (investigationBrowser) {
+    if (canvasBrowser) {
+      validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value)});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Canvas QA");
+    } else if (investigationBrowser) {
       validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during investigation QA");
     } else if (memoryBrowser) {
@@ -5684,6 +5697,10 @@ async function checkTrafficBrowser() {
       catch (screenshotError) {diagnostics.failure_screenshot_error = String(screenshotError.message).slice(0, 2048);}
     }
   } finally {
+    if (captureCanvasReceipt && socket?.readyState === 1) {
+      try {await captureCanvasReceipt();}
+      catch (error) {failure ??= error; diagnostics.canvas_sink_receipt_error = String(error.message);}
+    }
     downloads.close();
     diagnostics.download_events=downloads.receipts();
     socket?.close();
@@ -5692,6 +5709,11 @@ async function checkTrafficBrowser() {
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
     try { await floatFixture?.stop(); } catch (error) {failure ??= error; diagnostics.float32_cleanup_error = String(error.message);}
+    canvasFixture?.release();
+    if (canvasFixture) {
+      try {await writeFile(join(output,"canvas-fixture-receipts.json"),JSON.stringify({schema:"reb-canvas-ui-qa-v1",receipts:canvasReceipts,requests:canvasFixture.requests},null,2));}
+      catch (error) {failure ??= error; diagnostics.canvas_receipt_error = String(error.message);}
+    }
     factsFixture?.release(); consoleFixture?.release();
     collectionFixture?.release();
     memoryFixture?.release();
@@ -5712,9 +5734,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, float32FixtureOnly ? "fixture-validation.json" : "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS ${float32FixtureOnly ? "real loopback fixture (not rendered QA)" : "real Chromium"} ${memoryBrowser ? 'Memory workflow' : float32Browser || float32FixtureOnly ? 'Float32 diagnostics' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : comparisonBrowser ? 'Evidence supplied-package comparison' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  console.log(`PASS ${float32FixtureOnly ? "real loopback fixture (not rendered QA)" : "real Chromium"} ${canvasBrowser ? 'Canvas' : memoryBrowser ? 'Memory workflow' : float32Browser || float32FixtureOnly ? 'Float32 diagnostics' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : comparisonBrowser ? 'Evidence supplied-package comparison' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly) {await checkTrafficBrowser(); process.exit(0);}
+if (canvasBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

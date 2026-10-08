@@ -27,14 +27,9 @@ mod unix {
             .map_err(|_| Error::bad("Workspace path contains a null byte"))
     }
     fn open_at(parent: &File, name: &CString, flags: i32, mode: u32) -> std::io::Result<File> {
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                flags,
-                mode as libc::mode_t,
-            )
-        };
+        // openat is C-variadic: Darwin mode_t is u16 and must be promoted.
+        // Keep the mode as u32 here, matching the required unsigned-int argument.
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, mode) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }

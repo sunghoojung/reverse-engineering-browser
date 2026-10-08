@@ -1,0 +1,132 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
+index ecb68ce..38ed358 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
+@@ -27,6 +27,8 @@
+ 
+ #include "base/feature_list.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_worker_source_sink.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/page/v8_compile_hints_histograms.h"
+@@ -73,6 +75,48 @@ namespace blink {
+ 
+ namespace {
+ 
++reb::NativeWorkerText NativeWorkerSourceText(const String& text) {
++  if (text.empty()) {
++    return {};
++  }
++  return text.Is8Bit() ? reb::NativeWorkerText{text.Span8(), {}}
++                      : reb::NativeWorkerText{{}, text.Span16()};
++}
++
++void CaptureNativeDedicatedWorkerScript(ExecutionContext* context,
++                                       const ParkableString& source,
++                                       const String& url,
++                                       reb::NativeWorkerSourceKind kind) {
++  if (!reb::IsNativeWorkerSourceCaptureEnabled()) {
++    return;
++  }
++  if (!context || !context->IsDedicatedWorkerGlobalScope()) {
++    return;
++  }
++  const auto token_value = [](const auto& token) {
++    return reb::NativeWorkerToken{token.value().GetHighForSerialization(),
++                                 token.value().GetLowForSerialization()};
++  };
++  const auto worker = context->GetExecutionContextToken().Visit(token_value);
++  const auto now = static_cast<std::uint64_t>(
++      base::TimeTicks::Now().since_origin().InNanoseconds());
++  reb::NativeWorkerCaptureTicket ticket;
++  if (reb::BeginNativeWorkerSourceCapture(worker, now, ticket) !=
++      reb::NativeWorkerCaptureStatus::kAccepted) {
++    return;
++  }
++  const auto parent = context->GetParentExecutionContextToken();
++  // Never synchronously unpark a source or acquire its parking lock from a
++  // probe. Dedicated-worker sources are normally non-parkable; report an
++  // explicit gap if that changes instead of hiding blocking I/O in a hook.
++  const auto source_text = source.may_be_parked()
++                               ? reb::NativeWorkerText{{}, {}, true}
++                               : NativeWorkerSourceText(source.ToString());
++  static_cast<void>(reb::CaptureNativeWorkerSource(
++      ticket, parent ? parent->Visit(token_value) : reb::NativeWorkerToken{},
++      kind, source_text, NativeWorkerSourceText(url), now));
++}
++
+ // Used to throw an exception before we exceed the C++ stack and crash.
+ // This limit was arrived at arbitrarily. crbug.com/449744
+ const int kMaxRecursionDepth = 44;
+@@ -335,9 +379,15 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript(
+                          script_start_position.column_.ZeroBasedInt());
+ 
+   if (!*TRACE_EVENT_API_GET_CATEGORY_GROUP_ENABLED(kTraceEventCategoryGroup)) {
+-    return CompileScriptInternal(isolate, script_state, classic_script, origin,
+-                                 compile_options, no_cache_reason,
+-                                 can_use_crowdsourced_compile_hints, nullptr);
++    v8::MaybeLocal<v8::Script> script = CompileScriptInternal(
++        isolate, script_state, classic_script, origin, compile_options,
++        no_cache_reason, can_use_crowdsourced_compile_hints, nullptr);
++    if (!script.IsEmpty()) {
++      CaptureNativeDedicatedWorkerScript(
++          execution_context, classic_script.SourceText(), file_name,
++          reb::NativeWorkerSourceKind::kClassic);
++    }
++    return script;
+   }
+ 
+   std::optional<inspector_compile_script_event::V8ConsumeCacheResult>
+@@ -346,6 +396,12 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript(
+       isolate, script_state, classic_script, origin, compile_options,
+       no_cache_reason, can_use_crowdsourced_compile_hints, &cache_result);
+ 
++  if (!script.IsEmpty()) {
++    CaptureNativeDedicatedWorkerScript(
++        execution_context, classic_script.SourceText(), file_name,
++        reb::NativeWorkerSourceKind::kClassic);
++  }
++
+   TRACE_EVENT_END1(
+       kTraceEventCategoryGroup, "v8.compile", "data",
+       [&](perfetto::TracedValue context) {
+@@ -457,6 +513,12 @@ v8::MaybeLocal<v8::Module> V8ScriptRunner::CompileModule(
+     }
+   }
+ 
++  if (reb::IsNativeWorkerSourceCaptureEnabled() && !script.IsEmpty()) {
++    CaptureNativeDedicatedWorkerScript(
++        ExecutionContext::From(isolate->GetCurrentContext()),
++        params.GetSourceText(), file_name, reb::NativeWorkerSourceKind::kModule);
++  }
++
+   TRACE_EVENT_END1(kTraceEventCategoryGroup, "v8.compileModule", "data",
+                    [&](perfetto::TracedValue context) {
+                      inspector_compile_script_event::Data(
+diff --git a/third_party/blink/renderer/core/workers/worker_global_scope.cc b/third_party/blink/renderer/core/workers/worker_global_scope.cc
+index d745314..a501bfd 100644
+--- a/third_party/blink/renderer/core/workers/worker_global_scope.cc
++++ b/third_party/blink/renderer/core/workers/worker_global_scope.cc
+@@ -30,6 +30,7 @@
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/trace_event/typed_macros.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_worker_source_sink.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "services/metrics/public/cpp/mojo_ukm_recorder.h"
+ #include "third_party/blink/public/common/loader/javascript_framework_detection.h"
+@@ -214,6 +215,12 @@ scheduler::WorkerScheduler* WorkerGlobalScope::GetScheduler() {
+ }
+ 
+ void WorkerGlobalScope::Dispose() {
++  if (reb::IsNativeWorkerSourceCaptureEnabled() && IsDedicatedWorkerGlobalScope()) {
++    reb::RetireNativeWorkerSource(GetExecutionContextToken().Visit([](const auto& token) {
++      return reb::NativeWorkerToken{token.value().GetHighForSerialization(),
++                                   token.value().GetLowForSerialization()};
++    }));
++  }
+   DCHECK(IsContextThread());
+   loading_virtual_time_pauser_ = WebScopedVirtualTimePauser();
+   closing_ = true;

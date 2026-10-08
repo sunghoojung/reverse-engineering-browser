@@ -331,6 +331,16 @@ def check(binary, browser):
                 runtime("evaluate", source="for (let i=0;i<40;i++) console.log('queue-' + i)")
                 messages = runtime("poll")
                 assert len(messages["messages"]) <= 32 and messages["dropped"] > 0
+                # JSON escaping must be charged before enqueue. This batch fit
+                # the old 32 KiB raw-text budget but exceeded the 64 KiB reply,
+                # losing all logs after poll had already reset its drop count.
+                runtime("evaluate", source="for (let i=0;i<16;i++) console.log(String.fromCharCode(1).repeat(2048))")
+                messages = runtime("poll")
+                assert messages["status"] == "ok" and messages["messages"]
+                assert len(messages["messages"]) + messages["dropped"] == 16
+                assert messages["dropped"] > 0
+                assert all(message["text"] == "\x01" * 2048 for message in messages["messages"])
+                assert runtime("poll")["dropped"] == 0
                 runtime("evaluate", source="fetch('/console-resource')")
                 deadline = time.monotonic() + 5
                 while True:

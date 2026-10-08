@@ -114,9 +114,7 @@ void NativeConsoleRuntime::Reset() {
   expiration_.Stop();
   monitors_.clear();
   last_ = 0;
-  messages_.clear();
-  message_bytes_ = 0;
-  dropped_ = 0;
+  messages_.Reset();
 }
 void NativeConsoleRuntime::Message(const std::string& text,
                                    const std::string& source,
@@ -124,30 +122,25 @@ void NativeConsoleRuntime::Message(const std::string& text,
                                    unsigned line,
                                    int level,
                                    bool truncated) {
-  const auto message = Bounded(text);
-  const auto url = Bounded(source, 512);
-  const auto trace = Bounded(stack);
-  const auto bytes = message.size() + url.size() + trace.size();
-  while (!messages_.empty() && (messages_.size() >= 32 || message_bytes_ + bytes > 32768)) {
-    const auto& oldest = messages_.front();
-    message_bytes_ -= oldest.FindString("text")->size() + oldest.FindString("url")->size() +
-                      oldest.FindString("stack")->size();
-    messages_.pop_front();
-    if (dropped_ < 2147483647)
-      ++dropped_;
-  }
+  auto message = Bounded(text);
+  auto url = Bounded(source, 512);
+  auto trace = Bounded(stack);
+  const bool clipped = truncated || text.size() > message.size() || source.size() > url.size() ||
+                       stack.size() > trace.size();
   static constexpr std::array levels{"debug", "info", "warning", "error"};
-  messages_.push_back(base::Value::Dict()
-                          .Set("text", message)
-                          .Set("url", url)
-                          .Set("stack", trace)
+  const auto record = base::Value::Dict()
+                          .Set("text", std::move(message))
+                          .Set("url", std::move(url))
+                          .Set("stack", std::move(trace))
                           .Set("line", static_cast<int>(std::min(line, 2147483647u)))
                           .Set("level", levels[std::clamp(level, 0, 3)])
                           .Set("time", base::Time::Now().InMillisecondsFSinceUnixEpoch())
-                          .Set("truncated", truncated || text.size() > message.size() ||
-                                                source.size() > url.size() ||
-                                                stack.size() > trace.size()));
-  message_bytes_ += bytes;
+                          .Set("truncated", clipped);
+  std::string encoded;
+  if (base::JSONWriter::Write(record, &encoded))
+    messages_.Push(std::move(encoded));
+  else
+    messages_.Drop();
 }
 void NativeConsoleRuntime::Expire() {
   bool retained = false;
@@ -510,16 +503,7 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
   if (!operation)
     result = Failure("Malformed runtime command");
   else if (*operation == "poll") {
-    base::Value::List messages;
-    while (!messages_.empty()) {
-      messages.Append(std::move(messages_.front()));
-      messages_.pop_front();
-    }
-    result.Set("status", "ok")
-        .Set("messages", std::move(messages))
-        .Set("dropped", static_cast<int>(dropped_));
-    message_bytes_ = 0;
-    dropped_ = 0;
+    return messages_.Poll();
   } else if (*operation == "clear") {
     Reset();
     result.Set("status", "ok");

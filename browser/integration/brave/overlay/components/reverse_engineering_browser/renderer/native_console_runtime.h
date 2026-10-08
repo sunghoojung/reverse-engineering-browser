@@ -8,13 +8,13 @@
 
 #include <array>
 #include <cstdint>
-#include <deque>
 #include <string>
 #include <vector>
 
 #include "base/functional/callback_helpers.h"
 #include "base/timer/timer.h"
 #include "base/values.h"
+#include "brave/components/reverse_engineering_browser/common/native_console_messages.h"
 #include "third_party/blink/public/web/web_element.h"
 #include "v8/include/v8.h"
 
@@ -71,9 +71,7 @@ class NativeConsoleRuntime final {
   std::uint64_t next_handle_ = 1;
   std::uint64_t last_ = 0;
   unsigned next_temp_ = 1;
-  std::deque<base::Value::Dict> messages_;
-  std::size_t message_bytes_ = 0;
-  unsigned dropped_ = 0;
+  NativeConsoleMessages messages_;
 };
 
 }  // namespace reb

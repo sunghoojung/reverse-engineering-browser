@@ -1,0 +1,12 @@
+diff --git a/third_party/blink/renderer/core/exported/web_node.cc b/third_party/blink/renderer/core/exported/web_node.cc
+--- a/third_party/blink/renderer/core/exported/web_node.cc
++++ b/third_party/blink/renderer/core/exported/web_node.cc
+@@ -412,7 +412,7 @@ std::vector<WebConsoleListener> WebNode::ConsoleEventListeners(
+     v8::Isolate* isolate,
+     unsigned limit) const {
+   std::vector<WebConsoleListener> result;
+-  Node* node = Unwrap<Node>();
++  Node* node = private_.Get();
+   unsigned types = 0;
+   for (const auto& type : node->EventTypes()) {
+     if (++types > limit)

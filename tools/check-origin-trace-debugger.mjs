@@ -22,6 +22,7 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
 import {checkInvestigationCore, investigationFixture, checkInvestigationInteractions} from "./check-investigation-navigation.mjs";
+import {checkAnalystController,checkAnalystInteractions,reloadInvestigationDocument} from './check-analyst-editor.mjs';
 import {checkNotebookCore, notebookFixture, checkNotebookInteractions} from './check-investigation-notebook.mjs';
 import {sourcesHistoryFixture, checkSourcesHistoryFixture, checkSourcesHistoryInteractions} from "./check-sources-history.mjs";
 const sourcesHistoryBrowser = process.argv[2] === "--sources-history-ui-browser";
@@ -45,6 +46,7 @@ await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
 await checkNotebookCore(root);
+await checkAnalystController(root);
 await checkFloat32Model(root);
 // The fixture serves the same declared public leaves as the product. Inspect
 // raw origin-form paths before URL normalization, so encoded/traversing paths
@@ -5891,6 +5893,14 @@ async function checkTrafficBrowser() {
       assert.match(prompt.message, /Replace the current Decoder input and chain/);
       await command("Page.handleJavaScriptDialog", {accept});
     };
+    const reloadInvestigationPage = waitForDocument => reloadInvestigationDocument(evaluate, () => command('Page.reload'), waitForDocument);
+    const beforeUnload = async accept => {
+      const start = Date.now();
+      while (!browserDialogs.length && Date.now() - start < 5000) await new Promise(resolve => setTimeout(resolve, 25));
+      assert(browserDialogs.length, "The browser did not warn before discarding an Analyst draft");
+      assert.equal(browserDialogs.shift().type, 'beforeunload');
+      await command('Page.handleJavaScriptDialog', {accept});
+    };
     const typeText = text => command("Input.insertText", {text});
     const columnsAligned = async () => {
       const measured = await evaluate(`(() => {
@@ -5990,9 +6000,11 @@ async function checkTrafficBrowser() {
       validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value),navigatePolicy});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Canvas QA");
     } else if (investigationBrowser) {
-      const notebookValidation = await checkNotebookInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:()=>command('Page.reload')});
+      const notebookValidation = await checkNotebookInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:reloadInvestigationPage});
+      const analystValidation = await checkAnalystInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:reloadInvestigationPage,beforeUnload});
       validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});
       validation.notebook = notebookValidation;
+      validation.analyst = analystValidation;
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during investigation QA");
     } else if (memoryBrowser) {
       validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture:memoryFixture,recordMemoryCheck:value=>{diagnostics.memory_control_checks=[...(diagnostics.memory_control_checks??[]).slice(-63),value];}});

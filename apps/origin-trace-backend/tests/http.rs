@@ -5511,3 +5511,294 @@ async fn evidence_comparison_body_deadline_and_interrupted_upload_leave_service_
             .exists()
     );
 }
+
+#[cfg(unix)]
+fn workspace_change(kind: &str, generation: u64, writer: usize) -> Value {
+    if kind == "analyst" {
+        json!({"action":"replace_local_analyst_workspace","expected_generation":generation,
+            "folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],
+            "files":(0..16).map(|id|json!({"id":id+1,"folder_id":1,"name":format!("writer-{writer}-note-{id}"),
+                "kind":"scratchpad","language":"text","content":"x".repeat(32768)})).collect::<Vec<_>>()})
+    } else {
+        json!({"action":"replace_api_collection","expected_generation":generation,
+            "folders":[{"id":1,"name":"API Collection","parent_id":null,"variables":[]},
+                {"id":2,"name":format!("writer-{writer}"),"parent_id":1,"variables":[]}],"requests":[]})
+    }
+}
+#[cfg(unix)]
+async fn workspace_peer(shared: &Path) -> Server {
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = root.path().join("endpoint");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"));
+    command
+        .args(["--port", "0", "--endpoint-file"])
+        .arg(&endpoint)
+        .arg("--api-collection")
+        .arg(shared.join("collection.json"))
+        .arg("--local-analyst")
+        .arg(shared.join("analyst.json"));
+    for (flag, name) in [
+        ("--store", "events"),
+        ("--trace-store", "trace"),
+        ("--signal-store", "signals"),
+        ("--artifacts", "artifacts"),
+    ] {
+        command.arg(flag).arg(root.path().join(name));
+    }
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let url = loop {
+        if let Ok(url) = std::fs::read_to_string(&endpoint) {
+            break url.trim().to_owned();
+        }
+        assert!(child.try_wait().unwrap().is_none(), "Peer exited");
+        assert!(Instant::now() < deadline, "Peer startup timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    Server {
+        child,
+        root,
+        url,
+        client: reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap(),
+    }
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_http_processes_commit_one_winner_for_both_libraries() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let first = Server::start().await;
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("same-parent");
+    symlink(first.root.path(), &alias).unwrap();
+    let second = workspace_peer(&alias).await;
+    for (kind, route, filename) in [
+        ("analyst", "/api/local-analyst", "analyst.json"),
+        ("collection", "/api/api-collection", "collection.json"),
+    ] {
+        for trial in 0..5 {
+            let current: Value = first.get(route).await.json().await.unwrap();
+            let generation = current["generation"].as_u64().unwrap();
+            let action = format!("{route}/actions");
+            let (left, right) = tokio::join!(
+                first.action(&action, workspace_change(kind, generation, trial * 2)),
+                second.action(&action, workspace_change(kind, generation, trial * 2 + 1))
+            );
+            let responses = [left, right];
+            let mut winner = None;
+            for response in responses {
+                let status = response.status();
+                let body: Value = response.json().await.unwrap();
+                if status == 200 {
+                    assert!(winner.is_none(), "Two writers claimed one generation");
+                    winner = Some(body);
+                } else {
+                    assert_eq!(status, 409);
+                    assert!(
+                        ["state_conflict", "stale_generation"]
+                            .contains(&body["code"].as_str().unwrap())
+                    );
+                }
+            }
+            let winner = winner.expect("One writer must commit");
+            assert_eq!(winner["generation"], generation + 1);
+            let persisted: Value =
+                serde_json::from_slice(&std::fs::read(first.root.path().join(filename)).unwrap())
+                    .unwrap();
+            assert_eq!(persisted, winner);
+            let old = first
+                .action(&action, workspace_change(kind, generation, 99))
+                .await;
+            assert_eq!(old.status(), 409);
+            let old: Value = old.json().await.unwrap();
+            assert_eq!(old["code"], "stale_generation");
+        }
+        for path in [
+            filename.to_owned(),
+            format!("{filename}.reb-workspace-lock-v1"),
+        ] {
+            assert_eq!(
+                std::fs::metadata(first.root.path().join(path))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_http_held_lease_rejects_without_wait_or_changes() {
+    use std::{
+        fs::OpenOptions,
+        os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    };
+    let server = Server::start().await;
+    for (kind, route, name) in [
+        ("analyst", "/api/local-analyst", "analyst.json"),
+        ("collection", "/api/api-collection", "collection.json"),
+    ] {
+        let action = format!("{route}/actions");
+        assert_eq!(
+            server
+                .action(&action, workspace_change(kind, 0, 0))
+                .await
+                .status(),
+            200
+        );
+        let before = std::fs::read(server.root.path().join(name)).unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(
+                server
+                    .root
+                    .path()
+                    .join(format!("{name}.reb-workspace-lock-v1")),
+            )
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let started = Instant::now();
+        let response = server.action(&action, workspace_change(kind, 1, 1)).await;
+        assert_eq!(response.status(), 409);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "state_conflict");
+        assert!(body["error"].as_str().unwrap().contains("busy"));
+        assert_eq!(
+            std::fs::read(server.root.path().join(name)).unwrap(),
+            before
+        );
+        assert_eq!(
+            server.get(route).await.status(),
+            200,
+            "Atomic reads stay available"
+        );
+        drop(lock);
+        assert_eq!(
+            server
+                .action(&action, workspace_change(kind, 1, 1))
+                .await
+                .status(),
+            200
+        );
+    }
+}
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "Requires compiled native workspace helper; invoked by macOS app-build"]
+async fn workspace_native_lock_interoperability() {
+    use std::{
+        fs::OpenOptions,
+        io::{BufRead, BufReader},
+        os::fd::AsRawFd,
+    };
+    struct HelperChild(Child);
+    impl Drop for HelperChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let helper = std::env::var("REB_WORKSPACE_LEASE_TEST_HELPER").expect("Native helper path");
+    let server = Server::start().await;
+    for (kind, route, name) in [
+        ("analyst", "/api/local-analyst", "analyst.json"),
+        ("collection", "/api/api-collection", "collection.json"),
+    ] {
+        let path = server.root.path().join(name);
+        let action = format!("{route}/actions");
+        let mut held = HelperChild(
+            Command::new(&helper)
+                .arg("--hold")
+                .arg(&path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let output = held.0.stdout.take().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut ready = String::new();
+            let result = BufReader::new(output).read_line(&mut ready).map(|_| ready);
+            let _ = sent.send(result);
+        });
+        let ready = received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Native helper readiness deadline")
+            .unwrap();
+        assert_eq!(ready.trim(), "LOCKED");
+        assert_eq!(
+            server
+                .action(&action, workspace_change(kind, 0, 1))
+                .await
+                .status(),
+            409
+        );
+        assert!(!path.exists());
+        held.0.kill().unwrap();
+        held.0.wait().unwrap(); // A crashed holder must release its lease.
+        assert_eq!(
+            server
+                .action(&action, workspace_change(kind, 0, 1))
+                .await
+                .status(),
+            200
+        );
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(
+                server
+                    .root
+                    .path()
+                    .join(format!("{name}.reb-workspace-lock-v1")),
+            )
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let mut contender = HelperChild(
+            Command::new(&helper)
+                .arg("--expect-busy")
+                .arg(&path)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = contender.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Native contention helper deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(lock);
+        assert_eq!(
+            server
+                .action(&action, workspace_change(kind, 0, 2))
+                .await
+                .status(),
+            409
+        );
+    }
+}

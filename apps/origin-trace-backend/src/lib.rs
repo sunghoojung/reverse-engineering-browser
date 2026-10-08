@@ -21,6 +21,7 @@ pub mod vm;
 pub mod wasm;
 mod worker;
 mod workspace;
+mod workspace_lease;
 pub use app::App;
 pub use config::Options;
 pub use endpoint::PublishedEndpoint;

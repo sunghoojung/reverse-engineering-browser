@@ -74,6 +74,13 @@ export async function checkSourceWindowInteractions({evaluate,viewport,click,key
     await press('Backspace');
     for(const letter of value)await key(letter,`Key${letter.toUpperCase()}`,{text:letter,unmodifiedText:letter});
   };
+  const paneClick=async selector=>{
+    // Scroll the sidebar's actual owner, then hit-test a native pointer click.
+    // Never scroll an offscreen workspace to conceal a layout problem.
+    const delta=await evaluate(`(()=>{const node=document.querySelector(${JSON.stringify(selector)});if(!node)throw new Error('Missing Facts control');const pane=node.closest('#source-sidebar .debug-panes');if(!pane)return 0;const r=node.getBoundingClientRect(),p=pane.getBoundingClientRect();return r.top<p.top?r.top-p.top:r.bottom>p.bottom?r.bottom-p.bottom:0;})()`);
+    if(delta)await wheel('#source-sidebar .debug-panes',delta);
+    await click(selector);
+  };
   const pick=async id=>{
     await click('#source-quick-open');await type('#quick-open-input',`facts-${id}.js`);await press('Enter');
     await until(`selectedSource()?.artifact_id==='${id}' && !selectedSource()?.loading && state.sourceEditorView?.index`,'Owned source did not render');
@@ -137,9 +144,9 @@ export async function checkSourceWindowInteractions({evaluate,viewport,click,key
   await type('#source-search','');
   await click('#source-facts-toggle');
   await until("sourceFactsPanel.model.report?.source.artifact_id==='40001'",'Late-line Facts did not arrive');
-  await click('#source-facts-report select');await key('b','KeyB',{windowsVirtualKeyCode:66,text:'b',unmodifiedText:'b'});if(process.platform!=='darwin')await press('Enter');
+  await paneClick('#source-facts-report select');await key('b','KeyB',{windowsVirtualKeyCode:66,text:'b',unmodifiedText:'b'});if(process.platform!=='darwin')await press('Enter');
   await until("document.querySelector('#source-facts-report select').value==='bindings'",'Facts bindings did not become visible');
-  await click('.source-fact > button');
+  await paneClick('.source-fact > button');
   await until("elements.sourcePosition.textContent.includes('Original UTF-8 bytes') && state.sourceEditorView.window.line===20000",'Verified original-byte link still refused line 20001');
   assert((await evaluate('elements.sourcePosition.textContent')).includes(`[${start}, ${end})`));
   await screenshot('source-window-facts-original-late-line');

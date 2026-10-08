@@ -467,6 +467,34 @@ Analyst prioritizes the editor and evidence permissions; folder settings, storag
 variables, execution limits, and history can be expanded as needed. Tools keeps
 input and output visible with transformation history available on demand.
 
+Analyst keeps unsaved file and folder changes with their selected owners. Clicking
+the same file, refreshing, or visiting another workspace preserves the draft.
+Switching, creating, deleting, or moving a file away from a dirty folder requires
+saving or explicitly choosing **Discard changes** first. A changed or deleted
+saved owner keeps the draft and its original version visible; copy any edits you
+need, discard them, then **Retry load** to review the current saved version. No
+background refresh silently rebases a changed draft over another window's work.
+
+A save acknowledgement must match the exact submitted contents and generation.
+An interrupted or malformed acknowledgement triggers one readback, never another
+write. The editor stays locked during that check. Verified contents are marked
+saved; unresolved results retain the draft and block writes until **Retry load**.
+If readback still shows the original generation, an explicit retry uses that same
+generation check, so a delayed original save conflicts instead of committing
+twice. Conflicts and validation reasons remain visible. There is no autosave or
+persistent draft copy. Browser reload/close warns while drafts or unresolved saves
+exist; browser-controlled warnings cannot protect a forced process exit. Save
+before quitting the native app: this frontend change alone does not establish a
+native macOS window-close or quit confirmation.
+
+The existing `--investigation-ui-browser` gate includes synthetic Analyst library
+interactions at 1440×900, 760×560 and 360×740: dirty selection, folder/file edits,
+keyboard focus, workspace returns, real reload cancellation, lost/malformed save
+acknowledgements, locked recovery, concurrent edits and narrow recovery controls.
+Production-controller regressions run in `make javascript-check`. These fixtures
+are separate from real storage durability and native macOS lifecycle acceptance.
+
+
 ## Code ownership
 
 | Location | Responsibility |
@@ -481,7 +509,7 @@ input and output visible with transformation history available on demand.
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/debugger/` | CDP sessions, transport ownership, request validation, hooks, experiments, and automation |
-| `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `durable.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
+| `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
 | `../origin-trace-backend/src/decoder.rs`, `origin_trace.rs`, `vm.rs` | Native decoder adapter, trace projection, and VM analysis |
 | `macos/` | Native shell, evidence readers, and helper processes |
 

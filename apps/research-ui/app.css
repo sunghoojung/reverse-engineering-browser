@@ -1977,7 +1977,7 @@
       .analyst-form label { display: grid; gap: 5px; color: var(--faint); font: 11px var(--sans); text-transform: none; }
       .analyst-form input, .analyst-form textarea, .analyst-form select { width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 11px/1.45 var(--mono); text-transform: none; }
       .analyst-form textarea { min-height: 78px; resize: vertical; }
-      .analyst-editor-form { min-height: calc(100% - 58px); grid-template-rows: auto auto minmax(280px, 1fr) auto auto; }
+      .analyst-editor-form { min-height: calc(100% - 58px); grid-template-rows: auto minmax(280px, 1fr) auto auto; }
       .analyst-editor-form #analyst-content { min-height: 280px; height: 100%; tab-size: 2; white-space: pre; }
       .analyst-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(115px, .4fr); gap: 8px; }
       .analyst-form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
@@ -3669,8 +3669,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .source-window { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; flex-basis: 100%; min-width: 0; font: 11px var(--mono); color: var(--muted); }
 .source-window[hidden] { display: none; }
 .source-window label { display: flex; align-items: center; gap: 4px; }
-.source-window input { width: 68px; min-width: 0; box-sizing: border-box; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 3px; font: inherit; }
+.source-window input { width: 84px; min-width: 0; box-sizing: border-box; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 3px; font: inherit; }
 .source-search-status { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
 .source-excerpt-notice { color: var(--amber); font: 10px var(--mono); user-select: none; }
 .source-window :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-@media (max-width: 480px) { .source-window input { width: 56px; } #source-window-label { flex-basis: 100%; } }
+@media (max-width: 480px) { .source-window input { width: 76px; } #source-window-label { flex-basis: 100%; } }

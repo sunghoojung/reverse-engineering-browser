@@ -1,3 +1,4 @@
+import {checkSourceWindowModel,checkSourceWindowInteractions} from './check-source-window.mjs';
 import {checkTrafficComparisonController,checkCapturedComparisonInteractions} from './check-traffic-comparison-ui.mjs';
 import {checkTrafficComparisonModel} from './check-traffic-comparison.mjs';
 import {canvasBrowserFixture,checkCanvasFixture,checkCanvasInteractions} from './check-canvas-ui.mjs';
@@ -37,6 +38,7 @@ const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
 const root = process.argv[fieldsOnly || canvasBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+await checkSourceWindowModel(root);
 await checkTrafficComparisonModel(root);
 await checkTrafficComparisonController(root);
 await checkConsoleDOM(root);
@@ -1986,7 +1988,7 @@ const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceI
   'liveSources', 'capturedSources', 'selectedSource', 'deobfuscationKey', 'sourceOwnedLiveText', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource', 'loadScriptContent', 'sourceRuntimeLine', 'sourceRuntimeColumn', 'prefillHookFromSource',
-  'sourceDisplayName', 'sourceIcon', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
+  'sourceDisplayName', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
   'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(
@@ -2014,8 +2016,9 @@ function ownedContext(patch = {}) {
     sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
   const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout,
     sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsUnavailable:sourceFactsUI.sourceFactsUnavailable, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
+    appendSourceSyntax:(node,tokens)=>{node.textContent=tokens.map(value=>value.text).join('');}, sourceOccurrenceRange:()=>null, memoryOriginTraceActive:()=>false,
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, investigationPassiveSource:false, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
-    renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){},
+    renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){}, applySourceSearch(){},
     runtimeHooksState:()=>({workers:[], isolated:true, target_id:state.debuggerSession?.target?.id}),
     elements:{signalRenderList:new TrafficFixtureNode()}, ...canvasProductionRules,
     sourceName:source=>source.url, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
@@ -2263,15 +2266,56 @@ class SourceReviewNode {
   append(...nodes){for(let node of nodes){if(typeof node==='string')node=this.doc.createTextNode(node);node.parent=this;this.children.push(node);}}replaceChildren(...nodes){this._text='';this.children=[];this.append(...nodes);}
   contains(node){return this===node||this.children.some(child=>child.contains?.(node));}addEventListener(key,callback){(this.listeners[key]??=[]).push(callback);}
   getBoundingClientRect(){return {left:0,right:500};}focus(){this.doc.activeElement=this;}scrollIntoView(){}
-  matches(selector){if(selector==='[data-deob-control]')return this.dataset.deobControl!==undefined;if(selector==='[aria-selected="true"]')return this.attributes['aria-selected']==='true';if(selector==='.source-line[data-line]')return this.classes.has('source-line')&&this.dataset.line!==undefined;if(selector==='.source-line.current')return this.classes.has('source-line')&&this.classes.has('current');if(selector.startsWith('.'))return this.classes.has(selector.slice(1));return this.tagName===selector;}
+  matches(selector){const data=/^\[data-([a-z-]+)="([^"]*)"\]$/.exec(selector);if(data)return this.dataset[data[1].replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]===data[2];if(selector==='[data-deob-control]')return this.dataset.deobControl!==undefined;if(selector==='[aria-selected="true"]')return this.attributes['aria-selected']==='true';if(selector==='.source-line[data-line]')return this.classes.has('source-line')&&this.dataset.line!==undefined;if(selector==='.source-line.current')return this.classes.has('source-line')&&this.classes.has('current');if(selector.startsWith('.'))return this.classes.has(selector.slice(1));return this.tagName===selector;}
   querySelectorAll(selector){return this.children.flatMap(node=>[...(node.matches?.(selector)?[node]:[]),...(node.querySelectorAll?.(selector)??[])]);}querySelector(selector){return this.querySelectorAll(selector)[0]??null;}closest(selector){return this.matches(selector)?this:this.parent?.closest(selector);}
 }
 function sourceReviewDOM() {
   const document={activeElement:null,querySelector:()=>({hidden:false})};
   document.createElement=tag=>new SourceReviewNode(tag,document);
   document.createTextNode=text=>{const node=new SourceReviewNode('text',document);node.textContent=text;return node;};
-  const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree','sourcePosition','deobfuscationReport','deobfuscationIntrinsics'].map(key=>[key,new SourceReviewNode('div',document)]));
+  const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree','sourcePosition','sourceViewKind','sourceWasm','sourcePretty','sourceDeob','sourceHookPivot','deobfuscationReport','deobfuscationIntrinsics'].map(key=>[key,new SourceReviewNode('div',document)]));
   return {document,elements};
+}
+{
+  const original='\ufeff'+Array.from({length:20001},(_,line)=>line===20000?'const lateNeedle="😀";':`// row ${line}`).join('\r\n');
+  const artifact=await ownedArtifact('20001',original);Object.assign(artifact,{content:original,sourceTextLength:original.length});
+  const {document,elements}=sourceReviewDOM();
+  elements.sourceSearch=document.createElement('input');elements.sourceSearch.value='';elements.sourceSearchStatus=document.createElement('p');
+  const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'20001'},document,elements,sourceOccurrenceRange:()=>null,
+    functions:['applySourceSearch'],renderSources(){}});
+  ctx.api.renderSourceContent(ctx.api.selectedSource());elements.sourceSearch.value='lateNeedle';ctx.api.applySourceSearch();
+  assert.equal(ctx.state.sourceEditorView.window.line,20000);assert.match(elements.sourcePosition.textContent,/1 of 1 matches.*Line 20001, Column 7/);
+  assert.equal(elements.sourceCode.querySelector('[data-local-line="20000"]').querySelector('.source-text').textContent,'const lateNeedle="😀";');
+  assert(elements.sourceCode.children.length<=1000);
+  elements.sourceSearch.value='no-match';ctx.api.applySourceSearch();assert.match(elements.sourcePosition.textContent,/complete retained text/);
+  artifact.contentTruncated=true;ctx.api.renderSourceContent(ctx.api.selectedSource());assert.match(elements.sourcePosition.textContent,/coverage is incomplete/);
+  artifact.contentTruncated=false;artifact.contentLossy=true;ctx.api.renderSourceContent(ctx.api.selectedSource());assert.match(elements.sourceSearchStatus.textContent,/Lossy/);
+  artifact.contentLossy=false;artifact.content=original+'\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';artifact.contentTruncated=true;
+  ctx.api.renderSourceContent(ctx.api.selectedSource());elements.sourceSearch.value='Viewer preview';ctx.api.applySourceSearch();assert.match(elements.sourcePosition.textContent,/0 matches/);
+  assert.equal(ctx.state.sourceEditorView.content,original,'Presentation notices never enter Find or mappings');
+  elements.sourceSearch.value='';ctx.api.applySourceSearch();assert(!elements.sourcePosition.textContent.includes('matches'));
+  ctx.api.moveSourceWindow(999,3);assert.equal(document.activeElement.dataset.localLine,'999');
+  ctx.api.moveSourceWindow(1000,3);assert.equal(document.activeElement.dataset.localLine,'1000');
+  ctx.state.selectedArtifactId='missing';elements.sourceSearch.value='lateNeedle';ctx.api.applySourceSearch();assert.match(elements.sourcePosition.textContent,/nothing searched/);
+  sourceOwnershipReceipt.push({test:'retained_find_20001_line_coverage_notice_exclusion_stale_owner_and_window_boundaries',status:'passed'});
+}
+{
+  const text='/*'+'a'.repeat(100000)+'lateColumnNeedle*/\n'+'\n'.repeat(2000);
+  const script={script_id:'window-live',target_id:'page-window',hash:'opaque-window',language:'JavaScript',length:text.length,start_line:40,start_column:11,url:'https://fixture.invalid/window-live.js'};
+  const {document,elements}=sourceReviewDOM();elements.sourceSearch=document.createElement('input');elements.sourceSearch.value='';
+  let ctx;ctx=ownedContext({state:{debuggerSession:{target:{id:'page-window'},state:'paused',scripts:[script]},selectedScriptId:script.script_id},document,elements,
+    sourceOccurrenceRange:()=>null,functions:['applySourceSearch'],renderSources(){if(ctx)ctx.api.renderSourceContent(ctx.api.selectedSource());},fetch:async()=>{throw Error('An owned window may not fetch or execute');}});
+  ctx.state.liveScriptContent.set(script.script_id,{identity:ctx.api.liveScriptIdentity(script),content:text,sourceTextLength:text.length,contentTruncated:false});
+  ctx.api.selectScript(script.script_id,40,100013);
+  assert.equal(ctx.state.sourceEditorView.window.column,100002);assert.equal(ctx.state.sourceEditorView.window.line,0);
+  const row=elements.sourceCode.querySelector('[data-local-line="0"]');assert(row.querySelector('.source-text').textContent.includes('lateColumnNeedle'));assert(row.querySelector('.source-text').textContent.length<=16385);
+  let scrolled=0;row.scrollIntoView=()=>{scrolled++;};ctx.api.selectScript(script.script_id,40,100013);assert.equal(scrolled,1,'Repeated explicit frame selection must reveal its current window');
+  ctx.api.moveSourceWindow(1500);ctx.api.selectScript(script.script_id,40,100013);assert.equal(ctx.state.sourceEditorView.window.line,0);
+  elements.sourceSearch.value='lateColumnNeedle';ctx.api.applySourceSearch();assert.equal(ctx.state.sourceCursor.column,100013);assert(elements.sourceCode.querySelector('[data-local-line="0"]').classList.contains('cursor'));
+  const stable=ctx.state.sourceEditorView;ctx.api.renderSourceContent(ctx.api.selectedSource());assert.equal(ctx.state.sourceEditorView,stable);
+  assert.equal(ctx.api.setSourceCursor(ctx.api.selectedSource(),40,3),false,'Inline runtime columns before start_column cannot select source text');
+  ctx.api.selectScript(script.script_id,90000,90000);assert.match(elements.sourcePosition.textContent,/outside retained text/);assert.equal(ctx.api.setSourceCursor(ctx.api.selectedSource(),90000,90000),false);
+  sourceOwnershipReceipt.push({test:'minified_inline_live_columns_repeated_pause_search_cursor_stable_refresh_and_unretained_location',status:'passed'});
 }
 {
   const original='const a=1; const b=2;',artifact=await ownedArtifact('map-complete',original);
@@ -2418,8 +2462,9 @@ function ownedDerivedPayload(source, original, replacements) {
     runInNewContext(sourceProductionFunction('revealOriginalLine'),ctx.sandbox);
     await ctx.api.loadScriptContent(script);await ctx.api.loadDeobfuscation(ctx.api.selectedSource());const good=ctx.api.selectedSource().deobfuscation;
     await ctx.api.revealDeobfuscationChange(ctx.api.selectedSource(),good.inspectorView);
-    if(line>=20000){assert.match(good.inspectorView.notice,/20,000/);assert.equal(ctx.state.sourceDeobfuscated,true);assert.equal(elements.sourcePosition.textContent,'Existing source position');}
-    else {assert.equal(document.activeElement,row);assert.equal(elements.sourceSidebar.hidden,true);assert.match(elements.sourcePosition.textContent,new RegExp(`Line ${5+line}, Column ${13+(line===0?2:0)}`));}
+    assert.equal(ctx.state.sourceDeobfuscated,false);assert.equal(document.activeElement.dataset.line,String(5+line));
+    assert.equal(elements.sourceSidebar.hidden,true);assert.match(elements.sourcePosition.textContent,new RegExp(`Line ${5+line}, Column ${13+(line===0?2:0)}`));
+    assert(elements.sourceCode.children.length<=1000);assert.equal(elements.sourceDeob.getAttribute('aria-pressed'),'false');
     ctx.state.debuggerSession.scripts=[{...script,target_id:'replacement-page'}];const before=document.activeElement;await ctx.api.revealDeobfuscationChange(script,good.inspectorView);assert.equal(document.activeElement,before);
   }
   const legacyOriginal='const x=1+2;',artifact=await ownedArtifact('deob-legacy',legacyOriginal);artifact.content=legacyOriginal;
@@ -5982,6 +6027,7 @@ async function checkTrafficBrowser() {
       assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Evidence QA");
     } else if (sourceFactsBrowser) {
       validation = await checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:factsFixture,recordSourceCheck:entry=>{(diagnostics.source_ownership_checks??=[]).push(entry);}});
+      validation.sourceWindow=await checkSourceWindowInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:factsFixture});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Sources QA");
     } else {
     await evaluate(`window.fixtureRequests = Array.from({length:520}, (_,i) => ({id:'qa-'+i,path:'https://fixture.invalid/api/item-'+i+'?view=compact',method:i%3?'GET':'POST',status:i%11===0?'pending':200,time:i%11===0?'pending':i/2,type:'xhr',origin:'demo',tabId:'qa-tab',hostOnly:false,operation:'synthetic_qa',events:[],exchange:{request:{state:'available',mime:'application/json',text:'{"id":"qa","value":"first"}',headers:[['content-type','application/json']]},response:{state:i%11===0?'loading':'available',mime:'application/json',text:i%11===0?'':'{"result":"first"}',headers:[['content-type','application/json'],['x-fixture','one']]}}})); state.requests=fixtureRequests; state.sessionMode='demo'; renderRequests(); document.querySelector('#network-notice').textContent='Synthetic browser QA fixture · no live capture';`);

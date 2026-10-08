@@ -2459,7 +2459,7 @@
         .vm-detail-actions { width: 100%; justify-content: flex-start; margin-left: 0; }
         .statusbar span:not(:first-child):not(.local-only) { display: none; }
         #screen-sources:not([hidden]) { grid-template-columns: 148px minmax(260px, 1fr); }
-        .source-search { display: none; }
+        .source-search { width: 120px; }
         .source-tree-row { padding-left: calc(6px + var(--source-depth, 0) * 9px); }
       }
       @media (max-width: 1100px) {
@@ -3664,3 +3664,13 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .notebook-trigger-label { display: none; }
   .notebook-trigger-icon { display: block; }
 }
+
+/* Bounded retained-source excerpts. Notices are separate from evidence text. */
+.source-window { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; flex-basis: 100%; min-width: 0; font: 11px var(--mono); color: var(--muted); }
+.source-window[hidden] { display: none; }
+.source-window label { display: flex; align-items: center; gap: 4px; }
+.source-window input { width: 68px; min-width: 0; box-sizing: border-box; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 3px; font: inherit; }
+.source-search-status { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
+.source-excerpt-notice { color: var(--amber); font: 10px var(--mono); user-select: none; }
+.source-window :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 480px) { .source-window input { width: 56px; } #source-window-label { flex-basis: 100%; } }

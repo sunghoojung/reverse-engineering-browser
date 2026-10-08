@@ -166,8 +166,10 @@ function sourceFactsPosition(bytes, range) {
   const decode = value => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(value);
   const prefix = decode(bytes.subarray(0, range.start));
   const text = decode(bytes.subarray(range.start, range.end));
-  return {line: prefix.split('\n').length - 1, column: prefix.length - prefix.lastIndexOf('\n') - 1,
-    length: text.split('\n')[0].length, multiline: text.includes('\n')};
+  let line = 0, start = 0;
+  for (let next = prefix.indexOf('\n'); next >= 0; next = prefix.indexOf('\n', start)) {line++; start = next + 1;}
+  const newline = text.indexOf('\n');
+  return {line, column: prefix.length - start, length: newline < 0 ? text.length : newline, multiline: newline >= 0};
 }
 
 function createSourceFactsController({getSource, onChange, onNavigate, protocol,

@@ -252,7 +252,7 @@
               <div class="source-editor-toolbar">
                 <span id="source-location" class="source-location">Select a captured artifact</span>
                 <button id="source-quick-open" class="source-tool" type="button" aria-label="Open file" title="Open file (⌘P)">⌘P</button>
-                <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" title="Find text; Enter for next, Shift+Enter for previous (first 1000 matches)" /></label>
+                <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
                 <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
@@ -261,6 +261,15 @@
                 <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
                 <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
                 <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle debugger logs" title="Toggle debugger logs (Escape)">Logs</button>
+                <form id="source-window" class="source-window" aria-label="Source display window" hidden>
+                  <span id="source-window-label"></span>
+                  <button id="source-window-previous" class="source-tool" type="button" aria-label="Previous source lines">Previous</button>
+                  <button id="source-window-next" class="source-tool" type="button" aria-label="Next source lines">Next</button>
+                  <label>Line <input id="source-window-line" type="number" min="1" step="1" value="1" aria-label="Local source line" /></label>
+                  <label>Column <input id="source-window-column" type="number" min="1" step="1" value="1" aria-label="Local source column" /></label>
+                  <button class="source-tool" type="submit">Go</button>
+                </form>
+                <p id="source-search-status" class="source-search-status" role="status"></p>
               </div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>

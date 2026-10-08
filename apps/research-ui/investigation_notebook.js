@@ -7,9 +7,10 @@
   const exact = (value, fields) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field));
   const integer = (value, min = 0) => Number.isSafeInteger(value) && value >= min;
-  const text = (value, max, empty = true) => typeof value === 'string' && (empty || value.trim().length > 0) &&
-    value.length <= max && encoder.encode(value).length <= max && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(value) &&
+  const utf8Text = (value, max) => typeof value === 'string' && value.length <= max && encoder.encode(value).length <= max &&
     new TextDecoder('utf-8', {fatal: true}).decode(encoder.encode(value)) === value;
+  const text = (value, max, empty = true) => utf8Text(value, max) && (empty || value.trim().length > 0) &&
+    !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(value);
   const decimal = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= 18446744073709551615n;
   const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
   const empty = () => ({document_kind: KIND, contract_version: 1, scope: 'local-analyst-library', next_pin_id: 1, pins: []});
@@ -17,7 +18,9 @@
   // Reject duplicate (including escaped) object members before JSON.parse. All
   // notebook/library input is bounded before this nonrecursive-depth scan.
   function strictParse(source, maximum = FILE_MAX) {
-    if (!text(source, maximum)) throw new Error('The local document is invalid UTF-8 text or exceeds its byte limit.');
+    // JSON permits DEL inside strings. Validate notebook text separately so
+    // unrelated Analyst scratchpads keep their existing content contract.
+    if (!utf8Text(source, maximum)) throw new Error('The local document is invalid UTF-8 text or exceeds its byte limit.');
     let at = 0, nodes = 0;
     const whitespace = () => {while (/\s/.test(source[at] ?? '') && at < source.length) at++;};
     const string = () => {
@@ -346,7 +349,7 @@
       opener = document.activeElement ?? button; change(); const interaction = interactionRevision; dialog.showModal(); render();
       if (!supported) {close.focus(); return;}
       if (dirty) {say('Your unsaved pin draft is preserved. Save or cancel its edits to reload.'); label.focus(); return;}
-      const settled = await reload(); if (settled === revision && interaction === interactionRevision && dialog.open) (candidates(store.model.library).length ? select : newName).focus({preventScroll: true});
+      const settled = await reload(); if (settled === revision && interaction === interactionRevision && dialog.open) (candidates(store.model.library).length ? select : newName).focus();
     }
     function hide() {
       change(); store.cancel(); dialog.close(); opener?.focus({preventScroll: true});
@@ -405,18 +408,26 @@
       change(); const owner = revision, interaction = interactionRevision;
       if (existing < 0) {
         verifying = true; localNotice = 'Rechecking the new pin before saving…'; render();
-        const status = await resolve(pin.reference, getContext());
-        if (revision !== owner) return; verifying = false;
-        if (!stillMatches(pin.reference, status, getContext)) {say(status.status === 'ready' ? 'The new pin’s evidence changed before saving.' : status.message); return;}
+        try {
+          const status = await resolve(pin.reference, getContext);
+          if (revision !== owner) return;
+          if (!stillMatches(pin.reference, status, getContext)) {say(status.status === 'ready' ? 'The new pin’s evidence changed before saving.' : status.message); return;}
+        } catch {
+          if (revision === owner) localNotice = 'New pin verification failed. Your draft is preserved; review the retained evidence and retry.';
+          return;
+        } finally {if (revision === owner) {verifying = false; render();}}
       }
       selectedId = pin.id;
-      if (await persist({...projection(file), content: JSON.stringify(candidate)}, 'Pin and note saved locally.') && interaction === interactionRevision) open.focus({preventScroll: true});
+      if (await persist({...projection(file), content: JSON.stringify(candidate)}, 'Pin and note saved locally.') && interaction === interactionRevision) open.focus();
     });
     open.addEventListener('click', async () => {
       if (open.disabled) return; change(); const owner = revision, ref = structuredClone(draft.reference); verifying = true; assurance.textContent = 'Checking exact retained evidence…'; render();
-      const result = await resolve(ref, getContext());
+      let result;
+      try {result = await resolve(ref, getContext);}
+      catch {result = {status: 'unavailable', message: 'This saved reference could not be checked. Nothing was opened; retry after reviewing retained evidence.'};}
+      finally {if (revision === owner) {verifying = false; render();}}
       if (revision !== owner || !dialog.open) return;
-      verifying = false; assurance.textContent = result.message; assurance.dataset.status = result.status; render();
+      assurance.textContent = result.message; assurance.dataset.status = result.status; render();
       if (result.status !== 'ready') return;
       // Recheck synchronously after the async digest result reaches this owner.
       if (!stillMatches(ref, result, getContext)) {assurance.textContent = 'The exact observation changed before opening. Nothing was substituted.'; assurance.dataset.status = 'changed'; return;}

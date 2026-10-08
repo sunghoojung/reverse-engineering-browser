@@ -5692,6 +5692,9 @@ async function checkTrafficBrowser() {
     if (factsFixture && await factsFixture.handle(request, response)) return;
     if (consoleFixture && await consoleFixture.handle(request, response)) return;
     if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
+    // Comparison cases install authored retained state. Normal polling stays
+    // active but receives unchanged snapshots instead of the offline fixture.
+    if (trafficApiMode === "retained" && request.method === "GET" && ["/api/events", "/api/artifacts", "/api/debugger"].includes(path)) {response.writeHead(304); response.end(); return;}
     if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
     await serveFixtureAsset(request, response);
@@ -6070,6 +6073,10 @@ async function checkTrafficBrowser() {
     await evaluate("state.requests=[]; renderRequests(); renderInspector()");
     assert.match(await evaluate("elements.requestRows.textContent"), /No developer evidence/);
     await screenshot("requests-empty");
+    trafficApiMode = "retained";
+    // Settle any prior offline response before giving the authored state to the
+    // comparison fixture. Do not stop or replace production polling handlers.
+    await evaluate("(async()=>{const started=performance.now();while(state.refreshing||state.debuggerRefreshing){if(performance.now()-started>5000)throw Error('Prior Traffic refresh did not settle');await new Promise(resolve=>setTimeout(resolve,20));}})()");
     const capturedComparison = await checkCapturedComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,emptyDebugger:JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'))});
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
     validation = {capturedComparison,status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};

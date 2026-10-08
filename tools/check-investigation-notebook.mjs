@@ -49,6 +49,11 @@ export async function checkNotebookCore(root) {
   bounded.pins.at(-1).note += 'x'; assert.equal(api.validate(bounded), false);
   assert.throws(() => api.strictParse('{"pins":[],"p\\u0069ns":[]}'), /duplicate/);
   assert.throws(() => api.strictParse('['.repeat(18)+'0'+']'.repeat(18)), /structure/);
+  assert.equal(api.strictParse('{"content":"retained\x7ftext"}').content, 'retained\x7ftext');
+  assert.throws(() => api.strictParse('{"content":"bad\x01text"}'), /./);
+  assert.throws(() => api.strictParse('{"content":"\ud800"}'), /UTF-8/);
+  assert.equal(api.validate({...doc, pins: [{...doc.pins[0], name: 'bad\x7fname'}]}), false);
+  assert.equal(api.validate({...doc, pins: [{...doc.pins[0], note: 'bad\x7fnote'}]}), false);
   assert.equal(api.readNotebook({kind: 'analyst-script', language: 'javascript', content: JSON.stringify(doc)}), null);
   assert.equal(api.readNotebook({kind: 'scratchpad', language: 'json', content: '{"broken":'}), null);
   let context = {events: [baselineEvent()], artifacts: [artifact]}; const getContext = () => context;
@@ -72,6 +77,9 @@ export async function checkNotebookCore(root) {
   const delayed = await notebookModels(root, {crypto: {subtle: {digest: async (...args) => {await new Promise(resolve => {releaseHash = resolve;}); return webcrypto.subtle.digest(...args);}}}});
   context.events = [event]; const pinning = delayed.api.eventReference(event, getContext); context.events = [{...event, status_code: 201}]; releaseHash(); await assert.rejects(pinning, /changed/);
   let library = fixtureLibrary(empty), mode = 'ready', pending = [], calls = [];
+  library.files[1].content += '\x7f'; library.files[1].content_bytes++;
+  assert(validateLibrary(library), 'Existing Analyst scratchpads permit DEL content');
+  assert(JSON.stringify(library).includes('\x7f'), 'The normal JSON encoder retains legal DEL text');
   const initialFiles = copy(library.files);
   const fetcher = async (url, options = {}) => {
     calls.push({url, method: options.method ?? 'GET'});
@@ -124,6 +132,7 @@ export async function checkNotebookCore(root) {
   assert.equal(await slowBody.load(), null); assert.equal(slowBody.model.busy, false, 'Body deadline does not wait for a stalled producer cleanup');
   for (const path of ['apps/origin-trace-backend/src/app.rs', 'apps/research-ui/macos/OriginTraceApp.swift', 'scripts/build-research-app.sh', 'apps/research-ui/index.html'])
     assert((await readFile(join(root, path), 'utf8')).includes('investigation_notebook.js'), path);
+  await checkNotebookController(root);
   console.log('PASS notebook closed document, full scoped fingerprints, unknown extension refusal, async receiving guard, private library preservation, save receipts, cancellation/uncertainty, conflict and deadline (not rendered QA)');
 }
 
@@ -329,4 +338,50 @@ export async function checkNotebookPersistence(root, binary) {
 if (process.argv[2] === '--persistence') {
   assert(process.argv[3], 'Pass the built origin-trace-backend executable.');
   await checkNotebookPersistence(process.argv[4] || new URL('..', import.meta.url).pathname, process.argv[3]);
+}
+
+// Exercise the actual mounted editor handler as well as its pure helpers. This
+// does not claim geometry, native input, focus visibility or browser acceptance.
+export async function checkNotebookController(root) {
+  const document = {activeElement: null};
+  class Node {
+    constructor(tag) {this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.listeners = new Map(); this.attributes = {}; this.value = ''; this.hidden = false; this.disabled = false; this.open = false; this.scrollTop = 0; this.className = ''; this.classList = {add: name => {this.className += ` ${name}`;}};}
+    append(...nodes) {for (const node of nodes) {node.parentElement = this; this.children.push(node);}}
+    replaceChildren(...nodes) {this.children = []; this.append(...nodes);}
+    setAttribute(key, value) {this.attributes[key] = value;}
+    addEventListener(type, fn) {this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);}
+    async fire(type) {for (const fn of this.listeners.get(type) ?? []) await fn({type, target: this, preventDefault() {}, stopPropagation() {}});}
+    contains(node) {return node === this || this.children.some(child => child.contains(node));}
+    querySelector(selector) {return this.querySelectorAll(selector)[0] ?? null;}
+    querySelectorAll(selector) {const match = node => selector.startsWith('#') ? node.id === selector.slice(1) : selector.startsWith('.') ? node.className.split(/\s+/).includes(selector.slice(1)) : selector.startsWith('[data-pin-id=') ? node.dataset.pinId === selector.match(/"([^"]+)"/)[1] : false; const found = []; const visit = node => {for (const child of node.children) {if (match(child)) found.push(child); visit(child);}}; visit(this); return found;}
+    focus() {if (!this.disabled && !this.hidden) document.activeElement = this;}
+    select() {}
+    showModal() {this.open = true; this.querySelector('#notebook-close')?.focus();}
+    close() {this.open = false;}
+  }
+  document.body = new Node('body'); document.createElement = tag => new Node(tag);
+  const button = new Node('button'); document.body.append(button); button.focus();
+  const {api, empty, validateLibrary} = await notebookModels(root, {document, window: {addEventListener() {}}, location: {protocol: 'http:'}});
+  let library = fixtureLibrary(empty), failContext = false, posts = 0, opened = 0;
+  const original = copy(library.files), artifact = {session_id: '11', artifact_id: '7', sha256: 'a'.repeat(64), byte_size: 90, kind: 'javascript'};
+  const fetcher = async (_url, options = {}) => {if (options.method === 'POST') {posts++; library = replaceLibrary(library, JSON.parse(options.body));} return Response.json(library);};
+  const ui = api.mount({button, protocol: 'http:', validateLibrary, fetcher,
+    getContext: () => {if (failContext) throw new Error('Authored unavailable retained window'); return {artifacts: [artifact], events: [baselineEvent()]};},
+    getSelection: () => ({kind: 'artifact', artifact, range: {start: 1, end: 4}}), openReference: () => {opened++; return true;}});
+  const node = id => document.body.querySelector(`#notebook-${id}`);
+  await ui.show(); node('new-name').value = 'Mounted case'; await document.body.querySelector('.notebook-create').fire('submit');
+  assert.equal(library.files.length, 3); await node('add').fire('click');
+  node('pin-name').value = 'Mounted source'; await node('pin-name').fire('input'); node('pin-note').value = 'Authored note'; await node('pin-note').fire('input');
+  await node('editor').fire('submit');
+  assert.equal(JSON.parse(library.files[2].content).pins.length, 1, 'Mounted Save must call its retained-context function, not pass its result as a function');
+  assert(node('cancel').hidden, 'Successful verification releases its busy state');
+  await node('open').fire('click'); assert.equal(opened, 1); assert.equal(ui.dialog.open, false);
+  await ui.show(); await node('add').fire('click');
+  failContext = true; const before = posts; await node('editor').fire('submit');
+  assert.equal(posts, before, 'Failed new-pin verification makes no persistence request');
+  assert(node('cancel').hidden, 'Rejected verification releases busy state and preserves the editor'); assert.equal(node('save').disabled, false);
+  failContext = false; await node('editor').fire('submit'); assert.equal(JSON.parse(library.files[2].content).pins.length, 2);
+  await node('delete-pin').fire('click'); await node('delete-pin').fire('click'); assert.equal(JSON.parse(library.files[2].content).pins.length, 1);
+  await node('delete-book').fire('click'); await node('delete-book').fire('click'); assert.deepEqual(library.files, original);
+  console.log('PASS mounted Notebook create/pin/Save/open/delete handlers, failed verification recovery and unrelated-file preservation (DOM/controller fixture; not rendered QA)');
 }

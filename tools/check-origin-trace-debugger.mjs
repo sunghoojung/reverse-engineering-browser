@@ -21,7 +21,7 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
 import {checkInvestigationCore, investigationFixture, checkInvestigationInteractions} from "./check-investigation-navigation.mjs";
-import {checkAnalystController,checkAnalystInteractions} from './check-analyst-editor.mjs';
+import {checkAnalystController,checkAnalystInteractions,reloadInvestigationDocument} from './check-analyst-editor.mjs';
 import {checkNotebookCore, notebookFixture, checkNotebookInteractions} from './check-investigation-notebook.mjs';
 import {sourcesHistoryFixture, checkSourcesHistoryFixture, checkSourcesHistoryInteractions} from "./check-sources-history.mjs";
 const sourcesHistoryBrowser = process.argv[2] === "--sources-history-ui-browser";
@@ -5848,6 +5848,7 @@ async function checkTrafficBrowser() {
       assert.match(prompt.message, /Replace the current Decoder input and chain/);
       await command("Page.handleJavaScriptDialog", {accept});
     };
+    const reloadInvestigationPage = waitForDocument => reloadInvestigationDocument(evaluate, () => command('Page.reload'), waitForDocument);
     const beforeUnload = async accept => {
       const start = Date.now();
       while (!browserDialogs.length && Date.now() - start < 5000) await new Promise(resolve => setTimeout(resolve, 25));
@@ -5954,8 +5955,8 @@ async function checkTrafficBrowser() {
       validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value),navigatePolicy});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Canvas QA");
     } else if (investigationBrowser) {
-      const notebookValidation = await checkNotebookInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:()=>command('Page.reload')});
-      const analystValidation = await checkAnalystInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:()=>command('Page.reload'),beforeUnload});
+      const notebookValidation = await checkNotebookInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:reloadInvestigationPage});
+      const analystValidation = await checkAnalystInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:reloadInvestigationPage,beforeUnload});
       validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});
       validation.notebook = notebookValidation;
       validation.analyst = analystValidation;

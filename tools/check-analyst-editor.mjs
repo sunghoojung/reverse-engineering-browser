@@ -206,7 +206,32 @@ export async function checkAnalystController(root) {
   assert.equal(await f.ui.saveAnalystFile(),false,'Original delayed write makes explicit retry conflict');
   assert.equal(f.server.generation,2,'No duplicate commit');
   assert.equal(await f.ui.refreshLocalAnalyst(true),false,'Different saved base stays explicit until discarded');
+  let reloads=0, reads=0;
+  await reloadInvestigationDocument(async expression=>{
+    if(expression==='performance.timeOrigin')return 100;
+    reads++;
+    return runInNewContext(expression,{performance:{timeOrigin:reads<3?100:200},document:{readyState:reads===3?'loading':'complete'},renderRequests(){}});
+  },async()=>{reloads++;});
+  assert.equal(reloads,1);assert.equal(reads,4,'Old-page readiness and incomplete new documents cannot finish reload');
+  let evaluated=0;await reloadInvestigationDocument(async()=>{evaluated++;return 100;},async()=>{reloads++;},false);
+  assert.equal(evaluated,1,'The intentional beforeunload cancellation path does not wait for a replacement document');
   console.log('PASS Analyst dirty same-file/navigation/folder/unload guards, focus, exact receipts, uncertain reconciliation, conflict bases, stale replies, deadlines and duplicate-write suppression (controller fixture; not rendered QA)');
+}
+
+// Page.reload acknowledges dispatch before document replacement. A readiness
+// predicate on the old application is insufficient; bind it to a new document.
+export async function reloadInvestigationDocument(evaluate, reload, waitForDocument = true) {
+  const previous = await evaluate('performance.timeOrigin');
+  await reload();
+  if (!waitForDocument) return;
+  const start = Date.now();
+  while (Date.now() - start < 7000) {
+    try {
+      if (await evaluate(`performance.timeOrigin !== ${JSON.stringify(previous)} && document.readyState === 'complete' && typeof renderRequests === 'function'`)) return;
+    } catch { /* The old execution context may disappear during replacement. */ }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail('The reloaded application did not reach a new, complete document');
 }
 
 export async function checkAnalystInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture,reloadPage,beforeUnload}) {
@@ -241,7 +266,7 @@ export async function checkAnalystInteractions({evaluate,viewport,click,key,whee
   await screenshot('analyst-wide-dirty-guard');
   await click('[data-screen="sources"]');await enter();assert(await evaluate('state.analystDraftDirty'));assert.match(await evaluate('analystElements.content.value'),/unsaved conclusion/);
   await hit('#analyst-reload');await until('!state.localAnalystRefreshing');assert.match(await evaluate('analystElements.content.value'),/unsaved conclusion/);
-  const reloading=reloadPage();await beforeUnload(false);await reloading;
+  const reloading=reloadPage(false);await beforeUnload(false);await reloading;
   assert(await evaluate('state.analystDraftDirty'));assert.match(await evaluate('analystElements.content.value'),/unsaved conclusion/);
   receipts.push({check:'Native browser reload cancelled; dirty content retained',generation:f.library.generation});
 

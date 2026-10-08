@@ -50,7 +50,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   NativeProbeTransport();
   ~NativeProbeTransport() override;
 
-  static void Emit(const NativeProbeEvent& event) noexcept;
+  static bool Emit(const NativeProbeEvent& event, std::uint64_t config_generation) noexcept;
   static void EmitArtifact(NativeArtifactKind kind,
                            NativeArtifactCaptureOrigin capture_origin,
                            std::uint64_t creator_event_id,
@@ -58,7 +58,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                            std::uint64_t frame_id,
                            std::string_view source_url,
                            std::span<const std::uint8_t> content) noexcept;
-  void EmitEvent(const NativeProbeEvent& event) noexcept;
+  bool EmitEvent(const NativeProbeEvent& event, std::uint64_t config_generation) noexcept;
   void EmitGeneratedArtifact(NativeArtifactKind kind,
                              NativeArtifactCaptureOrigin capture_origin,
                              std::uint64_t creator_event_id,

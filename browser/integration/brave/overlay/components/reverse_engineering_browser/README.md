@@ -105,5 +105,13 @@ artifact ID instead of being copied through the renderer queue.
 
 Renderer code never writes files or sockets directly.
 
+The dedicated-worker source foundation uses a separate, dormant process-wide
+pool: four 2 MiB slots for one explicitly selected worker, allocated only on the
+control path. Native compile hooks have no production activation caller yet;
+CDP extraction remains unchanged. See the
+[worker-source contract](../../../../../../protocol/native-worker-source-v1.md)
+for encoding, sensitive approval, exact identity, loss reporting, unsupported
+shared/service workers, and the missing browser/IPC/API acceptance gates.
+
 The current event envelope does not yet carry a trustworthy origin identity,
 so origin allowlisting is intentionally not inferred from bounded payload text.

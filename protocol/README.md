@@ -13,6 +13,17 @@ lexical binding/effect analysis, original-byte ranges and explicit unknown cover
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,
 its disposable browser ownership, wire layouts, and limits.
 
+[Native Worker Source v1](native-worker-source-v1.md) describes the dormant
+dedicated-worker source queue, pinned hooks, and blockers to production activation.
+
+[Native Worker Transfer v1](native-worker-transfer-v1.md) describes the dormant
+browser-owned authority, acknowledged bounded metadata transfer, and unbound Mojo
+contract.
+
+[Native proxy containers v1](native-proxy-containers-v1.md) defines the
+preparation-only native policy and group ownership contract. Browser routing
+and UI activation remain unavailable pending the documented browser gates.
+
 ## Two representations
 
 1. Native hot paths use the fixed 320-byte C++ `EventRecord` in

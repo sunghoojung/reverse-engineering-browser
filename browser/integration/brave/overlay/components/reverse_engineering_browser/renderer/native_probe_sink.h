@@ -17,6 +17,12 @@
 
 namespace reb {
 
+// True means admitted to the renderer ring, not delivered to the browser,
+// broker, or evidence store. The generation identifies the captured policy.
+// Emitters must remain non-blocking and non-throwing.
+using NativeRendererProbeEmitter = bool (*)(const NativeProbeEvent& event,
+                                            std::uint64_t config_generation) noexcept;
+
 using NativeProbeFrameIdProvider = std::uint64_t (*)() noexcept;
 
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
@@ -27,13 +33,18 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   NativeProbeSink& operator=(const NativeProbeSink&) = delete;
 
   // Must be called from one serialized control sequence.
-  void SetEmitters(NativeProbeEmitter emitter,
+  void SetEmitters(NativeRendererProbeEmitter emitter,
                    NativeGeneratedArtifactEmitter artifact_emitter,
                    std::uint64_t session_id,
                    std::uint64_t category_mask,
                    std::uint64_t expires_at_monotonic_ns,
                    bool capture_canvas_images = false,
                    NativeProbeFrameIdProvider frame_id_provider = nullptr) noexcept;
+  // Called after acquiring the transport queue pointer. A successful check
+  // authorizes an in-flight insertion into that retained mapping; Disable does
+  // not wait for producers already past this admission check.
+  [[nodiscard]] bool CanAdmitEvent(const NativeProbeEvent& event,
+                                   std::uint64_t config_generation) const noexcept;
   [[nodiscard]] bool IsArtifactCaptureEnabled() const noexcept;
   [[nodiscard]] bool IsCanvasImageCaptureEnabled() const noexcept;
   void CaptureGeneratedArtifact(NativeArtifactKind kind,
@@ -54,12 +65,15 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   }
   void RecordApiCall(NativeProbeCategory category, std::string_view operation) noexcept;
   void RecordPropertyRead(NativeProbeCategory category, std::string_view operation) noexcept;
+  // Call-site state is an opaque, monotonically ordered configuration claim,
+  // not a session ID. Zero initializes an unobserved site. Failed admission
+  // leaves generation - 1 so stale callers cannot reclaim a newer generation.
   void RecordApiCallOnce(NativeProbeCategory category,
                          std::string_view operation,
-                         std::atomic<std::uint64_t>& observed_session_id) noexcept;
+                         std::atomic<std::uint64_t>& observed_generation) noexcept;
   void RecordPropertyReadOnce(NativeProbeCategory category,
                               std::string_view operation,
-                              std::atomic<std::uint64_t>& observed_session_id) noexcept;
+                              std::atomic<std::uint64_t>& observed_generation) noexcept;
   void RecordCanvasToDataUrl() noexcept;
   void RecordCanvasToDataUrl(std::string_view data_url) noexcept;
   void RecordWebAudioCall(std::string_view operation) noexcept;
@@ -74,9 +88,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       NativeProbeCategory category,
       NativeProbeType type,
       std::string_view operation,
-      std::atomic<std::uint64_t>* observed_session_id = nullptr) noexcept;
+      std::atomic<std::uint64_t>* observed_generation = nullptr) noexcept;
 
-  std::atomic<NativeProbeEmitter> emitter_{nullptr};
+  std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};
   std::atomic<std::uint64_t> next_sequence_{1};

@@ -12,6 +12,12 @@ browser/
 This keeps all project-owned work in one GitHub repository while avoiding a
 massive duplicate of Brave and Chromium.
 
+## Integrated build candidate
+
+For the combined native drafts and matched Origin Trace companion, use the
+[integrated build guide](../docs/development/integrated-brave-build.md). It records
+which foundations remain dormant and the gates required before release.
+
 ## Set up Brave
 
 Prepare the pinned Brave checkout:

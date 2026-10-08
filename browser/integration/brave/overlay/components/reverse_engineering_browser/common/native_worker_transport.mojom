@@ -1,0 +1,114 @@
+// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+
+module reb.mojom;
+
+// Dormant contract: no binder, receiver adapter or activation path exists yet.
+// No renderer-to-browser event method: the browser owns one outstanding request
+// and polls a fixed batch. Adapters must map fields, never memcpy native structs.
+struct WorkerToken {
+  uint64 high;
+  uint64 low;
+};
+struct WorkerObservationLease {
+  uint16 version = 1;
+  uint64 session_id;
+  uint64 generation;
+  uint64 expires_at_monotonic_ns;
+  uint64 issued_at_monotonic_ns;
+  uint64 observer_epoch;
+  uint64 document_generation;
+  WorkerToken browser_context;
+  WorkerToken storage_partition;
+  WorkerToken renderer_instance;
+  WorkerToken worker;
+  WorkerToken creator;
+  uint16 creator_kind;
+  WorkerToken selected_frame;
+  WorkerToken selected_document;
+  WorkerToken connection;
+};
+struct WorkerTransferEpoch {
+  WorkerToken connection;
+  uint64 session_id;
+  uint64 generation;
+};
+struct WorkerBatchAcknowledgment {
+  WorkerTransferEpoch epoch;
+  uint64 batch_id;
+};
+struct WorkerPullRequest {
+  WorkerTransferEpoch epoch;
+  uint64 request_id;
+  WorkerBatchAcknowledgment acknowledged;
+};
+struct WorkerObservationRecord {
+  uint32 magic;
+  uint16 version;
+  uint16 record_size;
+  uint16 operation;
+  uint16 worker_kind;
+  uint16 direction;
+  uint16 source_kind;
+  uint64 session_id;
+  uint64 generation;
+  uint64 sequence;
+  uint64 monotonic_time_ns;
+  WorkerToken browser_context;
+  WorkerToken renderer_instance;
+  WorkerToken worker;
+  WorkerToken creator;
+  uint64 native_trace_id;
+  uint64 dropped_before;
+  uint64 send_sequence;
+  int32 script_id;
+  uint16 creator_kind;
+  array<uint8, 18> reserved;
+};
+struct WorkerCaptureStats {
+  uint64 attempted;
+  uint64 dropped;
+  uint64 pending_gap;
+  uint64 retired;
+  uint64 stale;
+  uint64 contended;
+  uint32 queued;
+};
+struct WorkerTransferStats {
+  uint64 batches;
+  uint64 staged_records;
+  uint64 acknowledged_batches;
+  uint64 acknowledged_records;
+  uint64 retired_inflight_records;
+  uint64 invalid_controls;
+  uint64 timeouts;
+};
+struct WorkerObservationBatch {
+  uint16 version = 1;
+  uint16 count;
+  uint32 reserved;
+  WorkerTransferEpoch epoch;
+  uint64 batch_id;
+  uint64 acknowledgment_deadline_ns;
+  WorkerCaptureStats capture_stats;
+  bool worker_retired;
+  array<WorkerObservationRecord, 16> records;
+};
+struct WorkerTransferReply {
+  uint16 status;
+  WorkerTransferEpoch epoch;
+  uint64 request_id;
+  WorkerObservationBatch batch;
+  WorkerCaptureStats capture_stats;
+  WorkerTransferStats transfer_stats;
+};
+interface NativeWorkerMetadataClient {
+  Configure(WorkerObservationLease lease) => (uint16 status);
+  Pull(WorkerPullRequest request) => (WorkerTransferReply reply);
+  // Serialized with Configure/Pull. If a pull is outstanding during revocation,
+  // invalidate browser publication immediately and disconnect rather than post
+  // an additional unbounded control request. Disconnect retires sender storage.
+  Revoke(WorkerTransferEpoch epoch, uint16 reason) => (WorkerTransferReply reply);
+};

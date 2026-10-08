@@ -46,6 +46,11 @@ benchmark, and the backend and deobfuscator worker's Rust test suites. It also
 runs the source-facts HTTP/CLI integration test against the built Rust/Oxc worker;
 `CARGO_TARGET_DIR` is honored when locating that helper.
 
+`make native-proxy-policy-check` compiles and runs the preparation-only native
+proxy/container policy suite without Chromium, Cargo, sockets, or a browser.
+It is included in `make check` and `make sanitize`; it does not establish real
+browser routing or isolation. See the versioned native proxy-container contract.
+
 `origin-trace-backend` builds the Rust HTTP service, VM analyzer, and API CLI.
 `ui` starts that service after deterministic evidence generation. `backend-e2e`
 uses a disposable Chromium-compatible profile and synthetic localhost fixtures;

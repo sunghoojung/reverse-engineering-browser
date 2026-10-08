@@ -59,8 +59,11 @@ bool Inspectable(v8::Local<v8::Value> value) {
   if (!value->IsObject() || value->IsProxy())
     return false;
   const auto object = value.As<v8::Object>();
+  // V8 marks typed-array instance types as capable of embedder slots. That
+  // classification is not a host callback: native indexed descriptors remain
+  // safe. Actual interceptors and proxies stay excluded.
   return !object->HasNamedLookupInterceptor() && !object->HasIndexedLookupInterceptor() &&
-         !object->IsApiWrapper();
+         (!object->IsApiWrapper() || value->IsTypedArray());
 }
 // Descriptors are read only on ordinary objects. The descriptor itself is an
 // engine-created plain object, so reading its data fields cannot call a getter.
@@ -81,6 +84,16 @@ v8::Local<v8::Value> Data(v8::Isolate* isolate,
   if (!record->Get(context, Key(isolate, "value")).ToLocal(&result))
     return {};
   return result;
+}
+// V8 REPL evaluation returns an engine-owned promise whose fulfilled result
+// is a null-prototype record. Unwrap that record only for handles created by
+// REPL evaluation, never for a promise supplied by the page.
+v8::Local<v8::Value> ReplResult(v8::Isolate* isolate,
+                                v8::Local<v8::Context> context,
+                                v8::Local<v8::Value> value) {
+  if (!Inspectable(value) || !value.As<v8::Object>()->GetPrototype()->IsNull())
+    return {};
+  return Data(isolate, context, value.As<v8::Object>(), Key(isolate, ".repl_result"));
 }
 base::DictValue Failure(const char* text) {
   return base::DictValue().Set("status", "error").Set("text", text);
@@ -160,7 +173,9 @@ void NativeConsoleRuntime::Expire() {
   if (!retained && monitors_.empty())
     expiration_.Stop();
 }
-std::uint64_t NativeConsoleRuntime::Retain(v8::Isolate* isolate, v8::Local<v8::Value> value) {
+std::uint64_t NativeConsoleRuntime::Retain(v8::Isolate* isolate,
+                                           v8::Local<v8::Value> value,
+                                           bool repl) {
   if (next_handle_ == UINT64_MAX)
     return 0;
   if (!expiration_.IsRunning())
@@ -172,20 +187,27 @@ std::uint64_t NativeConsoleRuntime::Retain(v8::Isolate* isolate, v8::Local<v8::V
   slot.value.Reset(isolate, value);
   slot.id = next_handle_++;
   slot.expires_us = Now() + 60000000;
+  slot.repl = repl;
   return slot.id;
 }
-v8::Local<v8::Value> NativeConsoleRuntime::Lookup(v8::Isolate* isolate, const std::string& handle) {
+v8::Local<v8::Value> NativeConsoleRuntime::Lookup(v8::Isolate* isolate,
+                                                  const std::string& handle,
+                                                  bool* repl) {
   std::uint64_t id = 0;
   if (!base::StringToUint64(handle, &id) || !id || base::NumberToString(id) != handle)
     return {};
   for (auto& slot : slots_)
-    if (slot.id == id && slot.expires_us > Now())
+    if (slot.id == id && slot.expires_us > Now()) {
+      if (repl)
+        *repl = slot.repl;
       return slot.value.Get(isolate);
+    }
   return {};
 }
 base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
                                             v8::Local<v8::Context> context,
-                                            v8::Local<v8::Value> value) {
+                                            v8::Local<v8::Value> value,
+                                            bool repl) {
   base::DictValue result;
   std::string type = "object", text = "Object";
   bool truncated = false;
@@ -275,7 +297,7 @@ base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
           ">";
   }
   if (value->IsObject() || value->IsSymbol()) {
-    const auto handle = Retain(isolate, value);
+    const auto handle = Retain(isolate, value, repl);
     if (handle)
       result.Set("handle", base::NumberToString(handle));
   }
@@ -530,30 +552,47 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
                       .ToLocalChecked();
       v8::Local<v8::Value> value;
       bool success = false;
+      bool repl = false;
       if (base::TrimWhitespaceASCII(*source, base::TRIM_ALL) == "$_" ||
           base::TrimWhitespaceASCII(*source, base::TRIM_ALL) == "$_;") {
-        value = Lookup(isolate, base::NumberToString(last_));
+        value = Lookup(isolate, base::NumberToString(last_), &repl);
         success = !value.IsEmpty();
-      } else
+      } else {
         success = v8::debug::EvaluateNativeConsole(isolate, text,
                                                    v8::debug::NativeConsoleEvaluationMode::kRepl)
                       .ToLocal(&value);
+        repl = success && value->IsPromise();
+      }
+      if (success && repl) {
+        const auto promise = value.As<v8::Promise>();
+        promise->MarkAsHandled();
+        if (promise->State() == v8::Promise::kRejected) {
+          isolate->ThrowException(promise->Result());
+          success = false;
+        } else if (promise->State() == v8::Promise::kFulfilled) {
+          value = ReplResult(isolate, context, promise->Result());
+          success = !value.IsEmpty();
+          repl = false;
+        }
+      }
       if (success) {
-        last_ = Retain(isolate, value);
+        last_ = Retain(isolate, value, repl);
         result.Set("status", "ok");
-        result.Set("value", Value(isolate, context, value));
+        result.Set("value", Value(isolate, context, value, repl));
       } else
         result = Failure("JavaScript failed");
     }
   } else if (*operation == "last") {
-    auto value = Lookup(isolate, base::NumberToString(last_));
-    result =
-        value.IsEmpty()
-            ? Failure("Previous result expired")
-            : base::DictValue().Set("status", "ok").Set("value", Value(isolate, context, value));
+    bool repl = false;
+    auto value = Lookup(isolate, base::NumberToString(last_), &repl);
+    result = value.IsEmpty() ? Failure("Previous result expired")
+                             : base::DictValue()
+                                   .Set("status", "ok")
+                                   .Set("value", Value(isolate, context, value, repl));
   } else {
     const auto* handle = parsed->FindString("handle");
-    auto value = handle ? Lookup(isolate, *handle) : v8::Local<v8::Value>();
+    bool repl = false;
+    auto value = handle ? Lookup(isolate, *handle, &repl) : v8::Local<v8::Value>();
     if (value.IsEmpty())
       result = Failure("Value expired, was released, or belongs to another document");
     else if (*operation == "release" || *operation == "cancel") {
@@ -641,11 +680,21 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
         if (promise->State() == v8::Promise::kPending)
           result.Set("status", "pending");
         else {
-          last_ = Retain(isolate, promise->Result());
-          result.Set("status", promise->State() == v8::Promise::kRejected ? "rejected" : "ok");
-          result.Set("value", Value(isolate, context, promise->Result()));
+          const bool rejected = promise->State() == v8::Promise::kRejected;
+          auto settled = promise->Result();
+          if (repl && !rejected)
+            settled = ReplResult(isolate, context, settled);
+          if (settled.IsEmpty())
+            result = Failure("Malformed engine REPL result");
+          else {
+            last_ = Retain(isolate, settled);
+            result.Set("status", rejected ? "rejected" : "ok");
+            result.Set("value", Value(isolate, context, settled));
+          }
         }
       }
+    } else if (*operation == "store" && repl) {
+      result = Failure("Await this REPL evaluation before storing its result");
     } else if (*operation == "store") {
       std::string name;
       for (int attempt = 0; attempt < 128; ++attempt) {

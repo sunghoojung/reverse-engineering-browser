@@ -138,7 +138,12 @@ than V8's internal debug headers. Explicit commands retain native REPL evaluatio
 with debugger breaks disabled. Verified lexical completion uses the same engine
 evaluation path with side effects denied and without REPL mode; a failed lexical
 lookup stops completion. The bridge also exposes the existing bounded lexical
-enumeration without importing V8's internal check macros into Chromium code.
+enumeration without importing V8's internal check macros into Chromium code. The
+engine's REPL promise wrapper is unwrapped using its private handle provenance:
+synchronous commands show their actual result, and pending top-level await
+commands expose that result after settlement. Page-supplied promises retain
+normal promise identity and are never treated as engine wrappers. Pending REPL
+handles cannot be stored in the page; await the result before storing it.
 
 ## Verification
 

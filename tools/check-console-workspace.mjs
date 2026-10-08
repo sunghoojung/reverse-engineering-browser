@@ -1,3 +1,4 @@
+import {selectRenderedOption} from './rendered-keyboard.mjs';
 // Original scripted native replies. These fixtures never execute page JavaScript.
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -360,7 +361,7 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
   const until=(expression,message)=>eventually(()=>evaluate(expression),message);
   const press=value=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Escape:27,ArrowDown:40,ArrowUp:38,Home:36,Tab:9}[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
   const reveal=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`);await settleConsoleLayout(evaluate);await click(selector);};
-  const fill=async(selector,text)=>{await click(selector);await key('a','KeyA',{modifiers:2,windowsVirtualKeyCode:65});await type(text);};
+  const fill=async(selector,text)=>{await click(selector);await key('a','KeyA',{modifiers:process.platform==='darwin'?4:2,windowsVirtualKeyCode:65});await type(text);};
   const evaluations=()=>fixture.calls.filter(call=>call.command?.operation==='evaluate');
   const commandChecks=[];
   const finishCommand=async record=>{
@@ -389,7 +390,7 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
     if(wait)await finishCommand(record);return record;
   };
   const selectDocument=async()=>{
-    await click('#native-console-target');await press('Home');await press('ArrowDown');await press('Enter');
+    await selectRenderedOption({evaluate,click,key,selector:'#native-console-target',index:1});
     await until("!document.querySelector('#native-console-source').disabled",'Explicit document selection failed');
   };
   const connectionSnapshot=()=>evaluate(`(()=>{
@@ -519,10 +520,10 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
     await viewport(width,height);await geometry();await scrollUpperPane(name);await screenshot(name);
     // Exercise the real selector and the optional fifth grid track. No
     // synthetic style, hidden-attribute or application-state mutation is used.
-    await reveal('#request-search-scope');await press('Home');await press('ArrowDown');await press('Enter');
+    await reveal('#request-search-scope');await selectRenderedOption({evaluate,click,key,selector:'#request-search-scope',index:1});
     await until("document.querySelector('#request-search-scope').value==='content'&&!document.querySelector('#request-search-status').hidden",'Content-search selector must reveal its status row');
     await scrollUpperPane(name+' content search');await screenshot(name+'-content-search');
-    await reveal('#request-search-scope');await press('Home');await press('Enter');
+    await reveal('#request-search-scope');await selectRenderedOption({evaluate,click,key,selector:'#request-search-scope',index:0});
     await until("document.querySelector('#request-search-scope').value==='url'&&document.querySelector('#request-search-status').hidden",'URL search must restore the four-track pane');
     await upperPane(name+' restored URL search');await scrollNestedLedger(name);await screenshot(name+'-nested-ledger');await command('fixture.object',true,'pointer');
   }

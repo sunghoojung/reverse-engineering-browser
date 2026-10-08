@@ -46,6 +46,7 @@ class NativeConsoleRuntime final {
   struct Slot {
     std::uint64_t id = 0;
     std::int64_t expires_us = 0;
+    bool repl = false;
     v8::Global<v8::Value> value;
   };
   void Expire();
@@ -56,11 +57,14 @@ class NativeConsoleRuntime final {
   };
   std::vector<Monitor> monitors_;
   base::RepeatingTimer expiration_;
-  std::uint64_t Retain(v8::Isolate* isolate, v8::Local<v8::Value> value);
-  v8::Local<v8::Value> Lookup(v8::Isolate* isolate, const std::string& handle);
+  std::uint64_t Retain(v8::Isolate* isolate, v8::Local<v8::Value> value, bool repl = false);
+  v8::Local<v8::Value> Lookup(v8::Isolate* isolate,
+                              const std::string& handle,
+                              bool* repl = nullptr);
   base::DictValue Value(v8::Isolate* isolate,
                         v8::Local<v8::Context> context,
-                        v8::Local<v8::Value> value);
+                        v8::Local<v8::Value> value,
+                        bool repl = false);
   base::DictValue Properties(v8::Isolate* isolate,
                              v8::Local<v8::Context> context,
                              v8::Local<v8::Value> value,

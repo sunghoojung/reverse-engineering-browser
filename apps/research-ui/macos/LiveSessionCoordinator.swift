@@ -248,7 +248,9 @@ final class LiveSessionCoordinator {
     ready: @escaping (URL) -> Void,
     failed: @escaping (String) -> Void
   ) {
-    for _ in 0..<300 {
+    // Broker and receiver each allow 5 seconds, backend 15, and Brave 30.
+    // Let those helpers report their own failure before the outer deadline.
+    for _ in 0..<1200 {
       if !isCurrent(currentGeneration) { return }
       if let text = try? String(contentsOf: handshakeURL, encoding: .utf8),
         let url = validatedLoopbackURL(text.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -280,7 +282,7 @@ final class LiveSessionCoordinator {
     }
     reportFailureOnce(
       generation: currentGeneration,
-      message: "Live capture did not become ready within 15 seconds. "
+      message: "Live capture did not become ready within 60 seconds. "
         + failureMessage(logURL: logURL),
       failed: failed
     )

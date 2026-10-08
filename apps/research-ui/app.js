@@ -3529,7 +3529,7 @@
         const hookableScripts = (state.debuggerSession?.scripts ?? []).filter(script => {
           if (script.language !== 'JavaScript') return false;
           const url = script.url ?? '';
-          return !url.startsWith('file:') && !url.startsWith('evaluate;') && !url.startsWith('pptr:');
+          return !url.startsWith('file:') && !url.startsWith('evaluate;') && !url.startsWith('pptr:') && !url.startsWith('reb-automation-');
         });
         const workerScripts = hookableScripts.filter(script => script.target_type === 'worker').slice(-128);
         const scripts = [
@@ -7165,7 +7165,9 @@
 
       function liveSources() {
         const staleScriptIds = state.staleScriptIds ?? new Set();
-        return (state.debuggerSession?.scripts ?? []).filter(script => !staleScriptIds.has(script.script_id)).map(script => {
+        // Hide helper display entries without dropping them from the backend's
+        // complete catalog used to prove candidate byte identity and uniqueness.
+        return (state.debuggerSession?.scripts ?? []).filter(script => !staleScriptIds.has(script.script_id) && !script.url?.startsWith('reb-automation-')).map(script => {
           const entry = state.liveScriptContent.get(script.script_id);
           const cached = entry?.identity === liveScriptIdentity(script) ? entry : {};
           const analysis = state.deobfuscationCache?.get(deobfuscationKey({...script, source_type: 'script', target_id: script.target_id ?? state.debuggerSession?.target?.id, sha256: script.hash}));
@@ -7641,7 +7643,7 @@
               ['Runtime', 'live target'], ['Target', source.target_title || source.target_id || 'attached browser'],
               ['Script', source.script_id],
               ['Context', source.execution_context_id], ['Language', source.language],
-              ['Module', source.is_module ? 'yes' : 'no'], ['Source map', source.source_map_url || 'none'],
+              ['Module', source.is_module ? 'yes' : 'no'], ['Source map', source.source_map_url_omitted ? 'unavailable (URL exceeds 64 KiB)' : source.source_map_url || 'none'],
               ['Hash', source.hash || 'unreported'], ['Length', formatByteSize(source.length)]
             ]
           : [

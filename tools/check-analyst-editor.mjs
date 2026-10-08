@@ -1,3 +1,4 @@
+import {selectRenderedOption} from './rendered-keyboard.mjs';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -254,7 +255,7 @@ export async function checkAnalystInteractions({evaluate,viewport,click,key,whee
     }
     await click(selector);
   };
-  const type=async(selector,text)=>{await hit(selector);await key('a','KeyA',{windowsVirtualKeyCode:65,modifiers:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});await typeText(text);};
+  const type=async(selector,text)=>{await hit(selector);await key('a','KeyA',{windowsVirtualKeyCode:65,modifiers:process.platform==='darwin'?4:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});await typeText(text);};
   const enter=async()=>{await click('#advanced-navigation > summary');await click('#advanced-navigation [data-screen="analyst"]');await until('state.localAnalystLoaded && !state.localAnalystRefreshing');};
   const tree=id=>`#analyst-tree [data-file-id="${id}"]`;
   const editorGeometry=async label=>{
@@ -285,7 +286,7 @@ await hit('#analyst-reload');await until(`state.localAnalyst.generation===${f.li
   // folder editor's unsaved name. Use genuine select and button keyboard input.
   await hit('#screen-analyst .analyst-storage > summary');await type('#analyst-folder-name','Unsaved folder rename');
   assert.equal(await evaluate('analystElements.revertFolder.disabled'),false);
-  await hit('#analyst-folder');await key('Home','Home',{windowsVirtualKeyCode:36});await press('ArrowDown');await press('Enter');
+  await selectRenderedOption({evaluate,click:hit,key,selector:'#analyst-folder',index:1});
   assert.equal(await evaluate('analystElements.folder.value'),'3');
   const beforeMove=f.calls.filter(call=>call.method==='POST').length;
   await hit('#analyst-save');await until("state.localAnalystMessage.includes('folder changes')");

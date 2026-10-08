@@ -236,7 +236,7 @@ export async function checkCollectionInteractions({evaluate,viewport,click,key,w
     assert(await evaluate(expression),`Timed out: ${expression}`);
   };
   const press=value=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowRight:39,ArrowLeft:37,Tab:9}[value]});
-  const fill=async(selector,text)=>{await click(selector);await key('a','KeyA',{modifiers:2,windowsVirtualKeyCode:65});await type(text);};
+  const fill=async(selector,text)=>{await click(selector);await key('a','KeyA',{modifiers:process.platform==='darwin'?4:2,windowsVirtualKeyCode:65});await type(text);};
   const narrowGeometry=[];
   const checkNarrowGeometry=async label=>{
     const geometry=await evaluate(`(()=>{

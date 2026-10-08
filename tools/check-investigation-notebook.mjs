@@ -1,3 +1,4 @@
+import {selectRenderedOption} from './rendered-keyboard.mjs';
 import assert from 'node:assert/strict';
 import {readFile, mkdtemp, stat, rm} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
@@ -173,8 +174,8 @@ export async function checkNotebookInteractions({evaluate, viewport, click, key,
   const f = fixture.notebook, original = copy(f.library.files), receipts = [];
   const until = async (expression, message = expression) => {const start = Date.now(); while (Date.now() - start < 7000) {if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 25));} assert.fail(message);};
   const press = value => key(value, value, {windowsVirtualKeyCode: {Enter: 13, Escape: 27, Tab: 9, Home: 36, End: 35, ArrowDown: 40}[value], ...(value === 'Enter' ? {text: '\r', unmodifiedText: '\r'} : {})});
-  const type = async (selector, value) => {await click(selector); await key('a', 'KeyA', {windowsVirtualKeyCode: 65, modifiers: 2}); await key('Backspace', 'Backspace', {windowsVirtualKeyCode: 8}); await typeText(value);};
-  const chooseBook = async () => {await click('#notebook-select'); await press('Home'); await press('ArrowDown'); await press('Enter'); await until("!document.querySelector('#notebook-add').disabled");};
+  const type = async (selector, value) => {await click(selector); await key('a', 'KeyA', {windowsVirtualKeyCode: 65, modifiers: process.platform==='darwin'?4:2}); await key('Backspace', 'Backspace', {windowsVirtualKeyCode: 8}); await typeText(value);};
+  const chooseBook = async () => {await selectRenderedOption({evaluate,click,key,selector:'#notebook-select',index:1}); await until("!document.querySelector('#notebook-add').disabled");};
   const opened = async () => {await click('#open-investigation-notebook'); await until("document.querySelector('#investigation-notebook').open && !investigationNotebook.model.busy && investigationNotebook.model.library");};
   const saved = async count => {await until(`!investigationNotebook.model.busy && document.querySelectorAll('#notebook-list .notebook-pin').length===${count}`);};
   const hit = async selector => {

@@ -292,7 +292,8 @@ def check(binary, browser):
                     header, data = run(3, target, json.dumps({"operation": operation, **fields}))
                     assert header[4] == 11 and header[2] == 0, (header, data)
                     return json.loads(data)
-                assert runtime("evaluate", source='console.log("hello")')["value"]["type"] == "undefined"
+                logged = runtime("evaluate", source='console.log("hello")')
+                assert logged["value"]["type"] == "undefined", logged
                 assert any(message["text"] == "hello" for message in runtime("poll")["messages"])
                 obj = runtime("evaluate", source="window.previewObject")["value"]
                 properties = runtime("inspect", handle=obj["handle"], offset=0)["properties"]
@@ -301,8 +302,35 @@ def check(binary, browser):
                 runtime("evaluate", source="let consoleLexical = {method() {return 1}}")
                 assert any(item["name"] == "consoleLexical" for item in runtime("complete", path=[], prefix="consoleLex" )["items"])
                 assert any(item["name"] == "method" for item in runtime("complete", path=["consoleLexical"], prefix="met")["items"])
-                promise = runtime("evaluate", source="await Promise.resolve(42)")["value"]
+                # Engine REPL promises are distinct from promises returned by
+                # user code. Top-level await may settle before the reply.
+                awaited = runtime("evaluate", source="await Promise.resolve(42)")["value"]
+                if awaited["type"] == "promise":
+                    awaited = runtime("await", handle=awaited["handle"])["value"]
+                assert awaited["type"] == "number" and awaited["text"] == "42", awaited
+                deferred = runtime("evaluate", source="await new Promise(resolve => setTimeout(() => resolve(43), 500))")["value"]
+                assert deferred["type"] == "promise", deferred
+                assert runtime("await", handle=deferred["handle"])["status"] == "pending"
+                assert runtime("store", handle=deferred["handle"])["status"] == "error"
+                last_deferred = runtime("last")["value"]
+                deadline = time.monotonic() + 5
+                while True:
+                    settled = runtime("await", handle=last_deferred["handle"])
+                    if settled["status"] != "pending":
+                        break
+                    assert time.monotonic() < deadline, settled
+                    time.sleep(.05)
+                assert settled["status"] == "ok" and settled["value"]["text"] == "43", settled
+                promise = runtime("evaluate", source="Promise.resolve(42)")["value"]
+                assert promise["type"] == "promise", promise
                 assert runtime("await", handle=promise["handle"])["value"]["text"] == "42"
+                # An object that resembles the engine wrapper remains user
+                # evidence, including its property descriptor and getter.
+                fake = runtime("evaluate", source="Promise.resolve({get ['.repl_result']() { window.previewCalls++; return 99 }})")["value"]
+                fake_result = runtime("await", handle=fake["handle"])["value"]
+                assert fake_result["type"] == "object", fake_result
+                assert runtime("inspect", handle=fake_result["handle"], offset=0)["properties"][0]["accessor"]
+                assert runtime("evaluate", source="window.previewCalls")["value"]["text"] == "0"
                 runtime("release", handle=obj["handle"])
                 assert runtime("inspect", handle=obj["handle"], offset=0)["status"] == "error"
                 stored = runtime("store", handle=promise["handle"])["text"]
@@ -327,7 +355,13 @@ def check(binary, browser):
                 runtime("cancel", handle=pending["handle"])
                 assert runtime("await", handle=pending["handle"])["status"] == "error"
                 typed = runtime("evaluate", source="new Uint8Array(65537)")["value"]
-                assert runtime("inspect", handle=typed["handle"], offset=65520)["truncated"]
+                typed_properties = runtime("inspect", handle=typed["handle"], offset=65520)
+                assert typed_properties.get("truncated"), typed_properties
+                assert typed_properties["status"] == "ok" and len(typed_properties["properties"]) == 16
+                assert all(prop["value"]["type"] == "number" and prop["value"]["text"] == "0" for prop in typed_properties["properties"])
+                proxy = runtime("evaluate", source="new Proxy(new Uint8Array(4), {getOwnPropertyDescriptor() { window.previewCalls++; return undefined }})")["value"]
+                assert runtime("inspect", handle=proxy["handle"], offset=0)["status"] == "error"
+                assert runtime("evaluate", source="window.previewCalls")["value"]["text"] == "0"
                 runtime("evaluate", source="for (let i=0;i<40;i++) console.log('queue-' + i)")
                 messages = runtime("poll")
                 assert len(messages["messages"]) <= 32 and messages["dropped"] > 0

@@ -313,6 +313,7 @@
               isBoundedText(script.cdp_script_id, 4 * 1024) && script.cdp_script_id.length > 0) &&
           typeof script.url === 'string' && typeof script.hash === 'string' &&
           typeof script.source_map_url === 'string' && ['JavaScript', 'WebAssembly'].includes(script.language) &&
+          (script.source_map_url_omitted === undefined || typeof script.source_map_url_omitted === 'boolean') &&
           ['start_line', 'start_column', 'end_line', 'end_column', 'execution_context_id', 'length']
             .every(field => isSafeIntegerInRange(script[field], 0, Number.MAX_SAFE_INTEGER)) &&
           typeof script.has_source_url === 'boolean' && typeof script.is_module === 'boolean';

@@ -171,6 +171,8 @@ prompt; do not save credentials in that profile. An explicit checkbox opts into
 macOS Keychain encryption when credential storage is required. The app does not
 mark the session live until the browser debugger endpoint is ready, and the
 failure dialog can retry the same privacy mode without restarting Origin Trace.
+Startup allows up to 60 seconds for the bounded broker, receiver, backend and
+browser readiness stages; individual helper failures are reported sooner.
 **New Live Session…** in the application menu offers metadata-only capture and
 Keychain controls. `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects metadata-only
 automatic launch, and `REB_CAPTURE_CANVAS_IMAGES=0` disables image retention.

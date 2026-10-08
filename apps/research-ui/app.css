@@ -3356,7 +3356,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #collection-grid .collection-run-pane { grid-column: 2; border-top: 1px solid var(--line); }
 }
 @media (max-width: 760px) {
-  #collection-grid, #collection-grid[data-state="empty"] { grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; overflow: auto; align-content: start; }
+  #collection-grid, #collection-grid[data-state="empty"] { grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; overflow: auto; padding-inline-end: 8px; align-content: start; }
   #collection-grid .collection-pane { min-height: 0; max-height: none; overflow: visible; }
   #collection-grid .collection-library .collection-tree { flex: none; min-height: 70px; max-height: 150px; overflow: auto; }
   #collection-grid .collection-library .collection-scope-card { max-height: none; }
@@ -3556,20 +3556,21 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
       @media (max-width: 950px) {
         .memory-grid { grid-template-columns: 245px minmax(0, 1fr); }
         /* Keep readable stacked panes inside a real scroll owner in short windows. */
-        .memory-results-pane { overflow: auto; grid-template-columns: 1fr; grid-template-rows: minmax(150px, .7fr) minmax(170px, 1fr); }
+        /* Overlay scrollbars need an exposed parent edge beside nested panes. */
+        .memory-results-pane { overflow: auto; padding-inline-end: 8px; grid-template-columns: 1fr; grid-template-rows: minmax(150px, .7fr) minmax(170px, 1fr); }
         .memory-results-list { border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-results-pane[data-empty="true"] { grid-template-rows: 1fr; }
       }
       @media (max-width: 650px) {
         #screen-memory .screen-head { height: auto; padding-block: 10px; flex-wrap: wrap; gap: 8px; }
         #screen-memory > .memory-mode-switch { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .memory-grid { display: block; overflow: auto; }
+        .memory-grid { display: block; overflow: auto; padding-inline-end: 8px; }
         .memory-search-pane { max-height: none; overflow: visible; }
         .memory-form { grid-template-columns: 1fr; }
         .memory-output { min-height: 520px; }
         .memory-results-pane { min-height: 420px; grid-template-rows: minmax(150px, auto) minmax(220px, auto); }
         .memory-results-list { max-height: 220px; }
-        .memory-detail { max-height: 420px; padding: 10px; }
+        .memory-detail { max-height: 420px; padding: 10px; padding-inline-end: 18px; }
         .memory-property { grid-template-columns: minmax(0, 1fr) minmax(0, .7fr); }
         .memory-property-value { grid-column: 1 / -1; border-top: 1px solid var(--line-soft); }
         .memory-path-step { grid-template-columns: minmax(0, 1fr) 60px; }

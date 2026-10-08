@@ -2,6 +2,7 @@
 // CDP evaluation reads DOM/geometry; it never calls application actions or
 // installs hidden source identities. All fixture content is synthetic and owned.
 import assert from 'node:assert/strict';
+import {platformEditEvent, selectRenderedOption} from './rendered-keyboard.mjs';
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
@@ -189,9 +190,9 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     throw Error(`${phase}: ${label}: ${JSON.stringify(last)}`);
   };
   const frame=()=>evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-  const key=async(key,session=uiSession,modifiers=0)=>{
+  const key=async(key,session=uiSession,modifiers=0,native={})=>{
     await command('Page.bringToFront',{},session);
-    for(const event of candidateKeyEvents(key,modifiers))await command('Input.dispatchKeyEvent',event,session);
+    for(const event of candidateKeyEvents(key,modifiers))await command('Input.dispatchKeyEvent',platformEditEvent(event.type==='keyUp'?event:{...event,...native,...(native.text?{type:'keyDown'}:{})}),session);
     receipts.push({phase,kind:'native-key',key,modifiers});
   };
   const settleControl=async(selector,session=uiSession)=>evaluate(`new Promise((resolve,reject)=>{const start=performance.now();let previous='',stable=0;function frame(){const n=document.querySelector(${JSON.stringify(selector)});if(!n)return reject(Error('Missing settling control'));const r=n.getBoundingClientRect(),positions=[];for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect();positions.push([p.scrollTop,p.scrollLeft,b.left,b.top,b.width,b.height]);}const current=JSON.stringify([r.left,r.top,r.width,r.height,innerWidth,innerHeight,positions]);stable=(${candidateGeometryStability.toString()})(previous,current,stable);previous=current;if(stable>=3)return resolve();if(performance.now()-start>2000)return reject(Error('Control geometry did not settle in native frames'));requestAnimationFrame(frame);}requestAnimationFrame(frame);})`,session);
@@ -200,12 +201,19 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   const reveal=async(selector,session=uiSession)=>{
     await settleControl(selector,session);
     for(let attempt=0;attempt<30;attempt++){
-      const position=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)return {missing:true};const r=n.getBoundingClientRect();if(!r.width||!r.height)return {hidden:true};const nodes=[],ancestors=[];for(let p=n.parentElement;p;p=p.parentElement){const s=getComputedStyle(p),b=p.getBoundingClientRect();nodes.push(p);ancestors.push({id:p.id,left:b.left+p.clientLeft,right:b.left+p.clientLeft+p.clientWidth,top:b.top+p.clientTop,bottom:b.top+p.clientTop+p.clientHeight,clipX:['auto','scroll','overlay','hidden','clip'].includes(s.overflowX),clipY:['auto','scroll','overlay','hidden','clip'].includes(s.overflowY),scrollableY:['auto','scroll','overlay'].includes(s.overflowY)&&p.scrollHeight>p.clientHeight+1,scrollTop:p.scrollTop,maxScrollTop:p.scrollHeight-p.clientHeight});}const margin=(${candidateFocusMargin.toString()})(getComputedStyle(n)),plan=(${candidateRevealGeometry.toString()})({left:r.left,right:r.right,top:r.top,bottom:r.bottom},{left:0,right:innerWidth,top:0,bottom:innerHeight},ancestors,margin);if(plan.ready){const x=r.x+r.width/2,y=r.y+r.height/2;if(!n.contains(document.elementFromPoint(x,y)))return {blocked:true,reason:'Control is occluded',rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},clip:plan.clip};return {ready:true,x,y,clip:plan.clip,rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},margin};}if(plan.blocked)return {...plan,ancestors};const p=nodes[plan.owner],box=plan.visible;for(const x of [box.right-4,box.left+4,(box.left+box.right)/2])for(const y of [(box.top+box.bottom)/2,box.top+4,box.bottom-4]){const hit=document.elementFromPoint(x,y);if(!hit||!p.contains(hit))continue;let nested=false;for(let q=hit;q&&q!==p;q=q.parentElement){const s=getComputedStyle(q);if(['auto','scroll','overlay'].includes(s.overflowY)&&q.scrollHeight>q.clientHeight+1)nested=true;}if(!nested)return {x,y,delta:plan.delta,owner:ancestors[plan.owner],clip:plan.clip};}return {blocked:true,reason:'Scroll owner has no unobscured native wheel point',plan};})()`,session);
+      const position=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)return {missing:true};const r=n.getBoundingClientRect();if(!r.width||!r.height)return {hidden:true};const nodes=[],ancestors=[];for(let p=n.parentElement;p;p=p.parentElement){const s=getComputedStyle(p),b=p.getBoundingClientRect();nodes.push(p);ancestors.push({id:p.id,left:b.left+p.clientLeft,right:b.left+p.clientLeft+p.clientWidth,top:b.top+p.clientTop,bottom:b.top+p.clientTop+p.clientHeight,clipX:['auto','scroll','overlay','hidden','clip'].includes(s.overflowX),clipY:['auto','scroll','overlay','hidden','clip'].includes(s.overflowY),scrollableY:['auto','scroll','overlay'].includes(s.overflowY)&&p.scrollHeight>p.clientHeight+1,scrollTop:p.scrollTop,maxScrollTop:p.scrollHeight-p.clientHeight});}const margin=(${candidateFocusMargin.toString()})(getComputedStyle(n)),plan=(${candidateRevealGeometry.toString()})({left:r.left,right:r.right,top:r.top,bottom:r.bottom},{left:0,right:innerWidth,top:0,bottom:innerHeight},ancestors,margin);if(plan.ready){const x=r.x+r.width/2,y=r.y+r.height/2;if(!n.contains(document.elementFromPoint(x,y)))return {blocked:true,reason:'Control is occluded',rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},clip:plan.clip};return {ready:true,x,y,clip:plan.clip,rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},margin};}if(plan.blocked)return {...plan,ancestors};const p=nodes[plan.owner],box=plan.visible;for(const x of [(box.left+box.right)/2,box.left+4,box.right-20])for(const y of [(box.top+box.bottom)/2,box.top+4,box.bottom-4]){const hit=document.elementFromPoint(x,y);if(!hit||!p.contains(hit))continue;let nested=false;for(let q=hit;q&&q!==p;q=q.parentElement){const s=getComputedStyle(q);if(['auto','scroll','overlay'].includes(s.overflowY)&&q.scrollHeight>q.clientHeight+1)nested=true;}if(!nested)return {x,y,delta:plan.delta,owner:ancestors[plan.owner],clip:plan.clip};}return {blocked:true,reason:'Scroll owner has no unobscured native wheel point',plan};})()`,session);
       if(position.ready)return position;
       assert(!position.missing&&!position.hidden&&!position.blocked,`Unavailable unclipped control ${selector}: ${JSON.stringify(position)}`);
       receipts.push({phase,kind:'native-wheel',selector,deltaY:position.delta,owner:position.owner,clip:position.clip});
       await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:position.x,y:position.y},session);
       await command('Input.dispatchMouseEvent',{type:'mouseWheel',x:position.x,y:position.y,deltaX:0,deltaY:position.delta},session);
+      const afterWheel=await command('Runtime.evaluate',{expression:`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve({scrollTop:document.getElementById(${JSON.stringify(position.owner.id)})?.scrollTop,focus:document.activeElement?.id}))))`,awaitPromise:true,returnByValue:true},session);
+      receipts.push({phase,kind:'wheel-result',owner:position.owner.id,point:{x:position.x,y:position.y},before:position.owner.scrollTop,after:afterWheel.result.value});
+      if(afterWheel.result.value?.scrollTop===position.owner.scrollTop){
+        await command('Input.synthesizeScrollGesture',{x:position.x,y:position.y,yDistance:-position.delta,gestureSourceType:'mouse',speed:1200},session);
+        const gesture=await command('Runtime.evaluate',{expression:`({scrollTop:document.getElementById(${JSON.stringify(position.owner.id)})?.scrollTop})`,returnByValue:true},session);
+        receipts.push({phase,kind:'mouse-scroll-gesture-result',owner:position.owner.id,before:position.owner.scrollTop,after:gesture.result.value});
+      }
       await settleControl(selector,session);
     }
     throw Error(`Control did not become reachable: ${selector}`);
@@ -235,7 +243,14 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   const screenshot=async(name)=>{
     await frame();const shot=await command('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(shot.data,'base64'));
   };
-  const viewport=async(width,height)=>{await command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});await frame();};
+  const viewport=async(width,height)=>{
+    const info=await command('Target.getTargetInfo');
+    const browserWindow=await command('Browser.getWindowForTarget',{targetId:info.targetInfo.targetId},null);
+    await command('Browser.setWindowBounds',{windowId:browserWindow.windowId,bounds:{width,height,windowState:'normal'}},null);
+    await command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+    await command('Emulation.setVisibleSize',{width,height});await frame();
+    receipts.push({phase,kind:'viewport',width,height,window:await command('Browser.getWindowForTarget',{targetId:info.targetInfo.targetId},null)});
+  };
   const formSnapshotExpression=`(()=>{const control=id=>{const n=document.querySelector('#'+id);return {value:n?.value,checked:n?.type==='checkbox'?n.checked:undefined,disabled:n?.disabled,valid:n?.validity?.valid,validationMessage:n?.validationMessage};};return {url:control('hooks-field-url'),method:control('hooks-field-method'),kind:control('hooks-field-kind'),pointer:control('hooks-field-pointer'),captureConsent:control('hooks-field-confirm'),captureButton:control('hooks-field-configure'),armConsent:control('hooks-confirm'),armButton:control('hooks-arm'),captureStatus:document.querySelector('#hooks-field-status')?.textContent,armStatus:document.querySelector('#source-hooks-notice')?.textContent,experimentPending:state.experimentPending,debuggerActionPending:state.debuggerActionPending,experimentError:state.experimentError,backendField:state.debuggerSession?.runtime_hooks?.field_test?{enabled:state.debuggerSession.runtime_hooks.field_test.enabled,url:state.debuggerSession.runtime_hooks.field_test.url,method:state.debuggerSession.runtime_hooks.field_test.method,kind:state.debuggerSession.runtime_hooks.field_test.kind,pointer:state.debuggerSession.runtime_hooks.field_test.pointer}:null};})()`;
   const recordForm=async(label)=>{const form=await evaluate(formSnapshotExpression);receipts.push({phase,kind:'form-state',label,form});return form;};
   const targetSnapshotExpression=`(()=>{const s=document.querySelector('#candidate-experiment-target'),session=state.debuggerSession,hooks=session?.runtime_hooks;return {selected:s?.value,ownerTarget:candidateExperiment?.target,lifetime:JSON.stringify([hooks?.session_id,session?.request_interception?.created_at_ms,session?.object_experiment?.navigation_id,hooks?.target_id,session?.target?.id]),documentURL:session?.object_experiment?.url,catalogCount:session?.scripts?.length,catalog:(session?.scripts??[]).slice(0,64).map(script=>({id:script.script_id,target:script.target_id??session?.target?.id,type:script.target_type??'page',hash:script.hash,length:script.length,url:script.url})),options:[...(s?.options??[])].slice(0,10).map((option,index)=>({index,value:option.value,label:option.textContent,type:option.value===hooks?.target_id?'page':hooks?.workers?.find(worker=>worker.id===option.value)?.type??null}))};})()`;
@@ -246,10 +261,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     assert(option,`Missing explicit ${kind} target option`);
     const expected={...option,lifetime:before.lifetime};
     receipts.push({phase,kind:'target-choice-before',expected,snapshot:before});
-    // Same native select sequence as the proven Console document driver.
-    await click('#candidate-experiment-target');await key('Home');
-    for(let i=0;i<option.index;i++)await key('ArrowDown');
-    await key('Enter');
+    await selectRenderedOption({evaluate,click,key:(value,code,native)=>key(value,uiSession,native.modifiers??0,{code,...native}),selector:'#candidate-experiment-target',index:option.index});
     try {
       await until(`(${candidateTargetSelectionMatches.toString()})(${JSON.stringify(expected)},${targetSnapshotExpression})`,'Exact explicit '+kind+' target ID/type/owner/lifetime did not stick');
     } finally {

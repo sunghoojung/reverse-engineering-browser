@@ -780,6 +780,28 @@ only resolved locations in retired scripts are discarded. Unimplemented
 Workspace and Overrides tabs are omitted until they provide a usable workflow.
 File rows reserve their remaining width for the filename, with full URLs in
 tooltips and source metadata in Details. Folder rows retain their item counts.
+The navigator initially expands branches to keep retained files directly visible.
+Click a branch, or press Enter/Space on it, to collapse or expand it. One tree row
+is in the Tab order; Up/Down move through visible rows, Right opens a branch or
+enters its first child, Left closes it or returns to its parent, and Home/End
+reach the first/last visible row. Modified arrows keep their browser/history
+meaning. Focus and the open document are separate: collapsing a selected file's
+ancestor leaves its editor, Find result and original-byte location unchanged and
+never reads source bytes or runs analysis. Ordinary catalog refresh keeps keyed
+rows, tree focus and scroll, returning a removed focused row to its closest
+surviving ancestor. Page and Captured retain independent session-only branch
+state; origins and full path segments have distinct identities.
+
+The navigator inspects at most 5,000 catalog records, retains 10,000 metadata
+nodes and renders at most 1,000 expanded rows. Collapsed descendants have no DOM
+rows. It rejects URLs above 4,096 characters and identities above 8,192
+characters, shortens directory structure after 16 levels, and visibly discloses
+these limits rather than implying omitted sources are absent. Selection markers
+are withheld when the catalog cap prevents verifying a unique source. Empty path
+segments remain distinct, explicitly labeled folders. Collapse branches
+or use **Open file** to reach later catalog choices. Deep indentation is bounded
+for narrow sidebars; full source URLs remain available in tooltips. These limits
+do not evict open source text, change captured evidence, or relink documents.
 Clicking original source records the UTF-16 column across syntax spans, so the
 Hooks panel can target a function inside a minified line. Inline script offsets
 are included; readable representations cannot change the runtime cursor.
@@ -1331,6 +1353,17 @@ report are checked separately. The `sources-history-ui` CI job uploads screensho
 request/operation receipts and validation under `build/sources-history-ui-qa`.
 These small synthetic HTTP fixtures do not run a module or analyzed JavaScript,
 and this browser gate does not replace native macOS acceptance.
+
+The same job also runs `--sources-tree-ui-browser` with authored catalogs at
+1440×900, 760×560 and 360×740. Native pointer, wheel, Tab, arrow, Home/End,
+Enter and Space input cover collapse, selected-but-hidden files, independent
+Page/Captured paths, file activation, and actual source reveal. Catalog HTTP
+refreshes exercise additions, removal, reordering, retained focus/scroll anchors
+and typing in Find. Empty, Canvas-only, hostile-label and deep-path states remain
+explicit. Chrome accessibility snapshots verify branch ownership and collapse;
+screenshots and input/request receipts are in `build/sources-tree-ui-qa`. The
+inert model gate separately covers catalog/node/row bounds and unchanged-row
+reuse; it does not claim browser frame-time or memory measurements.
 
 ### Compare supplied packages
 

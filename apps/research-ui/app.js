@@ -7251,82 +7251,285 @@
         return matches.length === 1 ? matches[0] : null;
       }
 
-      function sourceTreeRow(label, glyph, depth, source = null, meta = '') {
-        if (source) source = sourceReference(source);
-        const row = document.createElement('button');
-        row.type = 'button';
-        row.className = 'source-tree-row';
-        row.style.setProperty('--source-depth', String(depth));
-        row.setAttribute('role', 'treeitem');
-        row.setAttribute('aria-level', String(depth + 1));
-        const icon = document.createElement('span');
-        icon.className = source ? `source-file-icon ${source.kind}` : 'tree-glyph';
-        icon.textContent = glyph;
-        const name = document.createElement('span');
-        name.className = 'source-tree-name';
-        name.textContent = label;
-        name.title = source?.url ?? label;
-        const detail = document.createElement('span');
-        detail.className = 'source-tree-meta';
-        detail.textContent = meta;
-        row.append(icon, name, detail);
-        if (source) {
-          if (source.source_type === 'artifact') row.dataset.artifactId = source.artifact_id;
-          if (source.source_type === 'script') row.dataset.scriptId = source.script_id;
-          const selected = source.source_type === 'artifact'
-            ? source.artifact_id === state.selectedArtifactId && state.selectedScriptId === null
-            : source.script_id === state.selectedScriptId;
-          row.setAttribute('aria-selected', String(selected));
-          row.addEventListener('click', () => source.source_type === 'script'
-            ? selectScript(source.script_id)
-            : selectArtifact(source.artifact_id));
-        } else {
-          row.setAttribute('aria-expanded', 'true');
+      // The navigator owns metadata and focus only. It never owns source bytes,
+      // editor state, analysis, or fetches. These caps also bound hostile paths.
+      const SOURCE_TREE_LIMITS = Object.freeze({catalog: 5000, nodes: 10000, visible: 1000, depth: 16, url: 4096, identity: 8192});
+
+      function sourceTreeModel(collection) {
+        const page = collection === 'page';
+        const catalog = page ? state.debuggerSession?.scripts ?? [] : state.artifacts;
+        const nodes = new Map();
+        const rootKey = JSON.stringify([collection, 'root']);
+        const root = {key: rootKey, kind: 'root', label: 'top', depth: 0, parent: null, children: [], count: 0};
+        nodes.set(rootKey, root);
+        const limits = {catalog: Math.max(0, catalog.length - SOURCE_TREE_LIMITS.catalog), omitted: 0, deep: 0, ambiguous: 0};
+        const files = new Map();
+        const branch = (key, label, kind, parent) => {
+          if (!nodes.has(key)) {
+            const node = {key, label, kind, depth: parent.depth + 1, parent: parent.key, children: [], count: 0};
+            nodes.set(key, node); parent.children.push(key);
+          }
+          return nodes.get(key);
+        };
+        for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
+          const raw = catalog[index];
+          if (page ? state.staleScriptIds?.has(raw.script_id) : raw.kind === 'canvas_data_url') continue;
+          // Refuse an overlong path before URL parsing or identity serialization.
+          if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
+          const source = {...sourceReference(raw), source_type: page ? 'script' : 'artifact'};
+          if (page) {
+            source.target_id ??= state.debuggerSession?.target?.id ?? '';
+            source.kind = source.language === 'WebAssembly' ? 'wasm' : 'javascript';
+          }
+          const identity = sourceIdentity(source);
+          if (!identity || identity.length > SOURCE_TREE_LIMITS.identity) {limits.omitted++; continue;}
+          const key = JSON.stringify([collection, 'source', identity]);
+          // Duplicate exact identities must never become two apparent choices.
+          if (files.has(key)) {files.get(key).ambiguous = true; limits.ambiguous++; continue;}
+          let origin = '(anonymous)', originIdentity = ['anonymous'], parts = [];
+          if (source.url) {
+            try {
+              const url = new URL(source.url);
+              origin = url.origin === 'null' ? url.protocol : url.origin;
+              originIdentity = ['url', origin];
+              parts = url.pathname.split('/');
+              if (url.pathname.startsWith('/')) parts.shift();
+            } catch {origin = '(generated)'; originIdentity = ['generated'];}
+          }
+          const directories = parts.slice(0, -1);
+          const bounded = directories.slice(0, SOURCE_TREE_LIMITS.depth);
+          const originKey = JSON.stringify([collection, 'origin', originIdentity]);
+          const directoryKeys = bounded.map((_, index) => JSON.stringify([collection, 'folder', originIdentity, bounded.slice(0, index + 1)]));
+          const newBranches = [originKey, ...directoryKeys].filter(value => !nodes.has(value)).length;
+          if (nodes.size + newBranches + 1 > SOURCE_TREE_LIMITS.nodes) {limits.omitted++; continue;}
+          if (directories.length > SOURCE_TREE_LIMITS.depth) limits.deep++;
+          let parent = branch(originKey, origin.replace(/^https?:\/\//, ''), 'origin', root);
+          const ancestors = [root, parent];
+          bounded.forEach((label, index) => {
+            parent = branch(directoryKeys[index], label || '(empty path segment)', 'folder', parent); ancestors.push(parent);
+          });
+          const node = {key, identity, kind: 'file', label: sourceDisplayName(source), source,
+            parent: parent.key, depth: parent.depth + 1, children: null};
+          nodes.set(key, node); files.set(key, node); parent.children.push(key);
+          for (const ancestor of ancestors) ancestor.count++;
         }
-        return row;
+        for (const node of nodes.values()) {
+          if (!node.children) continue;
+          node.children.sort((a, b) => {
+            const left = nodes.get(a), right = nodes.get(b);
+            return Number(left.kind === 'file') - Number(right.kind === 'file') || left.label.localeCompare(right.label) || a.localeCompare(b);
+          });
+          node.children.forEach((key, index) => {const child = nodes.get(key); child.position = index + 1; child.size = node.children.length;});
+        }
+        root.position = 1; root.size = 1;
+        return {collection, rootKey, nodes, limits};
       }
 
-      function renderSourceTree() {
-        const sources = state.sourceCollection === 'page' ? liveSources() : capturedSources();
-        if (sources.length === 0) {
-          const empty = document.createElement('div');
-          empty.className = 'source-tree-empty';
-          empty.textContent = state.sourceCollection === 'page'
+      function sourceTreeVisible(model, collapsed) {
+        const visible = [], stack = model.nodes.get(model.rootKey).count ? [model.rootKey] : [];
+        while (stack.length && visible.length < SOURCE_TREE_LIMITS.visible) {
+          const node = model.nodes.get(stack.pop()); visible.push(node);
+          if (node.children && !collapsed.has(node.key)) {
+            for (let index = node.children.length - 1; index >= 0; index--) stack.push(node.children[index]);
+          }
+        }
+        return {visible, limited: stack.length > 0};
+      }
+
+      function sourceTreeState() {
+        return state.sourceNavigator ??= {scopes: new Map(), rows: new Map(), serial: 0, model: null, visible: []};
+      }
+
+      function sourceTreeScope(nav, collection) {
+        if (!nav.scopes.has(collection)) nav.scopes.set(collection, {collapsed: new Set(), focus: null, scrollTop: 0, scrollLeft: 0});
+        return nav.scopes.get(collection);
+      }
+
+      function sourceTreeFocus(key, reveal = false) {
+        const nav = sourceTreeState(), scope = sourceTreeScope(nav, nav.model.collection);
+        const entry = nav.rows.get(key);
+        if (!entry) return;
+        scope.focus = key;
+        for (const [rowKey, value] of nav.rows) value.row.tabIndex = rowKey === key ? 0 : -1;
+        entry.row.focus({preventScroll: true});
+        if (reveal) {
+          // Scroll only the navigator, never the editor or an outer workspace.
+          const row = entry.row.getBoundingClientRect(), pane = elements.sourceTree.getBoundingClientRect();
+          if (row.top < pane.top) elements.sourceTree.scrollTop += row.top - pane.top;
+          else if (row.bottom > pane.bottom) elements.sourceTree.scrollTop += row.bottom - pane.bottom;
+        }
+      }
+
+      function toggleSourceTree(key, expanded = null) {
+        const nav = sourceTreeState(), node = nav.model?.nodes.get(key);
+        if (!node?.children?.length) return;
+        const scope = sourceTreeScope(nav, nav.model.collection);
+        const open = expanded ?? scope.collapsed.has(key);
+        if (open) scope.collapsed.delete(key); else scope.collapsed.add(key);
+        renderSourceTree(false);
+      }
+
+      function sourceTreeKeydown(event, key) {
+        // Leave browser/history/OS chords and native button Enter/Space alone.
+        if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        const nav = sourceTreeState(), node = nav.model?.nodes.get(key);
+        if (!node) return;
+        const scope = sourceTreeScope(nav, nav.model.collection);
+        const index = nav.visible.findIndex(value => value.key === key);
+        let next;
+        if (event.key === 'ArrowDown') next = nav.visible[Math.min(index + 1, nav.visible.length - 1)]?.key;
+        else if (event.key === 'ArrowUp') next = nav.visible[Math.max(0, index - 1)]?.key;
+        else if (event.key === 'Home') next = nav.visible[0]?.key;
+        else if (event.key === 'End') next = nav.visible.at(-1)?.key;
+        else if (event.key === 'ArrowRight') {
+          if (node.children?.length && scope.collapsed.has(key)) toggleSourceTree(key, true);
+          else if (node.children?.length) next = node.children[0];
+        } else if (event.key === 'ArrowLeft') {
+          if (node.children?.length && !scope.collapsed.has(key)) toggleSourceTree(key, false);
+          else next = node.parent;
+        } else return;
+        event.preventDefault(); event.stopPropagation();
+        if (next) sourceTreeFocus(next, true);
+      }
+
+      function sourceTreeRow(node, nav) {
+        const row = document.createElement('button');
+        row.type = 'button'; row.className = 'source-tree-row';
+        row.dataset.sourceTreeKey = node.key;
+        row.dataset.sourceTreeKind = node.kind;
+        row.setAttribute('role', 'treeitem');
+        const icon = document.createElement('span'); icon.setAttribute('aria-hidden', 'true');
+        const name = document.createElement('span'); name.className = 'source-tree-name';
+        const detail = document.createElement('span'); detail.className = 'source-tree-meta';
+        row.append(icon, name, detail);
+        let group = null;
+        if (node.children) {
+          group = document.createElement('div'); group.setAttribute('role', 'group');
+          group.id = `source-tree-group-${++nav.serial}`;
+          // A button cannot contain interactive descendants. Own the adjacent
+          // group so the accessibility tree still has the real hierarchy.
+          row.setAttribute('aria-owns', group.id);
+        }
+        row.addEventListener('focus', () => {
+          const scope = sourceTreeScope(nav, nav.model.collection); scope.focus = node.key;
+          for (const [key, entry] of nav.rows) entry.row.tabIndex = key === node.key ? 0 : -1;
+        });
+        row.addEventListener('keydown', event => sourceTreeKeydown(event, node.key));
+        row.addEventListener('click', () => {
+          const current = nav.model?.nodes.get(node.key);
+          if (!current) return;
+          sourceTreeScope(nav, nav.model.collection).focus = node.key;
+          if (current.children) toggleSourceTree(node.key);
+          else if (sourceIsCurrent(current.source)) {
+            if (current.source.source_type === 'script') selectScript(current.source.script_id);
+            else selectArtifact(current.source.artifact_id);
+          } else {
+            state.sourceNoticeKind = 'warning';
+            state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
+            renderSourceHealth();
+          }
+        });
+        return {row, icon, name, detail, group};
+      }
+
+      function renderSourceTree(refresh = true) {
+        const nav = sourceTreeState(), tree = elements.sourceTree, previous = nav.model;
+        const activeKey = document.activeElement?.dataset?.sourceTreeKey;
+        const hadFocus = tree.contains(document.activeElement);
+        const previousScope = previous && sourceTreeScope(nav, previous.collection);
+        let anchor = null;
+        if (refresh && previous?.collection === state.sourceCollection && tree.scrollTop > 0 && tree.clientHeight > 0) {
+          const pane = tree.getBoundingClientRect();
+          for (const node of nav.visible) {
+            const bounds = nav.rows.get(node.key).row.getBoundingClientRect();
+            if (bounds.bottom > pane.top && bounds.top < pane.bottom) {anchor = {key: node.key, offset: bounds.top - pane.top}; break;}
+          }
+        }
+        if (previousScope) {previousScope.scrollTop = tree.scrollTop; previousScope.scrollLeft = tree.scrollLeft;}
+        if (refresh || !previous || previous.collection !== state.sourceCollection) nav.model = sourceTreeModel(state.sourceCollection);
+        const model = nav.model, scope = sourceTreeScope(nav, model.collection);
+        // Deleted branches cannot grow an unbounded preference history. Page
+        // and Captured retain independent, session-only navigation state.
+        for (const key of scope.collapsed) if (!model.nodes.get(key)?.children) scope.collapsed.delete(key);
+        const {visible, limited} = sourceTreeVisible(model, scope.collapsed);
+        const keys = new Set(visible.map(node => node.key));
+        const nearest = key => {
+          for (let count = 0; key && count <= SOURCE_TREE_LIMITS.depth + 3; count++) {
+            if (keys.has(key)) return key;
+            key = (model.nodes.get(key) ?? previous?.nodes.get(key))?.parent;
+          }
+          return null;
+        };
+        const selectedCandidates = [...model.nodes.values()].filter(node => node.source && (node.source.source_type === 'script'
+          ? node.source.script_id === state.selectedScriptId
+          : state.selectedScriptId === null && node.source.artifact_id === state.selectedArtifactId));
+        // Selection must agree with the authoritative raw catalog, including
+        // records omitted by path/node limits. Never scan beyond the catalog cap
+        // merely to decorate a row: an incomplete catalog cannot prove uniqueness.
+        const selected = !model.limits.catalog && selectedCandidates.length === 1 && !selectedCandidates[0].ambiguous &&
+          keys.has(selectedCandidates[0].key) && sourceIsCurrent(selectedCandidates[0].source) ? selectedCandidates[0] : null;
+        scope.focus = nearest(hadFocus ? activeKey : scope.focus) ?? selected?.key ?? visible[0]?.key ?? null;
+        const containers = new Map([[tree, []]]);
+        for (const node of visible) {
+          let entry = nav.rows.get(node.key);
+          if (!entry) {entry = sourceTreeRow(node, nav); nav.rows.set(node.key, entry);}
+          const {row, icon, name, detail, group} = entry;
+          row.style.setProperty('--source-depth', String(Math.min(node.depth, 6)));
+          row.setAttribute('aria-level', String(node.depth + 1));
+          row.setAttribute('aria-posinset', String(node.position)); row.setAttribute('aria-setsize', String(node.size));
+          row.tabIndex = scope.focus === node.key ? 0 : -1;
+          const label = node.label.length > 512 ? node.label.slice(0, 509) + '…' : node.label;
+          if (name.textContent !== label) name.textContent = label;
+          name.title = node.source?.url || node.label;
+          row.setAttribute('aria-label', label);
+          icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
+          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '›' : '⌄';
+          detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
+          if (node.source) {
+            row.dataset[node.source.source_type === 'script' ? 'scriptId' : 'artifactId'] = node.source.source_type === 'script' ? node.source.script_id : node.source.artifact_id;
+            row.setAttribute('aria-selected', String(node === selected));
+          } else {
+            row.setAttribute('aria-expanded', String(!scope.collapsed.has(node.key)));
+            group.hidden = scope.collapsed.has(node.key); containers.set(group, []);
+          }
+          const container = node.parent ? nav.rows.get(node.parent).group : tree;
+          containers.get(container).push(row);
+          if (group) containers.get(container).push(group);
+        }
+        const notices = [];
+        if (model.limits.catalog) notices.push(`Only the first ${SOURCE_TREE_LIMITS.catalog.toLocaleString()} catalog records were inspected; ${model.limits.catalog.toLocaleString()} more records are outside this navigator. Selection markers are withheld until the full catalog fits this limit.`);
+        if (model.limits.omitted) notices.push(`${model.limits.omitted} sources exceed the navigator path, identity or node limit and are not listed.`);
+        if (model.limits.ambiguous) notices.push(`${model.limits.ambiguous} duplicate source identities are not shown twice; ambiguous sources cannot be opened.`);
+        if (model.limits.deep) notices.push(`${model.limits.deep} paths are shortened after ${SOURCE_TREE_LIMITS.depth} folders; file tooltips retain their full URLs.`);
+        if (limited) notices.push(`Showing the first ${SOURCE_TREE_LIMITS.visible.toLocaleString()} expanded rows. Collapse branches to see later rows, or use Open file.`);
+        if (!visible.length || notices.length) {
+          nav.notice ??= document.createElement('div'); nav.notice.className = 'source-tree-empty'; nav.notice.setAttribute('role', 'status');
+          nav.notice.textContent = notices.join(' ') || (state.sourceCollection === 'page'
             ? state.debuggerSession?.state === 'waiting' || state.debuggerSession?.state === 'connecting'
               ? 'Waiting for an authorized browser target. Open a page in the live Brave session.'
-              : 'Live scripts appear here when Origin Trace is started with make live.'
-            : 'No artifacts captured. JavaScript, WASM, source maps, and approved response bodies will appear here.';
-          elements.sourceTree.replaceChildren(empty);
-          return;
+              : 'No live scripts available. Detached execution contexts are excluded from Page.'
+            : 'No source artifacts captured. Canvas images are shown in Fingerprinting.');
+          // Keep limit disclosures above the rows, including when the navigator
+          // itself is empty after filtering or rejecting over-limit paths.
+          containers.get(tree).unshift(nav.notice);
         }
-        const rows = [sourceTreeRow('top', '⌄', 0, null, `${sources.length}`)];
-        const byOrigin = new Map();
-        sources.forEach(source => {
-          const origin = sourceOrigin(source);
-          if (!byOrigin.has(origin)) byOrigin.set(origin, []);
-          byOrigin.get(origin).push(source);
-        });
-        [...byOrigin.entries()].sort(([left], [right]) => left.localeCompare(right)).forEach(([origin, originSources]) => {
-          rows.push(sourceTreeRow(origin.replace(/^https?:\/\//, ''), '⌄', 1, null, `${originSources.length}`));
-          const renderedDirectories = new Set();
-          originSources.sort((left, right) => left.url.localeCompare(right.url)).forEach(source => {
-            const parts = sourcePathParts(source);
-            parts.slice(0, -1).forEach((directory, index) => {
-              const key = parts.slice(0, index + 1).join('/');
-              if (renderedDirectories.has(key)) return;
-              renderedDirectories.add(key);
-              rows.push(sourceTreeRow(directory, '⌄', index + 2));
-            });
-            rows.push(sourceTreeRow(
-              sourceDisplayName(source),
-              sourceIcon(source),
-              Math.max(2, parts.length + 1),
-              source,
-              sourceDisplayMeta(source)
-            ));
-          });
-        });
-        elements.sourceTree.replaceChildren(...rows);
+        for (const [container, children] of containers) {
+          const wanted = new Set(children);
+          for (const child of [...container.children]) if (!wanted.has(child)) child.remove();
+          children.forEach((child, index) => {if (container.children[index] !== child) container.insertBefore(child, container.children[index] ?? null);});
+        }
+        for (const [key, entry] of nav.rows) if (!keys.has(key)) {entry.row.remove(); entry.group?.remove(); nav.rows.delete(key);}
+        nav.visible = visible;
+        tree.tabIndex = visible.length ? -1 : 0;
+        tree.scrollTop = scope.scrollTop; tree.scrollLeft = scope.scrollLeft;
+        if (anchor && nav.rows.has(anchor.key)) {
+          const bounds = nav.rows.get(anchor.key).row.getBoundingClientRect();
+          tree.scrollTop += bounds.top - tree.getBoundingClientRect().top - anchor.offset;
+        }
+        if (hadFocus) {
+          if (scope.focus) sourceTreeFocus(scope.focus, Boolean(activeKey && activeKey !== scope.focus));
+          else tree.focus({preventScroll: true});
+        }
       }
 
       function renderSourceHealth() {

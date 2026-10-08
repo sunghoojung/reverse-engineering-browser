@@ -23,6 +23,8 @@ struct Request {
     assume_intrinsics: bool,
     #[serde(default)]
     function_at_byte: Option<u32>,
+    #[serde(default)]
+    candidate_end_byte: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,8 +128,16 @@ fn analyze(request: Request) -> Response {
         return error_response("source exceeds the deobfuscation byte limit");
     }
 
+    if request.candidate_end_byte.is_some() && request.function_at_byte.is_none() {
+        return error_response("candidate_end_byte requires function_at_byte");
+    }
     if let Some(offset) = request.function_at_byte {
-        return match preflight::function_at(&request.source, offset as usize) {
+        return match match request.candidate_end_byte {
+            Some(end) => {
+                preflight::candidate_function_at(&request.source, offset as usize, end as usize)
+            }
+            None => preflight::function_at(&request.source, offset as usize),
+        } {
             Ok(function_location) => Response {
                 schema: "reb-deobfuscator-worker-v1",
                 ok: true,
@@ -344,6 +354,7 @@ mod tests {
                 source: source.to_string(),
                 assume_intrinsics: false,
                 function_at_byte: None,
+                candidate_end_byte: None,
             });
             assert!(response.ok, "{source}: {:?}", response.syntax_errors);
             assert!(validate_derived(&response.derived_source, SourceType::unambiguous()).is_ok());
@@ -365,6 +376,7 @@ mod tests {
             source: original.to_string(),
             assume_intrinsics: false,
             function_at_byte: None,
+            candidate_end_byte: None,
         });
         assert_eq!(response.transformations.len(), 1);
         response.derived_source = "const result={(3)};".to_string();
@@ -412,6 +424,7 @@ mod tests {
                 source,
                 assume_intrinsics: true,
                 function_at_byte: None,
+                candidate_end_byte: None,
             });
             assert!(response.ok);
             assert!(response.derived_source.contains("f(\"ab\")"));
@@ -425,6 +438,7 @@ mod tests {
             source: "const f=function(){var a=[0];for(var i=0;i<3;i++){a=[a,a]}return a.length};const result=f();".to_string(),
             assume_intrinsics: true,
             function_at_byte: None,
+                candidate_end_byte: None,
         });
         assert!(response.ok);
         assert!(!response.transformations_truncated);
@@ -446,6 +460,7 @@ mod tests {
                 source: source.clone(),
                 assume_intrinsics: false,
                 function_at_byte: None,
+                candidate_end_byte: None,
             });
             assert!(disabled.ok);
             assert_eq!(disabled.derived_source, source);
@@ -453,6 +468,7 @@ mod tests {
                 source: source.clone(),
                 assume_intrinsics: true,
                 function_at_byte: None,
+                candidate_end_byte: None,
             });
             assert!(enabled.ok);
             assert!(!enabled.transformations_truncated);
@@ -490,6 +506,7 @@ mod tests {
                 source: source.to_string(),
                 assume_intrinsics: true,
                 function_at_byte: None,
+                candidate_end_byte: None,
             });
             assert!(response.ok);
             for kind in required {
@@ -527,6 +544,7 @@ mod tests {
                 source: source.to_string(),
                 assume_intrinsics: true,
                 function_at_byte: None,
+                candidate_end_byte: None,
             });
             assert!(response.ok, "{source}");
             assert!(
@@ -549,6 +567,7 @@ mod tests {
             source: split.clone(),
             assume_intrinsics: true,
             function_at_byte: None,
+            candidate_end_byte: None,
         });
         assert!(response.ok);
         assert!(response.transformations_truncated);
@@ -564,6 +583,7 @@ mod tests {
                 source: source.clone(),
                 assume_intrinsics: true,
                 function_at_byte: None,
+                candidate_end_byte: None,
             });
             assert!(response.ok);
             assert_eq!(response.derived_source, source);
@@ -576,6 +596,7 @@ mod tests {
             assume_intrinsics: false,
             source: "const value = 1 + 2 * 3; const unsafe = 1 / 0;".to_string(),
             function_at_byte: None,
+            candidate_end_byte: None,
         });
 
         assert!(response.ok);
@@ -593,6 +614,7 @@ mod tests {
             assume_intrinsics: false,
             source: "const broken = ;".to_string(),
             function_at_byte: None,
+            candidate_end_byte: None,
         });
 
         assert!(!response.ok);
@@ -608,6 +630,7 @@ mod tests {
             assume_intrinsics: false,
             source: "x".repeat(MAX_SOURCE_BYTES + 1),
             function_at_byte: None,
+            candidate_end_byte: None,
         });
 
         assert!(!response.ok);
@@ -656,6 +679,26 @@ mod framing_tests {
             .collect();
         assert_eq!(responses[0]["ok"], false);
         assert_eq!(responses[1]["derived_source"], "(3)");
+    }
+
+    #[test]
+    fn candidate_query_wire_flag_is_explicit_and_ordinary_queries_stay_compatible() {
+        let source = "function f(){return 'value';}";
+        let start = source.find("value").unwrap();
+        let base = serde_json::json!({"source":source,"function_at_byte":start});
+        let ordinary = analyze(serde_json::from_value(base.clone()).unwrap());
+        assert!(!ordinary.function_location.unwrap().candidate_eligible);
+        let mut strict = base;
+        strict["candidate_end_byte"] = serde_json::json!(start + 5);
+        let strict = analyze(serde_json::from_value(strict).unwrap());
+        assert!(strict.function_location.unwrap().candidate_eligible);
+        let malformed = analyze(
+            serde_json::from_value(
+                serde_json::json!({"source":source,"candidate_end_byte":start+5}),
+            )
+            .unwrap(),
+        );
+        assert!(!malformed.ok);
     }
 
     #[test]

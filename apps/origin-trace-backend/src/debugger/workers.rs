@@ -32,6 +32,13 @@ pub(super) struct Workers {
     retry: Mutex<BTreeMap<String, (u32, std::time::Instant)>>,
 }
 impl Workers {
+    pub(super) fn has_sessions(&self) -> bool {
+        !self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(BTreeMap::new()),
@@ -65,6 +72,9 @@ impl Debugger {
             .ok_or_else(|| Error::conflict("The isolated worker debugger is unavailable"))
     }
     pub(super) async fn close_workers(&self) {
+        self.hooks
+            .candidate_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let _refresh = self.workers.refresh.lock().await;
         self.workers
             .retry
@@ -309,21 +319,52 @@ impl Debugger {
                         &hex::encode(Sha256::digest(target.as_bytes()))[..16]
                     );
                     if public_id.len() > 4096 {
+                        self.hooks
+                            .candidate_catalog_incomplete
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        self.hooks
+                            .candidate_epoch
+                            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                         return;
                     }
                     script["script_id"] = json!(public_id);
                     script["cdp_script_id"] = json!(id);
                     script["target_id"] = json!(target);
                     script["target_type"] = json!("worker");
+                    self.hooks
+                        .candidate_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     self.update(|s| {
                         let scripts = s["scripts"].as_array_mut().unwrap();
                         scripts.retain(|v| v["script_id"] != script["script_id"]);
                         if scripts.len() >= 5000 {
+                            self.hooks
+                                .candidate_catalog_incomplete
+                                .store(true, std::sync::atomic::Ordering::Release);
                             scripts.remove(0);
                         }
                         scripts.push(script);
                     });
+                } else {
+                    self.hooks
+                        .candidate_catalog_incomplete
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    self.hooks
+                        .candidate_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 }
+            }
+            "Runtime.executionContextDestroyed" | "Runtime.executionContextsCleared" => {
+                self.hooks
+                    .candidate_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                self.update(|s| {
+                    s["scripts"].as_array_mut().unwrap().retain(|script| {
+                        script["target_id"] != target
+                            || (message["method"] == "Runtime.executionContextDestroyed"
+                                && script["execution_context_id"] != p["executionContextId"])
+                    });
+                });
             }
             "Debugger.paused" => {
                 if !self.hook_pause(target, p.clone())
@@ -344,5 +385,39 @@ impl Debugger {
             }
             _ => (),
         }
+    }
+}
+
+#[cfg(test)]
+mod candidate_catalog_tests {
+    use super::*;
+    use clap::Parser;
+    use std::sync::atomic::Ordering;
+    #[tokio::test]
+    async fn candidate_worker_catalog_preserves_other_contexts_and_taints_rejected_public_ids() {
+        let debugger = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        for context in [1, 2] {
+            debugger.worker_event("worker", json!({"method":"Debugger.scriptParsed", "params":{
+                "scriptId":context.to_string(), "url":"http://localhost/worker.js", "executionContextId":context
+            }})).await;
+        }
+        debugger.worker_event("worker", json!({"method":"Runtime.executionContextDestroyed","params":{"executionContextId":1}})).await;
+        let snapshot = debugger.snapshot();
+        assert_eq!(snapshot["scripts"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["scripts"][0]["execution_context_id"], 2);
+        debugger
+            .worker_event(
+                "worker",
+                json!({"method":"Debugger.scriptParsed","params":{
+                    "scriptId":"a".repeat(4096),"url":"http://localhost/worker.js"
+                }}),
+            )
+            .await;
+        assert!(
+            debugger
+                .hooks
+                .candidate_catalog_incomplete
+                .load(Ordering::Acquire)
+        );
     }
 }

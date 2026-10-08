@@ -11371,6 +11371,112 @@
                 }
               ]
             }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "bind_runtime_candidate"
+              },
+              "digest_version": {
+                "type": "string",
+                "const": "reb-live-script-utf8-v1"
+              },
+              "source_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "source_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2097152
+              },
+              "start_byte": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2097151
+              },
+              "end_byte": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2097152
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              },
+              "session_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "created_at_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "navigation_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "action",
+              "digest_version",
+              "source_sha256",
+              "source_bytes",
+              "start_byte",
+              "end_byte",
+              "target_id",
+              "session_id",
+              "created_at_ms",
+              "navigation_id"
+            ],
+            "x-source": [
+              "apps/origin-trace-backend/src/debugger/hooks/candidate.rs"
+            ],
+            "description": "Explicitly bind one original external live-JavaScript candidate to a selected disposable page or dedicated worker. Requires a unique complete UTF-8 SHA-256 match (not CDP hash or URL) within 64 scripts/8 MiB/15 seconds, then strict literal/synchronous-function worker admission. Adds observation-only return definition without capture, navigation or arming. Missing, changed, ambiguous, unsupported and stale ownership fail closed.",
+            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "browser-control",
+                    "process-launch",
+                    "process-stop"
+                  ],
+                  "when": "Fetches bounded script sources and launches the existing inert function-location worker."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "hooks-editable",
+                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                },
+                {
+                  "id": "live-hook-source",
+                  "condition": "A bounded live JavaScript source/location and available hook session are required; at most eight definitions."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Reads selected-target script source and adds an ephemeral observation-only definition. No evaluation, capture, navigation or breakpoint installation. Existing explicit capture and arm confirmations still apply.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/hooks/candidate.rs",
+                  "symbol": "Debugger::bind_candidate"
+                }
+              ]
+            },
+            "additionalProperties": false
           }
         ],
         "description": "All 59 action envelopes have source-backed request fields, types and requiredness, including conditional fields. Variants marked partial identify remaining complex runtime constraints explicitly. Session availability, record identity, mutation confirmation and state locks still apply. Extra properties remain allowed where dispatch ignores them."
@@ -11607,6 +11713,9 @@
           },
           "clear_console": {
             "$ref": "#/components/schemas/DebuggerAcknowledgementResult"
+          },
+          "bind_runtime_candidate": {
+            "$ref": "#/components/schemas/DebuggerRuntimeHooksResult"
           }
         }
       },

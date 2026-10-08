@@ -129,3 +129,11 @@ See [JavaScript source facts v1](../../protocol/javascript-source-facts-v1.md)
 for the API/CLI, byte coordinates, budgets, unknown frontiers and deliberately
 limited meaning of ordering and binding resolution. The operation does not
 rewrite source, resolve values, follow imports, or execute analyzed code.
+
+Candidate experiments additionally submit `candidate_end_byte` with
+`function_at_byte`. The strict query admits a complete literal range in a
+declared-synchronous function body and adds `candidate_eligible: true` to the
+function location. Ordinary queries set it false. Missing flags from older
+workers refuse only this bridge. Async/generator functions, comments, templates,
+accessors and parameter defaults remain unsupported; no query executes source.
+See [the bridge contract](../../docs/product/candidate-experiment-v1.md).

@@ -1,3 +1,4 @@
+mod candidate;
 use super::{Debugger, parse, requests, workers::Session};
 use crate::{
     error::{Error, Result},
@@ -8,7 +9,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -17,6 +18,8 @@ pub(super) struct Hooks {
     next: AtomicU64,
     hit: AtomicU64,
     epoch: AtomicU64,
+    pub(super) candidate_epoch: AtomicU64,
+    pub(super) candidate_catalog_incomplete: AtomicBool,
     points: Mutex<BTreeMap<(String, String), Value>>,
     queue: mpsc::Sender<Pause>,
     receiver: Mutex<Option<mpsc::Receiver<Pause>>>,
@@ -35,6 +38,8 @@ impl Hooks {
             next: AtomicU64::new(1),
             hit: AtomicU64::new(1),
             epoch: AtomicU64::new(0),
+            candidate_epoch: AtomicU64::new(0),
+            candidate_catalog_incomplete: AtomicBool::new(false),
             points: Mutex::new(BTreeMap::new()),
             queue,
             receiver: Mutex::new(Some(receiver)),
@@ -120,6 +125,7 @@ impl Debugger {
         script: &Value,
         line: u64,
         column: u64,
+        candidate: Option<&Value>,
     ) -> Result<Value> {
         let relative = line
             .checked_sub(script["start_line"].as_u64().unwrap())
@@ -163,9 +169,13 @@ impl Debugger {
         );
         let mut command = Command::new(path);
         command.env_clear().env("LANG", "C").env("LC_ALL", "C");
+        let mut query = json!({"source":source,"function_at_byte":offset});
+        if let Some(candidate) = candidate {
+            query["candidate_end_byte"] = candidate["end_byte"].clone();
+        }
         let result = worker::run(
             &mut command,
-            &serde_json::to_vec(&json!({"source":source,"function_at_byte":offset}))?,
+            &serde_json::to_vec(&query)?,
             4096,
             Duration::from_secs(5),
         )
@@ -176,6 +186,11 @@ impl Debugger {
         let document: Value = serde_json::from_slice(&result.bytes)
             .map_err(|_| Error::protocol("Malformed function targeting output"))?;
         let f = &document["function_location"];
+        if candidate.is_some() && !Self::candidate_worker_admitted(&document, source.len()) {
+            return Err(Error::bad(
+                "Unsupported candidate: choose a literal inside a synchronous function body; comments, async/generator functions and templates are not supported.",
+            ));
+        }
         if document["schema"] != "reb-deobfuscator-worker-v1"
             || document["ok"] != true
             || ![
@@ -213,6 +228,9 @@ impl Debugger {
         )
     }
     pub(super) async fn add_hook(&self, r: &Value) -> Result<Value> {
+        self.add_hook_with_candidate(r, None).await
+    }
+    async fn add_hook_with_candidate(&self, r: &Value, candidate: Option<&Value>) -> Result<Value> {
         self.hooks_editable()?;
         let snapshot = self.snapshot();
         if snapshot["runtime_hooks"]["definitions"]
@@ -335,11 +353,34 @@ impl Debugger {
             if source["truncated"] == true {
                 return Err(Error::bad("Runtime Hooks cannot target a truncated script"));
             }
-            self.locate_function(source["source"].as_str().unwrap(), script, line, column)
-                .await?
+            let text = source["source"].as_str().unwrap();
+            if let Some(guard) = candidate {
+                self.candidate_guard_current(guard, script, text)?;
+            }
+            let function = self
+                .locate_function(text, script, line, column, candidate)
+                .await?;
+            if let Some(guard) = candidate {
+                self.candidate_guard_current(guard, script, text)?;
+            }
+            function
         };
-        let definition = json!({"id":self.hooks.next.fetch_add(1,Ordering::Relaxed),"label":label,"script_id":id,"cdp_script_id":script.get("cdp_script_id").unwrap_or(&script["script_id"]),"target_id":target,"target_type":script.get("target_type").unwrap_or(&json!("page")),"entry_mode":mode,"function_expression":expression,"url":source_label(script["url"].as_str().unwrap_or("")),"line":line,"column":column,"function_kind":function["kind"],"function_start":function["start"],"function_end":function["end"],"target_line":function["body_start"]["line"],"target_column":function["body_start"]["column"],"entry_enabled":entry,"return_enabled":returns,"condition":condition,"entry_logic":entry_logic,"return_logic":return_logic,"return_mode":return_mode,"return_expression":return_expression,"return_value":value,"return_value_bytes":bytes,"resolved":null});
+        let mut definition = json!({"id":self.hooks.next.fetch_add(1,Ordering::Relaxed),"label":label,"script_id":id,"cdp_script_id":script.get("cdp_script_id").unwrap_or(&script["script_id"]),"target_id":target,"target_type":script.get("target_type").unwrap_or(&json!("page")),"entry_mode":mode,"function_expression":expression,"url":source_label(script["url"].as_str().unwrap_or("")),"line":line,"column":column,"function_kind":function["kind"],"function_start":function["start"],"function_end":function["end"],"target_line":function["body_start"]["line"],"target_column":function["body_start"]["column"],"entry_enabled":entry,"return_enabled":returns,"condition":condition,"entry_logic":entry_logic,"return_logic":return_logic,"return_mode":return_mode,"return_expression":return_expression,"return_value":value,"return_value_bytes":bytes,"resolved":null});
+        if let Some(guard) = candidate {
+            definition["candidate_guard"] = guard.clone();
+        }
+        let mut accepted = false;
         self.update(|s| {
+            if let Some(guard) = candidate
+                && !Self::candidate_commit_current(
+                    s,
+                    guard,
+                    self.hooks.candidate_epoch.load(Ordering::Acquire),
+                )
+            {
+                return;
+            }
+            accepted = true;
             s["runtime_hooks"]["definitions"]
                 .as_array_mut()
                 .unwrap()
@@ -349,6 +390,11 @@ impl Debugger {
                 "Runtime Hook definition added. Confirm isolated-page execution before arming."
             );
         });
+        if !accepted {
+            return Err(Error::conflict(
+                "Candidate owner changed before definition insertion.",
+            ));
+        }
         Ok(self.group_response("runtime_hooks"))
     }
     pub(super) fn remove_hook(&self, r: &Value) -> Result<Value> {
@@ -399,13 +445,13 @@ impl Debugger {
             .unwrap()
             .clone();
         let mut installed: BTreeMap<(String, String), Value> = BTreeMap::new();
-        let result=async {self.command("Network.enable",json!({"maxPostDataSize":if self.options.capture_network_content {131072} else {0}})).await?;for d in &mut definitions {let target=d["target_id"].as_str().unwrap().to_owned();let session=self.hook_session(&target).await?;let mut specs=Vec::new();
+        let result=async {self.command("Network.enable",json!({"maxPostDataSize":if self.options.capture_network_content {131072} else {0}})).await?;for d in &mut definitions {self.verify_candidate_arm(d).await?;let target=d["target_id"].as_str().unwrap().to_owned();let session=self.hook_session(&target).await?;self.check_candidate_definition(d)?;let mut specs=Vec::new();
             if d["entry_mode"]=="function" {let group=format!("reb-hook-function-{}-{}",s["runtime_hooks"]["session_id"],d["id"]);let evaluated=session.command("Runtime.evaluate",json!({"expression":d["function_expression"],"objectGroup":group,"silent":true,"returnByValue":false,"throwOnSideEffect":true,"awaitPromise":false,"timeout":100}),Duration::from_secs(3)).await;let installed_function=async {let v=evaluated?;if v["exceptionDetails"].is_object()||v["result"]["type"]!="function" {return Err(Error::bad("Live-function expression did not resolve without side effects to a function"));}let id=validation::text(&v["result"]["objectId"],"Function object ID",4096,false,false).map_err(|e|Error::protocol(e.message))?;session.command("Debugger.setBreakpointOnFunctionCall",json!({"objectId":id}),Duration::from_secs(3)).await}.await;let _=session.command("Runtime.releaseObjectGroup",json!({"objectGroup":group}),Duration::from_secs(3)).await;let point=installed_function?;let id=validation::text(&point["breakpointId"],"Hook breakpoint ID",4096,false,false).map_err(|e|Error::protocol(e.message))?;installed.insert((target.clone(),id.into()),json!({"hook_id":d["id"],"target_id":target,"phases":["entry"]}));d["resolved"]=json!({"entry_points":1,"return_points":0});}
-            else {let locations=session.command("Debugger.getPossibleBreakpoints",json!({"start":{"scriptId":d["cdp_script_id"],"lineNumber":d["target_line"],"columnNumber":d["target_column"]},"restrictToFunction":true}),Duration::from_secs(3)).await?;let locations=locations["locations"].as_array().filter(|a|a.len()<=100000).ok_or_else(||Error::protocol("Malformed or oversized hook locations"))?;let mut points=BTreeMap::new();let first=locations.iter().find_map(parse::location).ok_or_else(||Error::bad("No breakable function was found for the hook"))?;if first["script_id"]!=d["cdp_script_id"] {return Err(Error::protocol("Hook location refers to another script"));}
+            else {let locations=session.command("Debugger.getPossibleBreakpoints",json!({"start":{"scriptId":d["cdp_script_id"],"lineNumber":d["target_line"],"columnNumber":d["target_column"]},"restrictToFunction":true}),Duration::from_secs(3)).await?;self.check_candidate_definition(d)?;let locations=locations["locations"].as_array().filter(|a|a.len()<=100000).ok_or_else(||Error::protocol("Malformed or oversized hook locations"))?;let mut points=BTreeMap::new();let first=locations.iter().find_map(parse::location).ok_or_else(||Error::bad("No breakable function was found for the hook"))?;if first["script_id"]!=d["cdp_script_id"] {return Err(Error::protocol("Hook location refers to another script"));}
 if d["entry_enabled"]==true {points.insert((first["line"].as_u64().unwrap(),first["column"].as_u64().unwrap()),(first.clone(),vec!["entry"]));}let mut returns=0;for raw in locations {if raw["type"]!="return"||d["return_enabled"]!=true {continue;}let Some(loc)=parse::location(raw).filter(|l|l["script_id"]==d["cdp_script_id"]) else {continue;};let key=(loc["line"].as_u64().unwrap(),loc["column"].as_u64().unwrap());let point=points.entry(key).or_insert((loc,vec![]));if !point.1.contains(&"return") {point.1.push("return");returns+=1;}
 if returns>32 {return Err(Error::bad("Hook exceeds 32 synchronous return points"));}}
 if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no synchronous return point"));}for (_, (location,phases)) in points {specs.push(json!({"location":location,"phases":phases,"target_id":target,"hook_id":d["id"]}));}d["resolved"]=json!({"entry_points":if d["entry_enabled"]==true {1} else {0},"return_points":returns});
-                for spec in specs {if installed.len()>=64 {return Err(Error::bad("Hooks exceed the 64 active-point limit"));}let loc=&spec["location"];let result=session.command("Debugger.setBreakpoint",json!({"location":{"scriptId":loc["script_id"],"lineNumber":loc["line"],"columnNumber":loc["column"]}}),Duration::from_secs(3)).await?;let id=validation::text(&result["breakpointId"],"Hook breakpoint ID",4096,false,false).map_err(|e|Error::protocol(e.message))?;installed.insert((target.clone(),id.into()),spec);}}
+                for spec in specs {if installed.len()>=64 {return Err(Error::bad("Hooks exceed the 64 active-point limit"));}let loc=&spec["location"];let result=session.command("Debugger.setBreakpoint",json!({"location":{"scriptId":loc["script_id"],"lineNumber":loc["line"],"columnNumber":loc["column"]}}),Duration::from_secs(3)).await?;let id=validation::text(&result["breakpointId"],"Hook breakpoint ID",4096,false,false).map_err(|e|Error::protocol(e.message))?;installed.insert((target.clone(),id.into()),spec);self.check_candidate_definition(d)?;}}
             if self.hooks.epoch.load(Ordering::Acquire)!=epoch {return Err(Error::conflict("Runtime Hooks arming was cancelled"));}}
             Ok::<_,Error>(())}.await;
         if let Err(e) = result {
@@ -430,7 +476,22 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
         }
         let count = installed.len();
         *self.hooks.points.lock().unwrap_or_else(|e| e.into_inner()) = installed;
+        let mut committed = false;
         self.update(|s| {
+            if self.hooks.epoch.load(Ordering::Acquire) != epoch
+                || definitions.iter().any(|d| {
+                    d.get("candidate_guard").is_some_and(|guard| {
+                        !Self::candidate_commit_current(
+                            s,
+                            guard,
+                            self.hooks.candidate_epoch.load(Ordering::Acquire),
+                        )
+                    })
+                })
+            {
+                return;
+            }
+            committed = true;
             s["runtime_hooks"]["definitions"] = json!(definitions);
             s["runtime_hooks"]["active_points"] = json!(count);
             s["runtime_hooks"]["state"] = json!("armed");
@@ -439,6 +500,12 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                 definitions.len()
             ));
         });
+        if !committed {
+            self.disarm_hooks().await?;
+            return Err(Error::conflict(
+                "Candidate ownership changed before arming completed; installed points were removed.",
+            ));
+        }
         Ok(self.group_response("runtime_hooks"))
     }
     pub(super) async fn disarm_hooks(&self) -> Result<Value> {
@@ -610,6 +677,7 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
             let Some(hook) = hook else {
                 continue;
             };
+            self.check_candidate_definition(&hook)?;
             for phase in point["phases"].as_array().unwrap() {
                 if self.hooks.epoch.load(Ordering::Acquire) != p.epoch
                     || self.snapshot()["runtime_hooks"]["total_hits"]
@@ -634,6 +702,7 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                 if let Some(scope)=frame["scopeChain"].as_array().into_iter().flatten().take(12).find(|s|s["type"]=="local")&& let Some(id)=scope["object"]["objectId"].as_str().filter(|s|s.len()<=4096) {let properties=session.command("Runtime.getProperties",json!({"objectId":id,"ownProperties":true,"accessorPropertiesOnly":false,"generatePreview":true}),Duration::from_secs(1)).await?;let a=properties["result"].as_array().ok_or_else(||Error::protocol("Malformed hook bindings"))?;truncated=a.len()>32;for property in a.iter().take(32) {let Some(name)=property["name"].as_str() else {continue;};let accessor=property["get"].is_object()||property["set"].is_object();let value=if property["value"].is_object() {preview(&property["value"], capture)} else {json!({"type":if accessor {"accessor"} else {"unavailable"},"subtype":null,"class_name":null,"description":if accessor {"Accessor not invoked"} else {"Not initialized or unavailable"},"value":null,"unserializable_value":null,"value_truncated":false})};bindings.push(json!({"name":validation::truncate(name,256),"value":value,"accessor":accessor}));}}
                 if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch {return Ok(());}let logic=&hook[if phase=="entry" {"entry_logic"} else {"return_logic"}];if logic!="" {let result=evaluate(&session,frame_id,&format!("(()=>{{\n{}\n}})()",logic.as_str().unwrap()),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("Injected logic returned a Promise; only synchronous logic is supported"));}operation="logic_run";}
                 if phase=="return"&&hook["return_mode"]!="none" {if frame["returnValue"]["subtype"]=="promise" {return Err(Error::bad("Promise return values cannot be synchronously replaced"));}let argument=if hook["return_mode"]=="json" {let value=&hook["return_value"];let kind=match value {Value::Null=>"null",Value::Bool(_)=>"bool",Value::Number(n) if n.is_i64()||n.is_u64()=>"int",Value::Number(_)=>"float",Value::String(_)=>"str",Value::Array(_)=>"list",Value::Object(_)=>"dict"};replacement=json!({"string_sha256":if capture {provenance::project(&json!({"operation":"string_digest","value":value})).unwrap_or(Value::Null)} else {Value::Null},"type":kind,"subtype":null,"class_name":null,"description":validation::truncate(&value.to_string(),512),"value":if value.is_array()||value.is_object() {Value::Null} else {value.clone()},"unserializable_value":null,"value_truncated":hook["return_value_bytes"].as_u64().unwrap()>512});json!({"value":value})} else {let result=evaluate(&session,frame_id,hook["return_expression"].as_str().unwrap(),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("A Promise cannot be a synchronous return replacement"));}replacement=preview(&result, capture);if let Some(value)=result.get("value") {json!({"value":value})}else if let Some(value)=result.get("unserializableValue") {json!({"unserializableValue":value})}else if let Some(id)=result.get("objectId") {json!({"objectId":id})}else {return Err(Error::bad("Hook expression result cannot be returned"));}};if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch {return Ok(());}session.command("Debugger.setReturnValue",json!({"newValue":argument}),Duration::from_secs(3)).await?;operation="return_overridden";}Ok(())}.await;
+                self.check_candidate_definition(&hook)?;
                 if self.hooks.epoch.load(Ordering::Acquire) != p.epoch {
                     return Ok(());
                 }
@@ -714,6 +783,7 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
         Ok(())
     }
     pub(super) async fn hooks_navigated(&self) {
+        self.hooks.candidate_epoch.fetch_add(1, Ordering::AcqRel);
         if !self.snapshot()["runtime_hooks"]["definitions"]
             .as_array()
             .unwrap()

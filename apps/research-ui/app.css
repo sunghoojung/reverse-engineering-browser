@@ -3674,3 +3674,18 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .source-excerpt-notice { color: var(--amber); font: 10px var(--mono); user-select: none; }
 .source-window :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (max-width: 480px) { .source-window input { width: 76px; } #source-window-label { flex-basis: 100%; } }
+
+/* A bounded question in the existing workspace, never a second panel. */
+.candidate-experiment-strip { grid-column: 1 / -1; order: 1; padding: 10px 12px; border-bottom: 1px solid var(--line); font: 12px/1.45 var(--sans); min-width: 0; }
+.candidate-experiment-strip[hidden] { display: none; }
+.candidate-experiment-strip strong, .candidate-experiment-strip p { display: block; overflow-wrap: anywhere; margin: 0 0 8px; }
+.candidate-experiment-strip label { display: grid; gap: 4px; margin-bottom: 8px; }
+.candidate-experiment-strip select { width: 100%; min-width: 0; }
+.candidate-experiment-strip .experiment-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.field-provenance-candidate-row { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.field-provenance-candidate-row .field-provenance-source { flex: 1; min-width: 0; }
+.field-provenance-test-candidate { flex: 0 0 auto; }
+@media (max-width: 560px) {
+  .field-provenance-candidate-row { flex-direction: column; align-items: stretch; }
+  .field-provenance-test-candidate { align-self: flex-end; margin: 0 8px 8px; }
+}

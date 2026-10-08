@@ -57,7 +57,7 @@ jobs:
 
   requests-ui:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -153,6 +153,25 @@ jobs:
           name: float32-ui-${{ github.run_id }}
           path: build/float32-ui-qa
           if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Exercise original-to-disposable candidate bridge
+        if: ${{ !cancelled() }}
+        run: |
+          # Reuse the actual backend already built for Float32 in this job.
+          make origin-trace-backend debugger-transport deob-worker-build
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --candidate-bridge-ui-browser
+
+      - name: Upload rendered candidate bridge QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-bridge-ui-${{ github.run_id }}
+          path: build/candidate-bridge-ui-qa
+          if-no-files-found: error
           retention-days: 3
 
       - name: Exercise supplied comparisons in Evidence

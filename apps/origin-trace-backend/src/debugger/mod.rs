@@ -285,9 +285,22 @@ impl Debugger {
         self.set_state("connecting", None);
         let (connection, mut events) =
             Connection::open(&self.transport, target["web_socket_url"].as_str().unwrap()).await?;
+        self.hooks.candidate_epoch.fetch_add(1, Ordering::AcqRel);
+        // A main reconnect does not re-enable already attached worker debuggers.
+        // Their cleared descriptors cannot be treated as a complete catalog.
+        let retained_workers = self.workers.has_sessions();
         self.update(|s| {
+            let incomplete = retained_workers
+                || s["scripts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|script| script["target_type"] == "worker");
             s["target"] = public_target(target);
             s["scripts"] = json!([]);
+            self.hooks
+                .candidate_catalog_incomplete
+                .store(incomplete, Ordering::Release);
             s["paused"] = Value::Null;
             s["network"]["target_id"] = target["id"].clone();
             s["network"]["requests"] = json!([]);
@@ -609,6 +622,7 @@ impl Debugger {
                         .unwrap()["memory_origin_trace"]
                         .clone()
             }),
+            "bind_runtime_candidate" => return self.bind_candidate(request).await,
             "add_runtime_hook" => return self.add_hook(request).await,
             "remove_runtime_hook" => return self.remove_hook(request),
             "arm_runtime_hooks" => return self.arm_hooks(request).await,
@@ -761,8 +775,8 @@ impl Debugger {
         let method = message["method"].as_str().unwrap_or("");
         let p = &message["params"];
         match method {
-            "Debugger.scriptParsed"=>if let Some(script)=parse::script(p) {self.update(|s| {let scripts=s["scripts"].as_array_mut().unwrap();scripts.retain(|v|v["script_id"]!=script["script_id"]);if scripts.len()>=5000 {scripts.remove(0);}scripts.push(script);});},
-            "Runtime.executionContextDestroyed"|"Runtime.executionContextsCleared"=>self.update(|s| {let clear=method.ends_with("Cleared");s["scripts"].as_array_mut().unwrap().retain(|v|!clear && v["execution_context_id"]!=p["executionContextId"]);let ids=s["scripts"].as_array().unwrap().iter().map(|v|v["script_id"].clone()).collect::<Vec<_>>();for b in s["breakpoints"].as_array_mut().unwrap() {b["locations"].as_array_mut().unwrap().retain(|l|ids.contains(&l["script_id"]));}}),
+            "Debugger.scriptParsed"=>if let Some(script)=parse::script(p) {self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);self.update(|s| {let scripts=s["scripts"].as_array_mut().unwrap();scripts.retain(|v|v["script_id"]!=script["script_id"]);if scripts.len()>=5000 {self.hooks.candidate_catalog_incomplete.store(true,Ordering::Release);scripts.remove(0);}scripts.push(script);});}else{self.hooks.candidate_catalog_incomplete.store(true,Ordering::Release);self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);},
+            "Runtime.executionContextDestroyed"|"Runtime.executionContextsCleared"=>{self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);self.update(|s| {let clear=method.ends_with("Cleared");s["scripts"].as_array_mut().unwrap().retain(|v|v["target_type"]=="worker" || (!clear && v["execution_context_id"]!=p["executionContextId"]));let ids=s["scripts"].as_array().unwrap().iter().map(|v|v["script_id"].clone()).collect::<Vec<_>>();for b in s["breakpoints"].as_array_mut().unwrap() {b["locations"].as_array_mut().unwrap().retain(|l|ids.contains(&l["script_id"]));}})},
             "Page.frameNavigated"=>{if !p["frame"]["parentId"].is_string() {self.clear_object_search().await;self.hooks_navigated().await;}},
             "Debugger.paused"=>{let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();if self.hook_pause(&target,p.clone()) {return;}let pause=parse::pause(p);self.update(|s| {s["state"]=json!("paused");s["error"]=Value::Null;s["paused"]=pause;});let generation=self.snapshot()["generation"].as_u64().unwrap();let weak=Arc::downgrade(self);tokio::spawn(async move {if let Some(debugger)=weak.upgrade() {if debugger.memory_active(debugger.snapshot()["memory_origin_trace"]["trace_id"].as_u64().unwrap()) {debugger.memory_pause(debugger.snapshot()["paused"].clone()).await;} else {debugger.enrich(generation).await;}}});},
             "Debugger.resumed"=>self.update(|s| {if s["state"]!="crashed" {s["state"]=json!("running");s["paused"]=Value::Null;}}),

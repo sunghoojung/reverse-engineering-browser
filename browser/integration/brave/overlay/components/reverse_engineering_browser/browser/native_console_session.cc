@@ -137,7 +137,8 @@ class Session final {
     // threads. One command may be in flight; a timeout retires the session.
     int descriptor = -1;
     for (int attempt = 0; attempt < 40 && descriptor < 0; ++attempt) {
-      struct stat parent{}, endpoint{};
+      struct stat parent = {};
+      struct stat endpoint = {};
       const auto directory = base::FilePath(path).DirName();
       if (lstat(directory.value().c_str(), &parent) != 0 || !S_ISDIR(parent.st_mode) ||
           parent.st_uid != geteuid() || (parent.st_mode & 0777) != 0700) {

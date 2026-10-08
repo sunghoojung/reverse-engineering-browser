@@ -20,6 +20,8 @@ pub(super) struct Hooks {
     epoch: AtomicU64,
     pub(super) candidate_epoch: AtomicU64,
     pub(super) candidate_catalog_incomplete: AtomicBool,
+    candidate_sources: Mutex<BTreeMap<String, u64>>,
+    candidate_source_sequence: AtomicU64,
     points: Mutex<BTreeMap<(String, String), Value>>,
     queue: mpsc::Sender<Pause>,
     receiver: Mutex<Option<mpsc::Receiver<Pause>>>,
@@ -32,6 +34,50 @@ struct Pause {
     epoch: u64,
 }
 impl Hooks {
+    // Called inside the debugger state edit that changes this target's catalog.
+    // No revision lock is held across an await or while acquiring state.
+    pub(super) fn candidate_source_changed(&self, target: &str) {
+        let mut revisions = self
+            .candidate_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let next = self
+            .candidate_source_sequence
+            .load(Ordering::Relaxed)
+            .checked_add(1);
+        if target.is_empty()
+            || (!revisions.contains_key(target) && revisions.len() >= 9)
+            || next.is_none()
+        {
+            self.candidate_catalog_incomplete
+                .store(true, Ordering::Release);
+            self.candidate_epoch.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        let next = next.unwrap();
+        self.candidate_source_sequence
+            .store(next, Ordering::Relaxed);
+        revisions.insert(target.to_owned(), next);
+    }
+    pub(super) fn candidate_source_revision(&self, target: &str) -> Option<u64> {
+        self.candidate_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(target)
+            .copied()
+    }
+    pub(super) fn candidate_source_removed(&self, target: &str) {
+        self.candidate_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(target);
+    }
+    pub(super) fn candidate_sources_reset(&self) {
+        self.candidate_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
     pub fn new() -> Self {
         let (queue, receiver) = mpsc::channel(2);
         Self {
@@ -40,6 +86,8 @@ impl Hooks {
             epoch: AtomicU64::new(0),
             candidate_epoch: AtomicU64::new(0),
             candidate_catalog_incomplete: AtomicBool::new(false),
+            candidate_sources: Mutex::new(BTreeMap::new()),
+            candidate_source_sequence: AtomicU64::new(0),
             points: Mutex::new(BTreeMap::new()),
             queue,
             receiver: Mutex::new(Some(receiver)),
@@ -372,11 +420,7 @@ impl Debugger {
         let mut accepted = false;
         self.update(|s| {
             if let Some(guard) = candidate
-                && !Self::candidate_commit_current(
-                    s,
-                    guard,
-                    self.hooks.candidate_epoch.load(Ordering::Acquire),
-                )
+                && !Self::candidate_commit_current(s, guard, &self.hooks)
             {
                 return;
             }
@@ -480,13 +524,8 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
         self.update(|s| {
             if self.hooks.epoch.load(Ordering::Acquire) != epoch
                 || definitions.iter().any(|d| {
-                    d.get("candidate_guard").is_some_and(|guard| {
-                        !Self::candidate_commit_current(
-                            s,
-                            guard,
-                            self.hooks.candidate_epoch.load(Ordering::Acquire),
-                        )
-                    })
+                    d.get("candidate_guard")
+                        .is_some_and(|guard| !Self::candidate_commit_current(s, guard, &self.hooks))
                 })
             {
                 return;

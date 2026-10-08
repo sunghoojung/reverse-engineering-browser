@@ -340,10 +340,11 @@ let candidatePreparation = 0;
 const candidateUI = Object.fromEntries(['strip', 'question', 'status', 'target', 'bind', 'cancel', 'return', 'close']
   .map(name => [name, document.querySelector(`#candidate-experiment-${name}`)]));
 
-function candidateLifetime() {
+function candidateLifetime(target = candidateExperiment?.target ?? '') {
   const session = state.debuggerSession;
-  return JSON.stringify([experimentContextKey(), session?.object_experiment?.navigation_id,
-    session?.scripts?.map(script => liveScriptIdentity(script))]);
+  return JSON.stringify([experimentContextKey(), session?.object_experiment?.navigation_id, target,
+    session?.scripts?.filter(script => (script.target_id ?? session?.target?.id) === target)
+      .map(script => liveScriptIdentity(script))]);
 }
 function retireCandidateExperimentPending() {
   candidatePreparation += 1;

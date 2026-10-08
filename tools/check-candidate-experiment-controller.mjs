@@ -131,6 +131,22 @@ export async function checkCandidateExperimentController(root) {
     if(interruption==='close')assert.equal(c.api.owner,null);else assert.match(c.api.owner.notice,/retired|changed|ownership/i);
     assert.equal(c.hooks.field_test.enabled,false,'No implicit capture after late reply');
   }
+  for(const relevant of [false,true]) {
+    const held=deferred();c=fixture({action:()=>held.promise});await c.api.start(c.site);c.disposable();c.choose('disposable-page');
+    const definition=c.definition(),binding=c.api.bind();
+    c.state.debuggerSession.scripts.push({...c.script,script_id:'later-script',target_id:relevant?'disposable-page':'unrelated-worker',hash:'new-hash'});
+    c.hooks.definitions=[definition];held.resolve({runtime_hooks:c.hooks});await binding;
+    assert.equal(c.api.owner.bound?.id??null,relevant?null:7,relevant?'Selected-target catalog churn rejects late binding':'Unrelated Worker discovery leaves Page acknowledgement current');
+    assert.equal(c.elements.hooksConfirm.checked,false);
+  }
+  for(const changedTarget of ['worker-A','worker-B']) {
+    const held=deferred();c=fixture({action:()=>held.promise});await c.api.start(c.site);c.disposable();
+    c.state.debuggerSession.scripts.push({...c.script,script_id:'worker-source',target_id:'worker-A'});c.choose('worker-A');
+    const definition=c.definition(),binding=c.api.bind();
+    c.state.debuggerSession.scripts.push({...c.script,script_id:'later-worker-source',target_id:changedTarget,hash:'new-hash'});
+    c.hooks.definitions=[definition];held.resolve({runtime_hooks:c.hooks});await binding;
+    assert.equal(c.api.owner.bound?.id??null,changedTarget==='worker-A'?null:7,'Only the explicitly selected Worker owns its pending catalog');
+  }
   console.log('PASS candidate bridge production controller: full UTF-8 ownership, unsupported source locations, inert handoff, dirty draft cancellation, late source/digest/bind rejection, explicit target/consent lifetime, exact baseline field/hook and return/close ownership (DOM model; not rendered QA)');
 }
 if(process.argv[1]===new URL(import.meta.url).pathname)await checkCandidateExperimentController(process.argv[2]||new URL('..',import.meta.url).pathname);

@@ -92,11 +92,18 @@ A main reconnect that retains worker debugger sessions also taints completeness
 because it clears their descriptors without re-enabling those sessions. Dispose
 and create a fresh context to recover; no automatic reconnect/retest is added.
 
-Catalog epochs and exact source descriptors guard source reads, worker results,
-definition insertion, arming awaits/commit and hit processing. Binding re-reads
+Target-local catalog revisions and exact source descriptors guard source reads,
+worker results, definition insertion, arming awaits/commit and hit processing.
+Revision changes and catalog edits share the debugger state lock. At most nine
+revision entries (one page plus eight workers) are retained; removed/reset target
+revisions are never reused. Unknown ownership, registry overflow or revision
+exhaustion taints completeness rather than silently evicting a fence. Global
+disposable navigation, reconnect and session fences remain independent. Binding re-reads
 the matched source before its definition is added; arming repeats the complete
-unique-source scan and strict worker check. Catalog churn conservatively expires
-candidate use, even when an unrelated script appears; it never silently rebinds.
+unique-source scan and strict worker check. Selected-target catalog churn expires candidate use; unrelated Worker discovery,
+parsing and title changes cannot retire a Page or another Worker's binding. The
+UI scopes pending receipt ownership to the same selected-target catalog plus
+global disposable lifetime. Neither layer silently rebinds.
 Rollback removes newly installed points if ownership changes while arming.
 **Stop waiting**, navigation, disposal, panel close, return or newer selection retires UI replies;
 a retired POST acknowledgement says native completion is unknown and never

@@ -58,13 +58,17 @@ impl Debugger {
             .contains(&document["function_location"]["kind"].as_str().unwrap_or(""))
     }
 
-    pub(super) fn candidate_commit_current(s: &Value, guard: &Value, epoch: u64) -> bool {
-        s["runtime_hooks"]["isolated"] == true
+    pub(super) fn candidate_commit_current(s: &Value, guard: &Value, hooks: &super::Hooks) -> bool {
+        !hooks.candidate_catalog_incomplete.load(Ordering::Acquire)
+            && s["runtime_hooks"]["isolated"] == true
             && s["runtime_hooks"]["target_id"] == s["target"]["id"]
             && s["runtime_hooks"]["session_id"] == guard["session_id"]
             && s["request_interception"]["created_at_ms"] == guard["created_at_ms"]
             && s["object_experiment"]["navigation_id"] == guard["navigation_id"]
-            && guard["epoch"].as_u64() == Some(epoch)
+            && guard["epoch"].as_u64() == Some(hooks.candidate_epoch.load(Ordering::Acquire))
+            && guard["source_revision"].as_u64().is_some()
+            && guard["source_revision"].as_u64()
+                == hooks.candidate_source_revision(guard["target_id"].as_str().unwrap_or(""))
             && catalog(s, &guard["target_id"]).contains(&guard["script"])
     }
 
@@ -74,11 +78,7 @@ impl Debugger {
                 .hooks
                 .candidate_catalog_incomplete
                 .load(Ordering::Acquire)
-                || !Self::candidate_commit_current(
-                    &self.snapshot(),
-                    guard,
-                    self.hooks.candidate_epoch.load(Ordering::Acquire),
-                ))
+                || !Self::candidate_commit_current(&self.snapshot(), guard, &self.hooks))
         {
             return Err(Error::conflict(
                 "Candidate source catalog changed. Disarm and bind again before using this candidate.",
@@ -128,6 +128,9 @@ impl Debugger {
     }
     pub(super) async fn resolve_candidate(&self, r: &Value) -> Result<(Value, String)> {
         let epoch = self.hooks.candidate_epoch.load(Ordering::Acquire);
+        let revision = self
+            .hooks
+            .candidate_source_revision(r["target_id"].as_str().unwrap_or(""));
         let snapshot = self.candidate_owner(r)?;
         let scripts = catalog(&snapshot, &r["target_id"]);
         if scripts.is_empty() || scripts.len() > SCAN_SCRIPTS {
@@ -150,6 +153,11 @@ impl Debugger {
             let source = self.source(script["script_id"].as_str().unwrap()).await?;
             let current = self.candidate_owner(r)?;
             if self.hooks.candidate_epoch.load(Ordering::Acquire) != epoch
+                || revision.is_none()
+                || self
+                    .hooks
+                    .candidate_source_revision(r["target_id"].as_str().unwrap_or(""))
+                    != revision
                 || lifetime(&current) != lifetime(&snapshot)
                 || catalog(&current, &r["target_id"]) != scripts
             {
@@ -195,6 +203,9 @@ impl Debugger {
             ));
         }
         let epoch = self.hooks.candidate_epoch.load(Ordering::Acquire);
+        let revision = self
+            .hooks
+            .candidate_source_revision(r["target_id"].as_str().unwrap_or(""));
         tokio::time::timeout(Duration::from_secs(15), async {
             let (script, source) = self.resolve_candidate(r).await?;
             let start = r["start_byte"].as_u64().unwrap() as usize;
@@ -206,6 +217,7 @@ impl Debugger {
             let mut guard = r.clone();
             guard["script"] = script.clone();
             guard["epoch"] = json!(epoch);
+            guard["source_revision"] = json!(revision);
             self.add_hook_with_candidate(&json!({"label":"Field candidate · observe", "script_id":script["script_id"],
                 "line":location["line"],"column":location["column"],"entry_enabled":false,"return_enabled":true,
                 "entry_mode":"source","return_mode":"none"}), Some(&guard)).await
@@ -218,8 +230,7 @@ impl Debugger {
         source: &str,
     ) -> Result<()> {
         let s = self.candidate_owner(guard)?;
-        if self.hooks.candidate_epoch.load(Ordering::Acquire)
-            != guard["epoch"].as_u64().unwrap_or(u64::MAX)
+        if !Self::candidate_commit_current(&s, guard, &self.hooks)
             || &guard["script"] != script
             || !catalog(&s, &guard["target_id"]).contains(script)
             || !digest_matches(source, guard)
@@ -255,11 +266,7 @@ impl Debugger {
                 return Err(Error::conflict("Candidate function changed before arming."));
             }
             let current = self.candidate_owner(guard)?;
-            if !Self::candidate_commit_current(
-                &current,
-                guard,
-                self.hooks.candidate_epoch.load(Ordering::Acquire),
-            ) {
+            if !Self::candidate_commit_current(&current, guard, &self.hooks) {
                 return Err(Error::conflict("Candidate target changed before arming."));
             }
             Ok(())
@@ -286,12 +293,26 @@ mod tests {
             "target":{"id":"page","url":"http://localhost/page"},"scripts":[source()]})
     }
     fn guard() -> Value {
-        json!({"target_id":"page","session_id":4,"created_at_ms":111,"navigation_id":2,"epoch":7,"script":source()})
+        json!({"target_id":"page","session_id":4,"created_at_ms":111,"navigation_id":2,"epoch":7,"source_revision":1,"script":source()})
+    }
+    fn fences(epoch: u64) -> super::super::Hooks {
+        let hooks = super::super::Hooks::new();
+        hooks.candidate_epoch.store(epoch, Ordering::Release);
+        hooks.candidate_source_changed("page");
+        hooks
     }
     #[test]
     fn candidate_epoch_lifetime_and_exact_script_must_all_match() {
-        assert!(Debugger::candidate_commit_current(&state(), &guard(), 7));
-        assert!(!Debugger::candidate_commit_current(&state(), &guard(), 8));
+        assert!(Debugger::candidate_commit_current(
+            &state(),
+            &guard(),
+            &fences(7)
+        ));
+        assert!(!Debugger::candidate_commit_current(
+            &state(),
+            &guard(),
+            &fences(8)
+        ));
         for (group, key, value) in [
             ("runtime_hooks", "session_id", json!(5)),
             ("runtime_hooks", "isolated", json!(false)),
@@ -302,7 +323,7 @@ mod tests {
             let mut s = state();
             s[group][key] = value;
             assert!(
-                !Debugger::candidate_commit_current(&s, &guard(), 7),
+                !Debugger::candidate_commit_current(&s, &guard(), &fences(7)),
                 "{group}.{key}"
             );
         }
@@ -310,7 +331,7 @@ mod tests {
             let mut s = state();
             s["scripts"][0][key] = json!("changed");
             assert!(
-                !Debugger::candidate_commit_current(&s, &guard(), 7),
+                !Debugger::candidate_commit_current(&s, &guard(), &fences(7)),
                 "{key}"
             );
         }
@@ -461,5 +482,142 @@ mod tests {
                 {"script_id":"worker-one","target_id":"worker","target_type":"worker","execution_context_id":1}
             ])
         );
+    }
+    #[test]
+    fn selected_target_revision_fences_bind_arm_and_hit_without_cross_target_retirement() {
+        let hooks = fences(7);
+        assert!(Debugger::candidate_commit_current(
+            &state(),
+            &guard(),
+            &hooks
+        ));
+        hooks.candidate_source_changed("worker-a");
+        hooks.candidate_source_changed("worker-b");
+        hooks.candidate_source_changed("worker-b");
+        let mut unrelated = state();
+        unrelated["scripts"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"target_id":"worker-b","script_id":"new","language":"JavaScript"}));
+        assert!(
+            Debugger::candidate_commit_current(&unrelated, &guard(), &hooks),
+            "Worker discovery/parse cannot retire a Page binding"
+        );
+        let mut worker = source();
+        worker["target_id"] = json!("worker-a");
+        let mut snapshot = state();
+        snapshot["scripts"]
+            .as_array_mut()
+            .unwrap()
+            .push(worker.clone());
+        let mut worker_guard = guard();
+        worker_guard["target_id"] = json!("worker-a");
+        worker_guard["script"] = worker;
+        worker_guard["source_revision"] = json!(hooks.candidate_source_revision("worker-a"));
+        hooks.candidate_source_changed("worker-b");
+        assert!(
+            Debugger::candidate_commit_current(&snapshot, &worker_guard, &hooks),
+            "Unrelated Worker B cannot retire Worker A"
+        );
+        hooks.candidate_source_changed("worker-a");
+        assert!(
+            !Debugger::candidate_commit_current(&snapshot, &worker_guard, &hooks),
+            "Relevant churn is rejected even when script IDs, hash, context and bytes look unchanged"
+        );
+        assert!(Debugger::candidate_commit_current(
+            &state(),
+            &guard(),
+            &hooks
+        ));
+        hooks.candidate_source_changed("page");
+        assert!(
+            !Debugger::candidate_commit_current(&state(), &guard(), &hooks),
+            "Same-target change invalidates all shared bind/arm/hit checks"
+        );
+    }
+    #[test]
+    fn revisions_never_reuse_after_termination_reset_or_aba_and_storage_is_bounded() {
+        let hooks = fences(7);
+        let first = hooks.candidate_source_revision("page");
+        hooks.candidate_source_removed("page");
+        assert!(!Debugger::candidate_commit_current(
+            &state(),
+            &guard(),
+            &hooks
+        ));
+        hooks.candidate_source_changed("page");
+        assert_ne!(hooks.candidate_source_revision("page"), first);
+        assert!(!Debugger::candidate_commit_current(
+            &state(),
+            &guard(),
+            &hooks
+        ));
+        hooks.candidate_sources_reset();
+        hooks.candidate_source_changed("page");
+        assert_ne!(hooks.candidate_source_revision("page"), first);
+        for index in 0..8 {
+            hooks.candidate_source_changed(&format!("worker-{index}"));
+        }
+        assert_eq!(hooks.candidate_sources.lock().unwrap().len(), 9);
+        hooks.candidate_source_changed("unowned-overflow");
+        assert_eq!(hooks.candidate_sources.lock().unwrap().len(), 9);
+        assert!(hooks.candidate_catalog_incomplete.load(Ordering::Acquire));
+        let hooks = fences(7);
+        hooks
+            .candidate_source_sequence
+            .store(u64::MAX, Ordering::Release);
+        hooks.candidate_source_changed("page");
+        assert!(
+            hooks.candidate_catalog_incomplete.load(Ordering::Acquire),
+            "Revision exhaustion cannot wrap into a reused owner"
+        );
+        assert_eq!(hooks.candidate_source_revision("page"), Some(1));
+        assert!(!Debugger::candidate_commit_current(
+            &state(),
+            &guard(),
+            &hooks
+        ));
+    }
+    #[test]
+    fn main_navigation_fences_worker_candidates_before_async_object_cleanup() {
+        // Wiring regression: cleanup may await a retained Runtime object group.
+        // The global fence must precede its first await, even for Worker guards.
+        let source = include_str!("../mod.rs");
+        let navigation = source
+            .split("\"Page.frameNavigated\"=>")
+            .nth(1)
+            .unwrap()
+            .split("\"Debugger.paused\"=>")
+            .next()
+            .unwrap();
+        let fence = navigation.find("candidate_epoch.fetch_add").unwrap();
+        assert!(fence < navigation.find(".await").unwrap());
+        assert!(fence < navigation.find("clear_object_search").unwrap());
+    }
+    #[test]
+    fn global_navigation_reconnect_and_completeness_fences_still_override_target_scope() {
+        for taint in [false, true] {
+            let hooks = fences(7);
+            if taint {
+                hooks
+                    .candidate_catalog_incomplete
+                    .store(true, Ordering::Release);
+            } else {
+                hooks.candidate_epoch.fetch_add(1, Ordering::AcqRel);
+            }
+            assert!(!Debugger::candidate_commit_current(
+                &state(),
+                &guard(),
+                &hooks
+            ));
+        }
+        let hooks = fences(7);
+        hooks.candidate_source_changed("");
+        assert!(hooks.candidate_catalog_incomplete.load(Ordering::Acquire));
+        assert!(!Debugger::candidate_commit_current(
+            &state(),
+            &guard(),
+            &hooks
+        ));
     }
 }

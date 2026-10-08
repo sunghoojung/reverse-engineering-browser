@@ -21,7 +21,10 @@ producer is fabricated: request evidence comes from actual CDP capture.
 The owned loopback fixture explicitly enables
 network-content capture for its synthetic loopback traffic. Its Page and
 Worker actions are separate, and its candidate is a literal inside a synchronous
-function. The older debugger fixture and backend-action checks are unchanged.
+function. The Worker is created only by its explicit button; Page-only identity
+checks do not start asynchronous Worker discovery. Read-only readiness checks
+require the actual disposable target catalog, expected Page source count and
+Worker script/request before the corresponding bind, without retries. The older debugger fixture and backend-action checks are unchanged.
 
 This mode clicks the rendered Traffic field, Trace value, Find sources and
 Test this candidate controls before explicitly creating/opening a disposable
@@ -44,3 +47,12 @@ the test inspects and removes that definition through the visible control before
 its separate normal bind/baseline flow. Remaining exhaustive Return, Close,
 navigation and source-preparation races are controller-model coverage, not
 rendered interruption claims.
+
+The owned Stop Worker button terminates the wrong-target fixture worker before
+fresh navigation; readiness verifies actual target/catalog absence rather than
+relying on garbage collection or browser history caching.
+The positive candidate path explicitly starts from a fresh Worker-free document,
+binds the Page candidate, then uses the owned Worker button to create a new
+separate target. It verifies the Page binding survives that unrelated target's
+source discovery before explicit capture/arming and the genuine Page baseline.
+Target-relevant stale-source refusal remains a separate boundary.

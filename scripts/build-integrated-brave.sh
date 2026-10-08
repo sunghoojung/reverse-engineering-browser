@@ -11,7 +11,7 @@ usage() {
   echo "Usage: $0 [--init]"
   echo "Build the integrated macOS arm64 development browser and Origin Trace companion."
   echo "--init downloads/initializes the pinned Brave, Chromium and V8 checkout first."
-  echo "Requires full Xcode and at least 150 GiB free; 200–250 GiB is recommended."
+  echo "Requires full Xcode; first/init builds need 150 GiB free (200–250 GiB recommended)."
   echo "Does not activate dormant native worker or proxy foundations."
 }
 initialize=false
@@ -58,16 +58,6 @@ if [[ "${initialize}" == true && "${brave_directory}" != "${worktree}/src/brave"
   echo "For --init, set REB_BRAVE_WORKTREE and leave REB_BRAVE_DIRECTORY unset." >&2
   exit 2
 fi
-# Check the destination filesystem before bootstrap downloads anything.
-disk_path="${brave_directory}"
-while [[ ! -d "${disk_path}" ]]; do
-  disk_path="$(dirname "${disk_path}")"
-done
-available_kib="$(df -Pk "${disk_path}" | awk 'NR == 2 {print $4}')"
-if [[ ! "${available_kib}" =~ ^[0-9]+$ ]] || ((available_kib < 150 * 1024 * 1024)); then
-  echo "At least 150 GiB free is required on the Brave build filesystem (200–250 GiB recommended)." >&2
-  exit 1
-fi
 export REB_BRAVE_DIRECTORY="${brave_directory}"
 cd "${repository_root}"
 echo "Integration commit: $(git rev-parse HEAD)"
@@ -77,6 +67,23 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 state_arguments=(--repository "${repository_root}" --brave "${brave_directory}"
   --receipt "${repository_root}/build/integrated-brave-state.json")
+# Check the destination filesystem before bootstrap downloads anything.
+disk_path="${brave_directory}"
+while [[ ! -d "${disk_path}" ]]; do
+  disk_path="$(dirname "${disk_path}")"
+done
+available_kib="$(df -Pk "${disk_path}" | awk 'NR == 2 {print $4}')"
+if [[ "${initialize}" == true ]]; then
+  required_kib="$(python3 tools/check-integrated-brave-state.py reserve "${state_arguments[@]}" --require-clean)"
+else
+  required_kib="$(python3 tools/check-integrated-brave-state.py reserve "${state_arguments[@]}")"
+fi
+if [[ ! "${available_kib}" =~ ^[0-9]+$ || ! "${required_kib}" =~ ^[0-9]+$ ]] ||
+   ((available_kib < required_kib)); then
+  echo "Insufficient disk reserve: need ${required_kib} KiB free on the Brave build filesystem." >&2
+  echo "First/init builds reserve 150 GiB; verified repeats reserve max(50 GiB, existing output size)." >&2
+  exit 1
+fi
 if [[ "${initialize}" == true ]]; then
   python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}" --require-clean
 else
@@ -105,5 +112,6 @@ python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
 make brave-foundation-check
 make app-build native-console-check
 codesign --verify --deep --strict "build/Origin Trace.app"
+python3 tools/check-integrated-brave-state.py complete "${state_arguments[@]}"
 echo "Build steps passed. Complete the runtime checklist in docs/development/integrated-brave-build.md."
 echo "This is a local component browser plus an Origin Trace companion, not a portable release."

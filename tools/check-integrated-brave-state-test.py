@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded Git fixtures for integrated-build preservation guards; no browser download."""
 
+import importlib.util
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 HELPER = Path(__file__).with_name("check-integrated-brave-state.py")
@@ -34,7 +36,7 @@ class StateGuards(unittest.TestCase):
             git(path, "init", "-q")
             git(path, "config", "user.name", "Fixture")
             git(path, "config", "user.email", "fixture@example.invalid")
-            (path / ".gitignore").write_text("brave/\nv8/\nignored/\nbuild/\n")
+            (path / ".gitignore").write_text("brave/\nv8/\nignored/\nbuild/\nout/\n")
             (path / "tracked.txt").write_text("original\n")
             git(path, "add", ".gitignore", "tracked.txt")
             git(path, "commit", "-qm", "fixture")
@@ -156,6 +158,58 @@ class StateGuards(unittest.TestCase):
     def test_wrapper_refuses_override(self):
         self.assertIn("Unset REB_BRAVE_OUTPUT_DIRECTORY",
                       self.wrapper({"REB_BRAVE_OUTPUT_DIRECTORY": "out/Other"}).stderr)
+
+    def completed_browser_fixture(self):
+        output = self.chromium / "out/Component_arm64"
+        executable = output / "Brave Browser.app/Contents/MacOS/Brave Browser"
+        executable.parent.mkdir(parents=True)
+        executable.write_text("completed browser fixture")
+        executable.chmod(0o755)
+        (output / "args.gn").write_text("is_component_build = true\n")
+        self.assertEqual(self.call("record").returncode, 0)
+        self.assertEqual(self.call("complete").returncode, 0)
+        return executable
+
+    def test_first_incomplete_and_unproven_build_disk_reserve(self):
+        first = str(150 * 1024 * 1024)
+        self.assertEqual(self.call("reserve").stdout.strip(), first)
+        output = self.chromium / "out/Component_arm64"
+        output.mkdir(parents=True)
+        (output / "args.gn").write_text("partial build")
+        self.assertEqual(self.call("record").returncode, 0)
+        self.assertEqual(self.call("reserve").stdout.strip(), first)
+        self.assertNotEqual(self.call("complete").returncode, 0)
+
+    def test_valid_repeat_init_and_changed_output_reserves(self):
+        executable = self.completed_browser_fixture()
+        self.assertEqual(self.call("reserve").stdout.strip(), str(50 * 1024 * 1024))
+        self.assertEqual(self.call("reserve", "--require-clean").stdout.strip(),
+                         str(150 * 1024 * 1024))
+        args = self.chromium / "out/Component_arm64/args.gn"
+        original_args = args.read_text()
+        args.write_text("changed output configuration")
+        self.assertEqual(self.call("reserve").stdout.strip(), str(150 * 1024 * 1024))
+        args.write_text(original_args)
+        self.assertEqual(self.call("reserve").stdout.strip(), str(50 * 1024 * 1024))
+        executable.write_text("changed browser")
+        self.assertEqual(self.call("reserve").stdout.strip(), str(150 * 1024 * 1024))
+
+    def test_stale_source_completion_uses_first_build_reserve(self):
+        self.completed_browser_fixture()
+        git(self.repo, "commit", "--allow-empty", "-qm", "new integration")
+        self.assertEqual(self.call("reserve").stdout.strip(), str(150 * 1024 * 1024))
+
+    def test_repeat_reserve_size_and_invalid_measurement(self):
+        spec = importlib.util.spec_from_file_location("brave_state", HELPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with patch.object(module.subprocess, "check_output", return_value="104857600 output"):
+            self.assertEqual(module.repeat_reserve_kib("output"), 100 * 1024 * 1024)
+        for value in ("", "invalid output", "-1 output", "0 output"):
+            with self.subTest(value=value), patch.object(module.subprocess, "check_output",
+                                                         return_value=value):
+                with self.assertRaises(ValueError):
+                    module.repeat_reserve_kib("output")
 
     def test_receipt_does_not_follow_temporary_collision(self):
         private_file = self.root / "private.txt"

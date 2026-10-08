@@ -68,9 +68,57 @@ def snapshot(directory, pin, overlays=()):
     return {"head": actual.decode(), "dirty": dirty, "sha256": digest.hexdigest()}
 
 
+def write_receipt(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent,
+                                     prefix="integrated-brave-state-", delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(json.dumps(value, indent=2) + "\n")
+    try:
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def file_digest(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def completed_output(brave):
+    output = brave.parent / "out/Component_arm64"
+    args = output / "args.gn"
+    if output.is_symlink() or args.is_symlink() or not args.is_file():
+        raise ValueError("Completed component output/args are missing or symlinked")
+    names = ("Brave Browser", "Brave Browser Development", "Brave Browser Dev", "Brave Browser Beta")
+    for name in names:
+        executable = output / f"{name}.app/Contents/MacOS" / name
+        if executable.is_file() and os.access(executable, os.X_OK):
+            for ancestor in (executable, *executable.parents):
+                if ancestor == output.parent:
+                    break
+                if ancestor.is_symlink():
+                    raise ValueError("Completed browser output is symlinked")
+            return {"directory": str(output.resolve()), "args_sha256": file_digest(args),
+                    "executable": str(executable.relative_to(output)),
+                    "executable_sha256": file_digest(executable)}
+    raise ValueError("Completed component browser executable is missing")
+
+
+def repeat_reserve_kib(output):
+    result = subprocess.check_output(["du", "-sk", output], text=True).split()
+    if not result or not result[0].isdigit() or int(result[0]) <= 0:
+        raise ValueError("Cannot measure completed component output")
+    # Reserve at least one whole output's allocation for rebuild/link replacement.
+    return max(50 * 1024 * 1024, int(result[0]))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check", "record"))
+    parser.add_argument("mode", choices=("check", "record", "reserve", "complete"))
     parser.add_argument("--brave", type=Path, required=True)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
@@ -107,18 +155,29 @@ def main():
         "brave": str(args.brave.resolve()),
         "upstream": states,
     }
-    if args.mode == "record":
+    completion_receipt = args.receipt.with_name("integrated-brave-complete.json")
+    if args.mode == "reserve":
+        required = 150 * 1024 * 1024
+        if not args.require_clean and all(value is not None for value in states.values()):
+            try:
+                previous = json.loads(completion_receipt.read_text())
+                output = completed_output(args.brave)
+                if previous == {"source": identity, "output": output}:
+                    required = repeat_reserve_kib(output["directory"])
+            except (OSError, ValueError, subprocess.CalledProcessError):
+                pass  # Missing/stale/unmeasurable proof keeps the first-build reserve.
+        print(required)
+        return
+    if args.mode in ("record", "complete"):
         if any(value is None for value in states.values()):
             raise ValueError("Cannot record incomplete upstream checkouts")
-        args.receipt.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", dir=args.receipt.parent,
-                                         prefix="integrated-brave-state-", delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(json.dumps(identity, indent=2) + "\n")
-        try:
-            temporary.replace(args.receipt)
-        finally:
-            temporary.unlink(missing_ok=True)
+        if args.mode == "complete":
+            if not args.receipt.exists() or json.loads(args.receipt.read_text()) != identity:
+                raise ValueError("Source state changed during the build")
+            write_receipt(completion_receipt,
+                          {"source": identity, "output": completed_output(args.brave)})
+        else:
+            write_receipt(args.receipt, identity)
     elif any(value and value["dirty"] for value in states.values()):
         if args.require_clean:
             raise ValueError("--init requires clean upstream checkouts; omit --init for a recorded build")

@@ -15,7 +15,8 @@ Python 3.8 or newer, Rust/Cargo, Node.js >=24.16.0 and <25, and Corepack or pnpm
 installs system tools, accepts licenses, changes global Xcode selection, or enables
 worker/proxy capture. Set `DEVELOPER_DIR` for a nonstandard full Xcode location,
 and `REB_NODE_DIRECTORY` for the supported Node installation if necessary.
-Keep at least 150 GiB free on the Brave filesystem; 200–250 GiB is recommended.
+For initialization, first builds and unproven/incomplete builds, keep at least
+150 GiB free on the Brave filesystem; 200–250 GiB is recommended.
 A full source build takes hours. A small Linux workspace is not a build host.
 
 From the repository root:
@@ -38,7 +39,21 @@ remote and output overrides, and refuses unrecognized upstream edits. First-run
 `--init` requires clean upstream checkouts. Repeated runs without `--init` accept
 only the exact locally recorded post-sync state for this integration commit,
 including ignored overlay/patch destinations; symlink destinations are refused.
-The private receipt is `build/integrated-brave-state.json`, not a source artifact.
+The private source receipt is `build/integrated-brave-state.json`. Only after
+all browser, native tests, companion build and signature steps succeed does the
+wrapper write `build/integrated-brave-complete.json`. These are local build
+receipts, not source artifacts.
+
+A verified repeat for the exact integration commit, upstream state, component
+output path, GN args and browser executable can use an adaptive free-space
+reserve: the larger of **50 GiB or the allocated size of the existing component
+output**. This conservatively leaves room to duplicate the existing output during
+rebuilding/linking plus a substantial minimum; it is a headroom heuristic, not a
+guarantee against running out of disk. Initialization always requires 150 GiB.
+Missing/stale/incomplete successful-build proof, changed source/args/browser, or
+an unmeasurable output never earns the smaller reserve. The disk check runs
+before downloads, synchronization or build changes. Source/pin errors still
+stop the build independently of free space.
 If a receipt is missing or no longer matches, preserve the checkout and use a
 fresh pinned worktree. Never stash/reset/clean or discard edits to bypass this
 guard. The helper does none of those operations.

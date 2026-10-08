@@ -181,6 +181,8 @@ Requirement RequiredHandling(Traffic traffic) {
 
 PolicyRegistry::PolicyRegistry(ProfileToken profile) : profile_(profile) {}
 
+PolicyRegistry::~PolicyRegistry() = default;
+
 Error PolicyRegistry::Register(Policy policy) {
   if (!IsValidProfile(profile_)) {
     return Error::kInvalidProfile;

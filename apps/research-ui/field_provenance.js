@@ -366,6 +366,7 @@ function prefillCandidateField(selection) {
   elements.hooksFieldUrl.value = selection.url; elements.hooksFieldMethod.value = selection.request.method;
   elements.hooksFieldKind.value = selection.kind; elements.hooksFieldPointer.value = selection.selector;
   elements.hooksFieldConfirm.checked = false; elements.hooksConfirm.checked = false;
+  selection.error = null;
   return true;
 }
 function candidateSourceText(source, loaded, pageURL) {
@@ -493,7 +494,13 @@ function renderCandidateExperiment() {
 async function bindCandidateExperiment() {
   const owner = candidateExperiment;
   if (!owner || owner.pending || candidateUI.bind.disabled || !owner.target) return;
-  elements.hooksFieldConfirm.checked = false; elements.hooksConfirm.checked = false;
+  // Creating a new disposable lifetime deliberately erases prior form drafts.
+  // This explicit action restores only this question's field metadata, with the
+  // existing replacement consent if the researcher entered a different draft.
+  if (!prefillCandidateField(owner.selection)) {
+    owner.notice = owner.selection.error || 'Current value-test draft retained. No hook was bound.';
+    renderCandidateExperiment(); return;
+  }
   const session = state.debuggerSession;
   const pending = {retired:false, lifetime:candidateLifetime()};
   owner.pending = pending; owner.notice = 'Checking up to 64 scripts / 8 MiB in this target, then synchronous-function eligibility (15-second limit)…'; renderCandidateExperiment();
@@ -522,7 +529,7 @@ candidateUI.target?.addEventListener('change', () => {
   candidateExperiment.target = candidateUI.target.value;
   elements.hooksFieldConfirm.checked = false; elements.hooksConfirm.checked = false;
   candidateExperiment.bound = null;
-  candidateExperiment.notice = 'Selected disposable target only. Bind observation hook checks all bounded source bytes before adding a definition.';
+  candidateExperiment.notice = 'Selected disposable target only. Bind restores the original field setup (confirming replacement of a different draft), checks bounded source bytes, and adds an observation hook. Capture still requires explicit confirmation.';
   renderCandidateExperiment();
 });
 candidateUI.bind?.addEventListener('click', bindCandidateExperiment);

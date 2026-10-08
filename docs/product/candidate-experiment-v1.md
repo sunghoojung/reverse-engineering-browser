@@ -39,7 +39,11 @@ universal causality result.
 3. Explicitly Create isolated context and Open isolated page with a URL supplied
    by the researcher. Choose Page or a discovered dedicated Worker in the strip;
    there is no automatic target choice. Navigation resets this choice/consents.
-4. Bind observation hook explicitly reads sources and adds one observation-only
+4. Bind observation hook restores the original URL/method/kind/selector setup
+   after disposable creation clears old form drafts. A different current draft
+   requires the existing replacement confirmation; declining preserves it and
+   sends no binding action. Capture and Arm consent remain unchecked.
+   It explicitly reads sources and adds one observation-only
    return definition. It neither captures selected values nor installs breakpoints.
    A bound target is locked; remove its definition before binding another candidate.
 5. Explicitly confirm Capture, then confirm Arm hooks, and repeat the owned-page

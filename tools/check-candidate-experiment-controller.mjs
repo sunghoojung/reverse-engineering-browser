@@ -11,6 +11,8 @@ export async function checkCandidateExperimentController(root) {
   const source=await readFile(join(root,'apps/research-ui/field_provenance.js'),'utf8');
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const closeHooks=app.slice(app.indexOf('      function closeSourceHooks('),app.indexOf('      function pivotSourceToRuntimeHooks('));
+  const lifetimeKey=app.slice(app.indexOf('      function experimentLifetimeKey('),app.indexOf('      function experimentContextKey('));
+  const synchronizer=app.slice(app.indexOf('      function clearExperimentLifetime('),app.indexOf('      async function runExperimentAction('));
   const controller=source.slice(source.indexOf('// One ephemeral owner.'));
   assert(controller.startsWith('// One ephemeral owner.'));
   const decoder=source.slice(source.indexOf('function provenanceDecoderBytes('),source.indexOf('\nfunction decodeProvenanceValue('));
@@ -46,7 +48,7 @@ export async function checkCandidateExperimentController(root) {
       renderSourceSidebar:()=>{},renderFieldProvenance:()=>{renders++;},openSourceHooks:()=>{state.sourceHooksOpen=true;},
       showScreen:name=>{api.retire();document.querySelector('#screen-field-provenance').hidden=name!=='field-provenance';},
       renderRuntimeHooks:()=>api.render(),runExperimentAction:async request=>{calls.push(request);return action(request);},currentExperimentReceipt:value=>value};
-    const api=runInNewContext(decoder+'\n'+closeHooks+'\n'+controller+'\n;({closeHooks:closeSourceHooks,start:startCandidateExperiment,source:candidateSourceText,prefill:prefillCandidateField,render:renderCandidateExperiment,bind:bindCandidateExperiment,retire:retireCandidateExperimentPending,get owner(){return candidateExperiment;},get selection(){return fieldProvenanceSelection;},set selection(value){fieldProvenanceSelection=value;}})',context);
+    const api=runInNewContext(decoder+'\n'+closeHooks+'\n'+lifetimeKey+'\n'+synchronizer+'\n'+controller+'\n;({sync:syncExperimentSession,closeHooks:closeSourceHooks,start:startCandidateExperiment,source:candidateSourceText,prefill:prefillCandidateField,render:renderCandidateExperiment,bind:bindCandidateExperiment,retire:retireCandidateExperimentPending,get owner(){return candidateExperiment;},get selection(){return fieldProvenanceSelection;},set selection(value){fieldProvenanceSelection=value;}})',context);
     const node=name=>document.querySelector('#candidate-experiment-'+name);
     const disposable=()=>{
       state.debuggerSession.target={id:'disposable-page',url:'http://127.0.0.1/candidate-page'};
@@ -56,7 +58,7 @@ export async function checkCandidateExperimentController(root) {
     };
     const choose=id=>{node('target').value=id;node('target').fire('change');};
     const definition=()=>({id:7,candidate_guard:{...api.owner.fingerprint,target_id:api.owner.target}});
-    return {api,state,hooks,elements,script,loaded,text,site,selection,calls,confirmations,node,document,disposable,choose,definition,setLoad:value=>{load=value;},setAction:value=>{action=value;},get renders(){return renders;}};
+    return {api,state,hooks,elements,script,loaded,text,site,selection,calls,confirmations,node,document,disposable,choose,definition,setLoad:value=>{load=value;},setAction:value=>{action=value;},setConfirm:value=>{options.confirm=value;},get renders(){return renders;}};
   }
   let c=fixture();
   const original=c.api.source(c.script,c.loaded,'http://127.0.0.1/candidate-page');
@@ -88,6 +90,18 @@ export async function checkCandidateExperimentController(root) {
   appendedDigest.resolve(new Uint8Array(32));await appended;assert.equal(c.api.owner,null,'Digest completion must revalidate complete source, not matching prefix');assert.match(c.selection.error,/changed|unavailable/);
   let expire;const heldSource=deferred();c=fixture({load:()=>heldSource.promise,setTimeout:(callback,ms)=>{assert(ms>=0&&ms<=15000);expire=callback;return 1;},clearTimeout:()=>{}});
   const timed=c.api.start(c.site);expire();await timed;assert.equal(c.api.owner,null);assert.match(c.selection.error,/15 seconds/);heldSource.resolve();await Promise.resolve();assert.equal(c.api.owner,null,'Late source after deadline cannot enter experiment');
+
+  c=fixture();await c.api.start(c.site);const retainedQuestion=c.api.owner;
+  const creating={...c.state.debuggerSession,generation:1,request_interception:{experiment_id:1,created_at_ms:101,state:'creating',isolated:false,target_id:null}};
+  c.state.debuggerSession=c.api.sync(c.state.debuggerSession,creating);const beforeReady=structuredClone(creating);
+  c.disposable();const ready={...c.state.debuggerSession,generation:2,request_interception:{...creating.request_interception,state:'ready',isolated:true,target_id:'disposable-page'}};
+  c.state.debuggerSession=c.api.sync(beforeReady,ready);c.api.render();
+  assert.equal(c.elements.hooksFieldUrl.value,'','Actual creating-to-ready synchronizer erases value-test draft');assert.equal(c.elements.hooksFieldPointer.value,'');assert.equal(c.api.owner,retainedQuestion,'Original question survives ordinary new-lifetime draft clearing');assert.equal(c.calls.length,0);
+  c.choose('disposable-page');c.setAction(async()=>{c.hooks.definitions=[c.definition()];return {runtime_hooks:c.hooks};});await c.api.bind();
+  assert.equal(c.elements.hooksFieldUrl.value,c.selection.url,'Explicit Bind restores original field metadata after real lifetime transition');assert.equal(c.elements.hooksFieldPointer.value,'/payload');assert.equal(c.elements.hooksFieldConfirm.checked,false);assert.equal(c.elements.hooksConfirm.checked,false);assert.equal(c.calls.length,1);assert.equal(c.calls[0].action,'bind_runtime_candidate');assert(c.api.owner.bound);
+  c=fixture({confirm:false});await c.api.start(c.site);c.disposable();c.choose('disposable-page');c.elements.hooksFieldUrl.value='http://127.0.0.1/user-draft';c.elements.hooksFieldPointer.value='/keep';c.elements.hooksFieldConfirm.checked=true;c.elements.hooksConfirm.checked=true;await c.api.bind();
+  assert.equal(c.confirmations.length,1);assert.equal(c.calls.length,0,'Declining dirty metadata replacement must prevent binding POST');assert.equal(c.elements.hooksFieldUrl.value,'http://127.0.0.1/user-draft');assert.equal(c.elements.hooksFieldPointer.value,'/keep');assert.equal(c.elements.hooksFieldConfirm.checked,true);assert.equal(c.elements.hooksConfirm.checked,true);assert.equal(c.api.owner.bound,null);assert.match(c.api.owner.notice,/draft retained/);
+  c.setConfirm(true);c.setAction(async()=>{c.hooks.definitions=[c.definition()];return {runtime_hooks:c.hooks};});await c.api.bind();assert.equal(c.calls.length,1,'Accepted explicit retry dispatches once');assert.equal(c.api.owner.selection.error,null,'Accepted original metadata replacement clears declined-draft warning');assert.equal(c.elements.hooksFieldUrl.value,c.selection.url);assert.equal(c.elements.hooksFieldPointer.value,'/payload');assert.equal(c.elements.hooksFieldConfirm.checked,false);assert.equal(c.elements.hooksConfirm.checked,false);
 
   c=fixture();await c.api.start(c.site);c.disposable();
   c.hooks.workers=[{id:'worker-A',title:'Same worker URL'},{id:'worker-B',title:'Same worker URL'}];c.api.render();

@@ -52,6 +52,23 @@ export function candidateKeyEvents(key,modifiers=0) {
 
 // Titles are refreshed display metadata. Identity requires the exact selected
 // ID, its current type, the product owner, and the same disposable lifetime.
+export function candidateFocusMargin(style) {
+  return style.outlineStyle==='none'?0:Math.max(0,(parseFloat(style.outlineWidth)||0)+(parseFloat(style.outlineOffset)||0));
+}
+export function candidateRevealGeometry(rect,viewport,ancestors,margin=0) {
+  const clipped=start=>ancestors.slice(start).reduce((clip,ancestor)=>({left:ancestor.clipX?Math.max(clip.left,ancestor.left):clip.left,right:ancestor.clipX?Math.min(clip.right,ancestor.right):clip.right,top:ancestor.clipY?Math.max(clip.top,ancestor.top):clip.top,bottom:ancestor.clipY?Math.min(clip.bottom,ancestor.bottom):clip.bottom}),{...viewport});
+  const clip=clipped(0),fits=rect.left-margin>=clip.left&&rect.right+margin<=clip.right&&rect.top-margin>=clip.top&&rect.bottom+margin<=clip.bottom;
+  if(fits)return {ready:true,clip};
+  for(let index=0;index<ancestors.length;index++){
+    const owner=ancestors[index],visible=clipped(index);
+    if(!owner.scrollableY||visible.bottom-visible.top<rect.bottom-rect.top+2*margin)continue;
+    const delta=rect.top-margin<visible.top?rect.top-margin-visible.top:rect.bottom+margin>visible.bottom?rect.bottom+margin-visible.bottom:0;
+    if(delta<0&&owner.scrollTop>0||delta>0&&owner.scrollTop<owner.maxScrollTop)return {ready:false,owner:index,delta:Math.max(-400,Math.min(400,delta)),visible,clip};
+  }
+  return {ready:false,blocked:true,clip,rect};
+}
+export function candidateGeometryStability(previous,current,count) {return previous===current?count+1:0;}
+
 export function candidateTargetSelectionMatches(expected, snapshot) {
   const rows=snapshot.options.filter(option=>option.value===expected.value);
   return snapshot.lifetime===expected.lifetime&&snapshot.selected===expected.value&&
@@ -83,6 +100,11 @@ export async function checkCandidateFixture() {
   for(const [key,text,code,vk] of [['Enter','\r','Enter',13],[' ',' ','Space',32]]){const events=candidateKeyEvents(key);assert.deepEqual(events,[{type:'keyDown',key,code,modifiers:0,windowsVirtualKeyCode:vk,text,unmodifiedText:text},{type:'keyUp',key,code,windowsVirtualKeyCode:vk}]);}
   for(const key of ['Tab','Escape','ArrowDown','ArrowUp','Home','End']){const [down,up]=candidateKeyEvents(key);assert.equal(down.type,'rawKeyDown');assert.equal(up.type,'keyUp');assert(!('text' in down));assert(!('text' in up));assert(Number.isInteger(down.windowsVirtualKeyCode));}
   assert.deepEqual(candidateKeyEvents('a',2),[{type:'rawKeyDown',key:'a',code:'KeyA',modifiers:2,windowsVirtualKeyCode:65},{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65}]);
+  const viewport={left:0,right:360,top:0,bottom:740},pane={left:0,right:350,top:100,bottom:700,clipX:true,clipY:true,scrollableY:true,scrollTop:20,maxScrollTop:400},clippedButton={left:10,right:170,top:685,bottom:716};
+  assert.equal(candidateFocusMargin({outlineStyle:'solid',outlineWidth:'1px',outlineOffset:'-2px'}),0);assert.equal(candidateRevealGeometry({left:0,right:350,top:120,bottom:150},viewport,[pane],candidateFocusMargin({outlineStyle:'solid',outlineWidth:'1px',outlineOffset:'-2px'})).ready,true,'Full-width Traffic row with inset outline must not falsely require horizontal scrolling');assert.equal(candidateFocusMargin({outlineStyle:'solid',outlineWidth:'2px',outlineOffset:'2px'}),4);
+  const clippedPlan=candidateRevealGeometry(clippedButton,viewport,[pane],4);assert.equal(clippedPlan.ready,false);assert.equal(clippedPlan.delta,20,'Center hit inside viewport is insufficient when control/focus extends beyond ancestor');assert.equal(candidateRevealGeometry({...clippedButton,top:665,bottom:696},viewport,[pane],4).ready,true);
+  const outer={...pane,top:100,bottom:500,scrollTop:0,maxScrollTop:300};const nested={...pane,top:400,bottom:800,scrollTop:400,maxScrollTop:400};assert.equal(candidateRevealGeometry({left:10,right:100,top:600,bottom:630},viewport,[nested,outer],4).owner,1,'An exhausted inner pane must reveal through its actual outer scroll owner');assert.equal(candidateRevealGeometry(clippedButton,viewport,[{...pane,scrollableY:false}],4).blocked,true,'Non-scrollable ancestor clipping is a real blocked layout');
+  let stable=0,previous='';for(const current of ['moving1','moving2','still','still','still','still']){stable=candidateGeometryStability(previous,current,stable);previous=current;}assert.equal(stable,3,'Click waits for three unchanged native-frame geometry samples');
   const selected={value:'worker-A',type:'worker',lifetime:'session1/nav2'},targetSnapshot={selected:'worker-A',ownerTarget:'worker-A',lifetime:selected.lifetime,options:[{value:'worker-A',type:'worker',label:'Worker · updated title'}]};
   assert(candidateTargetSelectionMatches(selected,targetSnapshot),'Same exact worker may refresh its display title');
   for(const patch of [{selected:'worker-B'},{ownerTarget:'worker-B'},{lifetime:'session1/nav3'},{options:[]},{options:[{value:'worker-A',type:'page'}]},{options:[...targetSnapshot.options,...targetSnapshot.options]}])assert.equal(candidateTargetSelectionMatches(selected,{...targetSnapshot,...patch}),false,'Title independence must never weaken exact identity/type/owner/lifetime checks');
@@ -135,7 +157,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   socket.addEventListener('message',event=>{
     const message=JSON.parse(event.data);
     if(message.sessionId===uiSession&&message.method==='Page.javascriptDialogOpening')dialogs.push({type:message.params.type,message:message.params.message});
-    if(message.sessionId===uiSession&&message.method==='Network.requestWillBeSent'&&message.params.request.url===uiURL+'/api/debugger/actions'&&message.params.request.method==='POST'){try{const action=JSON.parse(message.params.request.postData).action;mutationRequests.push(action);if(action==='bind_runtime_candidate'){const receipt={phase,request_id:message.params.requestId,status:null};bindingRequests.set(message.params.requestId,receipt);bindingResponses.push(receipt);}}catch{mutationRequests.push('unparsed-action');}}
+    if(message.sessionId===uiSession&&message.method==='Network.requestWillBeSent'&&message.params.request.url===uiURL+'/api/debugger/actions'&&message.params.request.method==='POST'){try{const action=JSON.parse(message.params.request.postData).action;mutationRequests.push(action);if(['bind_runtime_candidate','configure_runtime_field_test','arm_runtime_hooks'].includes(action)){const receipt={phase,action,request_id:message.params.requestId,status:null};bindingRequests.set(message.params.requestId,receipt);bindingResponses.push(receipt);}}catch{mutationRequests.push('unparsed-action');}}
     if(message.sessionId===uiSession&&message.method==='Network.responseReceived'&&bindingRequests.has(message.params.requestId))bindingRequests.get(message.params.requestId).status=message.params.response.status;
     if(message.sessionId===uiSession&&message.method==='Network.loadingFinished'&&bindingRequests.has(message.params.requestId)){
       const receipt=bindingRequests.get(message.params.requestId);bindingRequests.delete(message.params.requestId);
@@ -172,23 +194,32 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     for(const event of candidateKeyEvents(key,modifiers))await command('Input.dispatchKeyEvent',event,session);
     receipts.push({phase,kind:'native-key',key,modifiers});
   };
-  // Reach offscreen controls by real wheel input into their nearest scroll owner.
+  const settleControl=async(selector,session=uiSession)=>evaluate(`new Promise((resolve,reject)=>{const start=performance.now();let previous='',stable=0;function frame(){const n=document.querySelector(${JSON.stringify(selector)});if(!n)return reject(Error('Missing settling control'));const r=n.getBoundingClientRect(),positions=[];for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect();positions.push([p.scrollTop,p.scrollLeft,b.left,b.top,b.width,b.height]);}const current=JSON.stringify([r.left,r.top,r.width,r.height,innerWidth,innerHeight,positions]);stable=(${candidateGeometryStability.toString()})(previous,current,stable);previous=current;if(stable>=3)return resolve();if(performance.now()-start>2000)return reject(Error('Control geometry did not settle in native frames'));requestAnimationFrame(frame);}requestAnimationFrame(frame);})`,session);
+  // Respect every ancestor's client clipping area, including hidden outer
+  // panes/status bars. Never substitute DOM scroll assignment for native wheels.
   const reveal=async(selector,session=uiSession)=>{
+    await settleControl(selector,session);
     for(let attempt=0;attempt<30;attempt++){
-      const position=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)return {missing:true};const r=n.getBoundingClientRect();if(!r.width||!r.height)return {hidden:true};const x=Math.max(1,Math.min(innerWidth-2,r.x+r.width/2)),y=Math.max(1,Math.min(innerHeight-2,r.y+r.height/2));if(r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&n.contains(document.elementFromPoint(x,y)))return {ready:true,x,y};for(let p=n.parentElement;p;p=p.parentElement){const s=getComputedStyle(p),b=p.getBoundingClientRect();if(['auto','scroll','overlay'].includes(s.overflowY)&&p.scrollHeight>p.clientHeight+1&&b.width&&b.height){const top=Math.max(0,b.top),bottom=Math.min(innerHeight,b.bottom);if(top>=bottom)continue;return {x:Math.min(innerWidth-2,Math.max(2,b.right-8)),y:(top+bottom)/2,delta:r.top<top?Math.max(-400,r.top-top-20):Math.min(400,r.bottom-bottom+20)};}}return {blocked:true,rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom}};})()`,session);
+      const position=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)return {missing:true};const r=n.getBoundingClientRect();if(!r.width||!r.height)return {hidden:true};const nodes=[],ancestors=[];for(let p=n.parentElement;p;p=p.parentElement){const s=getComputedStyle(p),b=p.getBoundingClientRect();nodes.push(p);ancestors.push({id:p.id,left:b.left+p.clientLeft,right:b.left+p.clientLeft+p.clientWidth,top:b.top+p.clientTop,bottom:b.top+p.clientTop+p.clientHeight,clipX:['auto','scroll','overlay','hidden','clip'].includes(s.overflowX),clipY:['auto','scroll','overlay','hidden','clip'].includes(s.overflowY),scrollableY:['auto','scroll','overlay'].includes(s.overflowY)&&p.scrollHeight>p.clientHeight+1,scrollTop:p.scrollTop,maxScrollTop:p.scrollHeight-p.clientHeight});}const margin=(${candidateFocusMargin.toString()})(getComputedStyle(n)),plan=(${candidateRevealGeometry.toString()})({left:r.left,right:r.right,top:r.top,bottom:r.bottom},{left:0,right:innerWidth,top:0,bottom:innerHeight},ancestors,margin);if(plan.ready){const x=r.x+r.width/2,y=r.y+r.height/2;if(!n.contains(document.elementFromPoint(x,y)))return {blocked:true,reason:'Control is occluded',rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},clip:plan.clip};return {ready:true,x,y,clip:plan.clip,rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},margin};}if(plan.blocked)return {...plan,ancestors};const p=nodes[plan.owner],box=plan.visible;for(const x of [box.right-4,box.left+4,(box.left+box.right)/2])for(const y of [(box.top+box.bottom)/2,box.top+4,box.bottom-4]){const hit=document.elementFromPoint(x,y);if(!hit||!p.contains(hit))continue;let nested=false;for(let q=hit;q&&q!==p;q=q.parentElement){const s=getComputedStyle(q);if(['auto','scroll','overlay'].includes(s.overflowY)&&q.scrollHeight>q.clientHeight+1)nested=true;}if(!nested)return {x,y,delta:plan.delta,owner:ancestors[plan.owner],clip:plan.clip};}return {blocked:true,reason:'Scroll owner has no unobscured native wheel point',plan};})()`,session);
       if(position.ready)return position;
-      assert(!position.missing&&!position.hidden&&!position.blocked,`Unavailable visible control ${selector}: ${JSON.stringify(position)}`);
+      assert(!position.missing&&!position.hidden&&!position.blocked,`Unavailable unclipped control ${selector}: ${JSON.stringify(position)}`);
+      receipts.push({phase,kind:'native-wheel',selector,deltaY:position.delta,owner:position.owner,clip:position.clip});
       await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:position.x,y:position.y},session);
-      await command('Input.dispatchMouseEvent',{type:'mouseWheel',x:position.x,y:position.y,deltaX:0,deltaY:position.delta||180},session);
-      await evaluate('new Promise(resolve=>setTimeout(resolve,80))',session);
+      await command('Input.dispatchMouseEvent',{type:'mouseWheel',x:position.x,y:position.y,deltaX:0,deltaY:position.delta},session);
+      await settleControl(selector,session);
     }
     throw Error(`Control did not become reachable: ${selector}`);
   };
   const click=async(selector,session=uiSession)=>{
     const point=await reveal(selector,session),startedAt=performance.now();
+    const before=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});return {disabled:n.disabled===true,checked:n.type==='checkbox'?n.checked:null,focus:document.activeElement?.id};})()`,session);
+    receipts.push({phase,kind:'pointer-ready',selector,...before,geometry:point});assert.equal(before.disabled,false,'Native action control is disabled: '+selector);
+    await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:point.x,y:point.y},session);
     await command('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1},session);
     await command('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1},session);
-    receipts.push({phase,kind:'pointer',selector});await evaluate('new Promise(resolve=>requestAnimationFrame(resolve))',session);return startedAt;
+    await evaluate('new Promise(resolve=>requestAnimationFrame(resolve))',session);
+    const after=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});return {disabled:n?.disabled,checked:n?.type==='checkbox'?n.checked:null,focus:document.activeElement?.id};})()`,session);
+    receipts.push({phase,kind:'pointer',selector,before,after});return startedAt;
   };
   const byText=async(text,scope='body')=>evaluate(`(()=>{const root=document.querySelector(${JSON.stringify(scope)}),nodes=[...root.querySelectorAll('button')],n=nodes.find(n=>n.textContent.trim()===${JSON.stringify(text)}&&!n.disabled&&n.getClientRects().length);if(!n)return null;const path=[];let e=n;while(e&&e!==document.documentElement){if(e.id){path.unshift('#'+CSS.escape(e.id));break;}const siblings=[...e.parentElement.children];path.unshift(e.tagName.toLowerCase()+':nth-child('+(siblings.indexOf(e)+1)+')');e=e.parentElement;}return path.join(' > ');})()`);
   const clickText=async(text,scope)=>{const selector=await byText(text,scope);assert(selector,`Missing visible '${text}'`);await click(selector);};
@@ -205,6 +236,8 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await frame();const shot=await command('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(shot.data,'base64'));
   };
   const viewport=async(width,height)=>{await command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});await frame();};
+  const formSnapshotExpression=`(()=>{const control=id=>{const n=document.querySelector('#'+id);return {value:n?.value,checked:n?.type==='checkbox'?n.checked:undefined,disabled:n?.disabled,valid:n?.validity?.valid,validationMessage:n?.validationMessage};};return {url:control('hooks-field-url'),method:control('hooks-field-method'),kind:control('hooks-field-kind'),pointer:control('hooks-field-pointer'),captureConsent:control('hooks-field-confirm'),captureButton:control('hooks-field-configure'),armConsent:control('hooks-confirm'),armButton:control('hooks-arm'),captureStatus:document.querySelector('#hooks-field-status')?.textContent,armStatus:document.querySelector('#source-hooks-notice')?.textContent,experimentPending:state.experimentPending,debuggerActionPending:state.debuggerActionPending,experimentError:state.experimentError,backendField:state.debuggerSession?.runtime_hooks?.field_test?{enabled:state.debuggerSession.runtime_hooks.field_test.enabled,url:state.debuggerSession.runtime_hooks.field_test.url,method:state.debuggerSession.runtime_hooks.field_test.method,kind:state.debuggerSession.runtime_hooks.field_test.kind,pointer:state.debuggerSession.runtime_hooks.field_test.pointer}:null};})()`;
+  const recordForm=async(label)=>{const form=await evaluate(formSnapshotExpression);receipts.push({phase,kind:'form-state',label,form});return form;};
   const targetSnapshotExpression=`(()=>{const s=document.querySelector('#candidate-experiment-target'),session=state.debuggerSession,hooks=session?.runtime_hooks;return {selected:s?.value,ownerTarget:candidateExperiment?.target,lifetime:JSON.stringify([hooks?.session_id,session?.request_interception?.created_at_ms,session?.object_experiment?.navigation_id,hooks?.target_id,session?.target?.id]),documentURL:session?.object_experiment?.url,catalogCount:session?.scripts?.length,catalog:(session?.scripts??[]).slice(0,64).map(script=>({id:script.script_id,target:script.target_id??session?.target?.id,type:script.target_type??'page',hash:script.hash,length:script.length,url:script.url})),options:[...(s?.options??[])].slice(0,10).map((option,index)=>({index,value:option.value,label:option.textContent,type:option.value===hooks?.target_id?'page':hooks?.workers?.find(worker=>worker.id===option.value)?.type??null}))};})()`;
   const chooseTarget=async(kind)=>{
     phase='select disposable '+kind;
@@ -266,17 +299,17 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     assert.deepEqual(await quietState(),before,'Candidate handoff must not create, navigate, bind, capture or arm');
     assert.equal(await evaluate("document.querySelector('#hooks-field-confirm').checked||document.querySelector('#hooks-confirm').checked"),false);
     assert.equal(await evaluate("document.querySelector('#candidate-experiment-target').value"),'');
-    phase='explicit disposable create/open';await click('#hooks-create');
-    await until("!document.querySelector('#hooks-navigate').disabled",'Explicit create did not enable disposable navigation');
+    await recordForm('candidate handoff');phase='explicit disposable create/open';await click('#hooks-create');
+    await until("!document.querySelector('#hooks-navigate').disabled",'Explicit create did not enable disposable navigation');await recordForm('after explicit context creation');
     const openDisposable=async(path)=>{
       await fill('#hooks-page-url',fixtureURL+path);await click('#hooks-navigate');
       await until("document.querySelector('#candidate-experiment-target').options.length>1&&!document.querySelector('#hooks-navigate').disabled",'Explicit open did not list targets');
       assert.equal(await evaluate("document.querySelector('#candidate-experiment-target').value"),'','Navigation must not choose target');
       assert.equal(await evaluate("document.querySelector('#hooks-field-confirm').checked||document.querySelector('#hooks-confirm').checked"),false,'Navigation must retire confirmations');
-      await fixtureReady(path,0);
+      await fixtureReady(path,0);await recordForm('after explicit navigation '+path);
     };
     const refuseBind=async(label)=>{
-      phase=label;receipts.push({phase,kind:'binding-start',snapshot:await evaluate(targetSnapshotExpression)});const expected=label==='negative-duplicate-exact-source'?'Ambiguous candidate: identical bytes occur in multiple sources of this target.':'No exact candidate bytes in the selected target.';const startedAt=await click('#candidate-experiment-bind');
+      phase=label;await recordForm('before explicit bind');receipts.push({phase,kind:'binding-start',snapshot:await evaluate(targetSnapshotExpression)});const expected=label==='negative-duplicate-exact-source'?'Ambiguous candidate: identical bytes occur in multiple sources of this target.':'No exact candidate bytes in the selected target.';const startedAt=await click('#candidate-experiment-bind');
       await until(`document.querySelector('#candidate-experiment-status').textContent.includes(${JSON.stringify(expected)})&&!document.querySelector('#candidate-experiment-bind').disabled`,label+' must fail for the exact intended identity reason and allow explicit retry');
       receipts.push({phase,kind:'binding-roundtrip',measurement:'Native Bind activation to rendered refusal; UI plus backend roundtrip, not pure source-scan time',elapsed_ms:Math.round(performance.now()-startedAt),outcome:'refused'});
       const state=await quietState();assert.equal(state.definitions,0,label+' cannot add a hook');assert.equal(state.enabled,false);assert.equal(state.armed,false);
@@ -309,7 +342,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     guardedTargetSession=disposableSession;
     // Delay only delivery of a genuine successful backend response. The real
     // bind executes, so Stop waiting cannot claim to undo its definition.
-    phase='rendered Stop waiting on genuine bind response';receipts.push({phase,kind:'binding-start',snapshot:await evaluate(targetSnapshotExpression)});
+    phase='rendered Stop waiting on genuine bind response';await recordForm('before pending bind');receipts.push({phase,kind:'binding-start',snapshot:await evaluate(targetSnapshotExpression)});
     await fill('#hooks-label','Retain owned hook draft');
     const draftBefore=await evaluate("JSON.stringify([document.querySelector('#hooks-label').value,document.querySelector('#hooks-field-url').value,document.querySelector('#hooks-field-pointer').value])");
     const bindsBefore=mutationRequests.filter(action=>action==='bind_runtime_candidate').length;
@@ -325,7 +358,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     assert.equal(bindHold.paused.responseStatusCode,200,'Cancellation case requires real successful backend binding: '+JSON.stringify(bindingResponses.at(-1)));
     assert(actualResponse.runtime_hooks?.definitions?.some(definition=>definition.candidate_guard),'Held response must contain the actual backend-added candidate definition');
     await until("!document.querySelector('#candidate-experiment-cancel').hidden",'Pending binding did not expose Stop waiting');
-    await screenshot('02-pending-bind-before-stop');
+    await reveal('#candidate-experiment-strip');await screenshot('02-pending-bind-before-stop');
     await keyboardTo('#candidate-experiment-cancel');await key('Enter');
     await until("/retired|changed|unknown/i.test(document.querySelector('#candidate-experiment-status').textContent)&&document.querySelector('#candidate-experiment-cancel').hidden",'Stop waiting did not retire acknowledgement ownership');
     let release='unchanged actual response released';
@@ -341,14 +374,14 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     assert.equal(await evaluate("JSON.stringify([document.querySelector('#hooks-label').value,document.querySelector('#hooks-field-url').value,document.querySelector('#hooks-field-pointer').value])"),draftBefore,'Stop waiting preserves visible drafts');
     const cancelledState=await quietState();assert.equal(cancelledState.definitions,1);assert.equal(cancelledState.enabled,false);assert.equal(cancelledState.armed,false);
     receipts.push({phase,kind:'rendered-response-cancellation',response:'Genuine owned backend HTTP200 and candidate definition verified before holding delivery',release,bind_dispatches:1,late_binding_restored:false,consents_restored:false,automatic_retry:false,drafts_retained:true,native_definition:'Added before cancellation; removed next by explicit visible control'});
-    await screenshot('02-stop-waiting-late-response');
+    await reveal('#candidate-experiment-strip');await screenshot('02-stop-waiting-late-response');
     await click('#hooks-definitions .hook-remove');
     await until("document.querySelectorAll('#hooks-definitions .hook-definition-row').length===0&&!document.querySelector('#candidate-experiment-bind').disabled",'Explicit Remove did not retire the backend-added definition');
     assert.equal((await quietState()).definitions,0);
     phase='explicit exact-byte bind';receipts.push({phase,kind:'binding-start',snapshot:await evaluate(targetSnapshotExpression)});await keyboardTo('#candidate-experiment-bind');const bindStartedAt=performance.now();await key('Enter');
     await until("document.querySelector('#candidate-experiment-status').textContent.startsWith('Observation hook bound.')",'Exact byte binding did not finish');
     receipts.push({phase,kind:'binding-roundtrip',measurement:'Native Bind activation to rendered bound status; UI plus backend roundtrip, not pure source-scan time',elapsed_ms:Math.round(performance.now()-bindStartedAt),outcome:'bound'});
-    const bound=await quietState();assert.equal(bound.definitions,1);assert.equal(bound.enabled,false);assert.equal(bound.armed,false);
+    await recordForm('after successful explicit bind');const bound=await quietState();assert.equal(bound.definitions,1);assert.equal(bound.enabled,false);assert.equal(bound.armed,false);
     phase='new Worker after exact Page binding';
     const pageBinding=await evaluate("candidateExperiment.bound.id"),bindDispatches=mutationRequests.filter(action=>action==='bind_runtime_candidate').length;
     const crossWorkerRequestsBefore=requestReceipts.length;
@@ -365,16 +398,18 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await reveal('#candidate-experiment-strip');await screenshot('02-new-worker-keeps-page-binding');
 
     for(const [width,height] of [[1440,900],[760,560],[360,740]]){
-      await viewport(width,height);await keyboardTo('#candidate-experiment-return');await reveal('#candidate-experiment-return');
+      await viewport(width,height);await reveal('#candidate-experiment-question');await screenshot(`02-bound-${width}-question`);await reveal('#candidate-experiment-status');await screenshot(`02-bound-${width}-status`);
+      await keyboardTo('#candidate-experiment-return');await key('Tab');await key('Tab',uiSession,8);assert.equal(await evaluate("document.activeElement.id"),'candidate-experiment-return','Fresh Tab away/back must restore Return focus at '+width);await reveal('#candidate-experiment-return');
       assert(await evaluate("document.documentElement.scrollWidth<=innerWidth+1"),'Bridge must not force page horizontal overflow');
       await screenshot(`02-bound-${width}`);
     }
     await viewport(1440,900);
-    phase='explicit capture and observation';await click('#hooks-field-confirm');await click('#hooks-field-configure');
+    phase='explicit selected-value capture';const beforeCapture=await recordForm('before capture consent');assert.equal(beforeCapture.url.value,fixtureURL+'/payload','Explicit Bind must restore original field URL; test must not refill it');assert.equal(beforeCapture.method.value,'POST');assert.equal(beforeCapture.kind.value,'json');assert.equal(beforeCapture.pointer.value,'/payload');assert.equal(beforeCapture.captureConsent.checked,false);assert.equal(beforeCapture.captureConsent.disabled,false);
+    await click('#hooks-field-confirm');const consented=await recordForm('after capture consent');assert.equal(consented.captureConsent.checked,true,'Native checkbox must visibly opt into capture');assert.equal(consented.captureButton.disabled,false,'Capture must be actionable before submit');assert.equal(consented.url.valid,true);await click('#hooks-field-configure');await recordForm('after explicit Capture click');
     await until("/POST.*\\/payload.*Capturing/.test(document.querySelector('#hooks-field-status').textContent)",'Explicit value capture did not become ready');
-    await click('#hooks-confirm');await click('#hooks-arm');
+    await recordForm('capture acknowledged');const captured=(await readOnlyState()).runtime_hooks.field_test;assert.equal(captured.enabled,true);assert.equal(captured.url,fixtureURL+'/payload');assert.equal(captured.method,'POST');assert.equal(captured.kind,'json');assert.equal(captured.pointer,'/payload');receipts.push({phase,kind:'backend-capture-configuration',enabled:captured.enabled,url:captured.url,method:captured.method,field_kind:captured.kind,pointer:captured.pointer});phase='explicit observation arming';await click('#hooks-confirm');const armReady=await recordForm('after arm consent');assert.equal(armReady.armConsent.checked,true);assert.equal(armReady.armButton.disabled,false);await click('#hooks-arm');await recordForm('after explicit Arm click');
     await until("/^Armed/.test(document.querySelector('#source-hooks-notice').textContent)&&!document.querySelector('#hooks-disarm').disabled",'Explicit arm did not complete');
-    assert.equal(await evaluate("document.querySelector('#candidate-experiment-target').value"),chosen,'Observation target must remain the explicitly selected page');
+    await recordForm('arm acknowledged');assert.equal(await evaluate("document.querySelector('#candidate-experiment-target').value"),chosen,'Observation target must remain the explicitly selected page');
     const stillOwned=(await command('Target.getTargets',{},null)).targetInfos.find(t=>t.targetId===chosen);
     assert.equal(stillOwned?.url,disposable.url,'Prepared native action belongs to the same disposable document');
     const requestsBefore=requestReceipts.length;phase='owned disposable page action';
@@ -396,13 +431,15 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await writeFile(join(output,'receipt.json'),JSON.stringify({status:'passed',path:'real backend and installed Chromium native CDP input',phase,receipts,bindingResponses,viewports:[[1440,900],[760,560],[360,740]],limitations:['Not native macOS WebKit acceptance.','No A/B/A comparison or persistence.','Return/Close/navigation/source-digest exhaustive late-ack races are controller-only; rendered interruption covers Stop waiting only.']},null,2));
     console.log(`PASS original live-JS to disposable matched-baseline rendered journey; receipts: ${output}`);
   } catch(error) {
+    let formFailure;try{formFailure=await recordForm('failure');}catch(diagnosticError){formFailure={error:String(diagnosticError)};}
     let bindingFailure;try{bindingFailure=await evaluate("({notice:document.querySelector('#candidate-experiment-status')?.textContent?.slice(0,2048),experimentError:state.experimentError?.slice(0,2048),pending:Boolean(candidateExperiment?.pending),bound:Boolean(candidateExperiment?.bound),hooksFailure:state.debuggerSession?.runtime_hooks?.last_failure})");}catch(diagnosticError){bindingFailure={error:String(diagnosticError)};}
     let targetFailure;try{targetFailure=await evaluate(targetSnapshotExpression);}catch(diagnosticError){targetFailure={error:String(diagnosticError)};}
     let uiFailure;try{uiFailure=await evaluate("(()=>({focus:{id:document.activeElement?.id,tag:document.activeElement?.tagName,text:document.activeElement?.textContent?.slice(0,100)},fieldSearch:typeof fieldProvenanceSelection==='undefined'?null:{searching:fieldProvenanceSelection?.searching,searched:fieldProvenanceSelection?.searched,error:fieldProvenanceSelection?.error,candidates:fieldProvenanceSelection?.candidates?.length,notice:document.querySelector('#field-provenance-notice')?.textContent,searchDisabled:document.querySelector('#field-provenance-search')?.disabled,renderedCandidates:document.querySelectorAll('.field-provenance-test-candidate').length},debuggerScripts:typeof state==='undefined'?null:state.debuggerSession?.scripts?.length}))()");}catch(diagnosticError){uiFailure={error:String(diagnosticError)};}
-    let backendFailure;try{const snapshot=await fetch(uiURL+'/api/debugger',{signal:AbortSignal.timeout(5000)}).then(r=>r.json());backendFailure={state:snapshot.state,target:snapshot.target,network_capture_enabled:snapshot.network?.capture_enabled,requests:snapshot.network?.requests?.length,hooks_state:snapshot.runtime_hooks?.state,lifetime:[snapshot.runtime_hooks?.session_id,snapshot.request_interception?.created_at_ms,snapshot.object_experiment?.navigation_id,snapshot.runtime_hooks?.target_id],catalogCount:snapshot.scripts?.length,catalog:(snapshot.scripts??[]).slice(0,64).map(script=>({id:script.script_id,target:script.target_id??snapshot.target?.id,type:script.target_type??'page',hash:script.hash,url:script.url,length:script.length}))};}catch(diagnosticError){backendFailure={error:String(diagnosticError)};}
+    let backendFailure;try{const snapshot=await fetch(uiURL+'/api/debugger',{signal:AbortSignal.timeout(5000)}).then(r=>r.json());backendFailure={state:snapshot.state,target:snapshot.target,network_capture_enabled:snapshot.network?.capture_enabled,requests:snapshot.network?.requests?.length,hooks_state:snapshot.runtime_hooks?.state,field_test:snapshot.runtime_hooks?.field_test?{enabled:snapshot.runtime_hooks.field_test.enabled,url:snapshot.runtime_hooks.field_test.url,method:snapshot.runtime_hooks.field_test.method,kind:snapshot.runtime_hooks.field_test.kind,pointer:snapshot.runtime_hooks.field_test.pointer,observations:snapshot.runtime_hooks.field_test.observations?.length}:null,lifetime:[snapshot.runtime_hooks?.session_id,snapshot.request_interception?.created_at_ms,snapshot.object_experiment?.navigation_id,snapshot.runtime_hooks?.target_id],catalogCount:snapshot.scripts?.length,catalog:(snapshot.scripts??[]).slice(0,64).map(script=>({id:script.script_id,target:script.target_id??snapshot.target?.id,type:script.target_type??'page',hash:script.hash,url:script.url,length:script.length}))};}catch(diagnosticError){backendFailure={error:String(diagnosticError)};}
     try{if(await evaluate("Boolean(document.querySelector('#candidate-experiment-strip')?.getClientRects().length)"))await reveal('#candidate-experiment-strip');}catch(revealError){bindingFailure.screenshot_reveal_error=String(revealError).slice(0,512);try{await reveal('#candidate-experiment-status');}catch{}}
     try{await screenshot('failure');}catch{}
+    if(/capture|arming/i.test(phase)){try{await reveal('#hooks-field-card');await screenshot('failure-value-test');}catch{try{await reveal('#hooks-field-status');await screenshot('failure-value-status');}catch{}}try{await reveal('#hooks-arm');await screenshot('failure-arm-control');}catch{}}
     await Promise.allSettled([...responseReads]);
-    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'failed',phase,error:String(error.stack||error),receipts,runtimeErrors,commandTrace,backendFailure,uiFailure,targetFailure,bindingFailure,bindingResponses,mutationRequests,interceptionErrors,dialogs},null,2));throw error;
+    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'failed',phase,error:String(error.stack||error),receipts,runtimeErrors,commandTrace,backendFailure,uiFailure,targetFailure,formFailure,bindingFailure,bindingResponses,mutationRequests,interceptionErrors,dialogs},null,2));throw error;
   } finally {if(bindHold){try{await command('Fetch.disable');}catch{}}for(const request of pending.values()){clearTimeout(request.timer);request.reject(Error('Journey closed'));}socket.close();}
 }

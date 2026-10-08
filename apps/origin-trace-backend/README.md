@@ -93,6 +93,14 @@ set `REB_SOURCE_FACTS_TEST_WORKER` to the built worker and run
 `cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml source_facts_real_worker_http_and_cli -- --ignored`
 to exercise that boundary directly.
 
+Durable Analyst/notebook and API Collection replacements now share a
+[cooperative cross-process writer lease](../../protocol/workspace-writer-lease-v1.md)
+with the native Swift handlers. A busy writer fails promptly with 409; stale
+expected generations remain explicit conflicts. Both readers/writers preserve
+atomic snapshots, and a post-publication synchronization failure is reported as
+an uncertain save. The contract documents private directories, reserved sidecars,
+parent aliases and the supported local-filesystem boundary.
+
 API failures preserve their HTTP status and human `error` text and add stable
 `code` and bounded `details` fields. The shared envelope and enum live in
 `src/error.rs` and the OpenAPI `Error`, `ErrorCode`, and `ErrorDetails` schemas.

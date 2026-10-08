@@ -18,7 +18,8 @@ This is the existing permission-restricted, atomic, generation-checked Analyst
 library, not browser localStorage. It is library-wide and can contain research
 from several sessions/profiles. The dialog discloses this scope before saving.
 Opening it does not select a profile or make a reference valid for a live page.
-A stale library generation rejects replacement; no automatic conflict merge,
+The [shared writer lease](workspace-writer-lease-v1.md) serializes native Swift and
+Rust process replacements. A stale library generation rejects replacement; no automatic conflict merge,
 retry, profile switch, capture change, or permission restoration occurs.
 
 The notebook controller owns a separate loaded library generation. It never

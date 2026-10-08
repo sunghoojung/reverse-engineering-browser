@@ -258,7 +258,17 @@ export async function checkNotebookInteractions({evaluate, viewport, click, key,
   await until('investigationNotebook.model.busy');
   const focusStarted = Date.now(); while (!f.pending.length && Date.now() - focusStarted < 5000) await new Promise(resolve => setTimeout(resolve, 25));
   assert(f.pending.length); assert.equal(await evaluate('document.activeElement.id'), 'notebook-cancel');
-  await press('Tab'); assert.equal(await evaluate('document.activeElement.id'), 'notebook-close');
+  await press('Tab');
+  const focusBoundary = await evaluate("({id:document.activeElement.id,tag:document.activeElement.tagName,documentFocused:document.hasFocus(),inside:document.querySelector('#investigation-notebook').contains(document.activeElement)})");
+  receipts.push({label:'native dialog forward Tab boundary',...focusBoundary});
+  assert(focusBoundary.inside || !focusBoundary.documentFocused && focusBoundary.tag === 'BODY', 'Modal Tab must stay in the dialog or reach browser chrome, never background page controls');
+  // Browser chrome is a legitimate native focus boundary. Navigate back using
+  // real Shift+Tab, then choose the preceding Close control during this save.
+  if (focusBoundary.id !== 'notebook-close') {
+    await key('Tab', 'Tab', {windowsVirtualKeyCode: 9, modifiers: 8});
+    if (await evaluate('document.activeElement.id') === 'notebook-cancel') await key('Tab', 'Tab', {windowsVirtualKeyCode: 9, modifiers: 8});
+  }
+  assert.equal(await evaluate('document.activeElement.id'), 'notebook-close');
   f.release(); f.mode = 'ready'; await until('!investigationNotebook.model.busy');
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
   assert.equal(await evaluate('document.activeElement.id'), 'notebook-close', 'Completion must not steal a newer keyboard focus choice');

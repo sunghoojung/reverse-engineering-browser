@@ -60,6 +60,9 @@ wire layouts, limits, and real-browser checks after rebuilding.
 Eligible HTTP and HTTPS documents must belong to a profile directory immediately
 inside the owned user-data root, including the fresh browser's `Default` profile.
 The user-data root itself is not a BrowserContext profile path.
+The explicit disposable root is resolved at startup to match Chromium's
+canonical profile paths, including macOS `/tmp` and `/var` aliases. An invalid
+root stays ineligible rather than admitting a fallback browser profile.
 
 ## Layout
 

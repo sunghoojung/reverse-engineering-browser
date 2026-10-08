@@ -19,6 +19,7 @@
 
 #include "base/command_line.h"
 #include "base/containers/span.h"
+#include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
@@ -111,7 +112,11 @@ class Session final {
     started_ = true;
     retired_ = std::move(retired);
     const auto& command = *base::CommandLine::ForCurrentProcess();
-    user_data_dir_ = command.GetSwitchValuePath("user-data-dir");
+    // Chromium canonicalizes the profile root. Resolve the explicitly owned
+    // directory once at startup too: /tmp and /var are aliases on macOS.
+    user_data_dir_ = base::MakeAbsoluteFilePath(command.GetSwitchValuePath("user-data-dir"));
+    if (user_data_dir_.empty())
+      return;
     std::uint64_t id = 0;
     if (!base::StringToUint64(command.GetSwitchValueASCII("reb-native-console-session-id"), &id) ||
         !id)

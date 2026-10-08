@@ -13,10 +13,11 @@ const browser =
   process.env.ORIGIN_TRACE_TEST_BROWSER ??
   "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const wrapper = join(temporary, "brave");
+const browserPid = join(temporary, "brave.pid");
 // The wrapper accepts only a quoted, explicit local executable path.
 await writeFile(
   wrapper,
-  `#!/bin/sh\nexec '${browser.replaceAll("'", "'\\''")}' --headless=new --disable-gpu "$@"\n`,
+  `#!/bin/sh\nprintf '%s\\n' "$$" > '${browserPid.replaceAll("'", "'\\''")}'\nexec '${browser.replaceAll("'", "'\\''")}' --headless=new --disable-gpu "$@"\n`,
   { mode: 0o700 },
 );
 const handshake = join(temporary, "handshake");
@@ -147,4 +148,56 @@ await assert.rejects(
 console.log(
   "PASS launcher exits, removes its handshake, and stops the backend",
 );
+
+// Reproduce a browser exit after readiness through the actual packaged launcher.
+// Only the PID recorded by our disposable wrapper is terminated.
+await writeFile(browserPid, "");
+const interrupted = spawn(join(contents, "Resources/run-live-session.sh"), [], {
+  cwd: temporary,
+  env: environment,
+  detached: true,
+});
+let interruptionDiagnostics = "";
+for (const pipe of [interrupted.stdout, interrupted.stderr]) {
+  pipe.on("data", chunk => {
+    interruptionDiagnostics = (interruptionDiagnostics + chunk).slice(-16384);
+  });
+}
+const interruptionExit = new Promise((resolveExit, reject) => {
+  interrupted.once("exit", resolveExit);
+  interrupted.once("error", reject);
+});
+let interruptionTimer;
+try {
+  let interruptionEndpoint;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    try {
+      interruptionEndpoint = (await readFile(handshake, "utf8")).trim();
+      if (interruptionEndpoint) break;
+    } catch {}
+    assert.equal(interrupted.exitCode, null, interruptionDiagnostics);
+    await wait(50);
+  }
+  assert(interruptionEndpoint, "Second launcher did not become ready: " + interruptionDiagnostics);
+  const pid = Number((await readFile(browserPid, "utf8")).trim());
+  assert(Number.isSafeInteger(pid) && pid > 0, "Disposable browser PID missing");
+  process.kill(pid, "SIGTERM");
+  const code = await Promise.race([
+    interruptionExit,
+    new Promise((_, reject) => {
+      interruptionTimer = setTimeout(() => reject(new Error("Browser exit left the live coordinator running")), 8000);
+    }),
+  ]);
+  assert.equal(code, 1, interruptionDiagnostics);
+  assert.match(interruptionDiagnostics, /Brave stopped; the live capture connection has closed/);
+  await assert.rejects(access(handshake));
+  await assert.rejects(fetch(new URL("/api/health", interruptionEndpoint), {signal: AbortSignal.timeout(1000)}));
+  console.log("PASS browser exit after readiness reports failure and tears down its live session");
+} finally {
+  clearTimeout(interruptionTimer);
+  if (interrupted.exitCode === null) {
+    try { process.kill(-interrupted.pid, "SIGKILL"); } catch {}
+  }
+}
 console.log(JSON.stringify({ temporary }));

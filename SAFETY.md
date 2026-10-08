@@ -28,6 +28,15 @@ it.
 
 ## Default capture
 
+- Opening the packaged Origin Trace app starts a visibly labeled local research
+  session with all implemented native capture categories, bounded CDP request
+  and response content, and Canvas image artifacts enabled. Launch this profile
+  only for authorized targets and data. The session expires after one hour.
+  **New Live Session…** offers metadata-only capture;
+  `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects that mode for automatic launch.
+- Standalone probes remain inactive without an enabled session. Metadata-only
+  sessions follow the defaults below; full-content research sessions follow
+  the sensitive-capture limits and credential redaction rules.
 - Capture metadata, sizes, hashes, stable identifiers, and bounded previews by
   default.
 - Do not capture credentials, authorization or proxy-authorization headers,
@@ -38,8 +47,9 @@ it.
 
 ## Sensitive capture
 
-- Sensitive capture is disabled by default. Where a capture path supports it,
-  enable it visibly and for one session only.
+- Sensitive capture requires an enabled, visibly labeled session. The packaged
+  app's automatic research profile enables it for its bounded session;
+  standalone and metadata-only sessions leave it disabled.
 - Enable sensitive capture only when the authorization for that session
   specifically covers the data being collected. Keep the capture bounded, audit
   the action, and document new capture paths and their redaction checks.

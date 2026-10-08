@@ -36,6 +36,7 @@ readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly cdp_network_capture="${REB_CDP_NETWORK_CAPTURE:-0}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
+readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
 readonly session_handshake="${REB_SESSION_HANDSHAKE:-}"
 readonly session_owner_pid="${REB_SESSION_OWNER_PID:-}"
@@ -56,6 +57,10 @@ if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; the
 fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
   echo "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1." >&2
+  exit 2
+fi
+if [[ "${localhost_only}" != 0 && "${localhost_only}" != 1 ]]; then
+  echo "REB_LOCALHOST_ONLY must be 0 or 1." >&2
   exit 2
 fi
 if [[ "${embedded_session}" != 0 && "${embedded_session}" != 1 ]]; then
@@ -102,6 +107,7 @@ brave_binary="${REB_BRAVE_BINARY:-}"
 if [[ -z "${brave_binary}" ]]; then
   readonly brave_output="${REB_BRAVE_OUTPUT_DIRECTORY:-${repository_root}/browser/worktree/src/out/Component_arm64}"
   readonly candidates=(
+    "${brave_output}/Brave Browser Development.app/Contents/MacOS/Brave Browser Development"
     "${brave_output}/Brave Browser.app/Contents/MacOS/Brave Browser"
     "${brave_output}/Brave Browser Dev.app/Contents/MacOS/Brave Browser Dev"
     "${brave_output}/Brave Browser Beta.app/Contents/MacOS/Brave Browser Beta"
@@ -153,35 +159,42 @@ artifact_receiver_pid=""
 analyzer_pid=""
 ui_pid=""
 brave_pid=""
+# An open native UI can keep HTTP event streams alive during graceful shutdown.
+# Bound teardown of our own children so retry never waits for an abandoned stream.
+stop_process() {
+  local child_pid="$1"
+  if [[ -z "${child_pid}" ]]; then
+    return
+  fi
+  if kill -0 "${child_pid}" 2>/dev/null; then
+    kill -TERM "${child_pid}" 2>/dev/null || true
+    for _ in {1..100}; do
+      if ! kill -0 "${child_pid}" 2>/dev/null; then
+        break
+      fi
+      sleep 0.05
+    done
+    if kill -0 "${child_pid}" 2>/dev/null; then
+      kill -KILL "${child_pid}" 2>/dev/null || true
+    fi
+  fi
+  wait "${child_pid}" 2>/dev/null || true
+}
+
 stop_artifact_receiver() {
   if [[ -z "${artifact_receiver_pid}" ]]; then
     return
   fi
-  if kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
-    kill -TERM "${artifact_receiver_pid}" 2>/dev/null || true
-  fi
-  wait "${artifact_receiver_pid}" 2>/dev/null || true
+  stop_process "${artifact_receiver_pid}"
   artifact_receiver_pid=""
 }
 
 cleanup() {
-  if [[ -n "${brave_pid}" ]] && kill -0 "${brave_pid}" 2>/dev/null; then
-    kill -TERM "${brave_pid}" 2>/dev/null || true
-    wait "${brave_pid}" 2>/dev/null || true
-  fi
-  if [[ -n "${analyzer_pid}" ]] && kill -0 "${analyzer_pid}" 2>/dev/null; then
-    kill "${analyzer_pid}" 2>/dev/null || true
-    wait "${analyzer_pid}" 2>/dev/null || true
-  fi
-  if [[ -n "${broker_pid}" ]] && kill -0 "${broker_pid}" 2>/dev/null; then
-    kill "${broker_pid}" 2>/dev/null || true
-    wait "${broker_pid}" 2>/dev/null || true
-  fi
+  stop_process "${brave_pid}"
+  stop_process "${analyzer_pid}"
+  stop_process "${broker_pid}"
   stop_artifact_receiver
-  if [[ -n "${ui_pid}" ]] && kill -0 "${ui_pid}" 2>/dev/null; then
-    kill "${ui_pid}" 2>/dev/null || true
-    wait "${ui_pid}" 2>/dev/null || true
-  fi
+  stop_process "${ui_pid}"
   if [[ -S "${socket_path}" ]]; then
     rm -f "${socket_path}"
   fi
@@ -354,6 +367,16 @@ fi
 if [[ "${use_system_keychain}" == 0 ]]; then
   brave_arguments+=(--use-mock-keychain)
 fi
+if [[ "${localhost_only}" == 1 ]]; then
+  # Preserve Chromium's own sandbox. A nested sandbox-exec prevents its children
+  # from initializing their sandbox on macOS. Route non-loopback traffic to an
+  # unused local proxy and block external DNS for deterministic local fixtures.
+  brave_arguments+=(
+    --proxy-server=http://127.0.0.1:9
+    '--proxy-bypass-list=localhost;127.0.0.1;[::1]'
+    '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1]'
+  )
+fi
 
 "${brave_binary}" "${brave_arguments[@]}" >"${brave_log}" 2>&1 &
 brave_pid=$!
@@ -420,6 +443,16 @@ echo "Close Brave to stop this capture session."
 
 if [[ "${embedded_session}" == 1 ]]; then
   while kill -0 "${session_owner_pid}" 2>/dev/null; do
+    if ! kill -0 "${brave_pid}" 2>/dev/null; then
+      echo "Brave stopped; the live capture connection has closed. See: ${brave_log}" >&2
+      exit 1
+    fi
+    for dependency in "${broker_pid}" "${artifact_receiver_pid}" "${ui_pid}"; do
+      if [[ -n "${dependency}" ]] && ! kill -0 "${dependency}" 2>/dev/null; then
+        echo "A live capture helper stopped; the session has closed. See: ${session_directory}" >&2
+        exit 1
+      fi
+    done
     sleep 1
   done
 else

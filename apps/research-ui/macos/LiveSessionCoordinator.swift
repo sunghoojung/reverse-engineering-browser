@@ -5,7 +5,7 @@ final class LiveSessionCoordinator {
   private var process: Process?
   private var logHandle: FileHandle?
   private var generation = UUID()
-  private var becameReady = false
+  private var failureReported = false
 
   var isRunning: Bool {
     lock.lock()
@@ -27,7 +27,7 @@ final class LiveSessionCoordinator {
     }
     let currentGeneration = UUID()
     generation = currentGeneration
-    becameReady = false
+    failureReported = false
     lock.unlock()
 
     do {
@@ -192,6 +192,8 @@ final class LiveSessionCoordinator {
     environment["REB_BRAVE_CACHE_ROOT"] = browserCacheRootURL.path
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
     environment["REB_CDP_NETWORK_CAPTURE"] = captureNetworkContent ? "1" : "0"
+    environment["REB_CAPTURE_CANVAS_IMAGES"] =
+      environment["REB_CAPTURE_CANVAS_IMAGES"] ?? (captureNetworkContent ? "1" : "0")
     environment["REB_USE_SYSTEM_KEYCHAIN"] = useSystemKeychain ? "1" : "0"
     environment["REB_BROKER_BINARY"] =
       macOSURL.appendingPathComponent(
@@ -252,11 +254,13 @@ final class LiveSessionCoordinator {
         let url = validatedLoopbackURL(text.trimmingCharacters(in: .whitespacesAndNewlines))
       {
         lock.lock()
-        if generation == currentGeneration {
-          becameReady = true
+        guard generation == currentGeneration, !failureReported else {
+          lock.unlock()
+          return
         }
         lock.unlock()
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+          guard self?.isCurrent(currentGeneration) == true else { return }
           ready(url)
         }
         return
@@ -289,7 +293,7 @@ final class LiveSessionCoordinator {
     failed: @escaping (String) -> Void
   ) {
     lock.lock()
-    let shouldReport = generation == currentGeneration && !becameReady
+    let shouldReport = generation == currentGeneration && !failureReported
     if process === child {
       process = nil
       try? logHandle?.close()
@@ -311,11 +315,11 @@ final class LiveSessionCoordinator {
     failed: @escaping (String) -> Void
   ) {
     lock.lock()
-    guard generation == currentGeneration, !becameReady else {
+    guard generation == currentGeneration, !failureReported else {
       lock.unlock()
       return
     }
-    becameReady = true
+    failureReported = true
     lock.unlock()
     DispatchQueue.main.async {
       failed(message)
@@ -325,7 +329,7 @@ final class LiveSessionCoordinator {
   private func isCurrent(_ currentGeneration: UUID) -> Bool {
     lock.lock()
     defer { lock.unlock() }
-    return generation == currentGeneration
+    return generation == currentGeneration && !failureReported
   }
 
   private func validatedLoopbackURL(_ value: String) -> URL? {
@@ -346,10 +350,10 @@ final class LiveSessionCoordinator {
       return "The live capture coordinator stopped before startup completed."
     }
     let tail = data.suffix(4 * 1_024)
-    let text = String(decoding: tail, as: UTF8.self).trimmingCharacters(
-      in: .whitespacesAndNewlines
-    )
-    return text.isEmpty ? "The live capture coordinator stopped before startup completed." : text
+    let lines = String(decoding: tail, as: UTF8.self).split(separator: "\n")
+    let cause = lines.last.map(String.init)
+      ?? "The live capture coordinator stopped before startup completed."
+    return cause + "\n\nSession log: " + logURL.path
   }
 
   private func sessionError(_ message: String) -> NSError {

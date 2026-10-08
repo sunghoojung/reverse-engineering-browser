@@ -3179,8 +3179,15 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .source-facts-report p { margin: 6px 0 10px; }
 .source-facts-identity { font-family: var(--mono); font-size: 10px; }
 .source-facts-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+/* Capture-phase read cancellation must not move a pressed control before its
+   click completes. Longer status/error messages scroll within the same slot. */
+.source-facts-status { height: 4.5em; line-height: 1.5; overflow: auto; scrollbar-gutter: stable; }
 .source-facts-status[role="alert"], .source-facts-coverage { color: var(--text); }
 .source-facts-list { display: grid; gap: 8px; }
+.source-facts-search, .source-facts-binding { display: grid; gap: 6px; margin: 10px 0; min-width: 0; }
+.source-facts-search input { width: 100%; min-width: 0; box-sizing: border-box; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 6px; font: inherit; }
+.source-facts-binding > button { white-space: normal; text-align: left; }
+.source-facts-relation { color: var(--muted); font-size: 11px; }
 .source-fact { display: grid; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
 .source-fact > button { text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .source-fact summary { cursor: pointer; }

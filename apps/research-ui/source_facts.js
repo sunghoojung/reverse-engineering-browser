@@ -68,6 +68,58 @@ function isSourceFactsReport(value, source) {
   return !(coverage.status === 'unavailable' && count);
 }
 
+// Join only the admitted top-level lexical target, never names, arbitrary JSON
+// keys or another document's IDs. The server owns the full semantic validator;
+// these local guards keep interactive links fail-closed if a target is absent.
+function sourceFactsReferenceTarget(operation, bindings) {
+  if (!['reference', 'read', 'write', 'call', 'construct'].includes(operation?.kind)) return null;
+  const target = operation.detail?.target;
+  if (!target || !['binding', 'ambiguous'].includes(target.kind) ||
+      !Array.isArray(target.binding_ids) || target.binding_ids.length < 1 || target.binding_ids.length > 64 ||
+      new Set(target.binding_ids).size !== target.binding_ids.length ||
+      !target.binding_ids.every(id => Number.isSafeInteger(id) && bindings.has(id)) ||
+      (target.kind === 'binding' && (target.binding_ids.length !== 1 || !['lexical-only', 'declaration'].includes(target.resolution))) ||
+      (target.kind === 'ambiguous' && (target.binding_ids.length < 2 || target.resolution !== 'duplicate-declarations'))) return null;
+  return target;
+}
+
+// Reports are immutable admitted JSON. Cache one target reference per operation,
+// never a binding × operation expansion. Replacement/eviction releases the weak
+// report owner; IDs and cached admissions never cross report boundaries.
+const sourceFactsReferenceCaches = new WeakMap();
+function sourceFactsReferenceContext(report) {
+  let context = sourceFactsReferenceCaches.get(report);
+  if (!context) {
+    const bindings = new Map(report.bindings.map(binding => [binding.id, binding]));
+    const targets = new WeakMap();
+    context = {bindings, target(operation) {
+      if (!targets.has(operation)) targets.set(operation, sourceFactsReferenceTarget(operation, bindings));
+      return targets.get(operation);
+    }};
+    sourceFactsReferenceCaches.set(report, context);
+  }
+  return context;
+}
+
+function sourceFactsBindingOperations(report, bindingId, kind = 'all') {
+  const context = sourceFactsReferenceContext(report);
+  if (!context.bindings.has(bindingId)) return [];
+  // At most 16,384 admitted facts and 64 candidates per target. Do not expand a
+  // binding x operation index or clone source bytes/history for this projection.
+  return report.operations.filter(operation => {
+    if (kind !== 'all' && operation.kind !== kind) return false;
+    return context.target(operation)?.binding_ids.includes(bindingId);
+  });
+}
+
+function sourceFactsOperationSummary(operation, bindings, target = sourceFactsReferenceTarget(operation, bindings)) {
+  const detail = operation.detail?.target;
+  const relationship = target ? target.kind === 'binding' ? 'Exact lexical binding' : 'Ambiguous declaration candidate'
+    : detail?.kind === 'unresolved' ? `Unresolved: ${String(detail.resolution ?? 'unknown').slice(0, 128)}`
+    : detail?.kind === 'property' ? 'Property target; runtime object unknown' : 'No admitted lexical binding';
+  return `${relationship} · region #${operation.region_id} · local order ${operation.order}${['call', 'construct'].includes(operation.kind) ? ' · runtime call target unknown' : ''}`;
+}
+
 async function sourceFactsReadBytes(response, maximum, signal) {
   // Own bytes immediately: retaining chunk views permits unbounded metadata and
   // large backing stores even below the byte cap. Content-Length is not trusted.
@@ -228,56 +280,193 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
   let category = 'operations';
   let page = 0;
   let rendered = -1;
+  let viewKey = null, viewReport = null;
+  let bindingId = null, candidates = null, query = '', operationKind = 'all', bindingPage = 0;
+  let navigationOwner = {}, renderOwner = {};
+  let retainedView = null, retainedReport = null, retainedKey = null;
   const node = (tag, text, className = '') => { const element = document.createElement(tag); element.textContent = text; element.className = className; return element; };
-  const button = (text, action) => { const element = node('button', text, 'secondary-button'); element.type = 'button'; element.dataset.factsAction = text.toLowerCase().replaceAll(' ', '-'); element.addEventListener('click', action); return element; };
+  const button = (text, action, key) => { const owner = renderOwner; const element = node('button', text, 'secondary-button'); element.type = 'button'; element.dataset.factsAction = key ?? text.toLowerCase().replaceAll(' ', '-'); element.addEventListener('click', () => { if (owner === renderOwner) action(); }); return element; };
   const controller = createSourceFactsController({getSource, onChange: render, onNavigate, protocol: location.protocol});
+  const redraw = (selector, selection) => {
+    controller.cancelOwned(navigationOwner, 'Original range request cancelled because the Facts selection changed.');
+    navigationOwner = {};
+    rendered = -1; render(controller.model);
+    const control = container.querySelector(selector);
+    control?.focus({preventScroll: true});
+    if (selection) control?.setSelectionRange(...selection);
+  };
+  const currentReport = report => controller.model.report === report && controller.model.key === sourceFactsIdentity(getSource());
+  const navigate = (range, report, owner) => {
+    if (currentReport(report) && owner === navigationOwner) {
+      void controller.navigate(range, {owner, isCurrent: () => currentReport(report) && owner === navigationOwner});
+    }
+  };
+  function renderStatus(model) {
+    const busy = ['loading', 'loading-source'].includes(model.status);
+    const status = container.querySelector('.source-facts-status');
+    status.textContent = model.error || (busy ? model.status === 'loading' ? 'Analyzing immutable JavaScript…' : 'Verifying original UTF-8 bytes…' : model.notice || (model.report ? 'Analysis response loaded. Original evidence is unchanged.' : 'No facts loaded. Analysis never executes this source.'));
+    status.setAttribute('role', model.error ? 'alert' : 'status');
+    const run = container.querySelector('[data-facts-run]'), cancel = container.querySelector('[data-facts-cancel]');
+    const focused = document.activeElement;
+    run.textContent = model.report || model.status === 'error' ? 'Retry facts' : 'Analyze captured source';
+    run.dataset.factsAction = model.report || model.status === 'error' ? 'retry-facts' : 'analyze-captured-source';
+    run.hidden = busy; cancel.hidden = !busy;
+    const retained = container.querySelector('.source-facts-retained');
+    if (retained) retained.hidden = !model.error;
+    for (const control of container.querySelectorAll('[data-facts-original]')) control.disabled = busy;
+    if (busy && (focused === run || focused?.dataset.factsOriginal !== undefined)) cancel.focus({preventScroll: true});
+    else if (!busy && focused === cancel) run.focus({preventScroll: true});
+  }
   function render(model) {
+    const focused = container.contains(document.activeElement) ? document.activeElement : null;
+    const focusedRow = focused?.closest('[data-fact-id]')?.dataset.factId;
+    const focusedAction = focused?.dataset.factsAction;
+    const focusedLabel = focused?.getAttribute('aria-label');
+    if (viewKey !== model.key) {
+      viewKey = model.key; viewReport = null;
+      bindingId = null; candidates = null; query = ''; operationKind = 'all'; page = 0; bindingPage = 0;
+    }
+    if (model.report !== viewReport) {
+      // Fact IDs are report-local. Even a successful reanalysis of the same bytes
+      // cannot silently inherit a declaration selection from the previous report.
+      viewReport = model.report; bindingId = null; candidates = null; page = 0; bindingPage = 0;
+    }
     const unavailable = sourceFactsUnavailable(getSource(), location.protocol);
     toggle.disabled = Boolean(unavailable);
     toggle.title = unavailable || 'Inspect bounded lexical and effect facts from this captured JavaScript artifact';
     toggle.setAttribute('aria-expanded', String(details.open));
     if (rendered === model.revision) return;
     rendered = model.revision;
+    // Shared navigation retires reads in a capture-phase pointer/key listener.
+    // Updating status must not detach the intended click/IME target mid-event.
+    if (!unavailable && retainedKey === model.key && retainedReport === model.report && retainedView === navigationOwner) {
+      renderStatus(model);
+      return;
+    }
+    renderOwner = {};
+    const controlOwner = renderOwner;
     const content = [];
-    if (unavailable) { container.replaceChildren(node('p', unavailable)); return; }
+    const renderedOwner = navigationOwner;
+    if (unavailable) { retainedKey = null; retainedReport = null; retainedView = null; container.replaceChildren(node('p', unavailable)); return; }
     content.push(node('p', `Session ${model.source.session_id} · artifact ${model.source.artifact_id} · ${model.source.byte_size} original bytes`, 'source-facts-identity'));
     content.push(node('p', `SHA-256 ${model.source.sha256}`, 'source-facts-identity'));
     content.push(node('p', 'Static lexical facts only. Shadowed declarations retain distinct IDs; ambiguous bindings remain candidates. Neither proves initialized values, dataflow or runtime call targets. Local order assumes region entry and normal completion.'));
     const actions = node('div', '', 'source-facts-actions');
     const busy = ['loading', 'loading-source'].includes(model.status);
-    actions.append(busy ? button('Cancel', () => controller.cancel()) : button(model.report || model.status === 'error' ? 'Retry facts' : 'Analyze captured source', () => controller.load()), button('Close', () => { details.open = false; controller.cancel(); toggle.focus(); }));
+    const run = button('Analyze captured source', () => controller.load()); run.dataset.factsRun = '';
+    const cancel = button('Cancel', () => controller.cancel()); cancel.dataset.factsCancel = '';
+    actions.append(run, cancel, button('Close', () => { details.open = false; controller.cancel(); toggle.focus(); }));
     content.push(actions);
     const status = node('p', model.error || (busy ? model.status === 'loading' ? 'Analyzing immutable JavaScript…' : 'Verifying original UTF-8 bytes…' : model.notice || (model.report ? 'Analysis response loaded. Original evidence is unchanged.' : 'No facts loaded. Analysis never executes this source.')), 'source-facts-status');
-    status.setAttribute('role', model.error ? 'alert' : 'status'); content.push(status);
+    status.setAttribute('role', model.error ? 'alert' : 'status'); status.tabIndex = 0; status.setAttribute('aria-label', 'Source facts status'); content.push(status);
     const report = model.report;
     if (report) {
       const coverage = report.coverage;
       content.push(node('p', `${coverage.status === 'complete' ? 'Complete within lexical-effects-v1 only' : coverage.status === 'partial' ? 'Partial coverage: unknown effects remain' : 'Analysis unavailable'} · ${coverage.truncated ? 'TRUNCATED: analysis budget reached' : 'Analysis not truncated'} · ${coverage.frontiers.length} unknown frontiers`, 'source-facts-coverage'));
       for (const message of coverage.diagnostics) content.push(node('p', message));
-      if (model.error) content.push(node('p', 'The last successful facts remain visible for these exact original bytes.'));
+      content.push(node('p', 'The last successful facts remain visible for these exact original bytes.', 'source-facts-retained'));
       const select = document.createElement('select'); select.className = 'debug-select'; select.setAttribute('aria-label', 'JavaScript fact category');
       for (const name of [...sourceFactsTables, 'frontiers']) {
         const rows = name === 'frontiers' ? coverage.frontiers : report[name];
         const option = node('option', `${name === 'frontiers' ? 'Unknown frontiers' : name[0].toUpperCase() + name.slice(1)} (${rows.length})`); option.value = name; select.append(option);
       }
       select.value = category;
-      select.addEventListener('change', () => { category = select.value; page = 0; rendered = -1; render(model); container.querySelector('select')?.focus(); });
+      const ownsView = () => currentReport(report) && controlOwner === renderOwner;
+      select.addEventListener('change', () => {
+        if (!ownsView()) return;
+        category = select.value; page = 0; bindingId = null; candidates = null;
+        redraw('[aria-label="JavaScript fact category"]');
+      });
       content.push(select);
-      const rows = category === 'frontiers' ? coverage.frontiers : report[category];
+      const referenceContext = sourceFactsReferenceContext(report);
+      const bindings = referenceContext.bindings;
+      const explore = id => {
+        if (!ownsView() || !bindings.has(id)) return;
+        bindingPage = page; category = 'bindings'; bindingId = id; page = 0; operationKind = 'all';
+        redraw('[data-facts-action="all-bindings"]');
+      };
+      let rows = category === 'frontiers' ? coverage.frontiers : report[category];
+      const binding = bindings.get(bindingId);
+      if (category === 'bindings') {
+        if (binding) {
+          const heading = node('div', '', 'source-facts-binding');
+          heading.append(node('strong', `Binding #${binding.id} · ${binding.name.slice(0, 256)}${binding.name.length > 256 ? '…' : ''}`));
+          heading.append(node('p', `${binding.kind} · scope #${binding.scope_id} · declaration bytes [${binding.range.start}, ${binding.range.end})`));
+          const back = button(candidates ? 'Back to candidates' : 'All bindings', () => {
+            if (!currentReport(report)) return;
+            bindingId = null; page = bindingPage;
+            redraw('[data-facts-binding-query]');
+          }, 'all-bindings');
+          const declaration = button('Reveal declaration', () => navigate(binding.range, report, renderedOwner), 'reveal-declaration');
+          declaration.disabled = busy; declaration.dataset.factsOriginal = '';
+          heading.append(back, declaration);
+          heading.append(node('p', 'Lexical operations, not runtime uses or dataflow. Multiple operations can describe the same source occurrence. Candidate rows do not identify a unique declaration.'));
+          const filter = document.createElement('select'); filter.className = 'debug-select'; filter.setAttribute('aria-label', 'Lexical operation kind');
+          for (const [value, label] of [['all', 'All operations'], ['reference', 'References'], ['read', 'Reads'], ['write', 'Writes'], ['call', 'Calls'], ['construct', 'Constructs']]) {
+            const option = node('option', label); option.value = value; filter.append(option);
+          }
+          filter.value = operationKind;
+          filter.addEventListener('change', () => { if (!ownsView()) return; operationKind = filter.value; page = 0; redraw('[aria-label="Lexical operation kind"]'); });
+          heading.append(filter); content.push(heading);
+          rows = sourceFactsBindingOperations(report, binding.id, operationKind);
+        } else {
+          const label = node('label', 'Find a declaration by name', 'source-facts-search');
+          const input = document.createElement('input'); input.type = 'search'; input.maxLength = 128; input.value = query;
+          input.dataset.factsBindingQuery = ''; input.setAttribute('aria-label', 'Find a declaration by name');
+          let composing = false;
+          const applyQuery = event => {
+            if (!ownsView() || composing || event.isComposing) return;
+            query = input.value.slice(0, 128); page = 0;
+            redraw('[data-facts-binding-query]', [input.selectionStart, input.selectionEnd]);
+          };
+          input.addEventListener('compositionstart', () => { composing = true; });
+          input.addEventListener('compositionend', event => { composing = false; applyQuery(event); });
+          input.addEventListener('input', applyQuery);
+          label.append(input); content.push(label);
+          if (candidates) {
+            content.push(node('p', `${candidates.length} ambiguous declaration candidates. No unique binding is proven.`));
+            content.push(button('Show all declarations', () => { candidates = null; query = ''; page = 0; redraw('[data-facts-binding-query]'); }, 'clear-candidates'));
+          }
+          const needle = query.toLowerCase();
+          rows = rows.filter(row => (!candidates || candidates.includes(row.id)) && (!needle || row.name.toLowerCase().includes(needle)));
+        }
+      }
       page = Math.min(page, Math.max(0, Math.ceil(rows.length / 100) - 1));
       const start = page * 100;
-      content.push(node('p', rows.length ? `Showing ${start + 1}–${Math.min(start + 100, rows.length)} of ${rows.length}. At most 100 rows are displayed.` : 'No facts in this category. Unknown effects are listed separately.'));
+      content.push(node('p', rows.length ? `Showing ${start + 1}–${Math.min(start + 100, rows.length)} of ${rows.length}${binding ? ' lexical operations' : ''}. At most 100 rows are displayed.`
+        : binding ? 'No admitted operations match this binding and filter. This is not proof of no runtime use; inspect coverage and unknown frontiers.'
+        : category === 'bindings' ? 'No declarations match this filter. Unknown effects are listed separately.' : 'No facts in this category. Unknown effects are listed separately.'));
       const pages = node('div', '', 'source-facts-actions');
-      const move = delta => { page += delta; rendered = -1; render(model); container.querySelector('select')?.focus(); };
+      const move = delta => { page += delta; redraw(binding ? '[aria-label="Lexical operation kind"]' : '[aria-label="JavaScript fact category"]'); };
       const previous = button('Previous', () => move(-1)); previous.disabled = page === 0;
       const next = button('Next', () => move(1)); next.disabled = start + 100 >= rows.length;
       pages.append(previous, next); content.push(pages);
       const list = node('div', '', 'source-facts-list');
       for (const row of rows.slice(start, start + 100)) {
         const item = node('article', '', 'source-fact');
+        item.dataset.factId = String(row.id ?? 'frontier');
         const title = `${row.id === undefined ? 'Unknown' : `#${row.id}`} ${row.kind ?? row.reason}${row.name === undefined ? '' : ` · ${row.name.slice(0, 256)}${row.name.length > 256 ? '…' : ''}`}`;
         item.append(node('strong', title));
-        const link = button(`Original bytes [${row.range.start}, ${row.range.end})`, () => controller.navigate(row.range)); link.disabled = busy; item.append(link);
+        const link = button(`Original bytes [${row.range.start}, ${row.range.end})`, () => navigate(row.range, report, renderedOwner)); link.disabled = busy; link.dataset.factsOriginal = ''; item.append(link);
+        if (category === 'bindings' && !binding) {
+          item.append(node('p', `Scope #${row.scope_id} · ${row.kind} declaration`));
+          item.append(button('Find lexical operations', () => explore(row.id), 'explore-binding'));
+        } else if (category === 'operations' || binding) {
+          item.append(node('p', sourceFactsOperationSummary(row, bindings, referenceContext.target(row)), 'source-facts-relation'));
+          const target = referenceContext.target(row);
+          if (target && !binding) {
+            if (target.kind === 'binding') {
+              const declaration = bindings.get(target.binding_ids[0]);
+              item.append(button(`Explore binding #${declaration.id} · ${declaration.name.slice(0, 128)}`, () => explore(declaration.id), 'explore-binding'));
+            } else {
+              item.append(button(`Choose declaration (${target.binding_ids.length} candidates)`, () => {
+                if (!currentReport(report)) return;
+                category = 'bindings'; bindingId = null; candidates = [...target.binding_ids]; query = ''; page = 0;
+                redraw('[data-facts-binding-query]');
+              }, 'choose-candidate'));
+            }
+          }
+        }
         const data = document.createElement('details'); data.append(node('summary', 'Fact details'));
         const text = JSON.stringify(row, null, 2); data.append(node('pre', text.length > 4096 ? `${text.slice(0, 4096)}\n[Detail display capped at 4,096 characters]` : text));
         item.append(data); list.append(item);
@@ -285,6 +474,18 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
       content.push(list);
     }
     container.replaceChildren(...content);
+    retainedKey = model.key; retainedReport = model.report; retainedView = navigationOwner;
+    renderStatus(model);
+    // Replacing rows must not drop keyboard ownership during a read/retry.
+    // A verified byte reveal deliberately focuses the editor before this render,
+    // so it never matches `focused` and cannot have its focus stolen here.
+    if (focused) {
+      const controls = [...container.querySelectorAll('button, input, select, .source-facts-status')];
+      let replacement = controls.find(control => focusedAction ? control.dataset.factsAction === focusedAction &&
+        control.closest('[data-fact-id]')?.dataset.factId === focusedRow : focusedLabel && control.getAttribute('aria-label') === focusedLabel);
+      if (!replacement || replacement.disabled || replacement.hidden) replacement = controls.find(control => !control.hidden && ['cancel', 'retry-facts', 'analyze-captured-source'].includes(control.dataset.factsAction));
+      replacement?.focus({preventScroll: true});
+    }
   }
   toggle.addEventListener('click', () => {
     if (details.open && details.getClientRects().length) { details.open = false; controller.cancel(); return; }
@@ -293,6 +494,7 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
     details.querySelector('summary').focus(); details.scrollIntoView({block: 'nearest'});
   });
   details.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && (event.isComposing || event.keyCode === 229)) { event.stopPropagation(); return; }
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); details.open = false; controller.cancel(); toggle.focus(); }
   });
   details.addEventListener('toggle', () => { if (!details.open) controller.cancel(); toggle.setAttribute('aria-expanded', String(details.open)); });

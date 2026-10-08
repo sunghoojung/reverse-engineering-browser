@@ -935,7 +935,20 @@ This is an explicit, inert analysis action. Live debugger scripts and derived
 text are not accepted. The Details pane shows complete-within-profile, partial,
 unavailable and truncated states, diagnostics and unknown-effect frontiers.
 Each category displays 100 rows per page; fact details are capped at 4,096
-characters. Shadowed declarations retain distinct IDs and ambiguous bindings
+characters. In **Bindings**, search declaration names and choose **Find lexical
+operations** to inspect exact-ID references, reads, writes, calls and constructs.
+The kind filter and paging keep long reports bounded. Same-name declarations in
+different scopes remain distinct; operation rows can return to their declaration
+explorer. Ambiguous targets offer an explicit candidate chooser and remain
+candidate links. Unresolved/dynamic names and property targets never become
+binding links. Counts describe static operations, which can share one source
+occurrence, not runtime uses or dataflow. Call targets remain unknown.
+**Reveal declaration** and operation **Original bytes** actions use the same
+verified UTF-8 reader. Changing the explorer selection cancels its pending
+reveal. Source identity changes and successful reanalysis clear selected fact
+IDs; a failed retry preserves the existing report and selection. Search supports
+Unicode composition and keeps captured labels inert. Nothing executes source,
+adds capture, or persists an index. Shadowed declarations retain distinct IDs and ambiguous bindings
 remain candidates. Neither is proof of initialized values, dataflow or runtime
 call targets; region-local order is conditional on entry and normal completion.
 

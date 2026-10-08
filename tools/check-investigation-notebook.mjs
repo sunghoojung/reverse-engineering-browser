@@ -157,9 +157,11 @@ export async function notebookFixture(base, root) {
       const next = replaceLibrary(fixture.library, action); assert(validateLibrary(next), 'Notebook writes must pass actual library validation');
       fixture.library = next;
       if (mode === 'hold') await new Promise(resolve => fixture.pending.push(resolve));
+      if (['commit-drop', 'recover-hold'].includes(mode)) {response.destroy(); return true;}
+      if (mode === 'malformed-ack') {response.writeHead(200, {'Content-Type': 'application/json'}); response.end('{'); return true;}
       json(200, next); return true;
     }
-    if (mode === 'hold') await new Promise(resolve => fixture.pending.push(resolve));
+    if (['hold', 'recover-hold'].includes(mode)) await new Promise(resolve => fixture.pending.push(resolve));
     json(200, mode === 'malformed' ? {unsupported: true} : captured); return true;
   };
   fixture.release = () => {for (const resolve of fixture.pending.splice(0)) resolve();};

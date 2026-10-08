@@ -250,6 +250,11 @@
         localAnalystLoaded: false,
         localAnalystRefreshing: false,
         localAnalystSaving: false,
+        localAnalystVersion: 0,
+        localAnalystNeedsReload: false,
+        localAnalystPendingSave: null,
+        analystDraftBase: null,
+        analystFolderBase: null,
         localAnalystStatus: 'loading',
         localAnalystMessage: 'Loading the local analyst workspace…',
         localAnalystRunner: null,
@@ -745,6 +750,7 @@
 
       const analystElements = {
         generation: document.querySelector('#analyst-generation'),
+        reload: document.querySelector('#analyst-reload'),
         runnerBadge: document.querySelector('#analyst-runner-badge'),
         notice: document.querySelector('#analyst-notice'),
         fileCount: document.querySelector('#analyst-file-count'),
@@ -758,6 +764,7 @@
         folderName: document.querySelector('#analyst-folder-name'),
         folderParent: document.querySelector('#analyst-folder-parent'),
         saveFolder: document.querySelector('#analyst-save-folder'),
+        revertFolder: document.querySelector('#analyst-revert-folder'),
         deleteFolder: document.querySelector('#analyst-delete-folder'),
         editorBadge: document.querySelector('#analyst-editor-badge'),
         editorEmpty: document.querySelector('#analyst-editor-empty'),

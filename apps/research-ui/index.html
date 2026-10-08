@@ -1077,6 +1077,7 @@
                   <button id="analyst-new-folder" class="secondary-button" type="button">New folder</button>
                   <button id="analyst-new-script" class="secondary-button" type="button">New script</button>
                   <button id="analyst-new-note" class="secondary-button" type="button">New note</button>
+                  <button id="analyst-reload" class="secondary-button" type="button">Retry load</button>
                 </div>
                 <div id="analyst-tree" class="analyst-tree" role="tree" aria-label="Analyst folders and files"></div>
                 <details class="analyst-storage"><summary class="workspace-disclosure-title">Folder settings</summary>
@@ -1084,7 +1085,7 @@
                   <form id="analyst-folder-form" class="analyst-form">
                     <label>Name<input id="analyst-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
                     <label>Parent folder<select id="analyst-folder-parent"></select></label>
-                    <div class="analyst-form-actions"><button id="analyst-save-folder" class="trace-button analyst-primary" type="submit">Save folder</button><button id="analyst-delete-folder" class="secondary-button" type="button">Delete empty folder</button></div>
+                    <div class="analyst-form-actions"><button id="analyst-save-folder" class="trace-button analyst-primary" type="submit">Save folder</button><button id="analyst-revert-folder" class="secondary-button" type="button">Discard changes</button><button id="analyst-delete-folder" class="secondary-button" type="button">Delete empty folder</button></div>
                   </form>
                 </details>
                 <details class="analyst-storage"><summary class="workspace-disclosure-title">Storage usage</summary>
@@ -1115,7 +1116,7 @@
                   </details>
                   <label>Content<textarea id="analyst-content" maxlength="32768" spellcheck="false" placeholder="const events = WB.Node.Evidence.events();&#10;console.info('events', events.length);&#10;return {count: events.length};"></textarea></label>
                   <div id="analyst-draft-status" class="analyst-draft-status" role="status">Saved locally</div>
-                  <div class="analyst-form-actions"><button id="analyst-save" class="trace-button analyst-primary" type="submit">Save file</button><button id="analyst-revert" class="secondary-button" type="button">Revert</button><button id="analyst-delete" class="secondary-button" type="button">Delete</button></div>
+                  <div class="analyst-form-actions"><button id="analyst-save" class="trace-button analyst-primary" type="submit">Save file</button><button id="analyst-revert" class="secondary-button" type="button">Discard changes</button><button id="analyst-delete" class="secondary-button" type="button">Delete</button></div>
                 </form>
               </section>
 

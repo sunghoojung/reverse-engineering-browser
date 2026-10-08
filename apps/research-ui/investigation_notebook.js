@@ -378,7 +378,18 @@
     refresh.addEventListener('click', reload);
     button.addEventListener('click', show); close.addEventListener('click', hide);
     dialog.addEventListener('cancel', event => {event.preventDefault(); hide();});
-    dialog.addEventListener('keydown', event => {interactionRevision++; event.stopPropagation();});
+    dialog.addEventListener('keydown', event => {
+      interactionRevision++; event.stopPropagation();
+      if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey) return;
+      const focusable = [...dialog.querySelectorAll('button, input, select, textarea, [tabindex]')]
+        .filter(node => !node.disabled && !node.hidden && node.tabIndex >= 0 && node.getClientRects().length);
+      const first = focusable[0], last = focusable.at(-1), active = document.activeElement;
+      // Native dialog tabbing may leave the document at its boundary. Keep the
+      // explicit notebook interaction within its visible, enabled controls.
+      if (first && (event.shiftKey ? active === first : active === last)) {
+        event.preventDefault(); (event.shiftKey ? last : first).focus();
+      }
+    });
     dialog.addEventListener('pointerdown', () => {interactionRevision++;});
     cancel.addEventListener('click', () => {change(); store.cancel(); localNotice = ''; render(); close.focus({preventScroll: true});});
     for (const control of [label, note]) control.addEventListener('input', () => {if (!draft) return; change(); dirty = true; draft.name = label.value; draft.note = note.value; assurance.textContent = ''; render();});

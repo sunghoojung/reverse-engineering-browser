@@ -260,14 +260,11 @@ export async function checkNotebookInteractions({evaluate, viewport, click, key,
   assert(f.pending.length); assert.equal(await evaluate('document.activeElement.id'), 'notebook-cancel');
   await press('Tab');
   const focusBoundary = await evaluate("({id:document.activeElement.id,tag:document.activeElement.tagName,documentFocused:document.hasFocus(),inside:document.querySelector('#investigation-notebook').contains(document.activeElement)})");
-  receipts.push({label:'native dialog forward Tab boundary',...focusBoundary});
-  assert(focusBoundary.inside || !focusBoundary.documentFocused && focusBoundary.tag === 'BODY', 'Modal Tab must stay in the dialog or reach browser chrome, never background page controls');
-  // Browser chrome is a legitimate native focus boundary. Navigate back using
-  // real Shift+Tab, then choose the preceding Close control during this save.
-  if (focusBoundary.id !== 'notebook-close') {
-    await key('Tab', 'Tab', {windowsVirtualKeyCode: 9, modifiers: 8});
-    if (await evaluate('document.activeElement.id') === 'notebook-cancel') await key('Tab', 'Tab', {windowsVirtualKeyCode: 9, modifiers: 8});
-  }
+  receipts.push({label:'native dialog forward Tab wraps to Close',...focusBoundary});
+  assert(focusBoundary.inside && focusBoundary.id === 'notebook-close', `Modal Tab must wrap within the dialog: ${JSON.stringify(focusBoundary)}`);
+  await key('Tab', 'Tab', {windowsVirtualKeyCode: 9, modifiers: 8});
+  assert.equal(await evaluate('document.activeElement.id'), 'notebook-cancel', 'Reverse Tab wraps to the last enabled dialog control');
+  await press('Tab');
   assert.equal(await evaluate('document.activeElement.id'), 'notebook-close');
   f.release(); f.mode = 'ready'; await until('!investigationNotebook.model.busy');
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
@@ -355,15 +352,16 @@ if (process.argv[2] === '--persistence') {
 export async function checkNotebookController(root) {
   const document = {activeElement: null};
   class Node {
-    constructor(tag) {this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.listeners = new Map(); this.attributes = {}; this.value = ''; this.hidden = false; this.disabled = false; this.open = false; this.scrollTop = 0; this.className = ''; this.classList = {add: name => {this.className += ` ${name}`;}};}
+    constructor(tag) {this.tagName = tag.toUpperCase(); this.tabIndex = ['BUTTON','INPUT','SELECT','TEXTAREA'].includes(this.tagName) ? 0 : -1; this.children = []; this.dataset = {}; this.listeners = new Map(); this.attributes = {}; this.value = ''; this.hidden = false; this.disabled = false; this.open = false; this.scrollTop = 0; this.className = ''; this.classList = {add: name => {this.className += ` ${name}`;}};}
     append(...nodes) {for (const node of nodes) {node.parentElement = this; this.children.push(node);}}
     replaceChildren(...nodes) {this.children = []; this.append(...nodes);}
     setAttribute(key, value) {this.attributes[key] = value;}
     addEventListener(type, fn) {this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);}
-    async fire(type) {for (const fn of this.listeners.get(type) ?? []) await fn({type, target: this, preventDefault() {}, stopPropagation() {}});}
+    async fire(type, details = {}) {const event = {type, target: this, defaultPrevented: false, preventDefault() {this.defaultPrevented = true;}, stopPropagation() {}, ...details}; for (const fn of this.listeners.get(type) ?? []) await fn(event); return event;}
+    getClientRects() {for (let node = this; node; node = node.parentElement) if (node.hidden) return []; return [{}];}
     contains(node) {return node === this || this.children.some(child => child.contains(node));}
     querySelector(selector) {return this.querySelectorAll(selector)[0] ?? null;}
-    querySelectorAll(selector) {const match = node => selector.startsWith('#') ? node.id === selector.slice(1) : selector.startsWith('.') ? node.className.split(/\s+/).includes(selector.slice(1)) : selector.startsWith('[data-pin-id=') ? node.dataset.pinId === selector.match(/"([^"]+)"/)[1] : false; const found = []; const visit = node => {for (const child of node.children) {if (match(child)) found.push(child); visit(child);}}; visit(this); return found;}
+    querySelectorAll(selector) {const match = node => selector === 'button, input, select, textarea, [tabindex]' ? ['BUTTON','INPUT','SELECT','TEXTAREA'].includes(node.tagName) || Object.hasOwn(node.attributes, 'tabindex') : selector.startsWith('#') ? node.id === selector.slice(1) : selector.startsWith('.') ? node.className.split(/\s+/).includes(selector.slice(1)) : selector.startsWith('[data-pin-id=') ? node.dataset.pinId === selector.match(/"([^"]+)"/)[1] : false; const found = []; const visit = node => {for (const child of node.children) {if (match(child)) found.push(child); visit(child);}}; visit(this); return found;}
     focus() {if (!this.disabled && !this.hidden) document.activeElement = this;}
     select() {}
     showModal() {this.open = true; this.querySelector('#notebook-close')?.focus();}
@@ -372,9 +370,9 @@ export async function checkNotebookController(root) {
   document.body = new Node('body'); document.createElement = tag => new Node(tag);
   const button = new Node('button'); document.body.append(button); button.focus();
   const {api, empty, validateLibrary} = await notebookModels(root, {document, window: {addEventListener() {}}, location: {protocol: 'http:'}});
-  let library = fixtureLibrary(empty), failContext = false, posts = 0, opened = 0;
+  let library = fixtureLibrary(empty), failContext = false, posts = 0, opened = 0, hold = false, release;
   const original = copy(library.files), artifact = {session_id: '11', artifact_id: '7', sha256: 'a'.repeat(64), byte_size: 90, kind: 'javascript'};
-  const fetcher = async (_url, options = {}) => {if (options.method === 'POST') {posts++; library = replaceLibrary(library, JSON.parse(options.body));} return Response.json(library);};
+  const fetcher = async (_url, options = {}) => {if (hold) await new Promise(resolve => {release = resolve;}); if (options.method === 'POST') {posts++; library = replaceLibrary(library, JSON.parse(options.body));} return Response.json(library);};
   const ui = api.mount({button, protocol: 'http:', validateLibrary, fetcher,
     getContext: () => {if (failContext) throw new Error('Authored unavailable retained window'); return {artifacts: [artifact], events: [baselineEvent()]};},
     getSelection: () => ({kind: 'artifact', artifact, range: {start: 1, end: 4}}), openReference: () => {opened++; return true;}});
@@ -392,6 +390,12 @@ export async function checkNotebookController(root) {
   assert(node('cancel').hidden, 'Rejected verification releases busy state and preserves the editor'); assert.equal(node('save').disabled, false);
   failContext = false; await node('editor').fire('submit'); assert.equal(JSON.parse(library.files[2].content).pins.length, 2);
   await node('delete-pin').fire('click'); await node('delete-pin').fire('click'); assert.equal(JSON.parse(library.files[2].content).pins.length, 1);
+  hold = true; const refresh = node('refresh').fire('click'); await Promise.resolve();
+  assert.equal(document.activeElement, node('cancel'));
+  assert((await ui.dialog.fire('keydown', {key: 'Tab'})).defaultPrevented); assert.equal(document.activeElement, node('close'));
+  assert((await ui.dialog.fire('keydown', {key: 'Tab', shiftKey: true})).defaultPrevented); assert.equal(document.activeElement, node('cancel'));
+  node('close').focus(); assert.equal((await ui.dialog.fire('keydown', {key: 'Tab'})).defaultPrevented, false, 'Interior native tab order is not replaced');
+  hold = false; release(); await refresh; assert.equal(document.activeElement, node('close'), 'Completion preserves the newer keyboard focus choice');
   await node('delete-book').fire('click'); await node('delete-book').fire('click'); assert.deepEqual(library.files, original);
   console.log('PASS mounted Notebook create/pin/Save/open/delete handlers, failed verification recovery and unrelated-file preservation (DOM/controller fixture; not rendered QA)');
 }

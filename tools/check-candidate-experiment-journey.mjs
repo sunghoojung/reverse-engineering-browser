@@ -10,14 +10,16 @@ export const candidateFixtureSource = `// UTF-8 ownership fixture: 雪 😀\nfun
 const workerSource = `function workerPayload(input){return "fixture-worker";}\nself.onmessage=e=>fetch("/payload",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({payload:workerPayload(e.data)})});\n`;
 export function candidateFixtureRoute(req, res, receipts = []) {
   const path = new URL(req.url, 'http://127.0.0.1').pathname;
-  if (['/candidate.js', '/candidate-changed.js', '/candidate-worker.js'].includes(path)) {
-    res.setHeader('Content-Type', 'text/javascript');
-    res.end(path === '/candidate-worker.js' ? workerSource : path === '/candidate-changed.js' ? candidateFixtureSource.replace('UTF-8 ownership', 'Changed UTF-8 ownership') : candidateFixtureSource);
+  if (['/candidate.js', '/candidate-worker.js'].includes(path)) {
+    let changed=false;
+    try{const referer=new URL(req.headers?.referer);changed=referer.origin===`http://${req.headers?.host}`&&/^127\.0\.0\.1:\d+$/.test(req.headers?.host)&&referer.pathname==='/candidate-changed';}catch{/* Missing or foreign Referer keeps original bytes. */}
+    res.setHeader('Content-Type', 'text/javascript');res.setHeader('Cache-Control','no-store');
+    res.end(path === '/candidate-worker.js' ? workerSource : changed ? candidateFixtureSource.replace('UTF-8 ownership', 'Changed UTF-8 ownership') : candidateFixtureSource);
     return true;
   }
   if (['/candidate-page', '/candidate-changed', '/candidate-duplicate'].includes(path)) {
     res.setHeader('Content-Type', 'text/html');
-    res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Owned candidate bridge fixture</title><link rel="icon" href="data:,"><h1>Owned candidate bridge fixture</h1><p>Separate actions: Page never sends a Worker request.</p><button id="send-page">Send Page payload</button><button id="send-worker">Send Worker payload</button><script src="${path === '/candidate-changed' ? '/candidate-changed.js' : '/candidate.js'}"></script>${path === '/candidate-duplicate' ? '<script src="/candidate.js?second=1"></script>' : ''}</html>`);
+    res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Owned candidate bridge fixture</title><link rel="icon" href="data:,"><h1>Owned candidate bridge fixture</h1><p>Separate actions: Page never sends a Worker request.</p><button id="send-page">Send Page payload</button><button id="send-worker">Send Worker payload</button><script src="/candidate.js"></script>${path === '/candidate-duplicate' ? '<script src="/candidate.js?second=1"></script>' : ''}</html>`);
     return true;
   }
   if (path === '/payload') {
@@ -37,12 +39,26 @@ export async function candidateSessionEvaluate(command, expression, session) {
   return result.result.value;
 }
 
+// Native buttons require the character-producing keyDown shape used by the
+// shared Sources-tree driver. rawKeyDown alone exercises key listeners but is
+// not an Enter/Space activation substitute.
+export function candidateKeyEvents(key,modifiers=0) {
+  const code=key===' '?'Space':key==='a'?'KeyA':key;
+  const windowsVirtualKeyCode={Enter:13,' ':32,Tab:9,Escape:27,ArrowDown:40,ArrowUp:38,ArrowLeft:37,ArrowRight:39,Home:36,End:35,a:65}[key];
+  const text=key==='Enter'?'\r':key===' '?' ':null;
+  const common={key,code,modifiers,windowsVirtualKeyCode};
+  return [{type:text!==null?'keyDown':'rawKeyDown',...common,...(text!==null?{text,unmodifiedText:text}:{})},{type:'keyUp',key,code,windowsVirtualKeyCode}];
+}
+
 export function candidateBindResponseMatches(params, actionURL) {
   if(params.request?.url!==actionURL || params.request?.method!=='POST' || !Number.isInteger(params.responseStatusCode))return false;
   try{return JSON.parse(params.request.postData).action==='bind_runtime_candidate';}catch{return false;}
 }
 
 export async function checkCandidateFixture() {
+  for(const [key,text,code,vk] of [['Enter','\r','Enter',13],[' ',' ','Space',32]]){const events=candidateKeyEvents(key);assert.deepEqual(events,[{type:'keyDown',key,code,modifiers:0,windowsVirtualKeyCode:vk,text,unmodifiedText:text},{type:'keyUp',key,code,windowsVirtualKeyCode:vk}]);}
+  for(const key of ['Tab','Escape','ArrowDown','ArrowUp','Home','End']){const [down,up]=candidateKeyEvents(key);assert.equal(down.type,'rawKeyDown');assert.equal(up.type,'keyUp');assert(!('text' in down));assert(!('text' in up));assert(Number.isInteger(down.windowsVirtualKeyCode));}
+  assert.deepEqual(candidateKeyEvents('a',2),[{type:'rawKeyDown',key:'a',code:'KeyA',modifiers:2,windowsVirtualKeyCode:65},{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65}]);
   const actionURL='http://127.0.0.1:1234/api/debugger/actions',owned={request:{url:actionURL,method:'POST',postData:JSON.stringify({action:'bind_runtime_candidate'})},responseStatusCode:200};
   assert(candidateBindResponseMatches(owned,actionURL));
   for(const changed of [{...owned,responseStatusCode:undefined},{...owned,request:{...owned.request,url:actionURL+'?foreign=1'}},{...owned,request:{...owned.request,method:'GET'}},{...owned,request:{...owned.request,postData:'{'}},{...owned,request:{...owned.request,postData:JSON.stringify({action:'arm_runtime_hooks'})}}])assert.equal(candidateBindResponseMatches(changed,actionURL),false,'Only genuine exact bind response is held');
@@ -52,14 +68,17 @@ export async function checkCandidateFixture() {
   assert.deepEqual(activationCalls.map(call=>[call.method,call.session]),['original','ui','disposable','ui'].flatMap(session=>[['Page.bringToFront',session],['Runtime.evaluate',session]]));
   assert(activationCalls.filter(call=>call.method==='Runtime.evaluate').every(call=>call.params.awaitPromise),'Foreground repair preserves native paint waits');
   await assert.rejects(candidateSessionEvaluate(async()=>{throw Error('activation refused');},'document.title','owned'),/activation refused/);
-  const response = path => {let value, type;assert(candidateFixtureRoute({url:path},{setHeader:(_,v)=>{type=v;},end:v=>{value=v;}}));return {value,type};};
+  const response = (path,headers={}) => {let value;const responseHeaders={};assert(candidateFixtureRoute({url:path,headers},{setHeader:(name,v)=>{responseHeaders[name]=v;},end:v=>{value=v;}}));return {value,headers:responseHeaders};};
   const page=response('/candidate-page').value;
   assert.match(page, /id="send-page"/);assert.match(page, /id="send-worker"/);
   assert.match(candidateFixtureSource,/function makePayload\(input\)\{\n  return "fixture-observed";/);
   assert(!candidateFixtureSource.includes('input+'));
   assert.match(candidateFixtureSource,/body:JSON.stringify\(\{payload:makePayload\("owned-input"\)\}\)/);
   assert.equal(response('/candidate.js').value,response('/candidate.js?second=1').value);
-  assert.notEqual(response('/candidate.js').value,response('/candidate-changed.js').value);
+  const changedPage=response('/candidate-changed').value;assert.equal(page.match(/<script src="([^"]+)"/)[1],changedPage.match(/<script src="([^"]+)"/)[1],'Changed fixture must retain identical script URL');
+  const changed=response('/candidate.js',{host:'127.0.0.1:1234',referer:'http://127.0.0.1:1234/candidate-changed'});
+  assert.notEqual(response('/candidate.js').value,changed.value);assert.match(changed.value,/return "fixture-observed"/);assert.equal(changed.headers['Cache-Control'],'no-store');
+  for(const referer of ['http://127.0.0.1:1234/candidate-page','http://127.0.0.1:9999/candidate-changed','https://foreign.invalid/candidate-changed','malformed'])assert.equal(response('/candidate.js',{host:'127.0.0.1:1234',referer}).value,candidateFixtureSource,'Only exact owned same-origin changed page varies bytes');
   assert.match(response('/candidate-duplicate').value,/candidate.js\?second=1/);
   const pageHandler=candidateFixtureSource.split('document.querySelector("#send-page").onclick=')[1].split('\n')[0];
   assert(!pageHandler.includes('postMessage'),'Page action must not also send Worker request');
@@ -78,10 +97,11 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   await mkdir(output,{recursive:true});
   const socket=await socketFactory(address), pending=new Map(), receipts=[], runtimeErrors=[], commandTrace=[];
   let lastForeground=null,bindHold=null,guardedTargetSession=null,guardedTargetEvaluations=0;
-  const mutationRequests=[],interceptionErrors=[];
+  const mutationRequests=[],interceptionErrors=[],dialogs=[];
   let sequence=0, uiSession, phase='attach';
   socket.addEventListener('message',event=>{
     const message=JSON.parse(event.data);
+    if(message.sessionId===uiSession&&message.method==='Page.javascriptDialogOpening')dialogs.push({type:message.params.type,message:message.params.message});
     if(message.sessionId===uiSession&&message.method==='Network.requestWillBeSent'&&message.params.request.url===uiURL+'/api/debugger/actions'&&message.params.request.method==='POST'){try{mutationRequests.push(JSON.parse(message.params.request.postData).action);}catch{mutationRequests.push('unparsed-action');}}
     if(message.sessionId===uiSession&&message.method==='Fetch.requestPaused'){
       if(bindHold&&!bindHold.paused&&candidateBindResponseMatches(message.params,uiURL+'/api/debugger/actions'))bindHold.paused=message.params;
@@ -105,16 +125,14 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   };
   const until=async(predicate,label,session=uiSession)=>{
     const deadline=Date.now()+20000;let last;
-    while(Date.now()<deadline){try{last=await evaluate(predicate,session);if(last)return last;}catch(error){last=error.message;}await new Promise(resolve=>setTimeout(resolve,40));}
+    while(Date.now()<deadline){assert.equal(dialogs.length,0,'Unexpected native dialog; no automatic acceptance: '+JSON.stringify(dialogs));try{last=await evaluate(predicate,session);if(last)return last;}catch(error){last=error.message;}await new Promise(resolve=>setTimeout(resolve,40));}
     throw Error(`${phase}: ${label}: ${JSON.stringify(last)}`);
   };
   const frame=()=>evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
   const key=async(key,session=uiSession,modifiers=0)=>{
     await command('Page.bringToFront',{},session);
-    const code=key===' '?'Space':key;
-    const windowsVirtualKeyCode={Enter:13,Tab:9,Escape:27,ArrowDown:40,Home:36,End:35,a:65}[key];
-    await command('Input.dispatchKeyEvent',{type:'rawKeyDown',key,code,modifiers,windowsVirtualKeyCode},session);
-    await command('Input.dispatchKeyEvent',{type:'keyUp',key,code,modifiers,windowsVirtualKeyCode},session);
+    for(const event of candidateKeyEvents(key,modifiers))await command('Input.dispatchKeyEvent',event,session);
+    receipts.push({phase,kind:'native-key',key,modifiers});
   };
   // Reach offscreen controls by real wheel input into their nearest scroll owner.
   const reveal=async(selector,session=uiSession)=>{
@@ -136,7 +154,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   };
   const byText=async(text,scope='body')=>evaluate(`(()=>{const root=document.querySelector(${JSON.stringify(scope)}),nodes=[...root.querySelectorAll('button')],n=nodes.find(n=>n.textContent.trim()===${JSON.stringify(text)}&&!n.disabled&&n.getClientRects().length);if(!n)return null;const path=[];let e=n;while(e&&e!==document.documentElement){if(e.id){path.unshift('#'+CSS.escape(e.id));break;}const siblings=[...e.parentElement.children];path.unshift(e.tagName.toLowerCase()+':nth-child('+(siblings.indexOf(e)+1)+')');e=e.parentElement;}return path.join(' > ');})()`);
   const clickText=async(text,scope)=>{const selector=await byText(text,scope);assert(selector,`Missing visible '${text}'`);await click(selector);};
-  const fill=async(selector,value)=>{await click(selector);await key('a',uiSession,process.platform==='darwin'?4:2);await command('Input.insertText',{text:value});};
+  const fill=async(selector,value)=>{await click(selector);await key('a',uiSession,process.platform==='darwin'?4:2);await command('Input.insertText',{text:value});assert(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(selector)})&&document.querySelector(${JSON.stringify(selector)}).value===${JSON.stringify(value)}`),'Native text replacement must retain focus and exact field value: '+selector);};
   const keyboardTo=async(selector)=>{
     await reveal(selector);
     for(let index=0;index<220;index++){
@@ -150,12 +168,14 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   };
   const viewport=async(width,height)=>{await command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});await frame();};
   const chooseTarget=async(kind)=>{
-    const index=await evaluate(`(()=>{const s=document.querySelector('#candidate-experiment-target');return [...s.options].findIndex(o=>o.value&&o.textContent.trim().startsWith(${JSON.stringify(kind)}));})()`);
-    assert(index>0,`Missing explicit ${kind} target option`);
+    const option=await evaluate(`(()=>{const s=document.querySelector('#candidate-experiment-target'),index=[...s.options].findIndex(o=>o.value&&o.textContent.trim().startsWith(${JSON.stringify(kind)}));return index>0?{index,value:s.options[index].value,label:s.options[index].textContent}:null;})()`);
+    assert(option,`Missing explicit ${kind} target option`);
+    // Same native select sequence as the proven Console document driver.
     await click('#candidate-experiment-target');await key('Home');
-    for(let i=0;i<index;i++)await key('ArrowDown');
+    for(let i=0;i<option.index;i++)await key('ArrowDown');
     await key('Enter');
-    await until("!!document.querySelector('#candidate-experiment-target').value",'Explicit target choice did not stick');
+    await until(`document.querySelector('#candidate-experiment-target').value===${JSON.stringify(option.value)}&&document.querySelector('#candidate-experiment-target').selectedOptions[0]?.textContent===${JSON.stringify(option.label)}`,'Exact explicit '+kind+' target choice did not stick');
+
   };
   const readOnlyState=()=>fetch(uiURL+'/api/debugger').then(r=>{assert(r.ok);return r.json();});
   const quietState=async()=>{const state=await readOnlyState();return {isolated:state.runtime_hooks.isolated,definitions:state.runtime_hooks.definitions.length,armed:['arming','armed','handling','stopping'].includes(state.runtime_hooks.state),enabled:state.runtime_hooks.field_test.enabled,targets:state.action_scope.targets.map(t=>t.target_id??t.id)};};
@@ -198,8 +218,8 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
       assert.equal(await evaluate("document.querySelector('#hooks-field-confirm').checked||document.querySelector('#hooks-confirm').checked"),false,'Navigation must retire confirmations');
     };
     const refuseBind=async(label)=>{
-      phase=label;const startedAt=await click('#candidate-experiment-bind');
-      await until("/no exact|no match|multiple|ambiguous|changed|unavailable|unsupported|not found/i.test(document.querySelector('#candidate-experiment-status').textContent)&&!document.querySelector('#candidate-experiment-bind').disabled",label+' must fail visibly and allow explicit retry');
+      phase=label;const expected=label==='negative-duplicate-exact-source'?'Ambiguous candidate: identical bytes occur in multiple sources of this target.':'No exact candidate bytes in the selected target.';const startedAt=await click('#candidate-experiment-bind');
+      await until(`document.querySelector('#candidate-experiment-status').textContent.includes(${JSON.stringify(expected)})&&!document.querySelector('#candidate-experiment-bind').disabled`,label+' must fail for the exact intended identity reason and allow explicit retry');
       receipts.push({phase,kind:'binding-roundtrip',measurement:'Native Bind activation to rendered refusal; UI plus backend roundtrip, not pure source-scan time',elapsed_ms:Math.round(performance.now()-startedAt),outcome:'refused'});
       const state=await quietState();assert.equal(state.definitions,0,label+' cannot add a hook');assert.equal(state.enabled,false);assert.equal(state.armed,false);
       await screenshot(label);
@@ -258,11 +278,11 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await until("document.querySelectorAll('#hooks-definitions .hook-definition-row').length===0&&!document.querySelector('#candidate-experiment-bind').disabled",'Explicit Remove did not retire the backend-added definition');
     assert.equal((await quietState()).definitions,0);
     phase='explicit exact-byte bind';await keyboardTo('#candidate-experiment-bind');const bindStartedAt=performance.now();await key('Enter');
-    await until("/bound|ready/i.test(document.querySelector('#candidate-experiment-status').textContent)",'Exact byte binding did not finish');
+    await until("document.querySelector('#candidate-experiment-status').textContent.startsWith('Observation hook bound.')",'Exact byte binding did not finish');
     receipts.push({phase,kind:'binding-roundtrip',measurement:'Native Bind activation to rendered bound status; UI plus backend roundtrip, not pure source-scan time',elapsed_ms:Math.round(performance.now()-bindStartedAt),outcome:'bound'});
     const bound=await quietState();assert.equal(bound.definitions,1);assert.equal(bound.enabled,false);assert.equal(bound.armed,false);
     for(const [width,height] of [[1440,900],[760,560],[360,740]]){
-      await viewport(width,height);await reveal('#candidate-experiment-return');
+      await viewport(width,height);await keyboardTo('#candidate-experiment-return');await reveal('#candidate-experiment-return');
       assert(await evaluate("document.documentElement.scrollWidth<=innerWidth+1"),'Bridge must not force page horizontal overflow');
       await screenshot(`02-bound-${width}`);
     }
@@ -288,12 +308,13 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await until("!document.querySelector('#screen-field-provenance').hidden&&document.querySelector('#field-provenance-value').textContent.includes('fixture-observed')",'Return did not restore original selected field');
     assert.deepEqual(await quietState(),beforeReturn,'Return restores evidence without implicit capture, arm, target or definition changes');
     await screenshot('04-return-original-field');
-    assert.equal(runtimeErrors.length,0,JSON.stringify(runtimeErrors));assert.equal(interceptionErrors.length,0,JSON.stringify(interceptionErrors));
+    assert.equal(runtimeErrors.length,0,JSON.stringify(runtimeErrors));assert.equal(interceptionErrors.length,0,JSON.stringify(interceptionErrors));assert.equal(dialogs.length,0,JSON.stringify(dialogs));
     await writeFile(join(output,'receipt.json'),JSON.stringify({status:'passed',path:'real backend and installed Chromium native CDP input',phase,receipts,viewports:[[1440,900],[760,560],[360,740]],limitations:['Not native macOS WebKit acceptance.','No A/B/A comparison or persistence.','Return/Close/navigation/source-digest exhaustive late-ack races are controller-only; rendered interruption covers Stop waiting only.']},null,2));
     console.log(`PASS original live-JS to disposable matched-baseline rendered journey; receipts: ${output}`);
   } catch(error) {
+    let uiFailure;try{uiFailure=await evaluate("(()=>({focus:{id:document.activeElement?.id,tag:document.activeElement?.tagName,text:document.activeElement?.textContent?.slice(0,100)},fieldSearch:typeof fieldProvenanceSelection==='undefined'?null:{searching:fieldProvenanceSelection?.searching,searched:fieldProvenanceSelection?.searched,error:fieldProvenanceSelection?.error,candidates:fieldProvenanceSelection?.candidates?.length,notice:document.querySelector('#field-provenance-notice')?.textContent,searchDisabled:document.querySelector('#field-provenance-search')?.disabled,renderedCandidates:document.querySelectorAll('.field-provenance-test-candidate').length},debuggerScripts:typeof state==='undefined'?null:state.debuggerSession?.scripts?.length}))()");}catch(diagnosticError){uiFailure={error:String(diagnosticError)};}
     let backendFailure;try{const snapshot=await fetch(uiURL+'/api/debugger',{signal:AbortSignal.timeout(5000)}).then(r=>r.json());backendFailure={state:snapshot.state,target:snapshot.target,network_capture_enabled:snapshot.network?.capture_enabled,requests:snapshot.network?.requests?.length,hooks_state:snapshot.runtime_hooks?.state};}catch(diagnosticError){backendFailure={error:String(diagnosticError)};}
     try{await screenshot('failure');}catch{}
-    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'failed',phase,error:String(error.stack||error),receipts,runtimeErrors,commandTrace,backendFailure,mutationRequests,interceptionErrors},null,2));throw error;
+    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'failed',phase,error:String(error.stack||error),receipts,runtimeErrors,commandTrace,backendFailure,uiFailure,mutationRequests,interceptionErrors,dialogs},null,2));throw error;
   } finally {if(bindHold){try{await command('Fetch.disable');}catch{}}for(const request of pending.values()){clearTimeout(request.timer);request.reject(Error('Journey closed'));}socket.close();}
 }

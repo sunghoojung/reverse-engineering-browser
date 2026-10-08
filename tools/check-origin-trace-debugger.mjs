@@ -3409,22 +3409,37 @@ function trafficBrowserProcess(executable, args) {
     if (!browser.pid) {cleanup.exited = true; elapsed(); return;}
     // This group is created solely for our own browser and launcher helpers.
     // It cannot include the caller or another user's browser.
-    const alive = () => {
+    const alive = async () => {
       if (!grouped) return browser.exitCode === null && browser.signalCode === null;
-      try {process.kill(-browser.pid, 0); return true;} catch (error) {if (error.code === "ESRCH") return false; throw error;}
+      const deadline = performance.now() + 1000;
+      for (;;) {
+        try {process.kill(-browser.pid, 0); return true;}
+        catch (error) {
+          if (error.code === "ESRCH") return false;
+          // Darwin can reject a group probe while its owned leader is a zombie
+          // awaiting Node's SIGCHLD processing. Retry after reaping; a lasting
+          // permission denial must still fail rather than imply successful cleanup.
+          if (process.platform !== "darwin" || error.code !== "EPERM" || performance.now() >= deadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      }
     };
-    const signal = name => {
+    const signal = async name => {
       try {if (grouped) process.kill(-browser.pid, name); else browser.kill(name); cleanup.signals.push(name);}
-      catch (error) {if (error.code !== "ESRCH") throw error;}
+      catch (error) {
+        if (error.code === "ESRCH") return;
+        if (process.platform === "darwin" && error.code === "EPERM" && !(await alive())) return;
+        throw error;
+      }
     };
     try {
       for (const name of ["SIGTERM", "SIGKILL"]) {
-        if (!alive()) break;
-        signal(name);
+        if (!(await alive())) break;
+        await signal(name);
         const deadline = performance.now() + graceMs;
-        while (alive() && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+        while (await alive() && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
       }
-      cleanup.exited = !alive();
+      cleanup.exited = !(await alive());
       if (!cleanup.exited) throw new Error("Owned browser process group did not exit after bounded cleanup");
     } catch (error) {cleanup.error = String(error.message).slice(0, 2048); throw error;}
     finally {elapsed(); browser.stdout.destroy(); browser.stderr.destroy();}

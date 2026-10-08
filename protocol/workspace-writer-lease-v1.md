@@ -18,7 +18,10 @@ redirect an already admitted transaction's reads or writes to another directory.
 The permanent sibling `<store filename>.reb-workspace-lock-v1` is an empty,
 user-owned, single-link regular file with exactly `0600` permissions. Every
 transaction opens its own descriptor with no-follow, nonblocking and close-on-exec
-flags, then acquires `flock(LOCK_EX | LOCK_NB)`. It verifies that the named entry
+flags. It first opens an existing sidecar; an absent sidecar is created exclusively.
+If an exclusive create meets an existing entry, one existing-only open follows.
+This uses at most three opens and no sleeps or retry loops. Unexpected errors and
+unsafe entries fail closed. It then acquires `flock(LOCK_EX | LOCK_NB)`. It verifies that the named entry
 still identifies the locked inode. The sidecar is never renamed or removed.
 Locking the JSON inode instead would be incorrect because publication replaces it.
 

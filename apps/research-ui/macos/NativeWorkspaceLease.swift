@@ -53,10 +53,19 @@ final class NativeWorkspaceLease {
       else {
         throw failure("store directory must be owned by this user and not writable by other users")
       }
-      lockDescriptor = Darwin.openat(
-        directoryDescriptor, filename + Self.lockSuffix,
-        O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, mode_t(0o600)
-      )
+      // Normal saves open once. Only an absent sidecar is created exclusively;
+      // EEXIST from a competing creator permits one existing-only open.
+      let lockName = filename + Self.lockSuffix
+      let lockFlags = O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+      lockDescriptor = Darwin.openat(directoryDescriptor, lockName, lockFlags)
+      if lockDescriptor < 0 && errno == ENOENT {
+        lockDescriptor = Darwin.openat(
+          directoryDescriptor, lockName, lockFlags | O_CREAT | O_EXCL, mode_t(0o600)
+        )
+        if lockDescriptor < 0 && errno == EEXIST {
+          lockDescriptor = Darwin.openat(directoryDescriptor, lockName, lockFlags)
+        }
+      }
       guard lockDescriptor >= 0 else {
         throw failure("save lock could not be opened safely")
       }

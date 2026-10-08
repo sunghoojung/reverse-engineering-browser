@@ -35,6 +35,20 @@ mod unix {
         }
         Ok(unsafe { File::from_raw_fd(fd) })
     }
+    // Normal saves open once. A missing sidecar is created exclusively; a
+    // competing creator's EEXIST permits one existing-only open. Unexpected
+    // errors never become busy conflicts or trigger unbounded retries.
+    fn admit_sidecar<T>(mut open: impl FnMut(bool) -> std::io::Result<T>) -> std::io::Result<T> {
+        match open(false) {
+            Ok(file) => Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => match open(true) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => open(false),
+                result => result,
+            },
+            Err(error) => Err(error),
+        }
+    }
+
     fn regular_owned(file: &File, label: &str) -> Result<()> {
         let metadata = file.metadata()?;
         if !metadata.is_file()
@@ -116,20 +130,23 @@ mod unix {
             lock_name.extend_from_slice(SUFFIX);
             let lock_name = CString::new(lock_name)
                 .map_err(|_| Error::bad("Workspace lock path is invalid"))?;
-            let lock = open_at(
-                &directory,
-                &lock_name,
-                libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_NOFOLLOW
-                    | libc::O_NONBLOCK
-                    | libc::O_CLOEXEC,
-                0o600,
-            )
+            let lock_flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+            let lock = admit_sidecar(|create| {
+                open_at(
+                    &directory,
+                    &lock_name,
+                    lock_flags
+                        | if create {
+                            libc::O_CREAT | libc::O_EXCL
+                        } else {
+                            0
+                        },
+                    0o600,
+                )
+            })
             .map_err(|error| {
                 Error::bad(format!(
-                    "Workspace writer lock could not be opened safely (OS error {:?})",
-                    error.raw_os_error()
+                    "Workspace writer lock could not be opened safely: {error}"
                 ))
             })?;
             regular_owned(&lock, "Workspace writer lock")?;
@@ -276,6 +293,66 @@ mod unix {
                 }
             }
             result
+        }
+    }
+    #[cfg(test)]
+    mod admission_tests {
+        use super::*;
+        #[test]
+        fn workspace_sidecar_initialization_races_are_bounded() {
+            let mut attempts = Vec::new();
+            let value = admit_sidecar(|create| {
+                attempts.push(create);
+                match attempts.len() {
+                    1 => Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
+                    2 => Err(std::io::Error::from_raw_os_error(libc::EEXIST)),
+                    _ => Ok(7),
+                }
+            })
+            .unwrap();
+            assert_eq!(value, 7);
+            assert_eq!(attempts, vec![false, true, false]);
+            let mut calls = 0;
+            let error = admit_sidecar::<()>(|_| {
+                calls += 1;
+                Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+            })
+            .unwrap_err();
+            assert_eq!(calls, 2);
+            assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
+            let mut calls = 0;
+            let error = admit_sidecar::<()>(|_| {
+                calls += 1;
+                Err(std::io::Error::from_raw_os_error(libc::EACCES))
+            })
+            .unwrap_err();
+            assert_eq!(calls, 1);
+            assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+        }
+        #[test]
+        fn workspace_sidecar_existing_open_never_creates_or_replaces() {
+            let mut calls = Vec::new();
+            assert_eq!(
+                admit_sidecar(|create| {
+                    calls.push(create);
+                    Ok(11)
+                })
+                .unwrap(),
+                11
+            );
+            assert_eq!(calls, vec![false]);
+            let mut calls = Vec::new();
+            let value = admit_sidecar(|create| {
+                calls.push(create);
+                if create {
+                    Ok(12)
+                } else {
+                    Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+                }
+            })
+            .unwrap();
+            assert_eq!(value, 12);
+            assert_eq!(calls, vec![false, true]);
         }
     }
 }

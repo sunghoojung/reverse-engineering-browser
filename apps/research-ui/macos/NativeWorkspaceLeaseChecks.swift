@@ -46,7 +46,10 @@ enum NativeWorkspaceLeaseChecks {
 
   private static func waitForExit(_ process: Process) {
     let deadline = Date().addingTimeInterval(5)
-    while process.isRunning && Date() < deadline { usleep(10_000) }
+    while process.isRunning && Date() < deadline {
+      // Match Foundation's task wait model while retaining an outer deadline.
+      RunLoop.current.run(until: min(deadline, Date().addingTimeInterval(0.01)))
+    }
     if process.isRunning {
       _ = kill(process.processIdentifier, SIGKILL)
       preconditionFailure("Workspace helper did not exit before its deadline")

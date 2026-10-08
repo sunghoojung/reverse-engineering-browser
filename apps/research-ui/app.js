@@ -5688,102 +5688,270 @@
         };
       }
 
+      function analystFileInput(file) {
+        return file ? {id: file.id, folder_id: file.folder_id, name: file.name, kind: file.kind,
+          language: file.language, content: file.content} : null;
+      }
+
+      function analystWorkspaceContents(workspace) {
+        return JSON.stringify({
+          folders: workspace.folders.map(folder => ({id: folder.id, name: folder.name, parent_id: folder.parent_id}))
+            .sort((left, right) => left.id - right.id),
+          files: workspace.files.map(analystFileInput).sort((left, right) => left.id - right.id)
+        });
+      }
+
+      function analystFileDraft() {
+        const file = analystFile();
+        return file ? {...analystFileInput(file), folder_id: Number(analystElements.folder.value),
+          name: analystElements.name.value.trim(), kind: analystElements.kind.value,
+          language: analystElements.kind.value === 'analyst-script' ? 'javascript' : analystElements.language.value,
+          content: analystElements.content.value} : null;
+      }
+
+      function analystFolderDraft() {
+        const folder = analystFolder();
+        return folder ? {...folder, name: analystElements.folderName.value.trim(),
+          parent_id: folder.id === 1 ? null : Number(analystElements.folderParent.value)} : null;
+      }
+
+      function analystHasUnsavedWork() {
+        return state.analystDraftDirty || state.analystFolderDirty || state.localAnalystSaving ||
+          Boolean(state.localAnalystPendingSave);
+      }
+
+      function guardAnalystUnload(event) {
+        if (!analystHasUnsavedWork()) return;
+        event.preventDefault();
+        event.returnValue = '';
+      }
+
+      // A deadline covers both headers and bounded body reads, even if transport
+      // cancellation cannot stop a server commit. Such writes must be reconciled.
+      async function analystReadJSON(path, options = {}) {
+        const controller = new AbortController();
+        let timer;
+        const deadline = new Promise((_, reject) => {
+          timer = setTimeout(() => { controller.abort(); reject(new Error('timed out')); }, 15000);
+        });
+        try {
+          return await Promise.race([deadline, (async () => {
+            const response = await fetch(path, {...options, signal: controller.signal});
+            if (response.status === 304) return {response, body: null};
+            const bytes = await sourceFactsReadBytes(response, 4 * 1024 * 1024, controller.signal);
+            return {response, body: JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes))};
+          })()]);
+        } finally { clearTimeout(timer); }
+      }
+
+      function admitAnalystWorkspace(body, confirmed = false) {
+        if (body.generation < state.localAnalyst.generation) throw new Error('An older workspace generation was returned');
+        const file = body.files.find(item => item.id === state.analystSelectedFileId);
+        const folder = body.folders.find(item => item.id === state.analystSelectedFolderId);
+        const savedFileDraft = confirmed && state.analystDraftDirty &&
+          JSON.stringify(analystFileDraft()) === JSON.stringify(analystFileInput(file));
+        const savedFolderDraft = confirmed && state.analystFolderDirty &&
+          JSON.stringify(analystFolderDraft()) === JSON.stringify(folder);
+        const changedFile = state.analystDraftDirty && !savedFileDraft && (!file ||
+          file.created_at_ms !== state.analystDraftBase?.created_at_ms ||
+          JSON.stringify(analystFileInput(file)) !== JSON.stringify(analystFileInput(state.analystDraftBase)));
+        const changedFolder = state.analystFolderDirty && !savedFolderDraft && JSON.stringify(folder) !== JSON.stringify(state.analystFolderBase);
+        if (changedFile || changedFolder) {
+          state.localAnalystNeedsReload = true;
+          state.localAnalystEtag = null;
+          setAnalystNotice('conflict', 'The edited file or folder changed in another window. Your draft and its original saved version remain here. Copy any edits you need, then choose Discard changes and Retry load before saving.');
+          return false;
+        }
+        if (savedFileDraft) state.analystDraftDirty = false;
+        if (savedFolderDraft) state.analystFolderDirty = false;
+        state.localAnalyst = body;
+        state.localAnalystLoaded = true;
+        state.localAnalystNeedsReload = false;
+        state.localAnalystEtag = `"local-analyst-${body.generation}"`;
+        if (!analystFolder()) state.analystSelectedFolderId = 1;
+        if (!analystFile()) state.analystSelectedFileId = null;
+        return true;
+      }
+
+      function reconcileAnalystSave(body) {
+        const pending = state.localAnalystPendingSave;
+        if (!pending) return null;
+        if (body.generation < pending.request.expected_generation) throw new Error('Recovery returned an older generation');
+        const contents = analystWorkspaceContents(body);
+        if (contents === pending.contents && (body.generation > pending.request.expected_generation ||
+            pending.contents === pending.baseContents)) {
+          state.localAnalystPendingSave = null;
+          const admitted = admitAnalystWorkspace(body, true);
+          if (admitted) setAnalystNotice('ready', `${pending.message} Saved contents verified by reloading generation ${body.generation}.`);
+          return admitted;
+        }
+        if (body.generation === pending.request.expected_generation && contents === pending.baseContents) {
+          // A delayed original write and a deliberate retry still use this same
+          // expected generation. Compare-and-swap can commit only one of them.
+          state.localAnalystPendingSave = null;
+          const admitted = admitAnalystWorkspace(body);
+          if (admitted) setAnalystNotice('error', `Save could not be confirmed: ${pending.reason || 'acknowledgement unavailable'}. Reload still shows the original generation; your draft is retained. An explicit retry will use the same generation check.`);
+          return false;
+        }
+        state.localAnalystPendingSave = null;
+        state.localAnalystNeedsReload = true;
+        state.localAnalystEtag = null;
+        setAnalystNotice('conflict', 'The workspace changed while this save was unconfirmed. Your draft and its original saved version remain here. Copy any edits you need, then discard changes and Retry load. Nothing was retried.');
+        return false;
+      }
+
       async function refreshLocalAnalyst(force = false) {
-        if (state.localAnalystRefreshing || location.protocol === 'file:') return false;
+        if (state.localAnalystRefreshing || state.localAnalystSaving || location.protocol === 'file:') return false;
         state.localAnalystRefreshing = true;
+        const version = state.localAnalystVersion;
         if (!state.localAnalystLoaded) setAnalystNotice('loading', 'Loading the local analyst workspace…');
         let loaded = false;
         try {
-          const headers = !force && state.localAnalystEtag ? {'If-None-Match': state.localAnalystEtag} : {};
-          const response = await fetch('/api/local-analyst', {cache: 'no-store', headers});
-          if (response.status !== 304) {
-            if (!response.ok) throw new Error(`Analyst workspace store returned ${response.status}`);
-            const body = await response.json();
-            if (!isLocalAnalystWorkspace(body)) throw new TypeError('Malformed analyst workspace response');
-            state.localAnalyst = body;
-            state.localAnalystLoaded = true;
-            state.localAnalystEtag = response.headers.get('ETag');
+          try {
+            const headers = !force && !state.localAnalystPendingSave && !state.localAnalystNeedsReload && state.localAnalystEtag
+              ? {'If-None-Match': state.localAnalystEtag} : {};
+            const {response, body} = await analystReadJSON('/api/local-analyst', {cache: 'no-store', headers});
+            if (version !== state.localAnalystVersion) return false;
+            if (response.status === 304) {
+              if (!headers['If-None-Match']) throw new Error('Recovery returned no workspace contents');
+              loaded = true;
+            } else {
+              if (!response.ok) throw new Error(`Analyst workspace store returned ${response.status}`);
+              if (!isLocalAnalystWorkspace(body)) throw new TypeError('Malformed analyst workspace response');
+              if (state.localAnalystPendingSave) loaded = reconcileAnalystSave(body);
+              else if (admitAnalystWorkspace(body)) {
+                const count = body.files.length;
+                setAnalystNotice(count ? 'ready' : 'empty', count
+                  ? `${count} saved ${count === 1 ? 'file' : 'files'} loaded from the permission-restricted local workspace.`
+                  : 'Start by saving a script or note.');
+                loaded = true;
+              }
+            }
+          } catch (error) {
+            if (version !== state.localAnalystVersion) return false;
+            state.localAnalystEtag = null;
+            setAnalystNotice('error', state.localAnalystPendingSave
+              ? `Save outcome remains uncertain: ${error.message}. Your draft is retained. Retry load before another write; nothing is retried automatically.`
+              : `Analyst workspace unavailable: ${error.message}. The last valid generation and your drafts remain visible.`);
           }
-          if (!analystFolder()) state.analystSelectedFolderId = 1;
-          if (!analystFile()) state.analystSelectedFileId = null;
-          const count = state.localAnalyst.files.length;
-          setAnalystNotice(count ? 'ready' : 'empty', count
-            ? `${count} saved ${count === 1 ? 'file' : 'files'} loaded from the permission-restricted local workspace.`
-            : 'Start by saving a script or note.');
-          loaded = true;
-        } catch (error) {
-          setAnalystNotice('error', `Analyst workspace unavailable: ${error.message}. The last valid generation remains visible.`);
-        }
-        try {
-          const response = await fetch('/api/local-analyst/runner', {cache: 'no-store'});
-          if (!response.ok) throw new Error(`runner returned ${response.status}`);
-          const runner = await response.json();
-          if (!isLocalAnalystRunner(runner)) throw new TypeError('malformed runner state');
-          state.localAnalystRunner = runner;
-        } catch (error) {
-          state.localAnalystRunner = {protocol_version: 1, available: false, active_run_id: null,
-            limits: emptyLocalAnalystWorkspace().limits, error: error.message};
+          if (version !== state.localAnalystVersion) return loaded;
+          // The visible form and its base must follow admitted data before the
+          // independent runner request yields to another user edit.
+          renderLocalAnalyst();
+          try {
+            const {response, body: runner} = await analystReadJSON('/api/local-analyst/runner', {cache: 'no-store'});
+            if (version !== state.localAnalystVersion) return loaded;
+            if (!response.ok) throw new Error(`runner returned ${response.status}`);
+            if (!isLocalAnalystRunner(runner)) throw new TypeError('malformed runner state');
+            state.localAnalystRunner = runner;
+          } catch (error) {
+            if (version !== state.localAnalystVersion) return loaded;
+            state.localAnalystRunner = {protocol_version: 1, available: false, active_run_id: null,
+              limits: emptyLocalAnalystWorkspace().limits, error: error.message};
+          }
+          return loaded;
         } finally {
           state.localAnalystRefreshing = false;
           renderLocalAnalyst();
         }
-        return loaded;
       }
 
       async function replaceLocalAnalyst(folders, files, successMessage) {
         if (state.localAnalystSaving) return false;
+        if (!state.localAnalystLoaded || state.localAnalystNeedsReload || state.localAnalystPendingSave) {
+          setAnalystNotice('conflict', 'Resolve the current draft and Retry load before changing this workspace.'); return false;
+        }
+        const request = analystReplacement(folders, files);
+        const pending = {request, contents: analystWorkspaceContents(request),
+          baseContents: analystWorkspaceContents(state.localAnalyst), message: successMessage};
+        state.localAnalystPendingSave = pending;
         state.localAnalystSaving = true;
+        state.localAnalystVersion += 1;
         setAnalystNotice('saving', 'Saving one atomic analyst workspace generation…');
         renderLocalAnalyst();
         try {
-          const response = await fetch('/api/local-analyst/actions', {
-            method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(analystReplacement(folders, files))
+          const {response, body} = await analystReadJSON('/api/local-analyst/actions', {
+            method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)
           });
-          const body = await response.json();
-          if (response.status === 409) {
-            state.localAnalystEtag = null;
-            await refreshLocalAnalyst(true);
-            setAnalystNotice('conflict', body.error || 'The workspace changed in another window. The latest generation was reloaded.');
-            return false;
-          }
-          if (!response.ok) throw new Error(body.error || `Analyst workspace store returned ${response.status}`);
-          if (!isLocalAnalystWorkspace(body)) throw new TypeError('Malformed analyst workspace response');
-          state.localAnalyst = body;
-          state.localAnalystLoaded = true;
-          state.localAnalystEtag = `"local-analyst-${body.generation}"`;
+          // A transport may replay a request after losing its acknowledgement.
+          // Even a 409 can follow the first attempt's commit. Reconcile the exact
+          // submitted contents instead of assuming this generation never saved.
+          if (!response.ok) throw new Error(body?.error || `Analyst workspace store returned ${response.status}`);
+          const expectedGeneration = pending.contents === pending.baseContents
+            ? request.expected_generation : request.expected_generation + 1;
+          if (!isLocalAnalystWorkspace(body) || body.generation !== expectedGeneration ||
+              analystWorkspaceContents(body) !== pending.contents) throw new TypeError('The save acknowledgement did not match the submitted generation and contents');
+          state.localAnalystPendingSave = null;
+          if (!admitAnalystWorkspace(body, true)) return false;
           setAnalystNotice('ready', successMessage);
           return true;
         } catch (error) {
-          setAnalystNotice('error', `Analyst workspace was not changed: ${error.message}`);
-          return false;
+          state.localAnalystEtag = null;
+          pending.reason = String(error.message).slice(0, 512);
+          setAnalystNotice('error', `Save outcome is uncertain: ${pending.reason}. Your draft is retained; checking the saved generation without retrying the write…`);
+          try {
+            const {response, body} = await analystReadJSON('/api/local-analyst', {cache: 'no-store'});
+            if (!response.ok || !isLocalAnalystWorkspace(body)) throw new Error('Recovery did not return a valid workspace');
+            return reconcileAnalystSave(body);
+          } catch (recoveryError) {
+            setAnalystNotice('error', `Save outcome remains uncertain: ${recoveryError.message}. Your draft is retained. Retry load before another write; nothing is retried automatically.`);
+            return false;
+          }
         } finally {
           state.localAnalystSaving = false;
           renderLocalAnalyst();
         }
       }
 
+      function analystMayLeaveDraft() {
+        if (state.localAnalystSaving) return false;
+        if (!state.localAnalystLoaded || state.localAnalystNeedsReload || state.localAnalystPendingSave) {
+          setAnalystNotice('conflict', 'Resolve the current draft and Retry load before changing the selected item.'); return false;
+        }
+        if (state.analystDraftDirty || state.analystFolderDirty) {
+          setAnalystNotice('conflict', 'Unsaved edits remain with the selected item. Save or choose Discard changes before switching, creating or deleting.');
+          return false;
+        }
+        return true;
+      }
+
+      function discardAnalystDraft(folder = false) {
+        if (state.localAnalystSaving) return;
+        state[folder ? 'analystFolderDirty' : 'analystDraftDirty'] = false;
+        state.analystDeleteFileId = null;
+        state.analystDeleteFolderId = null;
+        renderLocalAnalyst();
+        (folder ? analystElements.folderName : analystElements.content).focus({preventScroll: true});
+        if (state.localAnalystNeedsReload || state.localAnalystPendingSave) {
+          setAnalystNotice('conflict', 'Draft changes discarded. Retry load to review the current saved workspace before editing or saving.');
+        }
+      }
+
       function selectAnalystFolder(folderId, focus = false) {
-        if (!analystFolder(folderId)) return;
+        if (!analystFolder(folderId)) return false;
+        if (folderId === state.analystSelectedFolderId && state.analystSelectedFileId === null) return true;
+        if (!analystMayLeaveDraft()) return false;
         state.analystSelectedFolderId = folderId;
         state.analystSelectedFileId = null;
         state.analystFolderDraftId = null;
-        state.analystFolderDirty = false;
         state.analystDeleteFolderId = null;
         renderLocalAnalyst();
         if (focus) analystElements.tree.querySelector(`[data-folder-id="${folderId}"]`)?.focus({preventScroll: true});
+        return true;
       }
 
       function selectAnalystFile(fileId, focus = false) {
         const file = analystFile(fileId);
-        if (!file) return;
+        if (!file) return false;
+        if (fileId === state.analystSelectedFileId) return true;
+        if (!analystMayLeaveDraft()) return false;
         state.analystSelectedFileId = fileId;
         state.analystSelectedFolderId = file.folder_id;
-        state.analystExpandedFolderIds.add(file.folder_id);
-        state.analystDraftDirty = false;
+        analystFolderLineage(file.folder_id).forEach(folder => state.analystExpandedFolderIds.add(folder.id));
         state.analystDeleteFileId = null;
         renderLocalAnalyst();
         if (focus) analystElements.tree.querySelector(`[data-file-id="${fileId}"]`)?.focus({preventScroll: true});
+        return true;
       }
 
       function moveAnalystTreeSelection(event) {
@@ -5808,10 +5976,14 @@
         }
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
           : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
-        rows[next].click(); rows[next].focus({preventScroll: true});
+        const target = rows[next];
+        if (target.dataset.fileId) selectAnalystFile(Number(target.dataset.fileId), true);
+        else selectAnalystFolder(Number(target.dataset.folderId), true);
       }
 
       function renderAnalystTree() {
+        const focused = analystElements.tree.contains(document.activeElement) ? document.activeElement?.dataset : null;
+        const scrollTop = analystElements.tree.scrollTop;
         const nodes = [];
         const appendFolder = (folder, depth) => {
           const children = state.localAnalyst.folders.filter(candidate => candidate.parent_id === folder.id)
@@ -5829,7 +6001,7 @@
             textElement('span', 'analyst-tree-meta', String(children.length + files.length)));
           row.addEventListener('click', () => {
             const alreadySelected = state.analystSelectedFileId === null && state.analystSelectedFolderId === folder.id;
-            selectAnalystFolder(folder.id);
+            if (!selectAnalystFolder(folder.id)) return;
             if (alreadySelected && folder.id !== 1) {
               if (expanded) state.analystExpandedFolderIds.delete(folder.id); else state.analystExpandedFolderIds.add(folder.id);
             } else state.analystExpandedFolderIds.add(folder.id);
@@ -5847,7 +6019,7 @@
             fileRow.append(textElement('span', 'analyst-tree-glyph', file.kind === 'analyst-script' ? 'JS' : '·'),
               textElement('span', 'analyst-tree-name', file.name),
               textElement('span', 'analyst-tree-meta', file.kind === 'analyst-script' ? 'script' : file.language));
-            fileRow.addEventListener('click', () => selectAnalystFile(file.id));
+            fileRow.addEventListener('click', () => selectAnalystFile(file.id, true));
             fileRow.addEventListener('keydown', moveAnalystTreeSelection);
             nodes.push(fileRow);
           });
@@ -5855,10 +6027,14 @@
         const root = analystFolder(1);
         if (root) appendFolder(root, 0);
         analystElements.tree.replaceChildren(...nodes);
+        analystElements.tree.scrollTop = scrollTop;
+        const focusKey = focused?.fileId ? `[data-file-id="${focused.fileId}"]`
+          : focused?.folderId ? `[data-folder-id="${focused.folderId}"]` : null;
+        if (focusKey) analystElements.tree.querySelector(focusKey)?.focus({preventScroll: true});
       }
 
       function analystFolderOptions(selectedId, excludedIds = new Set()) {
-        return state.localAnalyst.folders.filter(folder => !excludedIds.has(folder.id))
+        const options = state.localAnalyst.folders.filter(folder => !excludedIds.has(folder.id))
           .sort((left, right) => analystFolderLineage(left.id).map(item => item.name).join('/').localeCompare(
             analystFolderLineage(right.id).map(item => item.name).join('/')))
           .map(folder => {
@@ -5867,6 +6043,12 @@
             option.selected = folder.id === selectedId;
             return option;
           });
+        if (selectedId && !options.some(option => option.value === String(selectedId))) {
+          const option = document.createElement('option'); option.value = String(selectedId);
+          option.textContent = `Unavailable folder #${selectedId}`; option.disabled = true; option.selected = true;
+          options.push(option);
+        }
+        return options;
       }
 
       function renderAnalystFolderForm() {
@@ -5875,6 +6057,7 @@
         const draftParentId = state.analystFolderDirty ? Number(analystElements.folderParent.value) : folder.parent_id ?? 1;
         if (state.analystFolderDraftId !== folder.id || !state.analystFolderDirty) {
           state.analystFolderDraftId = folder.id;
+          state.analystFolderBase = folder;
           analystElements.folderName.value = folder.name;
         }
         const excluded = folder.id === 1 ? new Set(state.localAnalyst.folders.map(item => item.id))
@@ -5883,7 +6066,8 @@
         if (folder.id !== 1) analystElements.folderParent.value = String(draftParentId);
         analystElements.folderName.disabled = folder.id === 1 || state.localAnalystSaving;
         analystElements.folderParent.disabled = folder.id === 1 || state.localAnalystSaving;
-        analystElements.saveFolder.disabled = folder.id === 1 || state.localAnalystSaving || !state.analystFolderDirty;
+        analystElements.saveFolder.disabled = folder.id === 1 || state.localAnalystSaving || state.localAnalystNeedsReload || Boolean(state.localAnalystPendingSave) || !state.analystFolderDirty;
+        analystElements.revertFolder.disabled = state.localAnalystSaving || !state.analystFolderDirty;
         const hasContents = state.localAnalyst.folders.some(item => item.parent_id === folder.id) ||
           state.localAnalyst.files.some(file => file.folder_id === folder.id);
         analystElements.deleteFolder.disabled = folder.id === 1 || hasContents || state.localAnalystSaving;
@@ -5899,6 +6083,7 @@
         if (!file) return;
         if (!state.analystDraftDirty || analystElements.editorForm.dataset.fileId !== String(file.id)) {
           analystElements.editorForm.dataset.fileId = String(file.id);
+          state.analystDraftBase = file;
           analystElements.name.value = file.name;
           analystElements.kind.value = file.kind;
           analystElements.language.value = file.language;
@@ -5913,13 +6098,13 @@
         analystElements.editorForm.querySelectorAll('input, textarea, select').forEach(field => {
           if (field !== analystElements.language) field.disabled = state.localAnalystSaving;
         });
-        analystElements.save.disabled = state.localAnalystSaving || !state.analystDraftDirty;
+        analystElements.save.disabled = state.localAnalystSaving || state.localAnalystNeedsReload || Boolean(state.localAnalystPendingSave) || !state.analystDraftDirty;
         analystElements.revert.disabled = state.localAnalystSaving || !state.analystDraftDirty;
         analystElements.deleteFile.disabled = state.localAnalystSaving;
         analystElements.deleteFile.textContent = state.analystDeleteFileId === file.id ? 'Confirm delete' : 'Delete';
         analystElements.draftStatus.dataset.kind = state.analystDraftDirty ? 'dirty' : 'saved';
         analystElements.draftStatus.textContent = state.analystDraftDirty
-          ? 'Unsaved changes cannot run. Save or revert this draft.'
+          ? 'Unsaved changes cannot run. Save or discard this draft before choosing another item. Save before closing the app.'
           : `${formatByteSize(file.content_bytes)} saved · file ${file.id} · ${new Date(file.updated_at_ms).toLocaleString()}`;
       }
 
@@ -6028,7 +6213,8 @@
           (analystElements.includeSignals.checked && state.signalProfile ? 1 : 0) +
           (analystElements.includeVm.checked && state.vmAnalysisStatus === 'ready' ? state.vmFindings.length : 0);
         analystElements.snapshotBadge.textContent = `${snapshotCount} records`;
-        const runnable = file?.kind === 'analyst-script' && !state.analystDraftDirty && runnerAvailable && !runnerBusy &&
+        const runnable = file?.kind === 'analyst-script' && !state.analystDraftDirty && !state.localAnalystNeedsReload &&
+          !state.localAnalystPendingSave && runnerAvailable && !runnerBusy &&
           !state.analystRunPending && state.analystTotalRuns < 256;
         analystElements.run.disabled = !runnable;
         analystElements.cancel.disabled = !state.analystRunPending;
@@ -6114,6 +6300,7 @@
         if (!analystElements.tree) return;
         const firstUse = state.localAnalyst.files.length === 0 && state.localAnalyst.folders.length === 1;
         analystElements.editorEmpty.parentElement?.parentElement?.setAttribute('data-state', firstUse ? 'empty' : 'ready');
+        analystElements.reload.disabled = state.localAnalystSaving || state.localAnalystRefreshing;
         analystElements.generation.textContent = `Generation ${state.localAnalyst.generation}`;
         analystElements.fileCount.textContent = `${state.localAnalyst.files.length} / 64`;
         analystElements.folderUsage.textContent = `${state.localAnalyst.folders.length} / 32`;
@@ -6625,6 +6812,7 @@
       }
 
       async function createAnalystFolder() {
+        if (!analystMayLeaveDraft()) return false;
         const parentId = state.analystSelectedFolderId;
         const name = analystUniqueName(parentId, 'New folder');
         const folder = {id: analystNextId(state.localAnalyst.folders), name, parent_id: parentId};
@@ -6640,6 +6828,7 @@
       }
 
       async function createAnalystFile(kind) {
+        if (!analystMayLeaveDraft()) return false;
         const folderId = state.analystSelectedFolderId;
         const script = kind === 'analyst-script';
         const name = analystUniqueName(folderId, script ? 'inspect evidence.js' : 'research notes.md');
@@ -6658,8 +6847,14 @@
       }
 
       async function saveAnalystFolder() {
+        if (!state.analystFolderDirty) return false;
         const folder = analystFolder();
         if (!folder || folder.id === 1) return;
+        if (JSON.stringify(folder) !== JSON.stringify(state.analystFolderBase)) {
+          state.localAnalystNeedsReload = true;
+          setAnalystNotice('conflict', 'The folder draft no longer matches its saved owner. Copy any edits you need, discard changes and Retry load.');
+          return false;
+        }
         const replacement = {...folder, name: analystElements.folderName.value.trim(),
           parent_id: Number(analystElements.folderParent.value)};
         const folders = state.localAnalyst.folders.map(candidate => candidate.id === folder.id ? replacement : candidate);
@@ -6672,8 +6867,20 @@
       }
 
       async function saveAnalystFile() {
+        if (!state.analystDraftDirty) return false;
         const file = analystFile();
         if (!file) return false;
+        if (analystElements.editorForm.dataset.fileId !== String(file.id) ||
+            file.created_at_ms !== state.analystDraftBase?.created_at_ms ||
+            JSON.stringify(analystFileInput(file)) !== JSON.stringify(analystFileInput(state.analystDraftBase))) {
+          state.localAnalystNeedsReload = true;
+          setAnalystNotice('conflict', 'The file draft no longer matches its saved owner. Copy any edits you need, discard changes and Retry load.');
+          return false;
+        }
+        if (state.analystFolderDirty && Number(analystElements.folder.value) !== state.analystSelectedFolderId) {
+          setAnalystNotice('conflict', 'Save or discard the folder changes before moving this file. Both drafts remain here.');
+          return false;
+        }
         const kind = analystElements.kind.value;
         const replacement = {
           ...file,
@@ -6695,6 +6902,7 @@
       }
 
       async function deleteAnalystFile() {
+        if (!analystMayLeaveDraft()) return false;
         const file = analystFile();
         if (!file) return;
         if (state.analystDeleteFileId !== file.id) {
@@ -6713,6 +6921,7 @@
       }
 
       async function deleteAnalystFolder() {
+        if (!analystMayLeaveDraft()) return false;
         const folder = analystFolder();
         if (!folder || folder.id === 1) return;
         const hasContents = state.localAnalyst.folders.some(candidate => candidate.parent_id === folder.id) ||
@@ -6737,7 +6946,7 @@
         const file = analystFile();
         if (!file || file.kind !== 'analyst-script' || state.analystRunPending) return;
         try {
-          if (state.analystDraftDirty) throw new TypeError('Save or revert the script before running it.');
+          if (state.analystDraftDirty || state.localAnalystNeedsReload || state.localAnalystPendingSave) throw new TypeError('Resolve the draft and reload any uncertain save before running this script.');
           if (!analystElements.confirm.checked) throw new TypeError('Confirm access to the selected evidence snapshot before running.');
           if (state.analystTotalRuns >= 256) throw new TypeError('The 256-run session limit was reached. Clear history to begin a fresh session.');
           const run = {
@@ -11041,7 +11250,7 @@
       analystElements.folderForm.querySelectorAll('input, select').forEach(field => field.addEventListener('input', () => {
         state.analystFolderDirty = true;
         state.analystDeleteFolderId = null;
-        analystElements.saveFolder.disabled = false;
+        renderAnalystFolderForm();
       }));
       analystElements.deleteFolder.addEventListener('click', deleteAnalystFolder);
       analystElements.editorForm.addEventListener('submit', event => {
@@ -11055,11 +11264,10 @@
         renderAnalystEditor();
         renderAnalystExecution();
       }));
-      analystElements.revert.addEventListener('click', () => {
-        state.analystDraftDirty = false;
-        state.analystDeleteFileId = null;
-        renderLocalAnalyst();
-      });
+      analystElements.revert.addEventListener('click', () => discardAnalystDraft());
+      analystElements.revertFolder.addEventListener('click', () => discardAnalystDraft(true));
+      analystElements.reload.addEventListener('click', () => refreshLocalAnalyst(true));
+      window.addEventListener('beforeunload', guardAnalystUnload);
       analystElements.deleteFile.addEventListener('click', deleteAnalystFile);
       analystElements.runForm.addEventListener('submit', event => {
         event.preventDefault();

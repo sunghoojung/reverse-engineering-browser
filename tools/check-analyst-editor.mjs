@@ -257,6 +257,12 @@ export async function checkAnalystInteractions({evaluate,viewport,click,key,whee
   const type=async(selector,text)=>{await hit(selector);await key('a','KeyA',{windowsVirtualKeyCode:65,modifiers:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});await typeText(text);};
   const enter=async()=>{await click('#advanced-navigation > summary');await click('#advanced-navigation [data-screen="analyst"]');await until('state.localAnalystLoaded && !state.localAnalystRefreshing');};
   const tree=id=>`#analyst-tree [data-file-id="${id}"]`;
+  const editorGeometry=async label=>{
+    const geometry=await evaluate(`(()=>{const r=analystElements.draftStatus.getBoundingClientRect(),a=analystElements.editorForm.querySelector('.analyst-form-actions').getBoundingClientRect(),t=analystElements.content.getBoundingClientRect();return {statusHeight:r.height,actionGap:a.top-r.bottom,contentGap:r.top-t.bottom,contentHeight:t.height}})()`);
+    assert(geometry.statusHeight<100&&geometry.actionGap>=0&&geometry.actionGap<=20&&geometry.contentGap>=0&&geometry.contentGap<=20&&geometry.contentHeight>=240,`${label}: editor rows must size content, not the status message: ${JSON.stringify(geometry)}`);
+    receipts.push({check:label,...geometry});
+  };
+
   await viewport(1440,900);await enter();
   await evaluate(`window.analystWriteCalls=0; window.analystOriginalFetch=window.fetch;
     window.fetch=function(url,options={}){if(String(url)==='/api/local-analyst/actions'&&options.method==='POST')window.analystWriteCalls++;return window.analystOriginalFetch.apply(this,arguments);}`);
@@ -268,7 +274,7 @@ await hit('#analyst-reload');await until(`state.localAnalyst.generation===${f.li
   assert.match(await evaluate('state.localAnalystMessage'),/Unsaved edits/);
   await hit(tree(1));await press('ArrowDown');assert.equal(await evaluate('document.activeElement.dataset.fileId'),'1');
   assert.equal(await evaluate('state.analystSelectedFileId'),1);assert.equal(await evaluate("document.querySelector('#screen-analyst img')"),null);
-  await screenshot('analyst-wide-dirty-guard');
+  await editorGeometry('Wide editor uses content space');await screenshot('analyst-wide-dirty-guard');
   await click('[data-screen="sources"]');await enter();assert(await evaluate('state.analystDraftDirty'));assert.match(await evaluate('analystElements.content.value'),/unsaved conclusion/);
   await hit('#analyst-reload');await until('!state.localAnalystRefreshing');assert.match(await evaluate('analystElements.content.value'),/unsaved conclusion/);
   const reloading=reloadPage(false);await beforeUnload(false);await reloading;
@@ -318,8 +324,9 @@ await hit('#analyst-reload');await until(`state.localAnalyst.generation===${f.li
 
   for(const [width,height] of [[760,560],[360,740]]){
     await viewport(width,height);await type('#analyst-content',`Keyboard draft at ${width}`);
-    await hit('#analyst-revert');await press('Tab');
+    await editorGeometry(`${width} editor uses content space`);await hit('#analyst-revert');await press('Tab');
     assert.equal(await evaluate('document.activeElement.id'),'analyst-delete','Discard returns focus to content, then Tab skips disabled Save/Discard');
+    await screenshot(`analyst-${width}-editor-actions`);
     await hit('#analyst-reload');await until('!state.localAnalystRefreshing');
     const geometry=await evaluate(`(()=>{const n=analystElements.reload,r=n.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:innerWidth,height:innerHeight,overflow:document.querySelector('#screen-analyst').scrollWidth-document.querySelector('#screen-analyst').clientWidth}})()`);
     assert(geometry.left>=0&&geometry.right<=width&&geometry.top>=0&&geometry.bottom<=height&&geometry.overflow<=1,JSON.stringify(geometry));

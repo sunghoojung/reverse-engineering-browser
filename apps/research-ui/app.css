@@ -1977,7 +1977,7 @@
       .analyst-form label { display: grid; gap: 5px; color: var(--faint); font: 11px var(--sans); text-transform: none; }
       .analyst-form input, .analyst-form textarea, .analyst-form select { width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 11px/1.45 var(--mono); text-transform: none; }
       .analyst-form textarea { min-height: 78px; resize: vertical; }
-      .analyst-editor-form { min-height: calc(100% - 58px); grid-template-rows: auto auto minmax(280px, 1fr) auto auto; }
+      .analyst-editor-form { min-height: calc(100% - 58px); grid-template-rows: auto minmax(280px, 1fr) auto auto; }
       .analyst-editor-form #analyst-content { min-height: 280px; height: 100%; tab-size: 2; white-space: pre; }
       .analyst-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(115px, .4fr); gap: 8px; }
       .analyst-form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }

@@ -69,6 +69,7 @@ async function controllerFixture(root) {
         if(f.mode==='busy'||request.expected_generation!==f.server.generation)return Response.json({error:'Workspace busy or stale'},{status:409});
         f.server=replaced(f.server,request);
         if(['commit-drop','commit-drop-read-fails'].includes(f.mode))throw new Error('Synthetic acknowledgement lost');
+        if(f.mode==='committed-conflict')return Response.json({error:'Stale generation after lost acknowledgement'},{status:409});
         if(f.mode==='malformed-ack')return new Response('{');
         if(f.mode==='wrong-ack')return Response.json({...f.server,generation:f.server.generation+1});
         return Response.json(f.server);
@@ -139,7 +140,7 @@ export async function checkAnalystController(root) {
 
   // Exact success receipts and committed-but-lost/malformed acknowledgements use
   // one POST. Recovery never resends a replacement.
-  for(const mode of ['ready','commit-drop','malformed-ack','wrong-ack']){
+  for(const mode of ['ready','commit-drop','committed-conflict','malformed-ack','wrong-ack']){
     f=await controllerFixture(root);f.edit(`Saved through ${mode}`);f.mode=mode;
     assert.equal(await f.ui.saveAnalystFile(),true,mode);assert.equal(f.postCount(),1);assert.equal(f.state.localAnalyst.generation,2);
     assert.equal(f.state.analystDraftDirty,false);assert.equal(f.elements.content.value,`Saved through ${mode}`);
@@ -203,9 +204,10 @@ export async function checkAnalystController(root) {
   [...f.timers][0].callback();assert.equal(await late,false);assert(f.state.analystDraftDirty);assert.equal(f.state.localAnalyst.generation,1);
   f.mode='ready';f.held.shift()();await new Promise(resolve=>setTimeout(resolve,0));
   assert.equal(f.state.localAnalyst.generation,1,'Late acknowledgement must not mutate UI');
-  assert.equal(await f.ui.saveAnalystFile(),false,'Original delayed write makes explicit retry conflict');
+  assert.equal(await f.ui.saveAnalystFile(),true,'A 409 after the original delayed commit is reconciled to the exact saved snapshot');
   assert.equal(f.server.generation,2,'No duplicate commit');
-  assert.equal(await f.ui.refreshLocalAnalyst(true),false,'Different saved base stays explicit until discarded');
+  assert.equal(f.state.analystDraftDirty,false);assert.equal(f.postCount(),2,'Only the explicit retry sent another application POST');
+  assert.equal(await f.ui.refreshLocalAnalyst(true),true);
   let reloads=0, reads=0;
   await reloadInvestigationDocument(async expression=>{
     if(expression==='performance.timeOrigin')return 100;
@@ -237,7 +239,7 @@ export async function reloadInvestigationDocument(evaluate, reload, waitForDocum
 export async function checkAnalystInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture,reloadPage,beforeUnload}) {
   const f=fixture.notebook, original=copy(f.library), receipts=[];
   f.library=analystFixtureLibrary(()=>f.library);f.library.generation=original.generation+1;f.mode='ready';
-  const until=async expression=>{const start=Date.now();while(Date.now()-start<7000){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(expression);};
+  const until=async expression=>{const start=Date.now();while(Date.now()-start<7000){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(expression+'; '+JSON.stringify({libraryGeneration:f.library.generation,calls:f.calls.slice(-8)})+'; '+await evaluate('JSON.stringify({generation:state.localAnalyst.generation,saving:state.localAnalystSaving,dirty:state.analystDraftDirty,notice:state.localAnalystMessage})'));};
   const press=async name=>key(name,name,{windowsVirtualKeyCode:{Enter:13,Tab:9,ArrowDown:40}[name],...(name==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
   const hit=async selector=>{
     for(let attempt=0;attempt<8;attempt++){
@@ -255,7 +257,10 @@ export async function checkAnalystInteractions({evaluate,viewport,click,key,whee
   const type=async(selector,text)=>{await hit(selector);await key('a','KeyA',{windowsVirtualKeyCode:65,modifiers:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});await typeText(text);};
   const enter=async()=>{await click('#advanced-navigation > summary');await click('#advanced-navigation [data-screen="analyst"]');await until('state.localAnalystLoaded && !state.localAnalystRefreshing');};
   const tree=id=>`#analyst-tree [data-file-id="${id}"]`;
-  await viewport(1440,900);await enter();await hit('#analyst-reload');await until(`state.localAnalyst.generation===${f.library.generation}`);
+  await viewport(1440,900);await enter();
+  await evaluate(`window.analystWriteCalls=0; window.analystOriginalFetch=window.fetch;
+    window.fetch=function(url,options={}){if(String(url)==='/api/local-analyst/actions'&&options.method==='POST')window.analystWriteCalls++;return window.analystOriginalFetch.apply(this,arguments);}`);
+await hit('#analyst-reload');await until(`state.localAnalyst.generation===${f.library.generation}`);
   await hit('#analyst-tree [data-folder-id="2"]');await hit(tree(1));
   await type('#analyst-content','Synthetic unsaved conclusion. <img src=x onerror=alert(1)>');
   await hit(tree(1));assert.equal(await evaluate('analystElements.content.value'),'Synthetic unsaved conclusion. <img src=x onerror=alert(1)>');
@@ -285,8 +290,13 @@ export async function checkAnalystInteractions({evaluate,viewport,click,key,whee
 
   for(const mode of ['commit-drop','malformed-ack']){
     f.mode=mode;await type('#analyst-content',`Saved after ${mode}`);const before=f.calls.filter(call=>call.method==='POST').length;
+    const writes=await evaluate('window.analystWriteCalls'),generation=f.library.generation;
     await hit('#analyst-save');await until('!state.localAnalystSaving && !state.analystDraftDirty');
-    assert.equal(f.calls.filter(call=>call.method==='POST').length,before+1);assert.equal(f.library.files[0].content,`Saved after ${mode}`);
+    assert.equal(await evaluate('window.analystWriteCalls'),writes+1,'The application never retries a POST');
+    assert.equal(f.library.generation,generation+1,'Transport replay cannot commit twice');
+    const wire=f.calls.slice().filter(call=>call.method==='POST').slice(before);
+    receipts.push({check:mode,applicationWrites:1,wireRequests:wire.map(call=>({expected:call.expectedGeneration,committed:call.committedGeneration??null})),savedGeneration:f.library.generation});
+    assert.equal(f.library.files[0].content,`Saved after ${mode}`);
     assert.match(await evaluate('state.localAnalystMessage'),/verified by reloading/);
     await screenshot(`analyst-${mode}-reconciled`);f.mode='ready';
   }
@@ -318,6 +328,6 @@ export async function checkAnalystInteractions({evaluate,viewport,click,key,whee
   await viewport(1440,900);f.library={...original,generation:f.library.generation+1};f.mode='ready';
   await reloadPage();await until("typeof state!=='undefined' && state.requests.length===1 && state.artifacts.length===2");
   return {status:'passed',viewports:[[1440,900],[760,560],[360,740]],receipts,
-    checks:['same-file no-op and dirty switching refusal','native arrow/Tab focus','workspace navigation and refresh retain draft','real beforeunload cancellation retains draft','simultaneous folder/file draft move guard','committed lost/malformed acknowledgement reread with one POST','create recovery keeps editor locked','concurrent change keeps original base until discard/reload','inert draft text','narrow recovery controls'],
+    checks:['same-file no-op and dirty switching refusal','native arrow/Tab focus','workspace navigation and refresh retain draft','real beforeunload cancellation retains draft','simultaneous folder/file draft move guard','committed lost/malformed acknowledgement and 409 replay reread with one application POST','create recovery keeps editor locked','concurrent change keeps original base until discard/reload','inert draft text','narrow recovery controls'],
     limitations:['Synthetic HTTP responses verify UI ownership, not disk durability.','Chromium lifecycle does not establish native macOS quit protection.']};
 }

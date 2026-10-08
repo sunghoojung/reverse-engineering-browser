@@ -20,10 +20,14 @@ std::uint64_t Deadline(const NativeWorkerLease& lease,
 }
 }  // namespace
 
+NativeWorkerTransferReceiver::NativeWorkerTransferReceiver(
+    const NativeWorkerAuthority& authority) noexcept
+    : authority_(authority) {}
+
 bool NativeWorkerTransferReceiver::Configure(const NativeWorkerLease& lease,
                                              const std::uint64_t now_ns) noexcept {
   if (active_ || lease.policy.generation <= greatest_generation_ ||
-      !authority_.IsCurrent(lease, now_ns)) {
+      !authority_.get().IsCurrent(lease, now_ns)) {
     return false;
   }
   greatest_generation_ = lease.policy.generation;
@@ -48,7 +52,7 @@ void NativeWorkerTransferReceiver::Revoke() noexcept {
 }
 const NativeWorkerBatch* NativeWorkerTransferReceiver::PendingForPublication(
     const std::uint64_t now_ns) noexcept {
-  if (!active_ || !authority_.IsCurrent(lease_, now_ns) ||
+  if (!active_ || !authority_.get().IsCurrent(lease_, now_ns) ||
       (pending_.batch_id != 0 && now_ns >= pending_.acknowledgment_deadline_ns)) {
     Revoke();
     return nullptr;
@@ -62,7 +66,7 @@ NativeWorkerTransferStatus NativeWorkerTransferReceiver::Request(
   if (!active_) {
     return NativeWorkerTransferStatus::kDisabled;
   }
-  if (!authority_.IsCurrent(lease_, now_ns)) {
+  if (!authority_.get().IsCurrent(lease_, now_ns)) {
     Revoke();
     return IsValidNativeWorkerLease(lease_, now_ns) ? NativeWorkerTransferStatus::kRevoked
                                                     : NativeWorkerTransferStatus::kExpired;
@@ -96,7 +100,7 @@ NativeWorkerTransferStatus NativeWorkerTransferReceiver::Receive(
       reply.request_id != outstanding_request_id_) {
     return NativeWorkerTransferStatus::kStaleEpoch;
   }
-  if (!authority_.IsCurrent(lease_, now_ns)) {
+  if (!authority_.get().IsCurrent(lease_, now_ns)) {
     Revoke();
     return IsValidNativeWorkerLease(lease_, now_ns) ? NativeWorkerTransferStatus::kRevoked
                                                     : NativeWorkerTransferStatus::kExpired;
@@ -162,7 +166,7 @@ NativeWorkerTransferStatus NativeWorkerTransferReceiver::Receive(
 }
 bool NativeWorkerTransferReceiver::AcknowledgePublished(const NativeWorkerBatchAck& batch,
                                                         const std::uint64_t now_ns) noexcept {
-  if (!active_ || !authority_.IsCurrent(lease_, now_ns) ||
+  if (!active_ || !authority_.get().IsCurrent(lease_, now_ns) ||
       (pending_.batch_id != 0 && now_ns >= pending_.acknowledgment_deadline_ns)) {
     Revoke();
     return false;

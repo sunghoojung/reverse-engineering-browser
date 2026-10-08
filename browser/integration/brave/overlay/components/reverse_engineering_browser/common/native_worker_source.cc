@@ -213,7 +213,7 @@ NativeWorkerCaptureStatus NativeWorkerSourceQueue::Configure(const NativeWorkerS
     return NativeWorkerCaptureStatus::kInvalid;
   }
   if (!slots_) {
-    slots_.reset(new (std::nothrow) Slot[kNativeWorkerSourceCapacity]);
+    slots_.reset(new (std::nothrow) std::array<Slot, kNativeWorkerSourceCapacity>);
     if (!slots_) {
       return NativeWorkerCaptureStatus::kAllocationFailed;
     }
@@ -231,7 +231,7 @@ NativeWorkerCaptureStatus NativeWorkerSourceQueue::Configure(const NativeWorkerS
 void NativeWorkerSourceQueue::ClearLocked() noexcept {
   Increment(stats_.retired, stats_.queued);
   while (stats_.queued != 0) {
-    slots_[read_].Clear();
+    (*slots_)[read_].Clear();
     read_ = (read_ + 1) % kNativeWorkerSourceCapacity;
     --stats_.queued;
   }
@@ -346,7 +346,7 @@ NativeWorkerCaptureStatus NativeWorkerSourceQueue::Capture(const NativeWorkerCap
   if (status != NativeWorkerCaptureStatus::kAccepted) {
     return DropLocked(status);
   }
-  Slot& slot = slots_[write_];
+  Slot& slot = (*slots_)[write_];
   slot.header = NativeWorkerSourceHeader{};
   slot.header.session_id = policy_.session_id;
   slot.header.generation = policy_.generation;
@@ -394,7 +394,7 @@ NativeWorkerCaptureStatus NativeWorkerSourceQueue::Take(NativeWorkerSourceHeader
   if (stats_.queued == 0) {
     return NativeWorkerCaptureStatus::kEmpty;
   }
-  Slot& slot = slots_[read_];
+  Slot& slot = (*slots_)[read_];
   if (source.size() < slot.header.source_size || url.size() < slot.header.url_size) {
     return NativeWorkerCaptureStatus::kOutputTooSmall;
   }

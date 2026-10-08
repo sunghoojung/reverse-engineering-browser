@@ -350,7 +350,7 @@ function retireCandidateExperimentPending() {
   if (candidateExperiment?.pending) {
     candidateExperiment.pending.retired = true;
     candidateExperiment.pending.actionOwner?.transport?.retire?.('Stopped waiting for candidate binding. Native completion is unknown; inspect Hooks before retrying.');
-    candidateExperiment.notice = 'Binding acknowledgement retired after navigation. A definition may have been added; inspect Hooks before retrying.';
+    candidateExperiment.notice = 'Binding acknowledgement retired. A definition may have been added; inspect Hooks before retrying.';
   }
 }
 function prefillCandidateField(selection) {
@@ -494,7 +494,7 @@ async function bindCandidateExperiment() {
   owner.pending = null;
   elements.hooksFieldConfirm.checked = false; elements.hooksConfirm.checked = false;
   if (pending.retired || pending.lifetime !== candidateLifetime()) {
-    owner.notice = 'Target or source ownership changed while binding. Inspect Hooks; no automatic retry or arming was sent.';
+    owner.notice = 'Binding acknowledgement was retired while waiting. Inspect Hooks; native completion is unknown. No automatic retry or arming was sent.';
   } else if (response) {
     const matches = response.runtime_hooks.definitions.filter(definition => definition.candidate_guard?.source_sha256 === owner.fingerprint.source_sha256 &&
       definition.candidate_guard?.target_id === owner.target && definition.candidate_guard?.start_byte === owner.fingerprint.start_byte);

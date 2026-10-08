@@ -27,7 +27,31 @@ export function candidateFixtureRoute(req, res, receipts = []) {
   return false;
 }
 
+// Selecting a CDP session does not foreground its tab. Chromium may suspend
+// requestAnimationFrame in background tabs; activate the owned target before
+// every DOM read/paint wait rather than replacing paint with elapsed time.
+export async function candidateSessionEvaluate(command, expression, session) {
+  await command('Page.bringToFront',{},session);
+  const result=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true},session);
+  if(result.exceptionDetails)throw Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+  return result.result.value;
+}
+
+export function candidateBindResponseMatches(params, actionURL) {
+  if(params.request?.url!==actionURL || params.request?.method!=='POST' || !Number.isInteger(params.responseStatusCode))return false;
+  try{return JSON.parse(params.request.postData).action==='bind_runtime_candidate';}catch{return false;}
+}
+
 export async function checkCandidateFixture() {
+  const actionURL='http://127.0.0.1:1234/api/debugger/actions',owned={request:{url:actionURL,method:'POST',postData:JSON.stringify({action:'bind_runtime_candidate'})},responseStatusCode:200};
+  assert(candidateBindResponseMatches(owned,actionURL));
+  for(const changed of [{...owned,responseStatusCode:undefined},{...owned,request:{...owned.request,url:actionURL+'?foreign=1'}},{...owned,request:{...owned.request,method:'GET'}},{...owned,request:{...owned.request,postData:'{'}},{...owned,request:{...owned.request,postData:JSON.stringify({action:'arm_runtime_hooks'})}}])assert.equal(candidateBindResponseMatches(changed,actionURL),false,'Only genuine exact bind response is held');
+  const activationCalls=[];
+  const activate=async(method,params,session)=>{activationCalls.push({method,params,session});return method==='Runtime.evaluate'?{result:{value:session}}:{};};
+  for(const session of ['original','ui','disposable','ui'])assert.equal(await candidateSessionEvaluate(activate,'document.visibilityState',session),session);
+  assert.deepEqual(activationCalls.map(call=>[call.method,call.session]),['original','ui','disposable','ui'].flatMap(session=>[['Page.bringToFront',session],['Runtime.evaluate',session]]));
+  assert(activationCalls.filter(call=>call.method==='Runtime.evaluate').every(call=>call.params.awaitPromise),'Foreground repair preserves native paint waits');
+  await assert.rejects(candidateSessionEvaluate(async()=>{throw Error('activation refused');},'document.title','owned'),/activation refused/);
   const response = path => {let value, type;assert(candidateFixtureRoute({url:path},{setHeader:(_,v)=>{type=v;},end:v=>{value=v;}}));return {value,type};};
   const page=response('/candidate-page').value;
   assert.match(page, /id="send-page"/);assert.match(page, /id="send-worker"/);
@@ -52,23 +76,32 @@ export async function checkCandidateFixture() {
 export async function checkCandidateExperimentJourney({address, uiURL, fixtureURL, root, socketFactory, requestReceipts}) {
   const output=process.env.REB_UI_SCREENSHOTS || join(root,'build/candidate-bridge-ui-qa');
   await mkdir(output,{recursive:true});
-  const socket=await socketFactory(address), pending=new Map(), receipts=[], runtimeErrors=[];
+  const socket=await socketFactory(address), pending=new Map(), receipts=[], runtimeErrors=[], commandTrace=[];
+  let lastForeground=null,bindHold=null,guardedTargetSession=null,guardedTargetEvaluations=0;
+  const mutationRequests=[],interceptionErrors=[];
   let sequence=0, uiSession, phase='attach';
   socket.addEventListener('message',event=>{
     const message=JSON.parse(event.data);
+    if(message.sessionId===uiSession&&message.method==='Network.requestWillBeSent'&&message.params.request.url===uiURL+'/api/debugger/actions'&&message.params.request.method==='POST'){try{mutationRequests.push(JSON.parse(message.params.request.postData).action);}catch{mutationRequests.push('unparsed-action');}}
+    if(message.sessionId===uiSession&&message.method==='Fetch.requestPaused'){
+      if(bindHold&&!bindHold.paused&&candidateBindResponseMatches(message.params,uiURL+'/api/debugger/actions'))bindHold.paused=message.params;
+      else command('Fetch.continueResponse',{requestId:message.params.requestId}).catch(error=>interceptionErrors.push(String(error)));
+    }
     if(message.method==='Runtime.exceptionThrown')runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
     const request=pending.get(message.id);if(!request)return;
     pending.delete(message.id);clearTimeout(request.timer);
     if(message.error)request.reject(Error(JSON.stringify(message.error)));else request.resolve(message.result);
   });
   const command=(method,params={},sessionId=uiSession)=>new Promise((resolve,reject)=>{
+    if(method==='Runtime.evaluate'&&sessionId===guardedTargetSession){guardedTargetEvaluations++;reject(Error('Test attempted forbidden Runtime.evaluate in guarded disposable target'));return;}
+    commandTrace.push({phase,method,session:sessionId,expression:method==='Runtime.evaluate'?params.expression.slice(0,180):undefined});if(commandTrace.length>64)commandTrace.shift();
     const id=++sequence,timer=setTimeout(()=>{pending.delete(id);reject(Error(`CDP timeout: ${method}`));},15000);
     pending.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));
   });
   const evaluate=async(expression,session=uiSession)=>{
-    const result=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true},session);
-    if(result.exceptionDetails)throw Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
-    return result.result.value;
+    const result=await candidateSessionEvaluate(command,expression,session);
+    if(lastForeground!==session){receipts.push({phase,kind:'foreground',session});lastForeground=session;}
+    return result;
   };
   const until=async(predicate,label,session=uiSession)=>{
     const deadline=Date.now()+20000;let last;
@@ -77,6 +110,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   };
   const frame=()=>evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
   const key=async(key,session=uiSession,modifiers=0)=>{
+    await command('Page.bringToFront',{},session);
     const code=key===' '?'Space':key;
     const windowsVirtualKeyCode={Enter:13,Tab:9,Escape:27,ArrowDown:40,Home:36,End:35,a:65}[key];
     await command('Input.dispatchKeyEvent',{type:'rawKeyDown',key,code,modifiers,windowsVirtualKeyCode},session);
@@ -130,8 +164,12 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     const originalSession=(await command('Target.attachToTarget',{targetId:original.targetId,flatten:true},null)).sessionId;
     const target=await command('Target.createTarget',{url:uiURL},null);
     uiSession=(await command('Target.attachToTarget',{targetId:target.targetId,flatten:true},null)).sessionId;
-    await command('Page.enable');await command('Runtime.enable');await viewport(1440,900);
+    await command('Page.enable');await command('Runtime.enable');await command('Network.enable',{maxPostDataSize:65536});await viewport(1440,900);
     await until("document.querySelector('#request-rows')&&document.querySelector('#capture-state').textContent!=='Connecting'",'Product did not load');
+    const services=await fetch(uiURL+'/api/health',{signal:AbortSignal.timeout(5000)}).then(r=>{assert(r.ok);return r.json();});assert.equal(services.capture_mode,'live','Supported owned broker capture must be configured');assert.equal(services.broker_connected,true,'Actual owned broker socket must be ready');
+    receipts.push({phase,kind:'service-readiness',capture_mode:services.capture_mode,broker_connected:services.broker_connected,native_event_producer:'not used; owned request evidence is captured through CDP'});
+    const backendReady=await readOnlyState();assert.equal(backendReady.target?.id,original.targetId,'Live debugger must own original fixture target');assert.equal(backendReady.network?.capture_enabled,true,'Original fixture capture requires explicit launch consent');receipts.push({phase,kind:'capture-configuration',original_target:original.targetId,cdp_content_capture:backendReady.network.capture_enabled,consent:'Explicit synthetic-fixture launch flag; candidate field Capture and Arm remain separate visible actions'});
+    await until("document.querySelector('#session-mode')?.dataset.kind==='live'",'Supported live capture setup is absent; do not inject capture mode');
     phase='original Traffic field';await click('#send-page',originalSession);
     await until("[...document.querySelectorAll('.request-row')].some(n=>n.textContent.includes('/payload'))",'Owned Page payload did not reach Traffic');
     const row=await evaluate("(()=>{const n=[...document.querySelectorAll('.request-row')].find(n=>n.textContent.includes('/payload'));return '#'+CSS.escape(n.id)})()");
@@ -172,6 +210,53 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await until("[...document.querySelector('#candidate-experiment-target').options].some(o=>o.textContent.trim().startsWith('Worker'))",'Owned worker target did not become visible');
     await chooseTarget('Worker');await refuseBind('negative-wrong-selected-worker');
     await chooseTarget('Page');
+    // DOM evaluation itself creates debugger scripts. Finish owned-page hit
+    // testing before binding; never perturb the guarded target catalog while
+    // observing the baseline. Later activation uses native input only.
+    const chosen=await evaluate("document.querySelector('#candidate-experiment-target').value");
+    const disposable=(await command('Target.getTargets',{},null)).targetInfos.find(t=>t.targetId===chosen);
+    assert(disposable&&disposable.targetId!==original.targetId,'Selected UI target must be a separate disposable page');
+    const disposableSession=(await command('Target.attachToTarget',{targetId:disposable.targetId,flatten:true},null)).sessionId;
+    const ownedActionPoint=await reveal('#send-page',disposableSession);
+    receipts.push({phase,kind:'owned-page-readiness',selector:'#send-page',target:disposable.targetId,before_binding:true});
+    guardedTargetSession=disposableSession;
+    // Delay only delivery of a genuine successful backend response. The real
+    // bind executes, so Stop waiting cannot claim to undo its definition.
+    phase='rendered Stop waiting on genuine bind response';
+    await fill('#hooks-label','Retain owned hook draft');
+    const draftBefore=await evaluate("JSON.stringify([document.querySelector('#hooks-label').value,document.querySelector('#hooks-field-url').value,document.querySelector('#hooks-field-pointer').value])");
+    const bindsBefore=mutationRequests.filter(action=>action==='bind_runtime_candidate').length;
+    bindHold={paused:null};
+    await command('Fetch.enable',{patterns:[{urlPattern:uiURL+'/api/debugger/actions',requestStage:'Response'}]});
+    await click('#candidate-experiment-bind');
+    const responseDeadline=Date.now()+20000;
+    while(!bindHold.paused&&Date.now()<responseDeadline)await new Promise(resolve=>setTimeout(resolve,25));
+    assert(bindHold.paused,'Actual bind response did not reach the response-stage hold');
+    assert.equal(bindHold.paused.responseStatusCode,200,'Cancellation case requires real successful backend binding');
+    const heldBody=await command('Fetch.getResponseBody',{requestId:bindHold.paused.requestId});
+    const actualResponse=JSON.parse(heldBody.base64Encoded?Buffer.from(heldBody.body,'base64').toString('utf8'):heldBody.body);
+    assert(actualResponse.runtime_hooks?.definitions?.some(definition=>definition.candidate_guard),'Held response must contain the actual backend-added candidate definition');
+    await until("!document.querySelector('#candidate-experiment-cancel').hidden",'Pending binding did not expose Stop waiting');
+    await screenshot('02-pending-bind-before-stop');
+    await keyboardTo('#candidate-experiment-cancel');await key('Enter');
+    await until("/retired|changed|unknown/i.test(document.querySelector('#candidate-experiment-status').textContent)&&document.querySelector('#candidate-experiment-cancel').hidden",'Stop waiting did not retire acknowledgement ownership');
+    let release='unchanged actual response released';
+    try{await command('Fetch.continueResponse',{requestId:bindHold.paused.requestId});}
+    catch(error){assert.match(String(error),/Invalid InterceptionId|Invalid requestId|Invalid .*id|No resource with given identifier|not found/i,'Unexpected response-release failure');release='Browser already aborted held delivery after Stop waiting';}
+    await command('Fetch.disable');bindHold=null;
+    await until("document.querySelectorAll('#hooks-definitions .hook-definition-row').length===1&&!document.querySelector('#hooks-definitions .hook-remove').disabled",'Actual added definition must be inspectable after cancellation');
+    await frame();
+    assert.equal(mutationRequests.filter(action=>action==='bind_runtime_candidate').length,bindsBefore+1,'Stop waiting and late delivery must not dispatch another binding');
+    assert.equal(await evaluate("document.querySelector('#hooks-field-confirm').checked||document.querySelector('#hooks-confirm').checked"),false,'Late delivery cannot restore capture or arming consent');
+    assert.equal(await evaluate("candidateExperiment?.bound===null"),true,'Cancelled question must not adopt late backend acknowledgement');
+    assert(await evaluate("!document.querySelector('#candidate-experiment-target').disabled&&!/Observation hook bound|Matched baseline/.test(document.querySelector('#candidate-experiment-status').textContent)"),'Late delivery cannot restore bridge binding');
+    assert.equal(await evaluate("JSON.stringify([document.querySelector('#hooks-label').value,document.querySelector('#hooks-field-url').value,document.querySelector('#hooks-field-pointer').value])"),draftBefore,'Stop waiting preserves visible drafts');
+    const cancelledState=await quietState();assert.equal(cancelledState.definitions,1);assert.equal(cancelledState.enabled,false);assert.equal(cancelledState.armed,false);
+    receipts.push({phase,kind:'rendered-response-cancellation',response:'Genuine owned backend HTTP200 and candidate definition verified before holding delivery',release,bind_dispatches:1,late_binding_restored:false,consents_restored:false,automatic_retry:false,drafts_retained:true,native_definition:'Added before cancellation; removed next by explicit visible control'});
+    await screenshot('02-stop-waiting-late-response');
+    await click('#hooks-definitions .hook-remove');
+    await until("document.querySelectorAll('#hooks-definitions .hook-definition-row').length===0&&!document.querySelector('#candidate-experiment-bind').disabled",'Explicit Remove did not retire the backend-added definition');
+    assert.equal((await quietState()).definitions,0);
     phase='explicit exact-byte bind';await keyboardTo('#candidate-experiment-bind');const bindStartedAt=performance.now();await key('Enter');
     await until("/bound|ready/i.test(document.querySelector('#candidate-experiment-status').textContent)",'Exact byte binding did not finish');
     receipts.push({phase,kind:'binding-roundtrip',measurement:'Native Bind activation to rendered bound status; UI plus backend roundtrip, not pure source-scan time',elapsed_ms:Math.round(performance.now()-bindStartedAt),outcome:'bound'});
@@ -186,23 +271,29 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await until("/POST.*\\/payload.*Capturing/.test(document.querySelector('#hooks-field-status').textContent)",'Explicit value capture did not become ready');
     await click('#hooks-confirm');await click('#hooks-arm');
     await until("/^Armed/.test(document.querySelector('#source-hooks-notice').textContent)&&!document.querySelector('#hooks-disarm').disabled",'Explicit arm did not complete');
-    const chosen=await evaluate("document.querySelector('#candidate-experiment-target').value");
-    const disposable=(await command('Target.getTargets',{},null)).targetInfos.find(t=>t.targetId===chosen);
-    assert(disposable&&disposable.targetId!==original.targetId,'Selected UI target must be a separate disposable page');
-    const disposableSession=(await command('Target.attachToTarget',{targetId:disposable.targetId,flatten:true},null)).sessionId;
-    const requestsBefore=requestReceipts.length;phase='owned disposable page action';await click('#send-page',disposableSession);
+    assert.equal(await evaluate("document.querySelector('#candidate-experiment-target').value"),chosen,'Observation target must remain the explicitly selected page');
+    const stillOwned=(await command('Target.getTargets',{},null)).targetInfos.find(t=>t.targetId===chosen);
+    assert.equal(stillOwned?.url,disposable.url,'Prepared native action belongs to the same disposable document');
+    const requestsBefore=requestReceipts.length;phase='owned disposable page action';
+    await command('Page.bringToFront',{},disposableSession);
+    await command('Input.dispatchMouseEvent',{type:'mousePressed',x:ownedActionPoint.x,y:ownedActionPoint.y,button:'left',clickCount:1},disposableSession);
+    await command('Input.dispatchMouseEvent',{type:'mouseReleased',x:ownedActionPoint.x,y:ownedActionPoint.y,button:'left',clickCount:1},disposableSession);
+    receipts.push({phase,kind:'pointer',selector:'#send-page',target:chosen,guarded_target_evaluation:false});
     await until("/matched baseline/i.test(document.querySelector('#candidate-experiment-status').textContent)",'Owned page action did not yield matched baseline');
+    assert.equal(guardedTargetEvaluations,0,'Guarded baseline target must receive native input only, never test evaluation that changes its script catalog');
+    receipts.push({phase,kind:'guarded-target-integrity',runtime_evaluations_after_binding_preparation:guardedTargetEvaluations});
     assert.equal(requestReceipts.length,requestsBefore+1,'Page button must issue exactly one Page request and no Worker request');
     await screenshot('03-matched-baseline');
     phase='return original evidence';const beforeReturn=await quietState();await keyboardTo('#candidate-experiment-return');await key('Enter');
     await until("!document.querySelector('#screen-field-provenance').hidden&&document.querySelector('#field-provenance-value').textContent.includes('fixture-observed')",'Return did not restore original selected field');
     assert.deepEqual(await quietState(),beforeReturn,'Return restores evidence without implicit capture, arm, target or definition changes');
     await screenshot('04-return-original-field');
-    assert.equal(runtimeErrors.length,0,JSON.stringify(runtimeErrors));
-    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'passed',path:'real backend and installed Chromium native CDP input',phase,receipts,viewports:[[1440,900],[760,560],[360,740]],limitations:['Not native macOS WebKit acceptance.','No A/B/A comparison or persistence.']},null,2));
+    assert.equal(runtimeErrors.length,0,JSON.stringify(runtimeErrors));assert.equal(interceptionErrors.length,0,JSON.stringify(interceptionErrors));
+    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'passed',path:'real backend and installed Chromium native CDP input',phase,receipts,viewports:[[1440,900],[760,560],[360,740]],limitations:['Not native macOS WebKit acceptance.','No A/B/A comparison or persistence.','Return/Close/navigation/source-digest exhaustive late-ack races are controller-only; rendered interruption covers Stop waiting only.']},null,2));
     console.log(`PASS original live-JS to disposable matched-baseline rendered journey; receipts: ${output}`);
   } catch(error) {
+    let backendFailure;try{const snapshot=await fetch(uiURL+'/api/debugger',{signal:AbortSignal.timeout(5000)}).then(r=>r.json());backendFailure={state:snapshot.state,target:snapshot.target,network_capture_enabled:snapshot.network?.capture_enabled,requests:snapshot.network?.requests?.length,hooks_state:snapshot.runtime_hooks?.state};}catch(diagnosticError){backendFailure={error:String(diagnosticError)};}
     try{await screenshot('failure');}catch{}
-    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'failed',phase,error:String(error.stack||error),receipts,runtimeErrors},null,2));throw error;
-  } finally {for(const request of pending.values()){clearTimeout(request.timer);request.reject(Error('Journey closed'));}socket.close();}
+    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'failed',phase,error:String(error.stack||error),receipts,runtimeErrors,commandTrace,backendFailure,mutationRequests,interceptionErrors},null,2));throw error;
+  } finally {if(bindHold){try{await command('Fetch.disable');}catch{}}for(const request of pending.values()){clearTimeout(request.timer);request.reject(Error('Journey closed'));}socket.close();}
 }

@@ -25,6 +25,7 @@
       // Ordinary refresh/navigation keeps file drafts in the owned component.
       // A departing document disposes it; BFCache suspension only retires work.
       window.addEventListener('pagehide', event => {
+        if (typeof retireCandidateExperimentPending === 'function') retireCandidateExperimentPending();
         evidenceWorkspace.setVisible(false);
         if (!event.persisted) evidenceWorkspace.disposeComparison();
       });
@@ -3506,6 +3507,7 @@
       }
 
       function renderRuntimeHooks() {
+        if (typeof renderCandidateExperiment === 'function') renderCandidateExperiment();
         const experiment = requestInterception();
         const objectExperiment = objectExperimentState();
         const hooks = runtimeHooksState();
@@ -3940,7 +3942,7 @@
           [['action_scope'], ['set_action_scope', 'close_experiment_page', 'create_experiment_page']],
           [['experiment'], ['configure_request_interception', 'run_request_interception', 'clear_request_interception_result']],
           [['object_experiment'], ['navigate_object_experiment', 'search_object_experiment', 'mutate_object_experiment']],
-          [['runtime_hooks'], ['add_runtime_hook', 'remove_runtime_hook', 'arm_runtime_hooks', 'disarm_runtime_hooks',
+          [['runtime_hooks'], ['bind_runtime_candidate', 'add_runtime_hook', 'remove_runtime_hook', 'arm_runtime_hooks', 'disarm_runtime_hooks',
             'clear_runtime_hook_hits', 'configure_runtime_field_test', 'compare_runtime_field_test']],
           [['automation_recipes'], ['add_automation_recipe', 'update_automation_recipe', 'remove_automation_recipe',
             'arm_automation_recipes', 'disarm_automation_recipes', 'cancel_automation_recipe', 'clear_automation_runs', 'run_automation_recipe']],
@@ -4505,6 +4507,7 @@
       }
 
       function closeSourceHooks(restoreFocus = true) {
+        if (typeof retireCandidateExperimentPending === 'function') retireCandidateExperimentPending();
         state.sourceHooksOpen = false;
         document.querySelector('#screen-sources').dataset.hooksOpen = 'false';
         elements.hooksHome.after(elements.hooksWorkspace);
@@ -10629,6 +10632,7 @@
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (screenName !== 'tools') float32Panel.cancel();
+        if (typeof retireCandidateExperimentPending === 'function') retireCandidateExperimentPending();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {

@@ -1452,3 +1452,13 @@ folding, BOM/CRLF/astral offsets, empty lines, source ownership, notice exclusio
 repeated inline-script frame locations and unavailable preview locations. Model
 costs are printed for 8 Mi-unit newline-heavy and minified inputs; these are
 measured helper costs, not browser frame-time or process-memory guarantees.
+
+### Original candidate → disposable observation
+
+Field trace's **Test this candidate** carries one bounded original live-JavaScript
+literal into a compact question strip in existing Runtime Hooks. Explicit create,
+open, page/worker choice, binding, capture and arming remain separate controls.
+Binding requires a unique complete UTF-8 digest match and strict synchronous-body
+worker admission, never a copied script ID or URL match. Original evidence remains
+separate and returnable; no field values are saved to the notebook. See the
+[identity, consent, bounds and research contract](../../docs/product/candidate-experiment-v1.md).

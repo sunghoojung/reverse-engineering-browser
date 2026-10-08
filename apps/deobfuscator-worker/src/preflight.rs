@@ -77,6 +77,68 @@ pub fn function_at(source: &str, offset: usize) -> Result<Option<FunctionLocatio
         {
             return Ok(Some(FunctionLocation {
                 kind: kind.to_string(),
+                candidate_eligible: false,
+                start: candidate.start_byte() as u32,
+                end: candidate.end_byte() as u32,
+                body_start: body.start_byte() as u32,
+            }));
+        }
+        node = candidate.parent();
+    }
+    Ok(None)
+}
+
+/// Narrow candidate admission: a literal string inside a synchronous function body.
+/// Comments, parameter defaults, templates, async/generator functions and class
+/// accessors are intentionally not candidate experiments in this version.
+pub fn candidate_function_at(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> Result<Option<FunctionLocation>, &'static str> {
+    let tree = parse_checked(source)?;
+    if start >= end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return Ok(None);
+    }
+    let mut node = tree.root_node().descendant_for_byte_range(start, end);
+    let mut literal = false;
+    while let Some(candidate) = node {
+        let kind = candidate.kind();
+        if matches!(kind, "comment" | "template_string") {
+            return Ok(None);
+        }
+        literal |= kind == "string";
+        if matches!(
+            kind,
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "generator_function_declaration"
+                | "generator_function"
+        ) {
+            let Some(body) = candidate.child_by_field_name("body") else {
+                return Ok(None);
+            };
+            let mut cursor = candidate.walk();
+            let unsupported = candidate
+                .children(&mut cursor)
+                .any(|child| matches!(child.kind(), "async" | "*" | "get" | "set"));
+            if !literal
+                || unsupported
+                || kind.starts_with("generator_")
+                || start < body.start_byte()
+                || end > body.end_byte()
+            {
+                return Ok(None);
+            }
+            return Ok(Some(FunctionLocation {
+                kind: kind.into(),
+                candidate_eligible: true,
                 start: candidate.start_byte() as u32,
                 end: candidate.end_byte() as u32,
                 body_start: body.start_byte() as u32,
@@ -89,6 +151,7 @@ pub fn function_at(source: &str, offset: usize) -> Result<Option<FunctionLocatio
 
 #[derive(Debug, serde::Serialize)]
 pub struct FunctionLocation {
+    pub candidate_eligible: bool,
     pub kind: String,
     pub start: u32,
     pub end: u32,
@@ -250,5 +313,67 @@ mod tests {
             }
             assert!(function_at(source, end).unwrap().is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::candidate_function_at;
+    fn location(source: &str) -> Option<super::FunctionLocation> {
+        let start = source.find("fixture-observed").unwrap();
+        candidate_function_at(source, start, start + "fixture-observed".len()).unwrap()
+    }
+    #[test]
+    fn candidate_requires_literal_inside_declared_synchronous_body() {
+        for source in [
+            "function f(){ return 'fixture-observed'; }",
+            "const f=()=> 'fixture-observed';",
+            "const f=function(){ return 'fixture-observed'; };",
+            "const o={f(){ return 'fixture-observed'; }}",
+        ] {
+            assert!(location(source).unwrap().candidate_eligible, "{source}");
+        }
+        for source in [
+            "function f(){ /* fixture-observed */ return 1; }",
+            "const s='fixture-observed';",
+            "async function f(){return 'fixture-observed';}",
+            "function* f(){return 'fixture-observed';}",
+            "const f=async()=> 'fixture-observed';",
+            "const o={get f(){return 'fixture-observed';}}",
+            "function f(x='fixture-observed'){return x;}",
+            "function f(){return `fixture-observed`;}",
+        ] {
+            assert!(location(source).is_none(), "{source}");
+        }
+        // A synchronous declaration can still return a Promise. Runtime return
+        // eligibility remains separate and must never imply an override works.
+        assert!(location("function f(){ return Promise.resolve('fixture-observed'); }").is_some());
+    }
+    #[test]
+    fn candidate_range_is_exact_utf8_and_never_crosses_literal_boundaries() {
+        let s = "function f(){ return '雪'; }";
+        let start = s.find('雪').unwrap();
+        assert!(
+            candidate_function_at(s, start, start + 3)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            candidate_function_at(s, start + 1, start + 3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            candidate_function_at(s, start, start + 2)
+                .unwrap()
+                .is_none()
+        );
+        assert!(candidate_function_at(s, start, start).unwrap().is_none());
+        assert!(
+            candidate_function_at(s, start, s.len() + 1)
+                .unwrap()
+                .is_none()
+        );
+        assert!(candidate_function_at(s, start, s.len()).unwrap().is_none());
     }
 }

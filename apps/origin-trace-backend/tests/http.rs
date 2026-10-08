@@ -582,10 +582,69 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
     }
     assert_eq!(
         names.len(),
-        59,
+        60,
         "Review debugger action coverage when the dispatcher changes"
     );
     assert_eq!(names, mappings.keys().map(String::as_str).collect());
+    let binding = actions
+        .iter()
+        .find(|action| action["properties"]["action"]["const"] == "bind_runtime_candidate")
+        .unwrap();
+    assert_eq!(
+        binding["x-result-schema"],
+        "#/components/schemas/DebuggerRuntimeHooksResult"
+    );
+    assert_eq!(
+        binding["x-reb-execution"]["effects"],
+        json!(["analysis", "local-state-write"])
+    );
+    assert_eq!(
+        binding["x-reb-execution"]["confirmations"],
+        json!([]),
+        "Binding adds an observation definition; capture and arming remain separate confirmed actions"
+    );
+    assert_eq!(binding["additionalProperties"], false);
+    for field in [
+        "digest_version",
+        "source_sha256",
+        "source_bytes",
+        "start_byte",
+        "end_byte",
+        "target_id",
+        "session_id",
+        "created_at_ms",
+        "navigation_id",
+    ] {
+        assert!(
+            binding["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field)),
+            "Candidate identity field {field} is required"
+        );
+    }
+    for forbidden in [
+        "script_id",
+        "url",
+        "source",
+        "return_value",
+        "selected_value",
+    ] {
+        assert!(
+            binding["properties"].get(forbidden).is_none(),
+            "Candidate handoff must not carry original IDs, source text, values or overrides"
+        );
+    }
+    let existing = actions
+        .iter()
+        .find(|action| action["properties"]["action"]["const"] == "add_runtime_hook")
+        .unwrap();
+    assert_eq!(
+        existing["required"],
+        json!(["action", "label", "script_id", "line"]),
+        "Existing hook callers keep their original envelope"
+    );
+
     let empty: Value = serde_json::from_str(include_str!("../assets/debugger-empty.json")).unwrap();
     // These two actions return state, unlike the generic acknowledgement.
     // The clear action is also exercised through live HTTP below; stopping an
@@ -728,7 +787,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             action_count += 1;
         }
     }
-    assert_eq!(action_count, 74);
+    assert_eq!(action_count, 75);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -790,7 +849,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             "Dispatch coverage: {name}"
         );
     }
-    assert_eq!(action_names("DebuggerAction").len(), 59);
+    assert_eq!(action_names("DebuggerAction").len(), 60);
     for (name, source, pattern) in [
         (
             "NativeConsoleAction",

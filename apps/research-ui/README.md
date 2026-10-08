@@ -520,7 +520,9 @@ CI job runs a relocated packaged app with synthetic workspaces through actual
 window close, application Quit, Stay by Return/Escape, explicit Close Anyway,
 save/pending states, coalesced requests, unavailable/untrusted documents, actual
 navigation, and injected stale/timeout replies. It verifies draft/owner retention
-and the expected warning before shutdown. The `--contract-only` mode checks build
+and the expected warning before shutdown. Quit scenarios enqueue Command-Q through
+AppKit so repeated requests follow the native event loop after a cancelled quit,
+rather than reentering `terminate` from a WebKit callback. The `--contract-only` mode checks build
 wiring only and is not evidence of native lifecycle behavior.
 
 

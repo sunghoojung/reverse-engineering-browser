@@ -118,7 +118,19 @@ final class NativeCloseGuardSmoke {
       window.performClose(nil)
       NSApp.terminate(nil)
     } else if scenario.hasSuffix("-quit") {
-      NSApp.terminate(nil)
+      // A user Quit arrives through AppKit's event queue. Calling terminate
+      // reentrantly from a WK callback after Stay can precede cancellation of
+      // the previous terminateLater request and bypass the next delegate query.
+      for type in [NSEvent.EventType.keyDown, .keyUp] {
+        guard let event = NSEvent.keyEvent(
+          with: type, location: .zero, modifierFlags: [.command],
+          timestamp: ProcessInfo.processInfo.systemUptime,
+          windowNumber: window.windowNumber, context: nil,
+          characters: "q", charactersIgnoringModifiers: "q",
+          isARepeat: false, keyCode: 12
+        ) else { fail("could not create Quit keyboard event"); return }
+        NSApp.postEvent(event, atStart: false)
+      }
     } else {
       window.performClose(nil)
     }

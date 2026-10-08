@@ -3656,3 +3656,11 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .traffic-comparison :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .traffic-comparison-identities > summary { cursor: pointer; padding: 4px 0; color: var(--text); }
+
+/* Keep phone navigation at its existing two rows instead of consuming evidence space. */
+.notebook-trigger-icon { display: none; width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+@media (max-width: 480px) {
+  #open-investigation-notebook { width: 27px; height: 27px; min-width: 27px; padding: 3px; }
+  .notebook-trigger-label { display: none; }
+  .notebook-trigger-icon { display: block; }
+}

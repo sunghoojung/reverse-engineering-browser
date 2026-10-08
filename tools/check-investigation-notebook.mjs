@@ -180,6 +180,8 @@ export async function checkNotebookInteractions({evaluate, viewport, click, key,
   await click('[data-screen="sources"]'); await click('[data-artifact-id="7"]');
   await until("selectedSource()?.content!==undefined");
   await click('#source-facts-toggle'); await until("document.querySelectorAll('#source-facts-report .source-fact').length>0");
+  const sourceDelta = await evaluate(`(()=>{const n=document.querySelector('.source-fact > button'),p=n.closest('#source-sidebar .debug-panes'),r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return r.top<b.top?r.top-b.top:r.bottom>b.bottom?r.bottom-b.bottom:0})()`);
+  if (sourceDelta) await wheel('#source-sidebar .debug-panes', sourceDelta + Math.sign(sourceDelta) * 8, 'edge');
   await click('.source-fact > button'); await until("investigationRange!==null && !document.querySelector('#investigation-decode-range').disabled");
   const pinnedRange = await evaluate('({start:investigationRange.start,end:investigationRange.end})');
   const actionBaseline = fixture.calls.filter(call => call.method === 'POST').length;
@@ -261,7 +263,9 @@ export async function checkNotebookInteractions({evaluate, viewport, click, key,
   assert.equal(await evaluate('state.consoleOpen'), consoleOpen, 'Escape closes notebook rather than toggling Sources console');
   assert.equal(await evaluate('window.notebookShortcutLeaks'),0,'Modal keys never reach background document handlers, even with an offline debugger');
   for (const size of [[760, 560], [360, 740]]) {
-    await viewport(...size); await opened(); await hit('#notebook-pin-1'); await geometry(`notebook ${size[0]}`);
+    await viewport(...size);
+    if(size[0]===360) assert(await evaluate("document.querySelector('.toolbar').getBoundingClientRect().height<=62"),'Notebook trigger must not add a third phone navigation row');
+    await opened(); await hit('#notebook-pin-1'); await geometry(`notebook ${size[0]}`);
     await screenshot(`notebook-${size[0]}-notes`);
     await hit('#notebook-pin-note'); await key('End', 'End', {windowsVirtualKeyCode: 35}); await typeText(' Keyboard edit.');
     await hit('#notebook-save'); await saved(2); await geometry(`saved ${size[0]}`); await screenshot(`notebook-${size[0]}-saved`);

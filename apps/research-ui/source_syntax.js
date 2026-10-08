@@ -18,6 +18,119 @@
         return {matches, truncated: false};
       }
 
+      // One selected document owns this sparse index. No array is allocated per
+      // newline, and excerpts never normalize CRLF, BOMs or UTF-16 positions.
+      const SOURCE_DOCUMENT_LIMIT = 8 * 1024 * 1024;
+      const SOURCE_WINDOW_LINES = 1000;
+      const SOURCE_WINDOW_COLUMN_LIMIT = 16384;
+      const SOURCE_WINDOW_OTHER_COLUMNS = 512;
+      function sourceDocumentIndex(text) {
+        const length = Math.min(text.length, SOURCE_DOCUMENT_LIMIT);
+        const anchors = [0];
+        let lineCount = 1;
+        for (let offset = text.indexOf('\n'); offset >= 0 && offset < length; offset = text.indexOf('\n', offset + 1)) {
+          if (lineCount % 128 === 0) anchors.push(offset + 1);
+          lineCount++;
+        }
+        return {text, length, anchors, lineCount, complete: length === text.length};
+      }
+      function sourceDocumentOffset(index, line) {
+        if (!Number.isSafeInteger(line) || line < 0 || line >= index.lineCount) return null;
+        let current = Math.floor(line / 128) * 128;
+        let offset = index.anchors[Math.floor(line / 128)];
+        while (current++ < line) offset = index.text.indexOf('\n', offset) + 1;
+        return offset;
+      }
+      function sourceDocumentPosition(index, offset) {
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > index.length) return null;
+        let low = 0, high = index.anchors.length - 1;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          if (index.anchors[middle] <= offset) low = middle; else high = middle - 1;
+        }
+        let start = index.anchors[low], line = low * 128;
+        for (let next = index.text.indexOf('\n', start); next >= 0 && next < offset; next = index.text.indexOf('\n', start)) {
+          start = next + 1; line++;
+        }
+        return {line, column: offset - start};
+      }
+      function sourceDocumentLine(index, line) {
+        const start = sourceDocumentOffset(index, line);
+        if (start === null) return null;
+        const newline = index.text.indexOf('\n', start);
+        const end = newline < 0 ? index.length : Math.min(newline, index.length);
+        return {start, end, length: end - start};
+      }
+      function sourceDocumentMatches(index, query, limit = 1000, acceptLine = null) {
+        const matches = [];
+        if (!query) return {matches, truncated: false, error: ''};
+        if (query.length > 512) return {matches, truncated: false, error: 'Find accepts at most 512 UTF-16 code units.'};
+        if (/[\r\n\u2028\u2029]/u.test(query)) return {matches, truncated: false, error: 'Find uses a single-line literal; line separators are not supported.'};
+        const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(escaped, 'giu');
+        // Accepted representation bounds normally make this a shared string;
+        // an oversized defensive input is explicitly a searched prefix.
+        const text = index.complete ? index.text : index.text.slice(0, index.length);
+        let match, line = 0, lineStart = 0, newline = text.indexOf('\n');
+        while ((match = pattern.exec(text)) !== null) {
+          while (newline >= 0 && newline < match.index) {line++; lineStart = newline + 1; newline = text.indexOf('\n', lineStart);}
+          if (acceptLine && !acceptLine(line)) continue;
+          if (matches.length === limit) return {matches, truncated: true, error: ''};
+          matches.push({line, column: match.index - lineStart, offset: match.index, length: match[0].length});
+        }
+        return {matches, truncated: false, error: ''};
+      }
+      function sourceDocumentExcerpt(index, line, column = 0, maximum = SOURCE_WINDOW_OTHER_COLUMNS) {
+        const bounds = sourceDocumentLine(index, line);
+        if (!bounds) return null;
+        const requested = Math.max(0, Math.min(bounds.length, Number.isSafeInteger(column) ? column : 0));
+        let start = Math.max(0, Math.min(bounds.length - maximum, requested - Math.floor(maximum / 4)));
+        let end = Math.min(bounds.length, start + maximum);
+        // Never split a scalar at a visual-window boundary. Absolute positions
+        // stay in UTF-16; exact evidence byte ranges remain separately verified.
+        const low = at => {const code = index.text.charCodeAt(bounds.start + at); return code >= 0xdc00 && code <= 0xdfff;};
+        if (start && low(start)) start--;
+        if (end < bounds.length && low(end)) end--;
+        return {line, offset: bounds.start, columnStart: start, columnEnd: end, fullLength: bounds.length,
+          text: index.text.slice(bounds.start + start, bounds.start + end)};
+      }
+      function sourceDocumentWindow(index, line = 0, column = 0) {
+        const target = Math.max(0, Math.min(index.lineCount - 1, Number.isSafeInteger(line) ? line : 0));
+        column = Math.max(0, Math.min(sourceDocumentLine(index, target).length, Number.isSafeInteger(column) ? column : 0));
+        const start = Math.floor(target / SOURCE_WINDOW_LINES) * SOURCE_WINDOW_LINES;
+        const end = Math.min(index.lineCount, start + SOURCE_WINDOW_LINES);
+        const rows = [];
+        for (let at = start; at < end; at++) rows.push(sourceDocumentExcerpt(index, at, at === target ? column : 0,
+          at === target ? SOURCE_WINDOW_COLUMN_LIMIT : SOURCE_WINDOW_OTHER_COLUMNS));
+        return {start, end, line: target, column, rows};
+      }
+
+      // Map only mounted lines. Normalized segment arrays and sparse source
+      // indices belong to the one editor owner, not every refresh or Find step.
+      function sourceWindowMapping(original, active, derived, formatted) {
+        if (!derived && !formatted) return null;
+        const originalIndex = sourceDocumentIndex(original);
+        const activeIndex = sourceDocumentIndex(active);
+        const derivedSegments = derived ? sourceSegmentsUTF16(original, active, derived.segments ?? [], derived.offset_unit) : null;
+        const formattedSegments = formatted ? sourceSegmentsUTF16(active, formatted.text, formatted.segments ?? [], formatted.offset_unit) : null;
+        const firstMapped = (segments, start, end) => {
+          let low = 0, high = segments.length;
+          while (low < high) {const middle = (low + high) >> 1; if (segments[middle].derived_end <= start) low = middle + 1; else high = middle;}
+          for (let at = low; at < segments.length && segments[at].derived_start <= end; at++) {
+            const value = derivedOriginalOffset(segments, Math.max(start, segments[at].derived_start));
+            if (value !== null) return value;
+          }
+          return null;
+        };
+        return rows => rows.map(row => {
+          let offset = formattedSegments ? firstMapped(formattedSegments, row.offset, row.offset + row.fullLength)
+            : firstMapped(derivedSegments, row.offset, row.offset + row.fullLength);
+          if (formattedSegments && derivedSegments && offset !== null) offset = derivedOriginalOffset(derivedSegments, offset);
+          const position = offset === null ? null : sourceDocumentPosition(derived ? originalIndex : activeIndex, offset);
+          return {originalLine: position?.line ?? null, originalColumn: position?.column ?? null};
+        });
+      }
+
       function sourceName(source) {
         if (!source.url) return source.source_type === 'script' ? `(anonymous ${source.script_id})` : `artifact-${source.artifact_id}`;
         try {

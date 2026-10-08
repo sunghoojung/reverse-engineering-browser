@@ -3496,7 +3496,7 @@
         }
         showScreen('sources');
         if (!state.sourceHooksOpen) openSourceHooks(false, false);
-        if (selectScript(source.script_id, hit.line) === false) return;
+        if (selectScript(source.script_id, hit.line, hit.column) === false) return;
         if (!setSourceCursor(source, hit.line, hit.column)) return;
         elements.sourcePosition.textContent = `Line ${hit.line + 1}, Column ${hit.column + 1}`;
         const identity = sourceIdentity(source);
@@ -7059,6 +7059,12 @@
             sourceIdentity(selectedSource()) !== sourceIdentity(source) ||
             state.sourceDeobfuscated || state.sourceFormatted || state.sourceWasm ||
             !Number.isSafeInteger(line) || line < 0 || !Number.isSafeInteger(column) || column < 0) return false;
+        const editor = state.sourceEditorView;
+        if (editor?.identity === sourceIdentity(source) && !editor.view.derived && !editor.view.formatted) {
+          const local = line - (source.start_line ?? 0), bounds = sourceDocumentLine(editor.index, local);
+          const localColumn = column - sourceRuntimeColumn(source, local);
+          if (!bounds || localColumn < 0 || localColumn > bounds.length) return false;
+        }
         state.sourceCursor = {identity: sourceIdentity(source), representation: 'original', scriptId: source.script_id, line, column};
         return true;
       }
@@ -7094,7 +7100,7 @@
           }
         } else if (preview) {
           preview.controller?.abort();
-          for (const field of ['content', 'contentTruncated', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
+          for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
         }
         for (const cache of [state.deobfuscationRequests, state.deobfuscationCache, state.sourceFormatCache]) {
           for (const [key, value] of cache ?? []) {
@@ -7485,46 +7491,121 @@
         return null;
       }
 
-      function applySourceSearch(reset = true, direction = 0) {
+      function applySourceSearch(reset = true, direction = 0, {reveal = true} = {}) {
         const query = elements.sourceSearch.value;
-        const rows = [...elements.sourceCode.querySelectorAll('.source-line[data-line]')];
-        const {matches, truncated} = findSourceOccurrences(rows.map(row => row.querySelector('.source-text').textContent), query);
+        let editor = state.sourceEditorView;
         const source = selectedSource();
-        const cursor = sourceCursorFor(source);
-        const matchingLines = new Set(matches.map(match => match.line));
-        rows.forEach((row, index) => row.classList.toggle('search-match', matchingLines.has(index)));
+        const status = message => {if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = message;};
         globalThis.CSS?.highlights?.delete('source-search-match');
-        if (!query || !matches.length) {
+        if (!editor || editor.identity !== sourceIdentity(source) || elements.sourceCode.hidden) {
           state.sourceSearchIndex = 0;
-          elements.sourcePosition.textContent = query ? '0 matches' : `Line ${(cursor?.line ?? source?.start_line ?? 0) + 1}, Column ${(cursor?.column ?? sourceRuntimeColumn(source, 0)) + 1}`;
+          if (query) elements.sourcePosition.textContent = 'Source text unavailable; nothing searched.';
+          status('Load or explicitly retry this source to search its retained text.');
+          return;
+        }
+        const coverage = editor.view.searchCoverage ?? 'Retained source text';
+        const incomplete = Boolean(editor.view.searchIncomplete || !editor.index.complete);
+        if (!query) {
+          state.sourceSearchIndex = 0;
+          elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', false));
+          const cursor = sourceCursorFor(source);
+          elements.sourcePosition.textContent = `Line ${(cursor?.line ?? sourceRuntimeLine(source, editor.window.line)) + 1}, Column ${(cursor?.column ?? editor.window.column) + 1}`;
+          status(`${coverage}. Find is a case-insensitive, single-line literal; no source is fetched.`);
+          return;
+        }
+        if (editor.search?.query !== query) {
+          editor.search = {query, ...sourceDocumentMatches(editor.index, query, 1000,
+            editor.view.wasmRows ? line => editor.view.wasmRows[line]?.byte_offset != null : null)};
+        }
+        const {matches, truncated, error} = editor.search;
+        if (error) {elements.sourcePosition.textContent = error; status(coverage); return;}
+        const matchingLines = new Set(matches.map(match => match.line));
+        const highlightRows = () => elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row =>
+          row.classList.toggle('search-match', matchingLines.has(Number(row.dataset.localLine))));
+        if (!matches.length) {
+          state.sourceSearchIndex = 0; highlightRows();
+          elements.sourcePosition.textContent = editor.view.wasmRows ? `0 matches in retained inspection rows; original module bytes were not searched.${incomplete ? ' Inspection coverage is incomplete.' : ''}`
+            : incomplete ? '0 matches in the searched display; source coverage is incomplete.' : '0 matches in complete retained text.';
+          status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
           return;
         }
         state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
         const match = matches[state.sourceSearchIndex];
-        const row = rows[match.line];
-        const line = Number(row.dataset.line) - 1;
-        const transformed = state.sourceDeobfuscated || state.sourceFormatted;
-        const column = match.column + (transformed ? 0 : sourceRuntimeColumn(source, match.line));
-        if (source?.source_type === 'script' && !transformed) {
-          setSourceCursor(source, line, column);
-          rows.forEach(candidate => candidate.classList.toggle('cursor', candidate === row));
+        if (reveal) {
+          // Mount only the matched line/column window. Never enter the full
+          // Sources route, which can start explicitly selected analysis.
+          renderSourceContent(source, editor.view, {line: match.line, column: match.column, search: false});
+          editor = state.sourceEditorView;
         }
-        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · Line ${line + 1}, Column ${column + 1}`;
-        const range = sourceOccurrenceRange(row.querySelector('.source-text'), match);
+        highlightRows();
+        const row = elements.sourceCode.querySelector(`[data-local-line="${match.line}"]`);
+        const transformed = state.sourceDeobfuscated || state.sourceFormatted;
+        const line = sourceRuntimeLine(source, match.line);
+        const column = match.column + (transformed ? 0 : sourceRuntimeColumn(source, match.line));
+        if (reveal && source.source_type === 'script' && !transformed) {setSourceCursor(source, line, column); updateSourceDecorations();}
+        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? 'Inspection row' : 'Line'} ${line + 1}, Column ${column + 1}`;
+        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
+        if (!row) return;
+        const localColumn = match.column - Number(row.dataset.columnStart ?? 0);
+        if (localColumn < 0 || localColumn + match.length > row.querySelector('.source-text').textContent.length) return;
+        const range = sourceOccurrenceRange(row.querySelector('.source-text'), {...match, column: localColumn});
         if (!range) return;
         if (globalThis.Highlight && globalThis.CSS?.highlights) CSS.highlights.set('source-search-match', new Highlight(range));
+        if (!reveal) return;
         const rect = range.getBoundingClientRect();
         const viewport = elements.sourceCodeWrap.getBoundingClientRect();
         elements.sourceCodeWrap.scrollLeft += rect.left - viewport.left - Math.min(120, viewport.width / 4);
         elements.sourceCodeWrap.scrollTop += rect.top - viewport.top - viewport.height / 2;
       }
 
+      function revealSourceColumn(row, column, focus = false) {
+        if (!row) return;
+        if (focus) {row.tabIndex = -1; row.focus({preventScroll: true});}
+        row.scrollIntoView({block: 'center', inline: 'nearest'});
+        const text = row.querySelector('.source-text');
+        if (!text?.textContent.length) return;
+        const offset = column - Number(row.dataset.columnStart ?? 0);
+        if (offset < 0 || offset > text.textContent.length) return;
+        // The final column is an empty caret after the last scalar. Reveal its
+        // neighboring glyph without changing the requested absolute location.
+        const visible = Math.min(offset, text.textContent.length - 1);
+        const range = sourceOccurrenceRange(text, {column: visible, length: 1});
+        if (!range) return;
+        const bounds = range.getBoundingClientRect(), viewport = elements.sourceCodeWrap.getBoundingClientRect();
+        elements.sourceCodeWrap.scrollLeft += bounds.left - viewport.left - Math.min(120, viewport.width / 4);
+      }
+
+      function renderSourceWindowControls(editor = state.sourceEditorView) {
+        if (!elements.sourceWindow) return;
+        elements.sourceWindow.hidden = !editor;
+        if (!editor) return;
+        const {window: window, index} = editor;
+        elements.sourceWindowLabel.textContent = `Lines ${window.start + 1}–${window.end} of ${index.lineCount}${index.complete ? '' : '+'}`;
+        elements.sourceWindowPrevious.disabled = window.start === 0;
+        elements.sourceWindowNext.disabled = window.end === index.lineCount;
+        if (document.activeElement !== elements.sourceWindowLine) elements.sourceWindowLine.value = String(window.line + 1);
+        if (document.activeElement !== elements.sourceWindowColumn) elements.sourceWindowColumn.value = String(Math.max(0, window.column) + 1);
+        elements.sourceWindowLine.max = String(index.lineCount);
+      }
+
+      function moveSourceWindow(line, column = 0) {
+        const editor = state.sourceEditorView, source = selectedSource();
+        if (!editor || editor.identity !== sourceIdentity(source) || !Number.isSafeInteger(line) || line < 0 || line >= editor.index.lineCount ||
+            !Number.isSafeInteger(column) || column < 0 || column > (sourceDocumentLine(editor.index, line)?.length ?? 0)) return false;
+        renderSourceContent(source, editor.view, {line, column, search: false});
+        applySourceSearch(false, 0, {reveal: false});
+        elements.sourcePosition.textContent = `Line ${sourceRuntimeLine(source, line) + 1}, Column ${column + 1} · Retained display location`;
+        const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
+        revealSourceColumn(row, column, true);
+        return true;
+      }
+
       function sourceRuntimeLine(source, sourceLine) {
-        return source?.source_type === 'script' ? source.start_line + sourceLine : sourceLine;
+        return source?.source_type === 'script' ? (source.start_line ?? 0) + sourceLine : sourceLine;
       }
 
       function sourceRuntimeColumn(source, sourceLine) {
-        return source?.source_type === 'script' && sourceLine === 0 ? source.start_column : 0;
+        return source?.source_type === 'script' && sourceLine === 0 ? source.start_column ?? 0 : 0;
       }
 
       function sourceClickColumn(line, event) {
@@ -7579,10 +7660,13 @@
           if (report) {
             const headings = ['Static inspection. The module is never executed.', `${report.status === 'partial' ? 'Partial' : 'Decoded'} · ${report.sections} sections · ${report.imported_functions} imported · ${report.defined_functions} defined · ${report.instructions} instructions`, ...report.omissions];
             const rows = [...headings.map(text => ({text, byte_offset: null})), ...report.rows];
-            return {content: rows.map(row => row.byte_offset === null ? `;; ${row.text}` : `${row.kind === 'instruction' ? `func ${row.function_index}`.padEnd(11) : row.kind.padEnd(11)} ${row.text}`).join('\n'), lineMap: null, wasmRows: rows};
+            return {content: rows.map(row => row.byte_offset === null ? `;; ${row.text}` : `${row.kind === 'instruction' ? `func ${row.function_index}`.padEnd(11) : row.kind.padEnd(11)} ${row.text}`).join('\n'), lineMap: null, wasmRows: rows,
+              searchCoverage: 'Retained static inspection rows with original byte offsets; headings and omissions excluded; not original source text', searchIncomplete: report.status === 'partial'};
           }
         }
-        const original = sourceFactsPanel.original(source) ?? source.content ?? '';
+        const verifiedOriginal = sourceFactsPanel.original(source);
+        const preview = source.content ?? '';
+        const original = verifiedOriginal ?? (Number.isSafeInteger(source.sourceTextLength) ? preview.slice(0, source.sourceTextLength) : preview);
         const derived = state.sourceDeobfuscated && source.kind === 'javascript' ? sourceDerivedView(source) : null;
         const active = derived?.text ?? original;
         const formatResult = state.sourceFormatted
@@ -7596,7 +7680,14 @@
           formatted,
           formatError: formatResult?.error ?? null,
           content: formatted?.text ?? active,
-          lineMap: sourceRepresentationLineMap(derived ? source.deobfuscation.original_source : original, active, derived, formatted)
+          mapOriginal: derived ? source.deobfuscation.original_source : original,
+          sourceVersion: derived ? source.deobfuscation.sourceWindowVersion : null,
+          searchIncomplete: verifiedOriginal === undefined && !derived && Boolean(source.contentTruncated || source.contentLossy),
+          searchCoverage: derived ? 'Complete retained derived text; transformation coverage is separate'
+            : verifiedOriginal !== undefined ? 'Complete hash-verified original text'
+              : source.contentLossy ? 'Lossy retained display only; absence in original bytes is unproven'
+                : source.contentTruncated ? 'Retained prefix only; the rest of the source was not searched'
+                  : 'Complete retained source text'
         };
       }
 
@@ -7607,9 +7698,10 @@
         else loadArtifactContent(state.artifacts.find(value => sourceIdentity(value) === identity), {retry: true});
       }
 
-      function renderSourceContent(source, view = null) {
+      function renderSourceContent(source, view = null, target = {}) {
         const identity = sourceIdentity(source);
-        const resetEditor = () => {state.sourceEditorView = null; elements.sourceCode.replaceChildren();};
+        const resetEditor = () => {state.sourceEditorView = null; elements.sourceCode.replaceChildren(); renderSourceWindowControls(null);
+          if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = 'Source text unavailable; nothing searched.';};
         if (!source) {
           resetEditor();
           elements.sourceLanguage.textContent = 'Plain text';
@@ -7662,33 +7754,62 @@
         view ??= sourceDisplayView(source);
         const content = view.content;
         const representation = JSON.stringify([identity, state.sourceWasm, state.sourceDeobfuscated, state.sourceFormatted,
-          state.sourceDeobfuscated ? deobfuscationKey(source) : null, state.pendingSourceLine?.identity, state.pendingSourceLine?.line]);
+          state.sourceDeobfuscated ? deobfuscationKey(source) : null]);
         const mapping = view.wasmRows ? state.wasmCache.get(wasmKey(source)) : view.derived ?? null;
         const formatting = view.formatted ?? null;
         const previous = state.sourceEditorView;
-        if (previous?.representation === representation && previous.content === content && previous.mapping === mapping && previous.formatting === formatting) {
-          updateSourceDecorations();
+        const sameDocument = previous?.representation === representation && previous.content === content && previous.mapping === mapping && previous.formatting === formatting;
+        const index = sameDocument ? previous.index : sourceDocumentIndex(content);
+        const savedWindow = state.sourceWindow?.identity === identity && state.sourceWindow.representation === representation ? state.sourceWindow : null;
+        const pendingLine = !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity
+          ? state.pendingSourceLine.line - (source.source_type === 'script' ? source.start_line ?? 0 : 0) : null;
+        const pendingKey = pendingLine === null ? null : `${identity}:${state.pendingSourceLine.line}:${state.pendingSourceLine.column ?? 0}:${state.pendingSourceLine.revision ?? 0}`;
+        const requestedLine = target.line ?? (pendingKey && pendingKey !== previous?.pendingKey ? pendingLine : savedWindow?.line ?? 0);
+        const pendingColumn = pendingKey && pendingKey !== previous?.pendingKey ? Math.max(0, (state.pendingSourceLine.column ?? 0) - sourceRuntimeColumn(source, pendingLine)) : null;
+        const requestedColumn = target.column ?? pendingColumn ?? savedWindow?.column ?? 0;
+        const clampedLine = Math.max(0, Math.min(index.lineCount - 1, Number.isSafeInteger(requestedLine) ? requestedLine : 0));
+        const window = sameDocument && previous.window.line === clampedLine && previous.window.column === requestedColumn
+          ? previous.window : sourceDocumentWindow(index, clampedLine, requestedColumn);
+        state.sourceWindow = {identity, representation, line: window.line, column: window.column};
+        const requestedUnavailable = requestedLine !== window.line || requestedColumn !== window.column;
+        const newPending = Boolean(pendingKey && pendingKey !== previous?.pendingKey && target.line === undefined);
+        const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column;
+        if (sameWindow) {
+          const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
+          previous.pendingKey = pendingKey;
+          previous.view = view;
+          updateSourceDecorations(); renderSourceWindowControls(previous);
+          if (coverageChanged && target.search !== false) applySourceSearch(false, 0, {reveal: false});
+          if (newPending) revealSourceColumn(elements.sourceCode.querySelector('.source-line.current'), window.column);
+          if (newPending && requestedUnavailable) elements.sourcePosition.textContent = 'Requested live location lies outside retained text; the available preview remains visible.';
           return;
         }
         elements.sourceCodeEmpty.replaceChildren();
-        const sameOwner = previous?.identity === identity && previous.representation === representation && previous.mapping === mapping && previous.formatting === formatting;
+        const sameOwner = sameDocument && previous.window.start === window.start;
         const scroll = {top: elements.sourceCodeWrap.scrollTop, left: elements.sourceCodeWrap.scrollLeft};
         const focused = elements.sourceCode.contains(document.activeElement)
           ? {line: document.activeElement.closest('.source-line')?.dataset.line, gutter: document.activeElement.classList.contains('source-gutter')} : null;
-        state.sourceEditorView = {identity, representation, content, mapping, formatting};
+        const mappingContext = sameDocument ? previous.mappingContext : view.lineMap ? null : sourceWindowMapping(view.mapOriginal ?? '', view.active ?? '', view.derived, view.formatted);
+        const mappedLines = mappingContext?.(window.rows);
+        if (!sameDocument) state.sourceSearchIndex = 0;
+        state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext,
+          pendingKey, search: sameDocument ? previous.search : null};
         const lineMap = view.lineMap;
-        const lines = content.split('\n');
-        const renderedLines = lines.slice(0, 20000);
         const breakpointsByLine = breakpointLinesForSource(source);
-        const tokenizer = createSourceTokenizer(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source);
+        // Later/column-clipped windows cannot assume the lexical state of an omitted prefix.
+        const plainWindow = window.start > 0 || window.rows.some(row => row.columnStart > 0 || row.columnEnd < row.fullLength);
+        const tokenizer = createSourceTokenizer(view.wasmRows || plainWindow ? {kind: 'plain', mime_type: 'text/plain'} : source);
         const cursor = sourceCursorFor(source);
-        const nodes = renderedLines.map((line, index) => {
+        const nodes = window.rows.map((excerpt, rowIndex) => {
+          const {text: line, line: index} = excerpt;
           const runtimeLine = sourceRuntimeLine(source, index);
-          const mapped = lineMap ? lineMap[index] ?? null : null;
+          const mapped = lineMap ? lineMap[index] ?? null : mappedLines?.[rowIndex] ?? null;
           const mappedLine = mapped?.originalLine ?? null;
           const row = document.createElement('span');
           row.className = 'source-line';
           row.dataset.line = String(runtimeLine + 1);
+          row.dataset.localLine = String(index);
+          row.dataset.columnStart = String(excerpt.columnStart);
           const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
           if (breakpoint) row.classList.add('breakpoint');
           if (source.source_type === 'script' && !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity && state.pendingSourceLine.line === runtimeLine) {
@@ -7725,29 +7846,26 @@
               if (offset == null) return;
               state.sourceWasm = false;
               renderSources();
-              const hexRow = elements.sourceCode.children[Math.floor(offset / 16)];
+              moveSourceWindow(Math.floor(offset / 16));
+              const hexRow = elements.sourceCode.querySelector(`[data-local-line="${Math.floor(offset / 16)}"]`);
               if (hexRow) { hexRow.tabIndex = -1; hexRow.focus({preventScroll: true}); hexRow.scrollIntoView({block: 'center'}); }
             });
           }
           const text = document.createElement('span');
           text.className = 'source-text';
-          appendSourceSyntax(text, sourceSyntaxTokens(line, tokenizer));
-          row.append(gutter, text);
+          appendSourceSyntax(text, line ? sourceSyntaxTokens(line, tokenizer) : []);
+          const displayed = document.createElement('span'); displayed.className = 'source-excerpt';
+          if (excerpt.columnStart) displayed.append(textElement('span', 'source-excerpt-notice', `⟪ columns 1–${excerpt.columnStart} omitted ⟫ `));
+          displayed.append(text);
+          if (excerpt.columnEnd < excerpt.fullLength) displayed.append(textElement('span', 'source-excerpt-notice', ` ⟪ columns ${excerpt.columnEnd + 1}–${excerpt.fullLength} omitted; use Find or Go to column ⟫`));
+          row.append(gutter, displayed);
           return row;
         });
-        if (lines.length > renderedLines.length) {
-          const notice = document.createElement('span');
-          notice.className = 'source-line';
-          const gutter = document.createElement('button'); gutter.type = 'button'; gutter.className = 'source-gutter'; gutter.disabled = true; gutter.textContent = '…';
-          const text = document.createElement('span'); text.className = 'source-text';
-          text.textContent = `Viewer limit reached. ${lines.length - renderedLines.length} more lines remain in the source.`;
-          notice.append(gutter, text);
-          nodes.push(notice);
-        }
         elements.sourceCode.replaceChildren(...nodes);
-        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets' : `${sourceSyntaxLabel(tokenizer.language)}${tokenizer.truncated ? ' · color limit reached' : ''}`;
+        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets' : `${sourceSyntaxLabel(tokenizer.language)}${plainWindow ? ' · bounded excerpt; omitted lexical context' : tokenizer.truncated ? ' · color limit reached' : ''}`;
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
+        renderSourceWindowControls();
         if (sameOwner) {
           elements.sourceCodeWrap.scrollTop = scroll.top;
           elements.sourceCodeWrap.scrollLeft = scroll.left;
@@ -7757,9 +7875,10 @@
         } else {
           elements.sourceCodeWrap.scrollTop = 0;
           elements.sourceCodeWrap.scrollLeft = 0;
-          applySourceSearch();
-          elements.sourceCode.querySelector('.source-line.current')?.scrollIntoView({block: 'center'});
+          if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
         }
+        if (newPending) revealSourceColumn(elements.sourceCode.querySelector('.source-line.current'), window.column);
+        if (newPending && requestedUnavailable) elements.sourcePosition.textContent = 'Requested live location lies outside retained text; the available preview remains visible.';
       }
 
       function updateSourceDecorations() {
@@ -7774,12 +7893,14 @@
           const current = !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity && state.pendingSourceLine.line === runtimeLine;
           row.classList.toggle('breakpoint', Boolean(breakpoint));
           row.classList.toggle('current', current);
+          row.classList.toggle('cursor', sourceCursorFor(source)?.line === runtimeLine);
           const gutter = row.querySelector('.source-gutter');
           if (!gutter) return;
           gutter.disabled = !enabled;
           gutter.setAttribute('aria-label', `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`);
         });
-        elements.sourceCode.querySelector('.source-line.current')?.scrollIntoView({ block: 'center' });
+        // Explicit pause/reveal changes choose their window while rendering.
+        // Ordinary debugger refresh must not pull a Find result back to a frame.
       }
 
       function renderSources() {
@@ -7801,6 +7922,14 @@
         elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
         elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
+        syncSourceDisplayControls(source, view);
+        renderSourceContent(source, view);
+        if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
+        renderDeobfuscationReport(source);
+        resumeInvestigationReturn();
+      }
+
+      function syncSourceDisplayControls(source, view) {
         elements.sourceViewKind.textContent = sourceViewLabel(source, view);
         elements.sourceWasm.hidden = source?.kind !== 'wasm' || source?.source_type !== 'artifact';
         elements.sourceWasm.setAttribute('aria-pressed', String(state.sourceWasm));
@@ -7817,10 +7946,6 @@
         elements.sourceDeob.title = state.sourceDeobfuscated ? 'Show original evidence' : 'Show deobfuscated representation';
         elements.sourceHookPivot.disabled = !['running', 'paused'].includes(state.debuggerSession?.state);
         elements.sourceHookPivot.setAttribute('aria-expanded', String(state.sourceHooksOpen));
-        renderSourceContent(source, view);
-        if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
-        renderDeobfuscationReport(source);
-        resumeInvestigationReturn();
       }
 
       function sourceViewLabel(source, view = null) {
@@ -7857,13 +7982,16 @@
         if (source.source_type === 'script') {
           setSourceCursor(source, sourceRuntimeLine(source, line), (column ?? 0) + sourceRuntimeColumn(source, line));
         }
-        renderSources();
+        const view = sourceDisplayView(source);
+        renderSourceContent(source, view, {line, column: column ?? 0, search: false});
+        syncSourceDisplayControls(source, view);
+        renderDeobfuscationReport(source);
+        applySourceSearch(false, 0, {reveal: false});
         const runtimeLine = sourceRuntimeLine(source, line);
         const row = [...elements.sourceCode.querySelectorAll('.source-line')].find(candidate => Number(candidate.dataset.line) === runtimeLine + 1);
         if (row) {
-          row.tabIndex = -1;
-          row.focus({preventScroll: true});
-          row.scrollIntoView({block: 'center'});
+          revealSourceColumn(row, column ?? 0, true);
+          elements.sourcePosition.textContent = `Original line ${runtimeLine + 1}, Column ${(column ?? 0) + sourceRuntimeColumn(source, line) + 1}`;
         } else {
           elements.sourcePosition.textContent = `Original line ${runtimeLine + 1} is outside the displayed preview. Facts can read verified original-byte ranges.`;
         }
@@ -7871,7 +7999,6 @@
 
       function revealSourceFactRange(source, range, position) {
         if (sourceFactsIdentity(selectedSource()) !== sourceFactsIdentity(source)) return;
-        if (position.line >= 20000) throw new Error('This range starts beyond the first 20,000 displayed lines. Its original byte offsets remain available in Facts.');
         // This uses separately hash-verified, strict UTF-8 original bytes, never
         // a lossy preview, derived text, or a live debugger script.
         if (getComputedStyle(elements.sourceSidebar).position === 'absolute') {
@@ -7882,11 +8009,12 @@
         const row = elements.sourceCode.querySelector(`[data-line="${position.line + 1}"]`);
         if (!row) throw new Error('This original range is outside the current source view.');
         const text = row.querySelector('.source-text');
-        const highlight = sourceOccurrenceRange(text, {column: position.column,
-          length: Math.min(position.length, text.textContent.length - position.column)});
+        const displayColumn = position.column - Number(row.dataset.columnStart ?? 0);
+        const highlight = sourceOccurrenceRange(text, {column: displayColumn,
+          length: Math.min(position.length, text.textContent.length - displayColumn)});
         if (highlight && globalThis.Highlight && globalThis.CSS?.highlights) CSS.highlights.set('source-search-match', new Highlight(highlight));
         rememberInvestigationRange(source, range);
-        elements.sourcePosition.textContent = `Original UTF-8 bytes [${range.start}, ${range.end}) · Line ${position.line + 1}, Column ${position.column + 1}${position.multiline ? ' · range continues on following lines' : ''}`;
+        elements.sourcePosition.textContent = `Original UTF-8 bytes [${range.start}, ${range.end}) · Line ${position.line + 1}, Column ${position.column + 1}${position.multiline ? ' · range continues on following lines' : ''}${position.length > text.textContent.length - displayColumn ? ' · highlight limited to displayed columns' : ''}`;
         if (highlight) {
           const bounds = highlight.getBoundingClientRect();
           const viewport = elements.sourceCodeWrap.getBoundingClientRect();
@@ -8029,6 +8157,8 @@
           if (!response.ok) throw new Error(payload.error || `Deobfuscation analysis returned ${response.status}`);
           const inspection = await validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal);
           if (!current()) return;
+          state.sourceAnalysisVersion = (state.sourceAnalysisVersion ?? 0) + 1;
+          payload.sourceWindowVersion = state.sourceAnalysisVersion;
           payload.sourceInspection = inspection;
           payload.inspectorView = {change: 0, pages: {}, open: {}, notice: ''};
           payload.sourceDocumentBytes = bytes.length;
@@ -8124,11 +8254,7 @@
         const wire = owner.payload.representation.segments[change.index];
         if (owner.source.source_type === 'script') {
           if (sourceOwnedLiveText(owner.source) !== owner.payload.original_source) return;
-          const position = sourceLocationForOffset(sourceLineStarts(owner.payload.original_source), change.original_start);
-          if (position.line >= 20000) {
-            view.notice = 'This range starts beyond the first 20,000 displayed lines. Its original byte offsets remain available above.';
-            renderDeobfuscationReport(owner.source); return;
-          }
+          const position = sourceDocumentPosition(sourceDocumentIndex(owner.payload.original_source), change.original_start);
           if (getComputedStyle(elements.sourceSidebar).position === 'absolute') {
             state.sourceSidebarOpen = false;
             renderSourceSidebar();
@@ -8380,6 +8506,7 @@
             if (inspection.reason) canvasOwner.imageError = inspection.reason;
             else canvasOwner.imageInfo = inspection;
           }
+          artifact.sourceTextLength = content.length;
           artifact.content = content;
           artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > 20000 * 16);
           if (artifact.contentTruncated) artifact.content += artifact.kind === 'wasm'
@@ -8388,7 +8515,7 @@
           if (!canvasOwner) boundSourcePreviews();
         } catch (error) {
           if (current()) {
-            if (canvasOwner) for (const field of ['content', 'contentVerified', 'contentLossy', 'contentTruncated']) delete artifact[field];
+            if (canvasOwner) for (const field of ['content', 'sourceTextLength', 'contentVerified', 'contentLossy', 'contentTruncated']) delete artifact[field];
             artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
           }
         } finally {
@@ -8477,7 +8604,7 @@
         return true;
       }
 
-      function selectScript(scriptId, line = null) {
+      function selectScript(scriptId, line = null, column = null) {
         const candidates = liveSources().filter(candidate => candidate.script_id === scriptId);
         if (candidates.length !== 1) {
           state.sourceNoticeKind = 'warning';
@@ -8494,7 +8621,8 @@
         state.sourceCollection = 'page';
         state.selectedScriptId = scriptId;
         state.selectedArtifactId = null;
-        state.pendingSourceLine = line === null ? null : { identity: sourceIdentity(source), scriptId, line };
+        state.sourceRevealRevision = (state.sourceRevealRevision ?? 0) + 1;
+        state.pendingSourceLine = line === null ? null : { identity: sourceIdentity(source), scriptId, line, column, revision: state.sourceRevealRevision };
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
         state.sourceWasm = false;
@@ -9793,7 +9921,7 @@
       function revealDebuggerLocation(location) {
         const source = liveSources().find(candidate => candidate.script_id === location.script_id);
         if (!source) return false;
-        selectScript(source.script_id, location.line);
+        selectScript(source.script_id, location.line, location.column);
         return true;
       }
 
@@ -9865,7 +9993,7 @@
           reveal.append(name, location);
           reveal.addEventListener('click', () => {
             const script = liveSources().find(candidate => candidate.url === breakpoint.url || candidate.script_id === resolved.script_id);
-            if (script) selectScript(script.script_id, resolved.line);
+            if (script) selectScript(script.script_id, resolved.line, resolved.column);
           });
           const actions = document.createElement('div'); actions.className = 'debug-row-actions';
           const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'debug-row-action'; edit.textContent = '✎'; edit.setAttribute('aria-label', `Edit breakpoint on line ${breakpoint.line + 1}`);
@@ -10744,6 +10872,33 @@
         if (requestId) await refreshVmAnalysis(requestId);
         showScreen('vm', elements.requestVmCandidates);
       });
+      elements.sourceWindowPrevious.addEventListener('click', () => {
+        const current = state.sourceEditorView?.window;
+        if (current) moveSourceWindow(Math.max(0, current.start - SOURCE_WINDOW_LINES));
+      });
+      elements.sourceWindowNext.addEventListener('click', () => {
+        const current = state.sourceEditorView?.window;
+        if (current) moveSourceWindow(current.end);
+      });
+      elements.sourceWindow.addEventListener('submit', event => {
+        event.preventDefault();
+        if (!moveSourceWindow(Number(elements.sourceWindowLine.value) - 1, Number(elements.sourceWindowColumn.value) - 1)) {
+          elements.sourcePosition.textContent = 'Choose a retained line and column within that line.';
+        }
+      });
+      elements.sourceSearch.addEventListener('paste', event => {
+        const pasted = event.clipboardData?.getData('text/plain');
+        if (typeof pasted === 'string' && /[\r\n\u2028\u2029]/u.test(pasted)) {
+          event.preventDefault();
+          elements.sourcePosition.textContent = 'Multiline paste refused. Find accepts a single-line literal; the existing query is unchanged.';
+        }
+      });
+      elements.sourceSearch.addEventListener('beforeinput', event => {
+        if (typeof event.data === 'string' && /[\r\n\u2028\u2029]/u.test(event.data)) {
+          event.preventDefault();
+          elements.sourcePosition.textContent = 'Line separators are not supported in Find; the existing query is unchanged.';
+        }
+      });
       elements.sourceSearch.addEventListener('input', () => applySourceSearch());
       elements.sourceSearch.addEventListener('keydown', event => {
         if (event.key !== 'Enter') return;
@@ -10804,7 +10959,7 @@
         const runtimeLine = Number(line.dataset.line) - 1;
         const localLine = runtimeLine - (source?.source_type === 'script' ? source.start_line : 0);
         const transformed = state.sourceDeobfuscated || state.sourceFormatted;
-        const column = sourceClickColumn(line, event) + (transformed ? 0 : sourceRuntimeColumn(source, localLine));
+        const column = Number(line.dataset.columnStart ?? 0) + sourceClickColumn(line, event) + (transformed ? 0 : sourceRuntimeColumn(source, localLine));
         if (source?.source_type === 'script' && !transformed) {
           setSourceCursor(source, runtimeLine, column);
           elements.sourceCode.querySelectorAll('.source-line').forEach(row => row.classList.toggle('cursor', row === line));

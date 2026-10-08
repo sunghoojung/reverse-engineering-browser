@@ -109,7 +109,7 @@ function revealProvenanceSite(site) {
     fieldProvenanceSelection.error = 'Source detached. Evidence retained.';
     renderFieldProvenance(); return;
   }
-  if (selectScript(source.script_id, site.line) === false || !setSourceCursor(source, site.line, site.column)) {
+  if (selectScript(source.script_id, site.line, site.column) === false || !setSourceCursor(source, site.line, site.column)) {
     fieldProvenanceSelection.error = 'The exact source location is unavailable or ambiguous. Evidence retained.';
     renderFieldProvenance(); return;
   }

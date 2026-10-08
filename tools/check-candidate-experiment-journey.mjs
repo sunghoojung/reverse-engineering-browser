@@ -50,6 +50,14 @@ export function candidateKeyEvents(key,modifiers=0) {
   return [{type:text!==null?'keyDown':'rawKeyDown',...common,...(text!==null?{text,unmodifiedText:text}:{})},{type:'keyUp',key,code,windowsVirtualKeyCode}];
 }
 
+// Titles are refreshed display metadata. Identity requires the exact selected
+// ID, its current type, the product owner, and the same disposable lifetime.
+export function candidateTargetSelectionMatches(expected, snapshot) {
+  const rows=snapshot.options.filter(option=>option.value===expected.value);
+  return snapshot.lifetime===expected.lifetime&&snapshot.selected===expected.value&&
+    snapshot.ownerTarget===expected.value&&rows.length===1&&rows[0].type===expected.type;
+}
+
 export function candidateBindResponseMatches(params, actionURL) {
   if(params.request?.url!==actionURL || params.request?.method!=='POST' || !Number.isInteger(params.responseStatusCode))return false;
   try{return JSON.parse(params.request.postData).action==='bind_runtime_candidate';}catch{return false;}
@@ -59,6 +67,9 @@ export async function checkCandidateFixture() {
   for(const [key,text,code,vk] of [['Enter','\r','Enter',13],[' ',' ','Space',32]]){const events=candidateKeyEvents(key);assert.deepEqual(events,[{type:'keyDown',key,code,modifiers:0,windowsVirtualKeyCode:vk,text,unmodifiedText:text},{type:'keyUp',key,code,windowsVirtualKeyCode:vk}]);}
   for(const key of ['Tab','Escape','ArrowDown','ArrowUp','Home','End']){const [down,up]=candidateKeyEvents(key);assert.equal(down.type,'rawKeyDown');assert.equal(up.type,'keyUp');assert(!('text' in down));assert(!('text' in up));assert(Number.isInteger(down.windowsVirtualKeyCode));}
   assert.deepEqual(candidateKeyEvents('a',2),[{type:'rawKeyDown',key:'a',code:'KeyA',modifiers:2,windowsVirtualKeyCode:65},{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65}]);
+  const selected={value:'worker-A',type:'worker',lifetime:'session1/nav2'},targetSnapshot={selected:'worker-A',ownerTarget:'worker-A',lifetime:selected.lifetime,options:[{value:'worker-A',type:'worker',label:'Worker · updated title'}]};
+  assert(candidateTargetSelectionMatches(selected,targetSnapshot),'Same exact worker may refresh its display title');
+  for(const patch of [{selected:'worker-B'},{ownerTarget:'worker-B'},{lifetime:'session1/nav3'},{options:[]},{options:[{value:'worker-A',type:'page'}]},{options:[...targetSnapshot.options,...targetSnapshot.options]}])assert.equal(candidateTargetSelectionMatches(selected,{...targetSnapshot,...patch}),false,'Title independence must never weaken exact identity/type/owner/lifetime checks');
   const actionURL='http://127.0.0.1:1234/api/debugger/actions',owned={request:{url:actionURL,method:'POST',postData:JSON.stringify({action:'bind_runtime_candidate'})},responseStatusCode:200};
   assert(candidateBindResponseMatches(owned,actionURL));
   for(const changed of [{...owned,responseStatusCode:undefined},{...owned,request:{...owned.request,url:actionURL+'?foreign=1'}},{...owned,request:{...owned.request,method:'GET'}},{...owned,request:{...owned.request,postData:'{'}},{...owned,request:{...owned.request,postData:JSON.stringify({action:'arm_runtime_hooks'})}}])assert.equal(candidateBindResponseMatches(changed,actionURL),false,'Only genuine exact bind response is held');
@@ -167,15 +178,23 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await frame();const shot=await command('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(shot.data,'base64'));
   };
   const viewport=async(width,height)=>{await command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});await frame();};
+  const targetSnapshotExpression=`(()=>{const s=document.querySelector('#candidate-experiment-target'),session=state.debuggerSession,hooks=session?.runtime_hooks;return {selected:s?.value,ownerTarget:candidateExperiment?.target,lifetime:JSON.stringify([hooks?.session_id,session?.request_interception?.created_at_ms,session?.object_experiment?.navigation_id,hooks?.target_id,session?.target?.id]),documentURL:session?.object_experiment?.url,options:[...(s?.options??[])].slice(0,10).map((option,index)=>({index,value:option.value,label:option.textContent,type:option.value===hooks?.target_id?'page':hooks?.workers?.find(worker=>worker.id===option.value)?.type??null}))};})()`;
   const chooseTarget=async(kind)=>{
-    const option=await evaluate(`(()=>{const s=document.querySelector('#candidate-experiment-target'),index=[...s.options].findIndex(o=>o.value&&o.textContent.trim().startsWith(${JSON.stringify(kind)}));return index>0?{index,value:s.options[index].value,label:s.options[index].textContent}:null;})()`);
+    phase='select disposable '+kind;
+    const before=await evaluate(targetSnapshotExpression),type=kind.toLowerCase();
+    const option=before.options.find(option=>option.value&&option.type===type&&option.label.trim().startsWith(kind));
     assert(option,`Missing explicit ${kind} target option`);
+    const expected={...option,lifetime:before.lifetime};
+    receipts.push({phase,kind:'target-choice-before',expected,snapshot:before});
     // Same native select sequence as the proven Console document driver.
     await click('#candidate-experiment-target');await key('Home');
     for(let i=0;i<option.index;i++)await key('ArrowDown');
     await key('Enter');
-    await until(`document.querySelector('#candidate-experiment-target').value===${JSON.stringify(option.value)}&&document.querySelector('#candidate-experiment-target').selectedOptions[0]?.textContent===${JSON.stringify(option.label)}`,'Exact explicit '+kind+' target choice did not stick');
-
+    try {
+      await until(`(${candidateTargetSelectionMatches.toString()})(${JSON.stringify(expected)},${targetSnapshotExpression})`,'Exact explicit '+kind+' target ID/type/owner/lifetime did not stick');
+    } finally {
+      receipts.push({phase,kind:'target-choice-after',expected,snapshot:await evaluate(targetSnapshotExpression)});
+    }
   };
   const readOnlyState=()=>fetch(uiURL+'/api/debugger').then(r=>{assert(r.ok);return r.json();});
   const quietState=async()=>{const state=await readOnlyState();return {isolated:state.runtime_hooks.isolated,definitions:state.runtime_hooks.definitions.length,armed:['arming','armed','handling','stopping'].includes(state.runtime_hooks.state),enabled:state.runtime_hooks.field_test.enabled,targets:state.action_scope.targets.map(t=>t.target_id??t.id)};};
@@ -222,7 +241,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
       await until(`document.querySelector('#candidate-experiment-status').textContent.includes(${JSON.stringify(expected)})&&!document.querySelector('#candidate-experiment-bind').disabled`,label+' must fail for the exact intended identity reason and allow explicit retry');
       receipts.push({phase,kind:'binding-roundtrip',measurement:'Native Bind activation to rendered refusal; UI plus backend roundtrip, not pure source-scan time',elapsed_ms:Math.round(performance.now()-startedAt),outcome:'refused'});
       const state=await quietState();assert.equal(state.definitions,0,label+' cannot add a hook');assert.equal(state.enabled,false);assert.equal(state.armed,false);
-      await screenshot(label);
+      await reveal('#candidate-experiment-strip');await screenshot(label);
     };
     await openDisposable('/candidate-changed');await chooseTarget('Page');await refuseBind('negative-changed-full-source');
     await openDisposable('/candidate-duplicate');await chooseTarget('Page');await refuseBind('negative-duplicate-exact-source');
@@ -312,9 +331,10 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await writeFile(join(output,'receipt.json'),JSON.stringify({status:'passed',path:'real backend and installed Chromium native CDP input',phase,receipts,viewports:[[1440,900],[760,560],[360,740]],limitations:['Not native macOS WebKit acceptance.','No A/B/A comparison or persistence.','Return/Close/navigation/source-digest exhaustive late-ack races are controller-only; rendered interruption covers Stop waiting only.']},null,2));
     console.log(`PASS original live-JS to disposable matched-baseline rendered journey; receipts: ${output}`);
   } catch(error) {
+    let targetFailure;try{targetFailure=await evaluate(targetSnapshotExpression);}catch(diagnosticError){targetFailure={error:String(diagnosticError)};}
     let uiFailure;try{uiFailure=await evaluate("(()=>({focus:{id:document.activeElement?.id,tag:document.activeElement?.tagName,text:document.activeElement?.textContent?.slice(0,100)},fieldSearch:typeof fieldProvenanceSelection==='undefined'?null:{searching:fieldProvenanceSelection?.searching,searched:fieldProvenanceSelection?.searched,error:fieldProvenanceSelection?.error,candidates:fieldProvenanceSelection?.candidates?.length,notice:document.querySelector('#field-provenance-notice')?.textContent,searchDisabled:document.querySelector('#field-provenance-search')?.disabled,renderedCandidates:document.querySelectorAll('.field-provenance-test-candidate').length},debuggerScripts:typeof state==='undefined'?null:state.debuggerSession?.scripts?.length}))()");}catch(diagnosticError){uiFailure={error:String(diagnosticError)};}
     let backendFailure;try{const snapshot=await fetch(uiURL+'/api/debugger',{signal:AbortSignal.timeout(5000)}).then(r=>r.json());backendFailure={state:snapshot.state,target:snapshot.target,network_capture_enabled:snapshot.network?.capture_enabled,requests:snapshot.network?.requests?.length,hooks_state:snapshot.runtime_hooks?.state};}catch(diagnosticError){backendFailure={error:String(diagnosticError)};}
     try{await screenshot('failure');}catch{}
-    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'failed',phase,error:String(error.stack||error),receipts,runtimeErrors,commandTrace,backendFailure,uiFailure,mutationRequests,interceptionErrors,dialogs},null,2));throw error;
+    await writeFile(join(output,'receipt.json'),JSON.stringify({status:'failed',phase,error:String(error.stack||error),receipts,runtimeErrors,commandTrace,backendFailure,uiFailure,targetFailure,mutationRequests,interceptionErrors,dialogs},null,2));throw error;
   } finally {if(bindHold){try{await command('Fetch.disable');}catch{}}for(const request of pending.values()){clearTimeout(request.timer);request.reject(Error('Journey closed'));}socket.close();}
 }

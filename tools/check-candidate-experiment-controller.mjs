@@ -90,8 +90,26 @@ export async function checkCandidateExperimentController(root) {
   const timed=c.api.start(c.site);expire();await timed;assert.equal(c.api.owner,null);assert.match(c.selection.error,/15 seconds/);heldSource.resolve();await Promise.resolve();assert.equal(c.api.owner,null,'Late source after deadline cannot enter experiment');
 
   c=fixture();await c.api.start(c.site);c.disposable();
+  c.hooks.workers=[{id:'worker-A',title:'Same worker URL'},{id:'worker-B',title:'Same worker URL'}];c.api.render();
+  const workerOptions=c.node('target').options.filter(option=>option.value.startsWith('worker-'));
+  assert.notEqual(workerOptions[0].textContent,workerOptions[1].textContent,'Same-title workers expose distinct target labels');
+  for(const option of workerOptions){assert(option.textContent.includes(option.value));assert(option.title.includes(option.value));assert(option['aria-label'].includes(option.value));}
+  const labelBefore=workerOptions[0].textContent.split(' · ').slice(0,2).join(' · ');
+  c.hooks.workers.reverse();c.api.render();
+  assert.equal(c.node('target').options.find(option=>option.value==='worker-A').textContent.split(' · ').slice(0,2).join(' · '),labelBefore,'Order refresh retains per-target display identity');
+  c.choose('worker-A');c.hooks.workers.find(worker=>worker.id==='worker-A').title='Updated worker title';c.api.render();
+  assert.equal(c.node('target').value,'worker-A','Presentation-only worker title changes retain exact selection');
+  assert.equal(c.api.owner.target,'worker-A');
+  const retiredAlias=c.api.owner.targetAliases.get('worker-A');
+  c.hooks.workers=[{id:'identical-prefix-A',title:'same'},{id:'identical-prefix-B',title:'same'}];c.api.render();
+  const collided=c.node('target').options.filter(option=>option.value.startsWith('identical-'));
+  assert.notEqual(collided[0].textContent.split(' · ')[0],collided[1].textContent.split(' · ')[0],'Leading aliases remain distinct when truncated IDs collide');
+  assert.equal(c.api.owner.targetAliases.size,2,'Only currently listed workers retain alias entries');
+  c.hooks.workers=[{id:'worker-A',title:'Owned worker'}];c.api.render();
+  assert.notEqual(c.api.owner.targetAliases.get('worker-A'),retiredAlias,'Removed display aliases are not reassigned when an ID returns');
   c.elements.hooksConfirm.checked=true;c.elements.hooksFieldConfirm.checked=true;c.choose('worker-A');
   assert.equal(c.elements.hooksConfirm.checked,false,'Target change retires arming consent');assert.equal(c.elements.hooksFieldConfirm.checked,false,'Target change retires field-capture consent');
+  c.hooks.workers[0].title='http://127.0.0.1/candidate-worker.js';c.api.render();assert.equal(c.node('target').value,'worker-A','Title refresh retains exact selected worker ID');assert.equal(c.api.owner.target,'worker-A');assert.match(c.node('target').options.find(option=>option.value==='worker-A').textContent,/http:\/\/127\.0\.0\.1\/candidate-worker\.js/);assert.equal(c.calls.length,0,'Refreshing worker label does not bind or dispatch');
   c.choose('disposable-page');c.elements.hooksConfirm.checked=true;c.elements.hooksFieldConfirm.checked=true;c.setAction(async()=>{const definition=c.definition();c.hooks.definitions=[definition];return {runtime_hooks:c.hooks};});await c.api.bind();
   assert.equal(c.elements.hooksConfirm.checked,false,'Binding retires pre-bind arming consent');assert.equal(c.elements.hooksFieldConfirm.checked,false,'Binding retires pre-bind capture consent');
   assert.equal(c.calls.length,1);assert.equal(c.calls[0].action,'bind_runtime_candidate');assert.equal(c.api.owner.bound.id,7);assert.equal(c.node('target').disabled,true,'Bound definition keeps target fixed until explicit removal or expiry');assert.match(c.node('status').textContent,/bound/i);

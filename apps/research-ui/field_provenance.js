@@ -444,12 +444,23 @@ function renderCandidateExperiment() {
     owner.replayLifetime = replayLifetime;
   }
   const ready = hooks?.isolated && hooks.target_id === session?.target?.id && session?.object_experiment?.navigation_id > 0;
-  const targets = ready ? [{id:hooks.target_id, title:'Page'}, ...(hooks.workers ?? []).map(worker => ({id:worker.id, title:`Worker · ${worker.title || worker.id}`}))] : [];
+  // Short, non-reused display aliases distinguish even colliding ID prefixes.
+  // They are ephemeral labels only; every selection/action still uses the full ID.
+  owner.targetAliases ??= new Map();
+  const workers = ready ? (hooks.workers ?? []) : [];
+  const activeIDs = new Set(workers.map(worker => worker.id));
+  for (const id of owner.targetAliases.keys()) if (!activeIDs.has(id)) owner.targetAliases.delete(id);
+  const targets = ready ? [{id:hooks.target_id, title:'Page'}, ...workers.map(worker => {
+    if (!owner.targetAliases.has(worker.id)) owner.targetAliases.set(worker.id, `W${owner.nextTargetAlias = (owner.nextTargetAlias ?? 0) + 1}`);
+    return {id:worker.id, title:`Worker ${owner.targetAliases.get(worker.id)} · ${worker.id.slice(0, 12)} · ${worker.title || 'Dedicated worker'}`};
+  })] : [];
   const key = JSON.stringify(targets);
   if (candidateUI.target.dataset.options !== key) {
     candidateUI.target.dataset.options = key;
     candidateUI.target.replaceChildren(...[{id:'',title:'Choose page or worker'}, ...targets].map(target => {
-      const option = document.createElement('option'); option.value = target.id; option.textContent = target.title; return option;
+      const option = document.createElement('option'); option.value = target.id; option.textContent = target.title;
+      option.title = target.id ? `${target.title} · Target ${target.id}` : target.title;
+      option.setAttribute('aria-label', option.title); return option;
     }));
     if (targets.some(target => target.id === owner.target)) candidateUI.target.value = owner.target;
     else owner.target = '';

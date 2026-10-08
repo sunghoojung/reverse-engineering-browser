@@ -217,14 +217,14 @@ The action routes are multiplexed, not invented REST resources:
   its current conditional-GET validator.
 - Analyst execution requires the current saved JavaScript script and explicit
   confirmation; sensitive selected artifact data needs additional confirmation.
-- Debugger enumerates all 59 current actions with source-backed request fields,
+- Debugger enumerates all 60 current actions with source-backed request fields,
   types, requiredness, defaults and bounded values, including automation,
   repeater, interception, object search and mutation. Six variants retain
   `x-schema-completeness: partial` for complex constraints: interception rule
   normalization, recursive mutation-value budgets, JSON-inside-string shape
   parsing in the two object searches, and legacy condition/expression fallback
   in breakpoint creation/update. These are modeling limits, not unknown endpoints.
-  `x-unmodeled-constraints` identifies each residual check. All 59 actions map
+  `x-unmodeled-constraints` identifies each residual check. All 60 actions map
   to one of 17 closed response envelopes; nested experiment, search-row and
   CDP-dependent state records remain partially typed with source pointers.
 
@@ -261,7 +261,7 @@ retry mutations after a timeout or dropped connection.
 
 ## Execution metadata
 
-All 25 operations and all 74 top-level request action variants, including the 59
+All 28 operations and all 75 top-level request action variants, including the 60
 debugger actions, carry version 1 `x-reb-execution` metadata. It is a source-owned,
 static advisory catalog. It does not grant permission, verify target ownership,
 report current availability, replace server validation, or prove that an action

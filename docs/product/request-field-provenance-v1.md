@@ -109,3 +109,10 @@ Serialization, encoding, hashing, encryption, asynchronous continuations,
 cross-frame/worker propagation, and WASM internals are explicitly unobserved.
 The page preserves the last understandable evidence on refresh failure and
 inserts all captured values and source labels as inert text.
+
+Original literal rows also offer **Test this candidate**. The
+[Candidate experiment v1 bridge](candidate-experiment-v1.md) carries the original
+question into existing Runtime Hooks, uniquely rebinds complete source bytes in
+an explicitly chosen disposable target, and adds an observation-only return
+hook. Capture, arming and later return replacement remain explicit. Unsupported
+syntax, changed/ambiguous sources and stale lifetimes fail visibly.

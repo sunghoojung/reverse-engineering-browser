@@ -1,3 +1,5 @@
+import {checkCandidateExperimentController} from './check-candidate-experiment-controller.mjs';
+import {candidateFixtureRoute, checkCandidateFixture, checkCandidateExperimentJourney} from './check-candidate-experiment-journey.mjs';
 import {checkSourceWindowModel,checkSourceWindowInteractions} from './check-source-window.mjs';
 import {checkTrafficComparisonController,checkCapturedComparisonInteractions} from './check-traffic-comparison-ui.mjs';
 import {checkTrafficComparisonModel} from './check-traffic-comparison.mjs';
@@ -8,6 +10,7 @@ import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import {
   readFile,
+  stat,
   readdir,
   open,
   rm,
@@ -40,8 +43,11 @@ const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
 const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
+const candidateBridgeBrowser = process.argv[2] === "--candidate-bridge-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || canvasBrowser || sourcesTreeBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[candidateBridgeBrowser || fieldsOnly || canvasBrowser || sourcesTreeBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+await checkCandidateFixture();
+await checkCandidateExperimentController(root);
 await checkSourceWindowModel(root);
 await checkSourceTreeModel(root);
 await checkTrafficComparisonModel(root);
@@ -6204,7 +6210,13 @@ if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));
 const resources = [];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const candidateRequestReceipts = [];
+const candidateStartup = {phase:'fixture', browser_stderr:'', backend_stderr:'', broker_stderr:''};
+let candidateBroker;
+const candidateOutput = process.env.REB_UI_SCREENSHOTS || join(root,'build/candidate-bridge-ui-qa');
+if (candidateBridgeBrowser) await mkdir(candidateOutput,{recursive:true});
 const fixture = createServer((req, res) => {
+  if (candidateFixtureRoute(req, res, candidateRequestReceipts)) return;
   if (process.env.ORIGIN_TRACE_FIXTURE_LOG)
     console.log("FIXTURE", req.method, req.url);
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -6256,10 +6268,30 @@ try {
   for (const name of ["rust"]) {
     const directory = join(temporary, name);
     await mkdir(directory);
+    const brokerSocket = join(directory,'broker.sock');
+    if(candidateBridgeBrowser){
+      candidateStartup.phase='native broker startup';
+      candidateBroker=spawn(join(root,'build/reb-event-broker'),[
+        '--store',join(directory,'events.jsonl'),'--trace-store',join(directory,'trace.jsonl'),
+        '--signal-store',join(directory,'signals.jsonl'),'--socket',brokerSocket,
+        '--token-file',join(directory,'broker.token'),'--session-id','71',
+        '--category-mask','256','--duration-seconds','600'],{stdio:['ignore','ignore','pipe']});
+      resources.push(candidateBroker);
+      candidateBroker.stderr.on('data',chunk=>{candidateStartup.broker_stderr=(candidateStartup.broker_stderr+chunk).slice(-16384);});
+      candidateBroker.on('error',error=>{candidateStartup.broker_error=error.message;});
+      let ready=false;
+      for(let i=0;i<100;i++){
+        if(candidateStartup.broker_error||candidateBroker.exitCode!==null)throw Error('Owned broker startup failed: '+JSON.stringify(candidateStartup));
+        try{const socket=await stat(brokerSocket),token=await stat(join(directory,'broker.token'));assert(token.isFile(),'Owned broker token must be a regular file');assert.equal(token.mode&0o777,0o600,'Owned broker token must stay user-only');if(socket.isSocket()){assert.equal(socket.mode&0o777,0o600,'Owned broker socket must stay user-only');ready=true;break;}}catch(error){if(error.code!=='ENOENT')throw error;}
+        await wait(50);
+      }
+      assert(ready,'Owned native broker did not create its private socket and token');
+      candidateStartup.broker_running=true;candidateStartup.broker_socket_mode='0600';candidateStartup.broker_token_mode='0600';
+    }
     const profile = join(directory, "browser");
     await mkdir(profile);
     const browser = spawn(
-      process.env.ORIGIN_TRACE_TEST_BROWSER ||
+      process.env.ORIGIN_TRACE_TEST_BROWSER || (candidateBridgeBrowser ? process.env.REB_UI_CHROMIUM : undefined) ||
         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
       [
         "--headless=new",
@@ -6271,10 +6303,16 @@ try {
         "--disable-sync",
         "--remote-debugging-port=0",
         `--user-data-dir=${profile}`,
-        fixtureUrl + "/page",
+        fixtureUrl + (candidateBridgeBrowser ? "/candidate-page" : "/page"),
       ],
-      { stdio: "ignore" },
+      { stdio: candidateBridgeBrowser ? ['ignore','ignore','pipe'] : "ignore" },
     );
+    if (candidateBridgeBrowser) {
+      candidateStartup.phase='browser startup';
+      browser.stderr.on('data',chunk=>{candidateStartup.browser_stderr=(candidateStartup.browser_stderr+chunk).slice(-16384);});
+      browser.on('error',error=>{candidateStartup.browser_error=error.message;});
+      browser.on('exit',(code,signal)=>{candidateStartup.browser_exit={code,signal};});
+    }
     resources.push(browser);
     let portReady = false;
     for (let i = 0; i < 300; i++) {
@@ -6313,6 +6351,7 @@ try {
         join(directory, "analyst.json"),
         "--devtools-active-port",
         join(profile, "DevToolsActivePort"),
+        ...(candidateBridgeBrowser ? ["--capture-network-content", "--socket", brokerSocket, "--broker-pid", String(candidateBroker.pid)] : []),
         ...(bundled
           ? []
           : [
@@ -6341,10 +6380,12 @@ try {
       },
     );
     resources.push(backend);
+    if (candidateBridgeBrowser) candidateStartup.phase='backend startup';
     let diagnostics = "";
     backend.stdout.resume();
     backend.stderr.on("data", (x) => {
       diagnostics += x;
+      if (candidateBridgeBrowser) candidateStartup.backend_stderr=diagnostics.slice(-16384);
       appendFile(join(directory, "stderr.log"), x);
     });
     backend.on("exit", (code) => {
@@ -6454,6 +6495,14 @@ try {
       );
     };
     await until((s) => s.state === "running");
+    if (candidateBridgeBrowser) {
+      const address = trafficDevtoolsAddress(await readFile(join(profile, "DevToolsActivePort"), "utf8"));
+      candidateStartup.phase='rendered journey';
+      await checkCandidateExperimentJourney({address, uiURL:url, fixtureURL:fixtureUrl, root, socketFactory:trafficBrowserSocket, requestReceipts:candidateRequestReceipts});
+      candidateStartup.phase='complete';
+      passed++;
+      continue;
+    }
     await action("create_request_interception_experiment");
     let s = await until(
       (s) =>
@@ -6979,6 +7028,13 @@ try {
   }
   console.log(JSON.stringify({ temporary, passed }));
 } finally {
+  if(candidateBroker&&candidateBroker.exitCode===null){
+    candidateBroker.kill('SIGUSR1');
+    const deadline=Date.now()+3000;while(candidateBroker.exitCode===null&&candidateBroker.signalCode===null&&Date.now()<deadline)await wait(25);
+    if(candidateBroker.exitCode===null&&candidateBroker.signalCode===null)candidateBroker.kill('SIGKILL');
+    candidateStartup.broker_cleanup={exit_code:candidateBroker.exitCode,signal:candidateBroker.signalCode};
+  }
+  if (candidateBridgeBrowser) await writeFile(join(candidateOutput,'startup.json'),JSON.stringify(candidateStartup,null,2));
   for (const child of resources) {
     if (child.exitCode === null) child.kill("SIGTERM");
   }

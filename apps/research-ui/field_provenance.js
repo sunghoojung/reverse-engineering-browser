@@ -136,7 +136,7 @@ function fieldSourceMatches(content, needle, source, limit = 32) {
       if (content[scanned] === '\n') { line += 1; column = 0; } else column += 1;
     }
     matches.push({script_id: source.script_id, target_id: source.target_id, source: provenanceSourceURL(source.url), source_hash: source.hash,
-      function: 'Text match', line, column});
+      function: 'Text match', line, column, match_start_utf16: offset, match_end_utf16: offset + needle.length});
     offset += needle.length;
   }
   return matches;
@@ -301,6 +301,14 @@ function provenanceSiteRow(site, label, context = '') {
   button.dataset.provenanceFocus = JSON.stringify([context, label, site.target_id, site.script_id, site.line, site.column]);
   button.title = button.disabled ? 'Source detached. Evidence retained.' :
     `${label === 'Observed' ? 'Observed call site' : label === 'Decoded candidate' ? 'Decoded source-text candidate' : 'Correlated candidate'} · ${site.source}\n${site.target_id} · script ${site.script_id} · ${site.source_hash || 'hash unavailable'}`;
+  if (!context && Number.isSafeInteger(site.match_start_utf16)) {
+    const row = trafficNode('div', 'field-provenance-candidate-row');
+    const test = provenanceButton('Test this candidate', () => startCandidateExperiment(site));
+    test.className = 'secondary-button field-provenance-test-candidate';
+    test.disabled = button.disabled;
+    test.dataset.provenanceFocus = `${button.dataset.provenanceFocus}-test`;
+    row.append(button, test); return row;
+  }
   return button;
 }
 
@@ -320,10 +328,218 @@ provenanceUI.back.addEventListener('click', () => {
 provenanceUI.test.addEventListener('click', () => {
   const selection = fieldProvenanceSelection;
   if (!selection?.url) return;
-  // Prefill only. Capture and mutation retain the existing explicit confirmations.
-  elements.hooksFieldUrl.value = selection.url; elements.hooksFieldMethod.value = selection.request.method;
-  elements.hooksFieldKind.value = selection.kind; elements.hooksFieldPointer.value = selection.selector;
-  elements.hooksFieldConfirm.checked = false;
+  if (!prefillCandidateField(selection)) return;
   showScreen('sources'); if (!state.sourceHooksOpen) openSourceHooks(false, false);
   renderRuntimeHooks(); focusRuntimeFieldTest();
+});
+
+// One ephemeral owner. Original source text/field evidence are never persisted
+// or substituted with replay bytes, URL equality, or a reused script identifier.
+let candidateExperiment = null;
+let candidatePreparation = 0;
+const candidateUI = Object.fromEntries(['strip', 'question', 'status', 'target', 'bind', 'cancel', 'return', 'close']
+  .map(name => [name, document.querySelector(`#candidate-experiment-${name}`)]));
+
+function candidateLifetime(target = candidateExperiment?.target ?? '') {
+  const session = state.debuggerSession;
+  return JSON.stringify([experimentContextKey(), session?.object_experiment?.navigation_id, target,
+    session?.scripts?.filter(script => (script.target_id ?? session?.target?.id) === target)
+      .map(script => liveScriptIdentity(script))]);
+}
+function retireCandidateExperimentPending() {
+  candidatePreparation += 1;
+  if (candidateExperiment?.pending) {
+    candidateExperiment.pending.retired = true;
+    candidateExperiment.pending.actionOwner?.transport?.retire?.('Stopped waiting for candidate binding. Native completion is unknown; inspect Hooks before retrying.');
+    candidateExperiment.notice = 'Binding acknowledgement retired. A definition may have been added; inspect Hooks before retrying.';
+  }
+}
+function prefillCandidateField(selection) {
+  if (state.experimentPending || ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state)) {
+    selection.error = 'Disarm hooks and wait for pending actions before opening a candidate experiment.';
+    renderFieldProvenance(); return false;
+  }
+  const different = (elements.hooksFieldUrl.value || elements.hooksFieldPointer.value) &&
+    (elements.hooksFieldUrl.value !== selection.url || elements.hooksFieldMethod.value !== selection.request.method ||
+      elements.hooksFieldKind.value !== selection.kind || elements.hooksFieldPointer.value !== selection.selector);
+  if (different && !window.confirm('Replace the current value-test form with this original request field? Active capture is unchanged until you explicitly submit.')) { selection.error = 'Current value-test draft retained.'; return false; }
+  elements.hooksFieldUrl.value = selection.url; elements.hooksFieldMethod.value = selection.request.method;
+  elements.hooksFieldKind.value = selection.kind; elements.hooksFieldPointer.value = selection.selector;
+  elements.hooksFieldConfirm.checked = false; elements.hooksConfirm.checked = false;
+  selection.error = null;
+  return true;
+}
+function candidateSourceText(source, loaded, pageURL) {
+  if (!source || source.kind !== 'javascript' || source.has_source_url || source.start_line !== 0 || source.start_column !== 0 ||
+      !/^https?:\/\//.test(source.url || '') || (source.target_type !== 'worker' && source.url === pageURL)) {
+    throw new Error('Unsupported candidate: choose external JavaScript without inline offsets or sourceURL.');
+  }
+  if (loaded?.identity !== liveScriptIdentity(source) || loaded.loading || loaded.loadError || loaded.contentTruncated ||
+      typeof loaded.content !== 'string' || !Number.isSafeInteger(loaded.sourceTextLength)) {
+    throw new Error('Complete original source is unavailable or changed. Retry source search.');
+  }
+  const text = loaded.content.slice(0, loaded.sourceTextLength);
+  const bytes = provenanceDecoderBytes(text);
+  if (!bytes || text.startsWith('\uFEFF') || text.includes('\uFFFD') || bytes.length === 0 || bytes.length > 2 * 1024 * 1024) {
+    throw new Error('Unsupported source encoding, BOM, replacement character or 2 MiB source limit.');
+  }
+  return {text, bytes};
+}
+async function candidateBeforeDeadline(promise, deadline) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {timer = setTimeout(() => reject(new Error('Candidate preparation exceeded 15 seconds. Original evidence retained.')), Math.max(0, deadline - Date.now()));})]);
+  } finally { clearTimeout(timer); }
+}
+async function startCandidateExperiment(site) {
+  const selection = fieldProvenanceSelection;
+  if (!selection?.url || !selection.candidates.includes(site)) return;
+  const token = ++candidatePreparation;
+  const deadline = Date.now() + 15000;
+  const screen = document.querySelector('#screen-field-provenance');
+  const current = () => token === candidatePreparation && fieldProvenanceSelection === selection && !screen.hidden;
+  const sources = liveSources().filter(source => source.script_id === site.script_id && source.target_id === site.target_id &&
+    source.hash === site.source_hash && site.source_hash);
+  if (sources.length !== 1) { selection.error = 'Original candidate source is missing or ambiguous.'; renderFieldProvenance(); return; }
+  const source = sources[0], identity = liveScriptIdentity(source);
+  selection.error = 'Preparing exact original candidate…'; renderFieldProvenance();
+  try {
+    await candidateBeforeDeadline(loadScriptContent(source), deadline);
+    if (!current()) return;
+    const {text, bytes} = candidateSourceText(source, state.liveScriptContent.get(source.script_id), state.debuggerSession?.target?.url);
+    const start = site.match_start_utf16, end = site.match_end_utf16;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > text.length ||
+        text.slice(start, end) !== (selection.derivedSearch?.value ?? selection.value)) throw new Error('Original candidate range changed. Search again.');
+    const prefix = provenanceDecoderBytes(text.slice(0, start)), match = provenanceDecoderBytes(text.slice(start, end));
+    if (!prefix || !match) throw new Error('Candidate range splits a UTF-8 character.');
+    if (!globalThis.crypto?.subtle) throw new Error('Exact source digest is unavailable in this workspace.');
+    const digest = [...new Uint8Array(await candidateBeforeDeadline(crypto.subtle.digest('SHA-256', bytes), deadline))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    if (!current()) return;
+    if (liveSources().filter(item => liveScriptIdentity(item) === identity).length !== 1 ||
+        candidateSourceText(source, state.liveScriptContent.get(source.script_id), state.debuggerSession?.target?.url).text !== text) throw new Error('Original source changed during preparation.');
+    if (!prefillCandidateField(selection)) { renderFieldProvenance(); return; }
+    candidateExperiment = {selection, source: {...site}, originalText: text,
+      fingerprint: {digest_version: 'reb-live-script-utf8-v1', source_sha256: digest, source_bytes: bytes.length,
+        start_byte: prefix.length, end_byte: prefix.length + match.length},
+      pending: null, bound: null, target: '', notice: 'Create and open a disposable page, then explicitly choose its page or worker. Original evidence stays separate.'};
+    selection.error = null;
+    showScreen('sources'); if (!state.sourceHooksOpen) openSourceHooks(false, false);
+    renderRuntimeHooks();
+    candidateUI.return.focus({preventScroll: true});
+  } catch (error) { if (current()) { selection.error = error.message; renderFieldProvenance(); } }
+}
+function renderCandidateExperiment() {
+  if (!candidateUI.strip) return;
+  const owner = candidateExperiment;
+  candidateUI.strip.hidden = !owner;
+  if (!owner) return;
+  candidateUI.question.textContent = `Does ${owner.source.source?.split('/').pop() || 'this candidate'}:${owner.source.line + 1} return relate to ${owner.selection.request.method} ${owner.selection.selector}?`;
+  const hooks = runtimeHooksState(), session = state.debuggerSession;
+  const replayLifetime = JSON.stringify([experimentContextKey(), session?.object_experiment?.navigation_id]);
+  if (owner.replayLifetime !== replayLifetime) {
+    if (owner.replayLifetime !== undefined) {
+      owner.target = ''; owner.bound = null;
+      candidateUI.target.value = '';
+      elements.hooksFieldConfirm.checked = false; elements.hooksConfirm.checked = false;
+      owner.notice = 'Disposable lifetime or navigation changed. Choose its page or worker again; capture and arming still require explicit confirmation.';
+    }
+    owner.replayLifetime = replayLifetime;
+  }
+  const ready = hooks?.isolated && hooks.target_id === session?.target?.id && session?.object_experiment?.navigation_id > 0;
+  // Short, non-reused display aliases distinguish even colliding ID prefixes.
+  // They are ephemeral labels only; every selection/action still uses the full ID.
+  owner.targetAliases ??= new Map();
+  const workers = ready ? (hooks.workers ?? []) : [];
+  const activeIDs = new Set(workers.map(worker => worker.id));
+  for (const id of owner.targetAliases.keys()) if (!activeIDs.has(id)) owner.targetAliases.delete(id);
+  const targets = ready ? [{id:hooks.target_id, title:'Page'}, ...workers.map(worker => {
+    if (!owner.targetAliases.has(worker.id)) owner.targetAliases.set(worker.id, `W${owner.nextTargetAlias = (owner.nextTargetAlias ?? 0) + 1}`);
+    return {id:worker.id, title:`Worker ${owner.targetAliases.get(worker.id)} · ${worker.id.slice(0, 12)} · ${worker.title || 'Dedicated worker'}`};
+  })] : [];
+  const key = JSON.stringify(targets);
+  if (candidateUI.target.dataset.options !== key) {
+    candidateUI.target.dataset.options = key;
+    candidateUI.target.replaceChildren(...[{id:'',title:'Choose page or worker'}, ...targets].map(target => {
+      const option = document.createElement('option'); option.value = target.id; option.textContent = target.title;
+      option.title = target.id ? `${target.title} · Target ${target.id}` : target.title;
+      option.setAttribute('aria-label', option.title); return option;
+    }));
+    if (targets.some(target => target.id === owner.target)) candidateUI.target.value = owner.target;
+    else owner.target = '';
+  }
+  const busy = state.experimentPending || ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state);
+  candidateUI.target.disabled = Boolean(owner.pending || busy || owner.bound);
+  if (candidateUI.cancel) candidateUI.cancel.hidden = !owner.pending;
+  candidateUI.bind.disabled = !ready || !owner.target || Boolean(owner.pending || busy || owner.bound);
+  let notice = owner.notice;
+  if (owner.bound) {
+    const definition = hooks?.definitions?.find(item => item.id === owner.bound.id && item.candidate_guard?.source_sha256 === owner.fingerprint.source_sha256);
+    if (!definition || owner.bound.context !== experimentContextKey()) {
+      owner.bound = null; notice = owner.notice = 'Bound hook expired after disposal, navigation or removal. Original evidence retained. Bind again explicitly.';
+      candidateUI.bind.disabled = !ready || !owner.target || Boolean(owner.pending || busy);
+    } else {
+      const test = hooks.field_test;
+      const sameField = test?.url === owner.selection.url && test?.method === owner.selection.request.method &&
+        test?.kind === owner.selection.kind && test?.pointer === owner.selection.selector;
+      const baseline = sameField && test.observations?.some(observation => observation.target_id === owner.target &&
+        observation.status === 'available' && observation.related_hit_ids?.some(id => hooks.hits?.some(hit =>
+          hit.id === id && hit.hook_id === definition.id && hit.category === 'return' && hit.operation === 'observed' && hit.original_return?.subtype !== 'promise' &&
+          observation.provenance?.candidates?.some(candidate => candidate.hit_id === hit.id && candidate.matched_values?.includes('original_return')))));
+      notice = baseline ? 'Matched baseline: selected field observed with this candidate return hit. Correlation only; no intervention or causality claim.'
+        : 'Observation hook bound. Explicitly confirm Capture, then confirm Arm hooks and repeat your owned page action. No replay runs automatically.';
+    }
+  }
+  candidateUI.status.textContent = notice;
+}
+async function bindCandidateExperiment() {
+  const owner = candidateExperiment;
+  if (!owner || owner.pending || candidateUI.bind.disabled || !owner.target) return;
+  // Creating a new disposable lifetime deliberately erases prior form drafts.
+  // This explicit action restores only this question's field metadata, with the
+  // existing replacement consent if the researcher entered a different draft.
+  if (!prefillCandidateField(owner.selection)) {
+    owner.notice = owner.selection.error || 'Current value-test draft retained. No hook was bound.';
+    renderCandidateExperiment(); return;
+  }
+  const session = state.debuggerSession;
+  const pending = {retired:false, lifetime:candidateLifetime()};
+  owner.pending = pending; owner.notice = 'Checking up to 64 scripts / 8 MiB in this target, then synchronous-function eligibility (15-second limit)…'; renderCandidateExperiment();
+  const operation = runExperimentAction({action:'bind_runtime_candidate', ...owner.fingerprint,
+    target_id:owner.target, session_id:session.runtime_hooks.session_id, created_at_ms:session.request_interception.created_at_ms,
+    navigation_id:session.object_experiment.navigation_id});
+  pending.actionOwner = state.experimentPrimaryOwner;
+  const response = currentExperimentReceipt(await operation);
+  if (candidateExperiment !== owner || owner.pending !== pending) return;
+  owner.pending = null;
+  elements.hooksFieldConfirm.checked = false; elements.hooksConfirm.checked = false;
+  if (pending.retired || pending.lifetime !== candidateLifetime()) {
+    owner.notice = 'Binding acknowledgement was retired while waiting. Inspect Hooks; native completion is unknown. No automatic retry or arming was sent.';
+  } else if (response) {
+    const matches = response.runtime_hooks.definitions.filter(definition => definition.candidate_guard?.source_sha256 === owner.fingerprint.source_sha256 &&
+      definition.candidate_guard?.target_id === owner.target && definition.candidate_guard?.start_byte === owner.fingerprint.start_byte);
+    if (matches.length === 1) owner.bound = {id:matches[0].id, context:experimentContextKey()};
+    else owner.notice = 'Binding acknowledgement was ambiguous. Inspect Hooks before retrying.';
+  } else owner.notice = state.experimentError || 'Candidate binding unavailable. Original evidence retained.';
+  renderCandidateExperiment();
+}
+candidateUI.target?.addEventListener('change', () => {
+  if (!candidateExperiment) return;
+  if (candidateExperiment.bound) { candidateUI.target.value = candidateExperiment.target; return; }
+  retireCandidateExperimentPending();
+  candidateExperiment.target = candidateUI.target.value;
+  elements.hooksFieldConfirm.checked = false; elements.hooksConfirm.checked = false;
+  candidateExperiment.bound = null;
+  candidateExperiment.notice = 'Selected disposable target only. Bind restores the original field setup (confirming replacement of a different draft), checks bounded source bytes, and adds an observation hook. Capture still requires explicit confirmation.';
+  renderCandidateExperiment();
+});
+candidateUI.bind?.addEventListener('click', bindCandidateExperiment);
+candidateUI.cancel?.addEventListener('click', () => { retireCandidateExperimentPending(); renderCandidateExperiment(); });
+candidateUI.return?.addEventListener('click', () => {
+  if (!candidateExperiment) return;
+  fieldProvenanceSelection = candidateExperiment.selection;
+  showScreen('field-provenance'); renderFieldProvenance(); provenanceUI.search.focus({preventScroll:true});
+});
+candidateUI.close?.addEventListener('click', () => {
+  retireCandidateExperimentPending(); candidateExperiment = null; renderCandidateExperiment();
+  elements.hooksCreate.focus({preventScroll:true});
 });

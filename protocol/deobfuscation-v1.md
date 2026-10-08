@@ -64,3 +64,14 @@ it in cache/request identity. The assumption means modeled built-ins have their
 standard behavior; it is not a claim that captured code has pristine prototypes.
 Missing workers cannot honor this mode and return 503. Worker JSON requests use
 the boolean `assume_intrinsics` with the same default.
+
+## Candidate function query (additive)
+
+The worker's existing `function_at_byte` query may also carry
+`candidate_end_byte`, the exclusive original UTF-8 range end. It is a narrow
+literal-in-synchronous-body query, not a rewrite. An accepted result adds
+`function_location.candidate_eligible: true`; ordinary location results set it
+false. Null/false/missing eligibility must fail closed for candidate experiments.
+Legacy ordinary-location consumers continue using kind/start/end/body_start.
+See [Candidate experiment v1](../docs/product/candidate-experiment-v1.md) for
+unsupported syntax, encoding and independent runtime return eligibility.

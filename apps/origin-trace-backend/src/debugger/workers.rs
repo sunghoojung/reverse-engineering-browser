@@ -32,6 +32,13 @@ pub(super) struct Workers {
     retry: Mutex<BTreeMap<String, (u32, std::time::Instant)>>,
 }
 impl Workers {
+    pub(super) fn has_sessions(&self) -> bool {
+        !self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(BTreeMap::new()),
@@ -65,6 +72,9 @@ impl Debugger {
             .ok_or_else(|| Error::conflict("The isolated worker debugger is unavailable"))
     }
     pub(super) async fn close_workers(&self) {
+        self.hooks
+            .candidate_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let _refresh = self.workers.refresh.lock().await;
         self.workers
             .retry
@@ -78,6 +88,15 @@ impl Debugger {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
         );
+        self.update(|state| {
+            for id in sessions.keys() {
+                self.hooks.candidate_source_removed(id);
+            }
+            state["scripts"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|script| script["target_type"] != "worker");
+        });
         for (_, s) in sessions {
             s.connection.close().await;
         }
@@ -132,6 +151,15 @@ impl Debugger {
                 .collect::<Vec<_>>()
         };
         for (id, s) in removed {
+            // Retire the target before awaiting transport teardown, so a late
+            // bind/arm/hit cannot accept a terminated worker's old revision.
+            self.update(|state| {
+                self.hooks.candidate_source_removed(&id);
+                state["scripts"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|script| script["target_id"] != id);
+            });
             s.connection.close().await;
             if self.snapshot()["runtime_hooks"]["definitions"]
                 .as_array()
@@ -148,6 +176,7 @@ impl Debugger {
                 });
             }
             self.update(|s| {
+                self.hooks.candidate_source_removed(&id);
                 s["scripts"]
                     .as_array_mut()
                     .unwrap()
@@ -208,6 +237,7 @@ impl Debugger {
                 let weak = Arc::downgrade(self);
                 let target_id = id.to_owned();
                 let captured_context = context.clone();
+                let event_owner = session.clone();
                 tokio::spawn(async move {
                     while let Some(event) = events.recv().await {
                         match event {
@@ -222,7 +252,7 @@ impl Debugger {
                                     break;
                                 }
                                 if message["sessionId"] == session_id {
-                                    d.worker_event(&target_id, message).await;
+                                    d.worker_event(&target_id, &event_owner, message).await;
                                 }
                             }
                             Event::Message(Err(_), _permit) => break,
@@ -267,6 +297,13 @@ impl Debugger {
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(id);
                 if let Some(s) = removed {
+                    self.update(|state| {
+                        self.hooks.candidate_source_removed(id);
+                        state["scripts"]
+                            .as_array_mut()
+                            .unwrap()
+                            .retain(|script| script["target_id"] != id);
+                    });
                     s.connection.close().await;
                 }
             } else {
@@ -298,7 +335,7 @@ impl Debugger {
         }
         Ok(())
     }
-    async fn worker_event(self: &Arc<Self>, target: &str, message: Value) {
+    fn worker_catalog_event(&self, target: &str, message: &Value) {
         let p = &message["params"];
         match message["method"].as_str().unwrap_or("") {
             "Debugger.scriptParsed" => {
@@ -309,6 +346,12 @@ impl Debugger {
                         &hex::encode(Sha256::digest(target.as_bytes()))[..16]
                     );
                     if public_id.len() > 4096 {
+                        self.hooks
+                            .candidate_catalog_incomplete
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        self.hooks
+                            .candidate_epoch
+                            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                         return;
                     }
                     script["script_id"] = json!(public_id);
@@ -316,15 +359,68 @@ impl Debugger {
                     script["target_id"] = json!(target);
                     script["target_type"] = json!("worker");
                     self.update(|s| {
+                        self.hooks.candidate_source_changed(target);
                         let scripts = s["scripts"].as_array_mut().unwrap();
                         scripts.retain(|v| v["script_id"] != script["script_id"]);
                         if scripts.len() >= 5000 {
+                            self.hooks
+                                .candidate_catalog_incomplete
+                                .store(true, std::sync::atomic::Ordering::Release);
                             scripts.remove(0);
                         }
                         scripts.push(script);
                     });
+                } else {
+                    self.hooks
+                        .candidate_catalog_incomplete
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    self.hooks
+                        .candidate_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 }
             }
+            "Runtime.executionContextDestroyed" | "Runtime.executionContextsCleared" => {
+                self.update(|s| {
+                    self.hooks.candidate_source_changed(target);
+                    s["scripts"].as_array_mut().unwrap().retain(|script| {
+                        script["target_id"] != target
+                            || (message["method"] == "Runtime.executionContextDestroyed"
+                                && script["execution_context_id"] != p["executionContextId"])
+                    });
+                });
+            }
+            _ => (),
+        }
+    }
+    async fn worker_event(self: &Arc<Self>, target: &str, owner: &Session, message: Value) {
+        let method = message["method"].as_str().unwrap_or("");
+        {
+            // Keep session ownership locked through synchronous catalog edits.
+            // Removal cannot interleave and resurrect a retired target revision.
+            let sessions = self
+                .workers
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !sessions.get(target).is_some_and(|current| {
+                Arc::ptr_eq(&current.connection, &owner.connection) && current.id == owner.id
+            }) {
+                return;
+            }
+            if [
+                "Debugger.scriptParsed",
+                "Runtime.executionContextDestroyed",
+                "Runtime.executionContextsCleared",
+            ]
+            .contains(&method)
+            {
+                self.worker_catalog_event(target, &message);
+                return;
+            }
+        }
+        // Never hold the session registry across network or pause awaits.
+        let p = &message["params"];
+        match method {
             "Debugger.paused" => {
                 if !self.hook_pause(target, p.clone())
                     && let Ok(s) = self.hook_session(target).await
@@ -344,5 +440,130 @@ impl Debugger {
             }
             _ => (),
         }
+    }
+}
+
+#[cfg(test)]
+mod candidate_catalog_tests {
+    use super::*;
+    use clap::Parser;
+    use std::sync::atomic::Ordering;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn candidate_late_worker_events_require_current_connection_and_session_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        // Pipe-only transport fixture: no socket, browser, source fetch or command.
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("transport");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '\\122\\105\\102\\001\\000\\000\\000\\000'\nexec sleep 60\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (first, _first_events) = Connection::open(&executable, "ws://127.0.0.1:1")
+            .await
+            .unwrap();
+        let (replacement, _replacement_events) = Connection::open(&executable, "ws://127.0.0.1:1")
+            .await
+            .unwrap();
+        let owner = Session {
+            connection: first.clone(),
+            id: Some("old-session".into()),
+        };
+        let debugger = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        let event = json!({"method":"Debugger.scriptParsed","params":{"scriptId":"1","url":"http://localhost/worker.js"}});
+        debugger.worker_event("worker", &owner, event.clone()).await;
+        assert!(
+            debugger.snapshot()["scripts"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(debugger.hooks.candidate_source_revision("worker"), None);
+        debugger
+            .workers
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("worker".into(), owner.clone());
+        debugger.worker_event("worker", &owner, event.clone()).await;
+        let original_revision = debugger.hooks.candidate_source_revision("worker").unwrap();
+        assert_eq!(debugger.snapshot()["scripts"].as_array().unwrap().len(), 1);
+        debugger.workers.sessions.lock().unwrap().remove("worker");
+        debugger.update(|s| {
+            s["scripts"] = json!([]);
+            debugger.hooks.candidate_source_removed("worker");
+        });
+        debugger.worker_event("worker", &owner, event.clone()).await;
+        assert_eq!(debugger.hooks.candidate_source_revision("worker"), None);
+        for current in [
+            Session {
+                connection: first.clone(),
+                id: Some("new-session".into()),
+            },
+            Session {
+                connection: replacement.clone(),
+                id: owner.id.clone(),
+            },
+        ] {
+            debugger
+                .workers
+                .sessions
+                .lock()
+                .unwrap()
+                .insert("worker".into(), current.clone());
+            debugger.worker_event("worker", &owner, event.clone()).await;
+            assert!(
+                debugger.snapshot()["scripts"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(debugger.hooks.candidate_source_revision("worker"), None);
+        }
+        let current = debugger
+            .workers
+            .sessions
+            .lock()
+            .unwrap()
+            .get("worker")
+            .unwrap()
+            .clone();
+        debugger.worker_event("worker", &current, event).await;
+        assert!(debugger.hooks.candidate_source_revision("worker").unwrap() > original_revision);
+        assert!(
+            !debugger
+                .hooks
+                .candidate_catalog_incomplete
+                .load(Ordering::Acquire)
+        );
+        first.close().await;
+        replacement.close().await;
+    }
+    #[tokio::test]
+    async fn candidate_worker_catalog_preserves_other_contexts_and_taints_rejected_public_ids() {
+        let debugger = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        for context in [1, 2] {
+            debugger.worker_catalog_event("worker", &json!({"method":"Debugger.scriptParsed", "params":{
+                "scriptId":context.to_string(), "url":"http://localhost/worker.js", "executionContextId":context
+            }}));
+        }
+        debugger.worker_catalog_event("worker", &json!({"method":"Runtime.executionContextDestroyed","params":{"executionContextId":1}}));
+        let snapshot = debugger.snapshot();
+        assert_eq!(snapshot["scripts"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["scripts"][0]["execution_context_id"], 2);
+        debugger.worker_catalog_event(
+            "worker",
+            &json!({"method":"Debugger.scriptParsed","params":{
+                "scriptId":"a".repeat(4096),"url":"http://localhost/worker.js"
+            }}),
+        );
+        assert!(
+            debugger
+                .hooks
+                .candidate_catalog_incomplete
+                .load(Ordering::Acquire)
+        );
     }
 }

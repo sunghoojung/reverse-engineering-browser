@@ -798,6 +798,17 @@
             <div id="hooks-workspace" class="experiment-workspace" aria-label="Runtime Hooks" hidden>
               <div class="source-hooks-head"><strong>Runtime Hooks · isolated</strong><button id="source-hooks-experiments" class="source-tool" type="button">Experiments</button><button id="source-hooks-close" class="source-tool" type="button" aria-label="Close Runtime Hooks panel">Close</button></div>
               <div id="source-hooks-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite" hidden></div>
+              <section id="candidate-experiment-strip" class="candidate-experiment-strip" aria-label="Candidate experiment question" hidden>
+                <strong id="candidate-experiment-question"></strong>
+                <p id="candidate-experiment-status" role="status" aria-live="polite"></p>
+                <label>Disposable target<select id="candidate-experiment-target"><option value="">Choose page or worker</option></select></label>
+                <div class="experiment-actions">
+                  <button id="candidate-experiment-bind" class="secondary-button" type="button" disabled>Bind observation hook</button>
+                  <button id="candidate-experiment-cancel" class="secondary-button" type="button" hidden>Stop waiting</button>
+                  <button id="candidate-experiment-return" class="secondary-button" type="button">Return to original field</button>
+                  <button id="candidate-experiment-close" class="source-tool" type="button">Clear question</button>
+                </div>
+              </section>
               <div class="experiment-column hooks-setup-column">
                 <article class="experiment-card">
                   <header>

@@ -126,7 +126,12 @@ mod unix {
                     | libc::O_CLOEXEC,
                 0o600,
             )
-            .map_err(|_| Error::bad("Workspace writer lock could not be opened safely"))?;
+            .map_err(|error| {
+                Error::bad(format!(
+                    "Workspace writer lock could not be opened safely (OS error {:?})",
+                    error.raw_os_error()
+                ))
+            })?;
             regular_owned(&lock, "Workspace writer lock")?;
             if lock.metadata()?.mode() & 0o7777 != 0o600 || lock.metadata()?.len() != 0 {
                 return Err(Error::bad(

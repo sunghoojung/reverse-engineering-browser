@@ -539,7 +539,12 @@ mod writer_tests {
     }
     #[test]
     fn independent_workspace_instances_share_one_generation_commit() {
-        for kind in [Kind::Analyst, Kind::Collection] {
+        // Repeat fresh-sidecar creation races, not only an established lock.
+        for kind in [Kind::Analyst, Kind::Collection]
+            .into_iter()
+            .cycle()
+            .take(16)
+        {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("store.json");
             let barrier = Arc::new(Barrier::new(8));
@@ -564,7 +569,10 @@ mod writer_tests {
                 .collect::<Vec<_>>();
             assert_eq!(successes.len(), 1);
             for error in results.iter().filter_map(|result| result.as_ref().err()) {
-                assert_eq!(error.status, 409);
+                assert_eq!(
+                    error.status, 409,
+                    "Concurrent writer must fail explicitly: {error:?}"
+                );
             }
             assert_eq!(Store::new(path, kind).load().unwrap(), *successes[0]);
         }

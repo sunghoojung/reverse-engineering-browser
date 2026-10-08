@@ -2709,6 +2709,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var window: NSWindow?
   private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
+  private var closeGuard: NativeCloseGuard?
+  private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
   private var selectedCaptureMode = LiveCaptureMode.metadata
@@ -2781,6 +2783,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     window.makeKeyAndOrderFront(nil)
     self.window = window
     self.webView = webView
+    let closeGuard = NativeCloseGuard(window: window, webView: webView)
+    window.delegate = closeGuard
+    self.closeGuard = closeGuard
 
     NSApp.setActivationPolicy(.regular)
     if !smokeTest {
@@ -2793,6 +2798,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       presentFatalError("The live UI URL must be an explicit loopback HTTP address")
       return
     }
+    closeGuard.prepareForLoad(requestedUIURL ?? localApplicationURL)
     webView.load(URLRequest(url: requestedUIURL ?? localApplicationURL))
     if smokeTest && ProcessInfo.processInfo.environment["REB_APP_SMOKE_LIVE_FAILURE"] == "1" {
       // Exercise the real startup failure path without a browser or modal dialog.
@@ -2812,6 +2818,28 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     if !smokeTest && requestedUIURL == nil && automaticLiveSessionEnabled() {
       requestAutomaticLiveSession()
     }
+  }
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    closeGuard?.applicationShouldTerminate() ?? .terminateNow
+  }
+
+  func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+    closeGuard?.navigationWillStart()
+  }
+
+  func webView(
+    _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+    decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+  ) {
+    if navigationAction.targetFrame?.isMainFrame == true {
+      closeGuard?.navigationWillStart()
+    }
+    decisionHandler(.allow)
+  }
+
+  func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    closeGuard?.navigationWillStart()
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -2836,6 +2864,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    closeSmoke?.willTerminate()
     liveSessionCoordinator.stop()
   }
 
@@ -2947,6 +2976,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           )
           return
         }
+        self.closeGuard?.prepareForLoad(nativeURL)
         webView.load(URLRequest(url: nativeURL))
         self.presentOriginTraceWindow()
       },
@@ -2975,6 +3005,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     automaticSessionSuppressed = false
     liveSessionCoordinator.stop()
     if let localApplicationURL, let webView {
+      closeGuard?.prepareForLoad(localApplicationURL)
       webView.load(URLRequest(url: localApplicationURL))
     }
     presentLiveSessionSetup()
@@ -3307,6 +3338,17 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     guard smokeTest else { return }
+    if let scenario = ProcessInfo.processInfo.environment["REB_APP_SMOKE_NATIVE_CLOSE"],
+      let window, let closeGuard
+    {
+      guard closeSmoke == nil else { return }
+      let smoke = NativeCloseGuardSmoke(
+        scenario: scenario, window: window, webView: webView, closeGuard: closeGuard
+      )
+      closeSmoke = smoke
+      smoke.start()
+      return
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
       let exerciseCollectionWrite =
         ProcessInfo.processInfo.environment["REB_APP_SMOKE_API_COLLECTION_WRITE"] == "1"

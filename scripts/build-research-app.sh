@@ -15,6 +15,8 @@ resources_path="${contents_path}/Resources"
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
 trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
+close_smoke_source="${repo_root}/apps/research-ui/macos/NativeCloseGuardSmoke.swift"
+close_guard_source="${repo_root}/apps/research-ui/macos/NativeCloseGuard.swift"
 live_session_source="${repo_root}/apps/research-ui/macos/LiveSessionCoordinator.swift"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
@@ -93,7 +95,7 @@ xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${trace_document_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" \
+  "${swift_source}" "${trace_document_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

@@ -333,6 +333,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Exercise native Analyst close and Quit lifecycle
+        if: matrix.os == 'macos-latest'
+        run: node tools/check-origin-trace-native-close.mjs
+
+      - name: Upload native close diagnostics
+        if: matrix.os == 'macos-latest' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-close-${{ github.run_id }}
+          path: build/native-close-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Upload macOS application preview
         if: matrix.os == 'macos-latest' && github.event_name == 'pull_request' && success()
         uses: actions/upload-artifact@v7

@@ -483,9 +483,13 @@ If readback still shows the original generation, an explicit retry uses that sam
 generation check, so a delayed original save conflicts instead of committing
 twice. Conflicts and validation reasons remain visible. There is no autosave or
 persistent draft copy. Browser reload/close warns while drafts or unresolved saves
-exist; browser-controlled warnings cannot protect a forced process exit. Save
-before quitting the native app: this frontend change alone does not establish a
-native macOS window-close or quit confirmation.
+exist. The native shell separately checks the current Analyst document before
+normal window close or Quit. Its sheet keeps **Stay** as the Return/Escape default;
+**Close Anyway** requires a deliberate choice for unsaved or unconfirmed changes,
+including when the document cannot report its state. Navigation invalidates an
+older close decision. Closing can interrupt a pending save and cannot undo a save
+already committed. Save and verify the result before closing. Neither warning
+protects against crashes or a forced process exit.
 
 The existing `--investigation-ui-browser` gate includes synthetic Analyst library
 interactions at 1440×900, 760×560 and 360×740: dirty selection, folder/file edits,
@@ -493,6 +497,15 @@ keyboard focus, workspace returns, real reload cancellation, lost/malformed save
 acknowledgements, locked recovery, concurrent edits and narrow recovery controls.
 Production-controller regressions run in `make javascript-check`. These fixtures
 are separate from real storage durability and native macOS lifecycle acceptance.
+
+Native acceptance requires `make app-build`, strict code-signature verification,
+and `node tools/check-origin-trace-native-close.mjs` on macOS. The existing macOS
+CI job runs a relocated packaged app with synthetic workspaces through actual
+window close, application Quit, Stay by Return/Escape, explicit Close Anyway,
+save/pending states, coalesced requests, unavailable/untrusted documents, actual
+navigation, and injected stale/timeout replies. It verifies draft/owner retention
+and the expected warning before shutdown. The `--contract-only` mode checks build
+wiring only and is not evidence of native lifecycle behavior.
 
 
 ## Code ownership

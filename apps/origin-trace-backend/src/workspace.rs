@@ -2,12 +2,12 @@ use crate::{
     durable,
     error::{Code, Error, Reason, Result},
     validation::{self, MAX_SAFE_INTEGER},
+    workspace_lease::Lease,
 };
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::Mutex,
 };
 use unicode_casefold::UnicodeCaseFold;
 
@@ -68,18 +68,16 @@ impl Kind {
 pub struct Store {
     pub path: PathBuf,
     pub kind: Kind,
-    lock: Mutex<()>,
 }
 impl Store {
     pub fn new(path: PathBuf, kind: Kind) -> Self {
-        Self {
-            path,
-            kind,
-            lock: Mutex::new(()),
-        }
+        Self { path, kind }
     }
     fn read(&self) -> Result<Value> {
-        match durable::read_private(&self.path, self.kind.maximum())? {
+        self.decode(durable::read_private(&self.path, self.kind.maximum())?)
+    }
+    fn decode(&self, bytes: Option<Vec<u8>>) -> Result<Value> {
+        match bytes {
             Some(bytes) => normalize(
                 self.kind,
                 &serde_json::from_slice(&bytes)
@@ -89,10 +87,6 @@ impl Store {
         }
     }
     pub fn load(&self) -> Result<Value> {
-        let _guard = self
-            .lock
-            .lock()
-            .map_err(|_| Error::new(500, "Workspace store is unavailable"))?;
         self.read()
     }
     pub fn replace(&self, request: &Value) -> Result<Value> {
@@ -116,11 +110,8 @@ impl Store {
             0,
             MAX_SAFE_INTEGER,
         )?;
-        let _guard = self
-            .lock
-            .lock()
-            .map_err(|_| Error::new(500, "Workspace store is unavailable"))?;
-        let current = self.read()?;
+        let lease = Lease::acquire(&self.path)?;
+        let current = self.decode(lease.read(kind.maximum())?)?;
         if current["generation"] != generation {
             return Err(Error::conflict(format!(
                 "{} changed in another window; refresh before saving",
@@ -174,7 +165,7 @@ impl Store {
                 Error::bad("Workspace store exceeds its byte limit").with_code(Code::ResourceLimit)
             );
         }
-        durable::write_private(&self.path, &bytes)?;
+        lease.write(&bytes)?;
         Ok(candidate)
     }
 }
@@ -522,4 +513,98 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
         return Err(Error::bad("Workspace generation zero must be empty"));
     }
     Ok(output)
+}
+
+#[cfg(all(test, unix))]
+mod writer_tests {
+    use super::*;
+    use std::{
+        fs,
+        sync::{Arc, Barrier},
+    };
+
+    fn replacement(kind: Kind, generation: u64, writer: usize) -> Value {
+        let mut folders = kind.empty()["folders"].as_array().unwrap().clone();
+        let mut folder = json!({"id":2,"name":format!("Writer {writer}"),"parent_id":1});
+        if kind == Kind::Collection {
+            folder["variables"] = json!([]);
+        }
+        folders.push(folder);
+        let action = if kind == Kind::Collection {
+            "replace_api_collection"
+        } else {
+            "replace_local_analyst_workspace"
+        };
+        json!({"action":action,"expected_generation":generation,"folders":folders,kind.items():[]})
+    }
+    #[test]
+    fn independent_workspace_instances_share_one_generation_commit() {
+        for kind in [Kind::Analyst, Kind::Collection] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("store.json");
+            let barrier = Arc::new(Barrier::new(8));
+            let jobs = (0..8)
+                .map(|writer| {
+                    let barrier = barrier.clone();
+                    let path = path.clone();
+                    std::thread::spawn(move || {
+                        let store = Store::new(path, kind);
+                        barrier.wait();
+                        store.replace(&replacement(kind, 0, writer))
+                    })
+                })
+                .collect::<Vec<_>>();
+            let results = jobs
+                .into_iter()
+                .map(|job| job.join().unwrap())
+                .collect::<Vec<_>>();
+            let successes = results
+                .iter()
+                .filter_map(|result| result.as_ref().ok())
+                .collect::<Vec<_>>();
+            assert_eq!(successes.len(), 1);
+            for error in results.iter().filter_map(|result| result.as_ref().err()) {
+                assert_eq!(error.status, 409);
+            }
+            assert_eq!(Store::new(path, kind).load().unwrap(), *successes[0]);
+        }
+    }
+    #[test]
+    fn workspace_busy_release_stale_noop_and_corruption_preserve_bytes() {
+        for kind in [Kind::Analyst, Kind::Collection] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("store.json");
+            let store = Store::new(path.clone(), kind);
+            let request = replacement(kind, 0, 1);
+            let saved = store.replace(&request).unwrap();
+            let before = fs::read(&path).unwrap();
+            let stamp = fs::metadata(&path).unwrap().modified().unwrap();
+            let lease = Lease::acquire(&path).unwrap();
+            assert_eq!(store.replace(&request).unwrap_err().status, 409);
+            assert_eq!(
+                store.load().unwrap(),
+                saved,
+                "Snapshots need not wait for a writer"
+            );
+            drop(lease);
+            assert_eq!(
+                store.replace(&request).unwrap_err().reason.code,
+                Code::StaleGeneration
+            );
+            let mut noop = request.clone();
+            noop["expected_generation"] = json!(1);
+            assert_eq!(store.replace(&noop).unwrap(), saved);
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+            fs::write(&path, b"{broken").unwrap();
+            assert!(
+                store
+                    .replace(&noop)
+                    .unwrap_err()
+                    .message
+                    .contains("malformed")
+            );
+            assert_eq!(fs::read(&path).unwrap(), b"{broken");
+        }
+    }
 }

@@ -129,8 +129,9 @@ and add `code` and bounded `details`. `ErrorCode` and `ErrorDetails` in the
 OpenAPI document own these fields. Precise reasons are assigned only where the
 source establishes the failure; legacy cases may use `unspecified` or a coarse
 reason. A request-body timeout is before action dispatch. Interrupted command
-writes or missing/malformed replies can have `command_outcome_unknown`; this
-never proves no effect or authorizes a retry. Dynamic failure reasons do not
+writes, missing/malformed replies, or workspace directory-sync failure after
+publication can have `command_outcome_unknown`; this never proves no effect or
+authorizes a retry. Dynamic failure reasons do not
 replace the [advisory effects and common guards](#execution-metadata).
 
 Analyst, JWT Decoder and native Console application failures can remain HTTP
@@ -208,8 +209,9 @@ The action routes are multiplexed, not invented REST resources:
   be stopped and does not remove artifact files.
 - Decoder has four discriminated actions and result schemas. JWT `ok=false`
   may be an HTTP 200 result, so inspect application outcomes.
-- Collection and Analyst replacement use optimistic `expected_generation` and
-  full documents. Stale generations return 409. Tree integrity, uniqueness,
+- Collection and Analyst replacement share the
+  [cooperative writer lease](workspace-writer-lease-v1.md), use optimistic
+  `expected_generation` and full documents. Stale generations return 409. Tree integrity, uniqueness,
   forbidden headers and aggregate UTF-8 limits remain runtime validations.
   Replacement responses do not include an ETag; read the workspace to obtain
   its current conditional-GET validator.

@@ -158,6 +158,11 @@ export async function checkCapturedComparisonInteractions({evaluate,viewport,cli
     await evaluate(`state.events=[{protocol_version:1,session_id:1,sequence_number:1,monotonic_time_ns:1,navigation_id:1,frame_id:1,artifact_id:0,parent_event_id:0,process_id:1,thread_id:1,category:'network',type:'request_started',payload_size:0,payload_encoding:'hex',payload:''}];if(!isBrokerEvent(state.events[0]))throw Error('Invalid healthy event fixture');state.eventsLimited=false;state.broker='connected';state.eventFailureKind=null;state.debuggerSession.network.capture_enabled=false;
       state.requests=Array.from({length:520},(_,i)=>({id:'healthy-'+i,origin:'live',method:'GET',path:'https://fixture.invalid/healthy-'+i,status:200,time:1,type:'xhr',events:[]}));
       state.requestTabId='all';state.requestDomain='all';state.trafficWindowStart=0;state.trafficWindowAnchor=null;elements.requestSearchScope.value=${JSON.stringify(search?'content':'url')};elements.requestFilter.value=${JSON.stringify(search?'healthy':'')};renderRequests();renderInspector();renderNetworkNotice();`);
+    // Exercise the actual polling path while this healthy authored capture is
+    // retained; an offline response must not resize its ledger mid-wheel.
+    await evaluate("(async()=>{while(state.refreshing)await new Promise(resolve=>setTimeout(resolve,20));await refresh();})()");
+    assert.equal(await evaluate("state.broker"),'connected');
+    assert.equal(await evaluate("state.eventFailureKind"),null);
     const healthy=await evaluate("(()=>{const pane=document.querySelector('.request-pane'),table=document.querySelector('.request-table'),rows=elements.requestRows;return {hidden:elements.networkNotice.hidden,search:!elements.requestSearchStatus.hidden,row:getComputedStyle(table).gridRowStart,height:rows.clientHeight,content:rows.scrollHeight,outer:pane.scrollTop,count:rows.children.length};})()");
     assert.equal(healthy.hidden,true);assert.equal(healthy.search,search);assert.equal(healthy.row,'-2');
     assert(healthy.count===500&&healthy.height>=28&&healthy.height<height&&healthy.content>healthy.height,'Healthy retained window must stay in an independently bounded ledger');

@@ -56,6 +56,24 @@ host-and-time correlations likewise cannot become exact captured trace links.
 See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
 for the identity boundary, retained limits and integration points.
 
+## Saved investigation notebook
+
+Use **Notebook** in the toolbar to create a named local notebook, then **Pin
+selected evidence** from a captured Source, native Request, or selected Evidence
+observation. Add a concise name and note and choose **Save pin**. Exact captured
+source ranges are preserved when they came from verified original-byte navigation.
+Reopening resolves the same retained identity; changed, missing or ambiguous
+records remain explicit. Names can repeat without confusing their scoped IDs.
+
+Notebooks survive application reload as non-executable JSON scratchpads in the
+existing Analyst library. The dialog clearly discloses its library-wide scope
+across sessions. Existing scripts and notes stay unchanged. Pins store reference
+metadata and event fingerprints, never copied source/request/console content or
+capture permissions. Typed notes may contain private information and remain local.
+Cancellation cannot undo an already committed save: unconfirmed writes require
+an explicit reload before another save. See the [notebook contract](../../protocol/investigation-notebook-v1.md)
+for bounds, identity semantics and validation coverage.
+
 ## Native console
 
 The **Console** bottom dock starts a separate disposable custom Brave session for

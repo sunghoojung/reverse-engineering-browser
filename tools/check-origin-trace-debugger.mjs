@@ -21,6 +21,7 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
 import {checkInvestigationCore, investigationFixture, checkInvestigationInteractions} from "./check-investigation-navigation.mjs";
+import {checkNotebookCore, notebookFixture, checkNotebookInteractions} from './check-investigation-notebook.mjs';
 import {sourcesHistoryFixture, checkSourcesHistoryFixture, checkSourcesHistoryInteractions} from "./check-sources-history.mjs";
 const sourcesHistoryBrowser = process.argv[2] === "--sources-history-ui-browser";
 const canvasBrowser = process.argv[2] === "--canvas-ui-browser";
@@ -41,6 +42,7 @@ await checkTrafficComparisonController(root);
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
+await checkNotebookCore(root);
 await checkFloat32Model(root);
 // The fixture serves the same declared public leaves as the product. Inspect
 // raw origin-form paths before URL normalization, so encoded/traversing paths
@@ -5672,7 +5674,7 @@ async function checkTrafficBrowser() {
   const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
   const collectionFixture = collectionBrowser ? await collectionBrowserFixture(root) : null;
   let floatFixture;
-  const factsFixture = sourcesHistoryBrowser ? await sourcesHistoryFixture(await sourceFactsBrowserFixture()) : investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
+  const factsFixture = sourcesHistoryBrowser ? await sourcesHistoryFixture(await sourceFactsBrowserFixture()) : investigationBrowser ? await notebookFixture(investigationFixture(await sourceFactsBrowserFixture()), root) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
   const evidenceFixture = evidenceBrowser || comparisonBrowser ? evidenceBrowserFixture() : null;
   if(evidenceFixture){
@@ -5690,6 +5692,9 @@ async function checkTrafficBrowser() {
     if (factsFixture && await factsFixture.handle(request, response)) return;
     if (consoleFixture && await consoleFixture.handle(request, response)) return;
     if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
+    // Comparison cases install authored retained state. Normal polling stays
+    // active but receives unchanged snapshots instead of the offline fixture.
+    if (trafficApiMode === "retained" && request.method === "GET" && ["/api/events", "/api/artifacts", "/api/debugger"].includes(path)) {response.writeHead(304); response.end(); return;}
     if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
     await serveFixtureAsset(request, response);
@@ -5940,7 +5945,9 @@ async function checkTrafficBrowser() {
       validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value),navigatePolicy});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Canvas QA");
     } else if (investigationBrowser) {
+      const notebookValidation = await checkNotebookInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:()=>command('Page.reload')});
       validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});
+      validation.notebook = notebookValidation;
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during investigation QA");
     } else if (memoryBrowser) {
       validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture:memoryFixture,recordMemoryCheck:value=>{diagnostics.memory_control_checks=[...(diagnostics.memory_control_checks??[]).slice(-63),value];}});
@@ -6066,6 +6073,10 @@ async function checkTrafficBrowser() {
     await evaluate("state.requests=[]; renderRequests(); renderInspector()");
     assert.match(await evaluate("elements.requestRows.textContent"), /No developer evidence/);
     await screenshot("requests-empty");
+    trafficApiMode = "retained";
+    // Settle any prior offline response before giving the authored state to the
+    // comparison fixture. Do not stop or replace production polling handlers.
+    await evaluate("(async()=>{const started=performance.now();while(state.refreshing||state.debuggerRefreshing){if(performance.now()-started>5000)throw Error('Prior Traffic refresh did not settle');await new Promise(resolve=>setTimeout(resolve,20));}})()");
     const capturedComparison = await checkCapturedComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,emptyDebugger:JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'))});
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
     validation = {capturedComparison,status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};

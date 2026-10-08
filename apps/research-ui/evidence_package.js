@@ -486,7 +486,7 @@ function evidenceObservationModel(context) {
     const matches = artifactIndex.byKey.get(key) ?? []; matches.push(artifact); artifactIndex.byKey.set(key, matches);
     artifactIndex.idCounts.set(artifact.artifact_id, (artifactIndex.idCounts.get(artifact.artifact_id) ?? 0) + 1);
   }
-  const records = new Map(), duplicates = new Set();
+  const records = new Map(), sources = new Map(), duplicates = new Set();
   let omitted = 0, queueMarkers = 0;
   for (const event of window) {
     if (!isBrokerEvent(event) || ![2, 3].includes(event.protocol_version)) { omitted += 1; continue; }
@@ -494,6 +494,7 @@ function evidenceObservationModel(context) {
     const key = evidenceEventKey(event);
     if (!key) { omitted += 1; continue; }
     if (records.has(key)) { duplicates.add(key); continue; }
+    sources.set(key, event);
     records.set(key, Object.fromEntries(['protocol_version', 'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id', 'frame_id', 'artifact_id', 'parent_event_id', 'request_id', 'process_id', 'thread_id', 'browser_context_id_high', 'browser_context_id_low', 'tab_id', 'status_code', 'error_code', 'category', 'type', 'payload', 'payload_truncated'].filter(field => Object.hasOwn(event, field)).map(field => [field, event[field]])));
   }
   const request = context.request;
@@ -528,7 +529,7 @@ function evidenceObservationModel(context) {
   });
   const related = rows.filter(row => row.group !== 'unlinked');
   return {request: request ? {id: request.id, origin: request.origin, method: request.method, path: String(request.path ?? '').slice(0, 2048), hostOnly: request.hostOnly} : null,
-    requestKey: evidenceRequestKey(request), correlatedRequest, rows, related, omitted, queueMarkers,
+    requestKey: evidenceRequestKey(request), correlatedRequest, rows, related, omitted, queueMarkers, sources,
     missingParents: missing.size, unavailableRequest: requestKeys.size - retainedRequest.size,
     duplicates: duplicates.size, parentLimit, parentCycle, limited: Boolean(context.eventsLimited || (context.events?.length ?? 0) > 5000),
     sequence: evidenceSequenceObservations([...records.values()]),
@@ -768,6 +769,20 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     }, showPackages, showComparison, disposeComparison,
     // Bounded view state only. Shared navigation may restore this without
     // retaining payloads, source text, reports or package bytes in history.
+    selectedEvent: () => model?.rows.some(row => row.key === selectedKey && !row.duplicate) ? model.sources.get(selectedKey) ?? null : null,
+    // A saved event pin has no historical request association. Keep the current
+    // context/filter and label an out-of-filter selection instead of inventing one.
+    openEvent(key) {
+      const current = evidenceObservationModel(getContext());
+      if (!current.rows.some(row => row.key === key && !row.duplicate)) return false;
+      model = current; requestKey = current.requestKey; selectedKey = key;
+      listSignature = ''; detailSignature = 'restoring'; rebuild();
+      showPackages(false, false); setPane('detail'); sync();
+      const outside = !filtered.some(row => row.key === key);
+      message(outside ? 'The saved observation is outside the current filter. The pin preserves no request association.'
+        : 'Opened an exact saved observation. Request relationships describe the current retained context.', outside);
+      return true;
+    },
     snapshot: () => ({requestKey, selectedKey, page, pane, packages}),
     canRestore(value, request = getContext().request) {const current = evidenceObservationModel({...getContext(), request}); return Boolean(value && value.requestKey === current.requestKey && (!value.selectedKey || current.rows.some(row => row.key === value.selectedKey && !row.duplicate)));},
     restore(value) {

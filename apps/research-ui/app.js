@@ -11310,4 +11310,35 @@
       }
 
       initializeInvestigationNavigation();
+      const investigationNotebook = RebInvestigationNotebook.mount({
+        button: document.querySelector('#open-investigation-notebook'),
+        validateLibrary: isLocalAnalystWorkspace,
+        getContext: () => ({events: state.events, artifacts: state.artifacts}),
+        getSelection: () => {
+          if (investigationScreen() === 'sources') {
+            const artifact = selectedSource();
+            if (artifact?.source_type !== 'artifact') return null;
+            const identity = investigationArtifactIdentity(artifact);
+            const range = investigationSame(investigationRange?.identity, identity) ? investigationRange : null;
+            return {kind: 'artifact', artifact, range};
+          }
+          let event = investigationScreen() === 'evidence' ? evidenceWorkspace.selectedEvent() : null;
+          if (investigationScreen() === 'traffic') event = requestTraceRoot(state.requests.find(item => item.id === state.selectedRequestId));
+          if (!event) return null;
+          const identity = investigationEventIdentity(event);
+          const retained = state.events.filter(value => investigationSame(identity, investigationEventIdentity(value)));
+          return retained.length === 1 ? {kind: 'event', event} : null;
+        },
+        openReference: (reference, token) => {
+          if (reference.type === 'captured-artifact') return openInvestigation({kind: 'artifact', identity: reference,
+            range: reference.range, relation: 'Opened a saved exact artifact reference. The note is researcher interpretation.'});
+          const matches = state.events.filter(event => String(event.session_id) === reference.session &&
+            String(event.process_id) === reference.process && String(event.sequence_number) === reference.sequence);
+          if (matches.length !== 1) return false;
+          try {if (RebInvestigationNotebook.eventCanonical(matches[0]) !== token) return false;} catch {return false;}
+          const key = `${reference.session}:${reference.process}:${reference.sequence}`;
+          showScreen('evidence');
+          return evidenceWorkspace.openEvent(key);
+        }
+      });
       initializePaneLayout();

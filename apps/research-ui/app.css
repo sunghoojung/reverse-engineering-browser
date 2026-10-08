@@ -3607,6 +3607,40 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 @media (max-width: 1000px) { .float32-workspace { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 480px) { .float32-form, .float32-output { padding: 10px; } .float32-form fieldset { padding: 8px; } }
 
+/* Explicit saved evidence references; no source bytes are retained by this view. */
+.investigation-notebook { width: min(940px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); overflow: auto; box-shadow: 0 24px 80px #0008; }
+.investigation-notebook::backdrop { background: #171526b8; }
+.notebook-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.notebook-header h2 { margin: 0; font-size: 18px; }
+.notebook-scope, .notebook-notice, .notebook-assurance, .notebook-reference, .notebook-empty { font-size: 12px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.notebook-scope { margin: 12px 0; }
+.notebook-notice { min-height: 20px; margin: 12px 0; }
+.notebook-notice[data-kind="warning"], .notebook-assurance[data-status]:not([data-status="ready"]) { color: var(--amber); }
+.notebook-controls, .notebook-create, .notebook-actions { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; }
+.notebook-create { margin-top: 10px; }
+.notebook-field { display: flex; flex-direction: column; min-width: 0; gap: 5px; font-size: 12px; }
+.notebook-controls .notebook-field, .notebook-create .notebook-field { flex: 1 1 220px; }
+.investigation-notebook input, .investigation-notebook textarea, .investigation-notebook select { width: 100%; min-width: 0; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: inherit; }
+.investigation-notebook textarea { resize: vertical; min-height: 110px; max-height: 260px; }
+.notebook-split { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 16px; min-height: 270px; }
+.notebook-left { min-width: 0; }
+.notebook-list { margin-top: 10px; max-height: 330px; overflow-y: auto; overflow-x: hidden; padding: 2px; }
+.notebook-pin { display: flex; flex-direction: column; text-align: left; white-space: normal; width: 100%; align-items: start; gap: 5px; margin-bottom: 6px; padding: 10px; overflow-wrap: anywhere; }
+.notebook-pin strong { font-size: 13px; }
+.notebook-pin span { font-size: 11px; color: var(--muted); }
+.notebook-pin[aria-current="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.notebook-editor { min-width: 0; display: flex; flex-direction: column; gap: 10px; border-left: 1px solid var(--line); padding-left: 16px; }
+.notebook-reference, .notebook-assurance { margin: 0; }
+.investigation-notebook :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.investigation-notebook button:disabled { opacity: .5; }
+@media (max-width: 760px) {
+  .investigation-notebook { padding: 14px; width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
+  .notebook-split { grid-template-columns: 1fr; }
+  .notebook-list { max-height: 160px; }
+  .notebook-editor { border-left: 0; padding-left: 0; border-top: 1px solid var(--line); padding-top: 12px; }
+  .notebook-header h2 { font-size: 16px; }
+  .notebook-controls, .notebook-create { align-items: stretch; }
+}
 /* Retained Traffic comparison shares the inspector's independently bounded pane. */
 .traffic-comparison { min-width: 0; min-height: 0; overflow: auto; padding: 12px; }
 .traffic-comparison[hidden] { display: none; }
@@ -3622,3 +3656,11 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .traffic-comparison :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .traffic-comparison-identities > summary { cursor: pointer; padding: 4px 0; color: var(--text); }
+
+/* Keep phone navigation at its existing two rows instead of consuming evidence space. */
+.notebook-trigger-icon { display: none; width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+@media (max-width: 480px) {
+  #open-investigation-notebook { width: 27px; height: 27px; min-width: 27px; padding: 3px; }
+  .notebook-trigger-label { display: none; }
+  .notebook-trigger-icon { display: block; }
+}

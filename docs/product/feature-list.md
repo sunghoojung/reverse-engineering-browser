@@ -146,7 +146,7 @@ privacy, and implementation limits are documented in
   evidence rows.
 - Unified investigation timeline and causal graph.
 - Source-to-event and event-to-source navigation.
-- Bookmarks, annotations, hypotheses, and evidence-backed conclusions.
+- [Saved evidence pins and researcher notes](../../protocol/investigation-notebook-v1.md) in the local Analyst library; structured hypotheses and evidence-backed conclusions remain planned.
 - Console and the persistent Local Analyst scratchpad.
 - Byte viewer, decoder chains, and JWT inspection.
 - Baseline, Deep Analysis, and Experiment status shown at all times.

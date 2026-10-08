@@ -10,6 +10,7 @@ HEAP_SNAPSHOT_BINARY := $(BUILD_DIR)/reb-heap-snapshot
 DECODER_BINARY := $(BUILD_DIR)/reb-decoder
 DEBUGGER_TRANSPORT_BINARY := $(BUILD_DIR)/reb-debugger-transport
 NATIVE_CONSOLE_BINARY := $(BUILD_DIR)/reb-console
+NATIVE_CONSOLE_MESSAGES_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_console_messages.o
 NATIVE_CONSOLE_IO_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_console_io.o
 NATIVE_PROBE_QUEUE_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_queue.o
 NATIVE_WORKER_SOURCE_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_worker_source.o
@@ -33,7 +34,7 @@ APP_BINARIES := \
 	$(DEBUGGER_TRANSPORT_BINARY) \
 	$(NATIVE_CONSOLE_BINARY)
 $(DEMO_BINARY): $(BUILD_DIR)/apps/reb-event-demo/main.o \
-	$(BUILD_DIR)/src/capture/event.o $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT)
+	$(BUILD_DIR)/src/capture/event.o $(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT)
 $(BUILD_DIR)/apps/reb-event-demo/main.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(PRODUCER_BINARY): $(BUILD_DIR)/apps/reb-event-producer/main.o \
 	$(BUILD_DIR)/src/capture/event.o \
@@ -84,7 +85,7 @@ $(BUILD_DIR)/%.o: %.cc
 # Discover dependency files without adding sources to any link target implicitly.
 NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp)
 NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \
-	$(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT) \
+	$(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT) \
 	$(NATIVE_PROXY_POLICY_OBJECT) $(BUILD_DIR)/tools/check-native-proxy-policy.o
 
 $(NATIVE_OBJECTS): mk/config.mk mk/native.mk

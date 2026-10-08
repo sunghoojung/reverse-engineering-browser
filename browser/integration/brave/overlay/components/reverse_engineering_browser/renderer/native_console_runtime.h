@@ -28,6 +28,8 @@ namespace reb {
 // Monotonic handles never alias an evicted value or a replacement document.
 class NativeConsoleRuntime final {
  public:
+  NativeConsoleRuntime();
+  ~NativeConsoleRuntime();
   void Reset();
   void Message(const std::string& text,
                const std::string& source,
@@ -56,16 +58,16 @@ class NativeConsoleRuntime final {
   base::RepeatingTimer expiration_;
   std::uint64_t Retain(v8::Isolate* isolate, v8::Local<v8::Value> value);
   v8::Local<v8::Value> Lookup(v8::Isolate* isolate, const std::string& handle);
-  base::Value::Dict Value(v8::Isolate* isolate,
-                          v8::Local<v8::Context> context,
-                          v8::Local<v8::Value> value);
-  base::Value::Dict Properties(v8::Isolate* isolate,
-                               v8::Local<v8::Context> context,
-                               v8::Local<v8::Value> value,
-                               int offset);
-  base::Value::Dict Complete(v8::Isolate* isolate,
+  base::DictValue Value(v8::Isolate* isolate,
+                        v8::Local<v8::Context> context,
+                        v8::Local<v8::Value> value);
+  base::DictValue Properties(v8::Isolate* isolate,
                              v8::Local<v8::Context> context,
-                             const base::Value::Dict& command);
+                             v8::Local<v8::Value> value,
+                             int offset);
+  base::DictValue Complete(v8::Isolate* isolate,
+                           v8::Local<v8::Context> context,
+                           const base::DictValue& command);
   std::array<Slot, 128> slots_;
   std::size_t next_slot_ = 0;
   std::uint64_t next_handle_ = 1;

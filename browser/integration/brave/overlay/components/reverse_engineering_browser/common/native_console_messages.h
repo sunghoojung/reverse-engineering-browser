@@ -25,7 +25,8 @@ class NativeConsoleMessages final {
   static constexpr std::size_t kByteLimit = 32768;
   static constexpr std::uint32_t kDropLimit = 2147483647;
 
-  NativeConsoleMessages() = default;
+  NativeConsoleMessages() noexcept;
+  ~NativeConsoleMessages() noexcept;
   NativeConsoleMessages(const NativeConsoleMessages&) = delete;
   NativeConsoleMessages& operator=(const NativeConsoleMessages&) = delete;
   NativeConsoleMessages(NativeConsoleMessages&&) = delete;

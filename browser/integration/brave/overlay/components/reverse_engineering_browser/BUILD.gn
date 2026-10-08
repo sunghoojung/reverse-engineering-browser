@@ -112,6 +112,7 @@ component("renderer_sink") {
 
 static_library("renderer") {
   sources = [
+    "common/native_console_messages.cc",
     "common/native_console_messages.h",
     "common/native_vm_finding.h",
     "renderer/native_console_agent.cc",

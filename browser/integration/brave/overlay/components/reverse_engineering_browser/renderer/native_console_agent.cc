@@ -9,11 +9,13 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <string>
 
 #include "base/command_line.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -97,7 +99,7 @@ class ExecutionDeadline final {
   }
   base::Lock lock_;
   base::ConditionVariable changed_{&lock_};
-  v8::Isolate* isolate_ = nullptr;
+  raw_ptr<v8::Isolate> isolate_ = nullptr;
   base::TimeTicks expires_;
   bool expired_ = false;
   bool worker_running_ = false;
@@ -141,7 +143,7 @@ NativeConsoleType Preview(v8::Isolate* isolate,
       text = number < 0 ? "-Infinity" : "Infinity";
     else {
       std::array<char, 128> buffer{};
-      const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), number);
+      const auto result = std::to_chars(buffer.data(), std::to_address(buffer.end()), number);
       if (result.ec == std::errc{})
         text.assign(buffer.data(), result.ptr);
     }

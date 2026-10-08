@@ -129,6 +129,8 @@ struct NativeWorkerObservationStats final {
 // a newer authorization for the same worker token.
 class NativeWorkerObservationQueue final {
  public:
+  NativeWorkerObservationQueue() noexcept;
+
   [[nodiscard]] bool IsEnabled() const noexcept {
     return active_generation_.load(std::memory_order_acquire) != 0;
   }

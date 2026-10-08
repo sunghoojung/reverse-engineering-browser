@@ -48,6 +48,8 @@ bool ValidInput(const NativeWorkerObservationInput& input) noexcept {
 }
 }  // namespace
 
+NativeWorkerObservationQueue::NativeWorkerObservationQueue() noexcept = default;
+
 NativeWorkerCaptureStatus NativeWorkerObservationQueue::Configure(
     const NativeWorkerObservationPolicy& policy,
     const std::uint64_t now_ns) noexcept {

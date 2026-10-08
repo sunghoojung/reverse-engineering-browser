@@ -36,7 +36,14 @@ for both invocations. For an already initialized checkout only, the existing
 The wrapper refuses a mismatched `--init` destination and stops on any failure.
 It checks all three upstream pins before mutation, rejects revision, integration,
 remote and output overrides, and refuses unrecognized upstream edits. First-run
-`--init` requires clean upstream checkouts. Repeated runs without `--init` accept
+`--init` requires clean upstream checkouts. A missing checkout is initialized
+normally. A pristine unborn Brave Git repository left before the first successful
+fetch is also admitted only for `--init`: it must contain only its own `.git`, no
+index files/refs/pending operation, and only the official Brave fetch remote URLs. Custom hooks, hook/monitor
+configuration or configuration includes require inspection and are refused.
+This narrowly permits safe initialization to continue; a partial checkout with
+user content, a wrong remote, symlinks or initialized mismatched pins still stops.
+Repeated runs without `--init` accept
 only the exact locally recorded post-sync state for this integration commit,
 including ignored overlay/patch destinations; symlink destinations are refused.
 The private source receipt is `build/integrated-brave-state.json`. Only after

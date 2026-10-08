@@ -109,11 +109,14 @@ class StateGuards(unittest.TestCase):
         (self.brave / "ignored").symlink_to(self.root, target_is_directory=True)
         self.assertNotEqual(self.call().returncode, 0)
 
-    def wrapper(self, overrides=None):
+    def wrapper(self, overrides=None, initialize=False, expect_bootstrap=False):
         scripts = self.repo / "scripts"
         scripts.mkdir(exist_ok=True)
         wrapper = scripts / "build-integrated-brave.sh"
         shutil.copyfile(HELPER.parent.parent / "scripts/build-integrated-brave.sh", wrapper)
+        bootstrap = scripts / "bootstrap-brave.sh"
+        bootstrap.write_text(f"#!/bin/sh\ntouch '{self.root}/bootstrap-admitted'\nexit 91\n")
+        bootstrap.chmod(0o755)
         helper_dir = self.repo / "tools"
         helper_dir.mkdir(exist_ok=True)
         shutil.copyfile(HELPER, helper_dir / HELPER.name)
@@ -137,11 +140,101 @@ class StateGuards(unittest.TestCase):
         environment.update(PATH=str(mocks) + os.pathsep + os.environ["PATH"],
                            REB_BRAVE_DIRECTORY=str(self.brave))
         environment.update(overrides or {})
-        result = subprocess.run(["bash", str(wrapper)], env=environment, capture_output=True,
+        arguments = ["bash", str(wrapper)] + (["--init"] if initialize else [])
+        result = subprocess.run(arguments, env=environment, capture_output=True,
                                 text=True, check=False)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.root / "mutated").exists(), result.stdout + result.stderr)
+        self.assertEqual((self.root / "bootstrap-admitted").exists(), expect_bootstrap,
+                         result.stdout + result.stderr)
         return result
+
+    def fresh_nested_brave(self):
+        self.brave = self.repo / "browser/worktree/src/brave"
+        self.chromium = self.brave.parent
+        self.v8 = self.chromium / "v8"
+        ignore = self.repo / ".gitignore"
+        ignore.write_text(ignore.read_text() + "browser/worktree/\n")
+        git(self.repo, "add", ".gitignore")
+        git(self.repo, "commit", "-qm", "ignore generated browser workspace")
+
+    def make_pristine_unborn_brave(self):
+        self.fresh_nested_brave()
+        self.brave.mkdir(parents=True)
+        git(self.brave, "init", "-q")
+        git(self.brave, "remote", "add", "origin", "https://github.com/brave/brave-core.git")
+
+    def test_absent_nested_upstream_reaches_bootstrap(self):
+        self.fresh_nested_brave()
+        self.assertFalse(self.brave.exists())
+        self.assertEqual(self.call("check", "--require-clean").returncode, 0)
+        self.assertEqual(self.call("reserve", "--require-clean").stdout.strip(),
+                         str(150 * 1024 * 1024))
+        self.assertEqual(self.wrapper(initialize=True, expect_bootstrap=True).returncode, 91)
+        self.assertFalse(self.brave.exists())  # Stub never downloads or creates a checkout.
+
+    def test_pristine_unborn_brave_is_admitted_only_for_init(self):
+        self.make_pristine_unborn_brave()
+        self.assertNotEqual(self.call().returncode, 0)
+        self.assertNotEqual(self.call("record").returncode, 0)
+        self.assertEqual(self.call("check", "--require-clean").returncode, 0)
+        self.assertEqual(self.wrapper(initialize=True, expect_bootstrap=True).returncode, 91)
+        self.assertEqual(list(self.brave.iterdir()), [self.brave / ".git"])
+
+    def test_unborn_brave_preserves_any_worktree_or_index_data(self):
+        self.make_pristine_unborn_brave()
+        target = self.brave / "private.txt"
+        target.write_text("preserve existing partial work")
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+        self.assertEqual(target.read_text(), "preserve existing partial work")
+        git(self.brave, "add", "private.txt")
+        target.unlink()  # An index-only user file must still block initialization.
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+        self.assertEqual(git(self.brave, "show", ":private.txt"), "preserve existing partial work")
+
+    def test_unborn_brave_wrong_remote_refs_and_operation_state_refused(self):
+        self.make_pristine_unborn_brave()
+        git(self.brave, "remote", "set-url", "origin", "https://example.invalid/other.git")
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+        git(self.brave, "remote", "set-url", "origin", "https://github.com/brave/brave-core.git")
+        git(self.brave, "config", "--add", "remote.origin.url", "https://example.invalid/extra.git")
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+        git(self.brave, "config", "--unset-all", "remote.origin.url")
+        git(self.brave, "config", "remote.origin.url", "https://github.com/brave/brave-core.git")
+        pending = self.brave / ".git/MERGE_HEAD"
+        pending.write_text("unfinished")
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+        pending.unlink()
+        git(self.brave, "fetch", str(self.repo), "HEAD")
+        git(self.brave, "update-ref", "refs/tags/preserve", git(self.brave, "rev-parse", "FETCH_HEAD"))
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+
+    def test_unborn_custom_hooks_and_executable_configuration_refused(self):
+        self.make_pristine_unborn_brave()
+        marker = self.root / "unexpected-hook-ran"
+        hook = self.brave / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+        hook.chmod(0o755)
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+        self.assertTrue(hook.exists())
+        self.assertFalse(marker.exists())
+        hook.unlink()
+        for key, value in (("core.hooksPath", "/unexpected/hooks"),
+                           ("core.fsmonitor", "/unexpected/monitor"),
+                           ("include.path", "/unexpected/config")):
+            with self.subTest(key=key):
+                git(self.brave, "config", key, value)
+                self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+                self.assertEqual(git(self.brave, "config", "--get", key), value)
+                git(self.brave, "config", "--unset", key)
+        self.assertFalse(marker.exists())
+
+    def test_broken_upstream_symlink_refused_during_init(self):
+        self.fresh_nested_brave()
+        self.brave.parent.mkdir(parents=True)
+        self.brave.symlink_to(self.root / "absent-target", target_is_directory=True)
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+        self.assertTrue(self.brave.is_symlink())
 
     def test_wrapper_stops_dirty_overlay_before_mutating_helpers(self):
         target = self.brave / "ignored/overlay.cc"

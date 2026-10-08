@@ -87,7 +87,7 @@ function investigationSelector(node, root = document, stableOnly = false) {
   if (stableOnly) {
     // Dynamic rows may reorder while a local read is pending. Never restore
     // focus by ordinal position into a different piece of evidence.
-    for (const key of ['requestId','traceKey','artifactId','scriptId','evidenceKey']) {
+    for (const key of ['requestId','traceKey','artifactId','scriptId','evidenceKey','localLine']) {
       const value = node.dataset?.[key];
       if (!value || value.length > 256 || key === 'traceKey' && value.startsWith('gap:')) continue;
       const attribute = key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
@@ -130,6 +130,9 @@ function investigationSnapshot() {
     sourceRange: investigationSame(investigationRange?.identity, investigationArtifactIdentity(source)) ? {start:investigationRange.start,end:investigationRange.end} : null,
     traceRow: state.selectedTraceRow, traceGap: investigationSelectedGap(), decoderStep: state.decoderSelectedStepId,
     sourceFormatted: state.sourceFormatted, sourceDeobfuscated: state.sourceDeobfuscated, sourceWasm: state.sourceWasm,
+    sourceWindow: screen === 'sources' && state.sourceEditorView?.window ? {line:state.sourceEditorView.window.line, column:state.sourceEditorView.window.column,
+      version:state.sourceEditorView.view.sourceVersion ?? null, assumption:Boolean(state.deobfuscationAssumeIntrinsics),
+      kind:[Boolean(state.sourceEditorView.view.derived),Boolean(state.sourceEditorView.view.formatted),Boolean(state.sourceEditorView.view.wasmRows)].join(':'), length:state.sourceEditorView.content.length} : null,
     focus: investigationSelector(document.activeElement, root, true), scroll,
     notice: document.querySelector('#investigation-notice').textContent.slice(0,1024)};
 }
@@ -225,9 +228,21 @@ function resumeInvestigationReturn() {
       renderBacktrace();
       if (entry.traceRow && (!restoredRow || state.selectedTraceRow !== restoredRow)) investigationNotice('The request trace was reopened, but its previously selected step is no longer retained.', 'stale');
     }
+    let restoreSourcePixels = true;
+    if (entry.screen === 'sources' && entry.sourceWindow && state.sourceEditorView) {
+      const editor = state.sourceEditorView;
+      const kind = [Boolean(editor.view.derived),Boolean(editor.view.formatted),Boolean(editor.view.wasmRows)].join(':');
+      if (kind === entry.sourceWindow.kind && editor.content.length === entry.sourceWindow.length &&
+          (editor.view.sourceVersion ?? null) === entry.sourceWindow.version &&
+          (!editor.view.derived || Boolean(state.deobfuscationAssumeIntrinsics) === entry.sourceWindow.assumption)) {
+        const sameOriginalRange = entry.sourceRange && !entry.sourceFormatted && !entry.sourceDeobfuscated &&
+          editor.window.line === entry.sourceWindow.line && editor.window.column === entry.sourceWindow.column;
+        if (!sameOriginalRange) moveSourceWindow(entry.sourceWindow.line, entry.sourceWindow.column);
+      } else {restoreSourcePixels = false; investigationNotice('The source reopened, but the saved representation window is unavailable.', 'unavailable');}
+    }
     const root = document.querySelector(`#screen-${entry.screen}`);
-    for (const saved of entry.scroll) {const node = root.matches(saved.selector) ? root : root.querySelector(saved.selector); if (node) {node.scrollTop = saved.top; node.scrollLeft = saved.left;}}
-    const focus = [entry.focus && root.querySelector(entry.focus), document.querySelector('#investigation-back'),
+    for (const saved of entry.scroll) {if (!restoreSourcePixels && saved.selector === '#source-code-wrap') continue; const node = root.matches(saved.selector) ? root : root.querySelector(saved.selector); if (node) {node.scrollTop = saved.top; node.scrollLeft = saved.left;}}
+    const focus = [restoreSourcePixels && entry.focus && root.querySelector(entry.focus), document.querySelector('#investigation-back'),
       document.querySelector('#investigation-forward')].find(node => node && !node.disabled && !node.closest?.('[hidden]'));
     focus?.focus({preventScroll:true});
   });

@@ -62,11 +62,6 @@ private func checkNativeUIURLs() {
   print("PASS native UI URL validation, query preservation and capability marker")
 }
 
-private struct LocalHTTPError: Error {
-  let status: Int
-  let message: String
-}
-
 private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let indexURL: URL
   private let eventStoreURL: URL
@@ -84,8 +79,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
   private let demoEvidenceEnabled: Bool
-  private let apiCollectionLock = NSLock()
-  private let localAnalystLock = NSLock()
   private let analystRunnerLock = NSLock()
   private var activeAnalystProcess: Process?
   private var activeAnalystRunID: Int?
@@ -683,8 +676,17 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return normalized
   }
 
-  private func loadApiCollectionLocked() throws -> [String: Any] {
-    let descriptor = Darwin.open(apiCollectionStoreURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+  private func decodeApiCollection(_ data: Data?) throws -> [String: Any] {
+    guard let data else { return emptyApiCollection() }
+    do {
+      return try normalizeApiCollection(JSONSerialization.jsonObject(with: data, options: []))
+    } catch {
+      throw LocalHTTPError(status: 500, message: "API Collection store is malformed")
+    }
+  }
+
+  private func loadApiCollection() throws -> [String: Any] {
+    let descriptor = Darwin.open(apiCollectionStoreURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
     if descriptor < 0 {
       if errno == ENOENT { return emptyApiCollection() }
       throw LocalHTTPError(status: 500, message: "API Collection store could not be opened safely")
@@ -714,7 +716,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       guard data.count <= maximumBytes else {
         throw LocalHTTPError(status: 500, message: "API Collection store exceeds 2 MiB")
       }
-      return try normalizeApiCollection(JSONSerialization.jsonObject(with: data, options: []))
+      return try decodeApiCollection(data)
     } catch let error as LocalHTTPError where error.status == 500 {
       throw error
     } catch {
@@ -727,9 +729,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func apiCollectionResponse(ifNoneMatch: String?) throws -> (Data, Int, [String: String]) {
-    apiCollectionLock.lock()
-    defer { apiCollectionLock.unlock() }
-    let collection = try loadApiCollectionLocked()
+    let collection = try loadApiCollection()
     let generation = collection["generation"] as! Int
     let etag = "\"api-collection-\(generation)\""
     if ifNoneMatch == etag {
@@ -773,39 +773,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return ["folders": collection["folders"] ?? [], "requests": requests]
   }
 
-  private func writeApiCollectionLocked(_ collection: [String: Any]) throws {
-    let directory = apiCollectionStoreURL.deletingLastPathComponent()
-    try FileManager.default.createDirectory(
-      at: directory,
-      withIntermediateDirectories: true,
-      attributes: [.posixPermissions: 0o700]
-    )
+  private func writeApiCollection(_ collection: [String: Any], lease: NativeWorkspaceLease) throws {
     var data = try apiCollectionData(collection)
     data.append(0x0a)
     guard data.count <= 2 * 1_024 * 1_024 else {
       throw LocalHTTPError(status: 400, message: "API Collection store exceeds 2 MiB")
     }
-    try data.write(to: apiCollectionStoreURL, options: [.atomic])
-    try FileManager.default.setAttributes(
-      [.posixPermissions: 0o600],
-      ofItemAtPath: apiCollectionStoreURL.path
-    )
-    let storedDescriptor = Darwin.open(
-      apiCollectionStoreURL.path,
-      O_RDONLY | O_CLOEXEC | O_NOFOLLOW
-    )
-    guard storedDescriptor >= 0 else {
-      throw LocalHTTPError(status: 500, message: "API Collection store could not be synchronized")
-    }
-    defer { Darwin.close(storedDescriptor) }
-    guard Darwin.fsync(storedDescriptor) == 0 else {
-      throw LocalHTTPError(status: 500, message: "API Collection store could not be synchronized")
-    }
-    let directoryDescriptor = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
-    if directoryDescriptor >= 0 {
-      _ = Darwin.fsync(directoryDescriptor)
-      Darwin.close(directoryDescriptor)
-    }
+    try lease.write(data)
   }
 
   private func replaceApiCollection(request: URLRequest) throws -> (Data, Int, [String: String]) {
@@ -829,9 +803,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       action["expected_generation"],
       label: "Expected API Collection generation"
     )
-    apiCollectionLock.lock()
-    defer { apiCollectionLock.unlock() }
-    let current = try loadApiCollectionLocked()
+    let lease = try NativeWorkspaceLease(
+      at: apiCollectionStoreURL, label: "API Collection", maximumBytes: 2 * 1_024 * 1_024
+    )
+    defer { lease.close() }
+    let current = try decodeApiCollection(lease.read())
     guard current["generation"] as? Int == expectedGeneration else {
       throw LocalHTTPError(
         status: 409,
@@ -872,7 +848,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     if NSDictionary(dictionary: apiCollectionContent(candidate)).isEqual(to: apiCollectionContent(current)) {
       result = current
     } else {
-      try writeApiCollectionLocked(candidate)
+      try writeApiCollection(candidate, lease: lease)
       result = candidate
     }
     let generation = result["generation"] as! Int
@@ -1132,8 +1108,17 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return normalized
   }
 
-  private func loadLocalAnalystLocked() throws -> [String: Any] {
-    let descriptor = Darwin.open(localAnalystStoreURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+  private func decodeLocalAnalyst(_ data: Data?) throws -> [String: Any] {
+    guard let data else { return emptyLocalAnalystWorkspace() }
+    do {
+      return try normalizeLocalAnalystWorkspace(JSONSerialization.jsonObject(with: data))
+    } catch {
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store is malformed")
+    }
+  }
+
+  private func loadLocalAnalyst() throws -> [String: Any] {
+    let descriptor = Darwin.open(localAnalystStoreURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
     if descriptor < 0 {
       if errno == ENOENT { return emptyLocalAnalystWorkspace() }
       throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be opened safely")
@@ -1162,7 +1147,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       guard data.count <= maximumBytes else {
         throw LocalHTTPError(status: 500, message: "Analyst workspace store exceeds 1 MiB")
       }
-      return try normalizeLocalAnalystWorkspace(JSONSerialization.jsonObject(with: data))
+      return try decodeLocalAnalyst(data)
     } catch let error as LocalHTTPError where error.status == 500 {
       throw error
     } catch {
@@ -1171,9 +1156,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func localAnalystResponse(ifNoneMatch: String?) throws -> (Data, Int, [String: String]) {
-    localAnalystLock.lock()
-    defer { localAnalystLock.unlock() }
-    let workspace = try loadLocalAnalystLocked()
+    let workspace = try loadLocalAnalyst()
     let generation = workspace["generation"] as! Int
     let etag = "\"local-analyst-\(generation)\""
     if ifNoneMatch == etag { return (Data(), 304, ["ETag": etag]) }
@@ -1184,36 +1167,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
-  private func writeLocalAnalystLocked(_ workspace: [String: Any]) throws {
-    let directory = localAnalystStoreURL.deletingLastPathComponent()
-    try FileManager.default.createDirectory(
-      at: directory,
-      withIntermediateDirectories: true,
-      attributes: [.posixPermissions: 0o700]
-    )
+  private func writeLocalAnalyst(_ workspace: [String: Any], lease: NativeWorkspaceLease) throws {
     var data = try JSONSerialization.data(withJSONObject: workspace)
     data.append(0x0a)
     guard data.count <= 1_024 * 1_024 else {
       throw LocalHTTPError(status: 400, message: "Analyst workspace store exceeds 1 MiB")
     }
-    try data.write(to: localAnalystStoreURL, options: [.atomic])
-    try FileManager.default.setAttributes(
-      [.posixPermissions: 0o600],
-      ofItemAtPath: localAnalystStoreURL.path
-    )
-    let descriptor = Darwin.open(localAnalystStoreURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-    guard descriptor >= 0 else {
-      throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be synchronized")
-    }
-    defer { Darwin.close(descriptor) }
-    guard Darwin.fsync(descriptor) == 0 else {
-      throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be synchronized")
-    }
-    let directoryDescriptor = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
-    if directoryDescriptor >= 0 {
-      _ = Darwin.fsync(directoryDescriptor)
-      Darwin.close(directoryDescriptor)
-    }
+    try lease.write(data)
   }
 
   private func localAnalystRequestBody(_ request: URLRequest) throws -> Data {
@@ -1235,9 +1195,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let expected = try apiCollectionInteger(
       action["expected_generation"], label: "Expected analyst workspace generation"
     )
-    localAnalystLock.lock()
-    defer { localAnalystLock.unlock() }
-    let current = try loadLocalAnalystLocked()
+    let lease = try NativeWorkspaceLease(
+      at: localAnalystStoreURL, label: "Analyst workspace", maximumBytes: 1_024 * 1_024
+    )
+    defer { lease.close() }
+    let current = try decodeLocalAnalyst(lease.read())
     guard current["generation"] as? Int == expected else {
       throw LocalHTTPError(
         status: 409,
@@ -1281,7 +1243,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     if NSDictionary(dictionary: candidateContent).isEqual(to: currentContent) {
       result = current
     } else {
-      try writeLocalAnalystLocked(candidate)
+      try writeLocalAnalyst(candidate, lease: lease)
       result = candidate
     }
     let generation = result["generation"] as! Int
@@ -1374,15 +1336,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         )
       }
     }
-    localAnalystLock.lock()
-    let workspace: [String: Any]
-    do {
-      workspace = try loadLocalAnalystLocked()
-    } catch {
-      localAnalystLock.unlock()
-      throw error
-    }
-    localAnalystLock.unlock()
+    let workspace = try loadLocalAnalyst()
     guard workspace["generation"] as? Int == generation,
       let script = (workspace["files"] as? [[String: Any]])?.first(where: {
         $0["id"] as? Int == scriptID

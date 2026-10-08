@@ -522,7 +522,7 @@ wiring only and is not evidence of native lifecycle behavior.
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/debugger/` | CDP sessions, transport ownership, request validation, hooks, experiments, and automation |
-| `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `durable.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
+| `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
 | `../origin-trace-backend/src/decoder.rs`, `origin_trace.rs`, `vm.rs` | Native decoder adapter, trace projection, and VM analysis |
 | `macos/` | Native shell, evidence readers, and helper processes |
 
@@ -831,11 +831,37 @@ connects Traffic's JSON tree and Query selection to that workflow through
 text candidates, and equal-string replay hook candidates. **Test value** prefills
 the exact selector; **Field trace** returns from the test. Source links require
 retained target, script, and source hash identity.
-Find counts literal, case-insensitive occurrences within rendered lines, including
-multiple matches on one minified line. Enter advances and Shift+Enter goes back,
-wrapping through the first 1000 matches with a visible `+` when results are capped.
-The selected occurrence scrolls into view and supplies the original-source Hook
-location. Formatted search is display-only; captured bytes are never rewritten.
+Find searches the selected document's owned retained text, independently of
+which lines are mounted. It uses a case-insensitive single-line literal of at
+most 512 UTF-16 code units. Multiline pastes are refused before the browser can
+join their lines. Enter advances and Shift+Enter goes back through the first
+1,000 matches, including late matches in minified lines and after line 20,000.
+A visible `+` discloses the match cap. Search never fetches more bytes or runs an
+analyzer. Complete text, retained prefixes, lossy displays and unavailable or
+evicted previews have separate coverage labels; an incomplete negative is never
+reported as absence from the complete source. Loading/truncation notices are
+excluded. Pretty/Deob Find names the retained display representation, with
+transformation completeness separate from search coverage.
+
+The editor mounts at most 1,000 lines. Previous/Next and explicit local Line /
+Column controls reach other retained locations. The target line retains at most
+16,384 UTF-16 units (one additional unit may preserve a surrogate pair); other
+lines retain at most 512 each. Omitted-column markers sit outside source text.
+Find and original-byte links reveal an excerpt containing the requested absolute
+location, rather than increasing these limits. Later or clipped windows use a
+plain-text label because omitted prefixes cannot establish lexical coloring
+state. Captured bytes, line endings, BOMs and absolute runtime locations stay
+unchanged. The current document has one sparse line anchor per 128 lines, at
+most 65,537 anchors for the defensive 8 Mi UTF-16-unit inspection limit. Accepted
+preview and verified-original readers retain their existing smaller byte limits.
+Derived/Pretty mappings are projected only for mounted lines.
+
+Investigation history retains logical line/column windows with the exact source
+and representation owner, then restores pane scroll. A changed derived-analysis
+version or intrinsic assumption cannot restore a stale representation window.
+Ordinary debugger refresh leaves Find and the current window in place; explicit
+frame, Hook and original-source pivots choose their own retained location.
+
 
 The Sources sidebar starts closed without an attached debugger. Details opens
 source metadata and connection status; attached sessions show debugger controls
@@ -1016,8 +1042,8 @@ existing verified 2 MiB chunk endpoint (at most 4 MiB total), checks its SHA-256
 and strictly decodes UTF-8 while retaining a byte-order mark. It then switches
 the existing editor to original source and reveals the selected half-open byte
 range. The start-line span is highlighted when browser highlights are available;
-multiline ranges remain explicitly labeled. The editor's 20,000-line display
-limit remains visible and links beyond it report that limit. A lossy preview,
+multiline ranges remain explicitly labeled. Links beyond line 20,000 now mount
+the corresponding bounded line/column excerpt; a clipped highlight is labeled. A lossy preview,
 a different session, changed hash or derived representation is never used as a
 byte-coordinate substitute.
 
@@ -1069,7 +1095,9 @@ no captured evidence is modified by resizing.
 
 Captured WASM opens in Hex. **Inspect** shows bounded sections, types, imports,
 exports and function disassembly with byte-offset links back to original bytes.
-Function indexes include imports. **Find** searches the active view; failures
+Function indexes include imports. **Find** searches retained Hex text or
+offset-bearing inspection rows with an explicit inspection label. Inspection
+headings and omission messages are excluded; partial coverage stays visible. Failures
 provide **Retry inspection**. Partial coverage and display limits are explicit.
 The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
 the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
@@ -1363,3 +1391,17 @@ The existing driver owns the real browser lifecycle:
 `REB_UI_CHROMIUM` set and the current backend built. Its domain fixture forwards
 requests to the actual backend; only held delivery and a labeled 503 are synthetic.
 `--float32-fixture-only` checks the real loopback boundary without rendered claims.
+
+### Retained-source Find and window regression checks
+
+The existing `--source-facts-ui-browser` check includes complete 20,001-line and
+1.7 MiB minified fixtures, actual pointer/keyboard Find cycling across window
+boundaries, late-column excerpts, local line/column controls, logical-window
+Back/Forward, original-byte Facts links, single-line paste refusal, and coverage
+labels at 1440×900, 760×560 and 360×740. These authored fixtures never execute
+source text. Screenshots and the Sources validation receipt include the bounded
+window results. The JavaScript gate also exercises sparse indices, Unicode case
+folding, BOM/CRLF/astral offsets, empty lines, source ownership, notice exclusion,
+repeated inline-script frame locations and unavailable preview locations. Model
+costs are printed for 8 Mi-unit newline-heavy and minified inputs; these are
+measured helper costs, not browser frame-time or process-memory guarantees.

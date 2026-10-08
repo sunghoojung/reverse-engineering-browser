@@ -14,6 +14,7 @@ macos_path="${contents_path}/MacOS"
 resources_path="${contents_path}/Resources"
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
 trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
+workspace_lease_source="${repo_root}/apps/research-ui/macos/NativeWorkspaceLease.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
 close_smoke_source="${repo_root}/apps/research-ui/macos/NativeCloseGuardSmoke.swift"
 close_guard_source="${repo_root}/apps/research-ui/macos/NativeCloseGuard.swift"
@@ -86,6 +87,14 @@ render_icon 1024 icon_512x512@2x.png
 xcrun iconutil -c icns "${iconset_path}" -o "${resources_path}/OriginTrace.icns"
 
 xcrun swiftc -parse-as-library \
+  "${workspace_lease_source}" "${repo_root}/apps/research-ui/macos/NativeWorkspaceLeaseChecks.swift" \
+  -o "${repo_root}/build/check-native-workspace-lease"
+"${repo_root}/build/check-native-workspace-lease"
+REB_WORKSPACE_LEASE_TEST_HELPER="${repo_root}/build/check-native-workspace-lease" \
+  cargo test --locked --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml" \
+  workspace_native_lock_interoperability -- --ignored
+
+xcrun swiftc -parse-as-library \
   "${trace_document_source}" "${repo_root}/tools/check-origin-trace-gaps.swift" \
   -o "${repo_root}/build/check-origin-trace-gaps"
 "${repo_root}/build/check-origin-trace-gaps" \
@@ -95,7 +104,7 @@ xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${trace_document_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" \
+  "${swift_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

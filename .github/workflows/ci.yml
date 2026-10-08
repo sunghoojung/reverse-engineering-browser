@@ -284,6 +284,23 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Exercise Sources tree native navigation and refresh
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --sources-tree-ui-browser
+
+      - name: Upload rendered Sources tree QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sources-tree-ui-${{ github.run_id }}
+          path: build/sources-tree-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   test:
     timeout-minutes: 15
     strategy:

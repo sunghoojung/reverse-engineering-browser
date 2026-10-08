@@ -37,6 +37,7 @@ async function runScenario(app, directory, name) {
   const child = spawn(join(app, 'Contents/MacOS/OriginTrace'), args, {
     cwd: directory,
     env: {...process.env, REB_APP_SMOKE_TEST: '1', REB_APP_SMOKE_NATIVE_CLOSE: name,
+      REB_APP_SMOKE_NATIVE_CLOSE_OUTPUT: join(root, 'build/native-close-qa'),
       REB_APP_SMOKE_LIVE_FAILURE: '0', REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1'},
   });
   let output = '';
@@ -71,7 +72,12 @@ if (!process.argv.includes('--contract-only')) {
   try {
     const app = join(temporary, 'Origin Trace.app');
     await cp(join(root, 'build/Origin Trace.app'), app, {recursive: true});
-    for (const scenario of scenarios) await runScenario(app, temporary, scenario);
+    const failures = [];
+    for (const scenario of scenarios) {
+      try { await runScenario(app, temporary, scenario); }
+      catch (error) { failures.push(error); console.error(`FAIL packaged native lifecycle: ${scenario}`); }
+    }
+    if (failures.length) throw new AggregateError(failures, `${failures.length} native lifecycle scenarios failed`);
   } finally {
     await rm(temporary, {recursive: true, force: true});
   }

@@ -128,7 +128,7 @@ final class NativeCloseGuardSmoke {
     guard let sheet = window.attachedSheet, let stay = button("Stay") else {
       fail("missing Stay button"); return
     }
-    require(stay.keyEquivalent == "\r", "Stay must be the Return default")
+    require(sheet.defaultButtonCell === (stay.cell as? NSButtonCell), "Stay must be the native default button")
     require(button("Close Anyway")?.keyEquivalent == "", "destructive keyboard default")
     wait(until: { self.window.attachedSheet == nil }, label: "Stay dismissal") {
       self.require(self.window.isVisible, "Stay closed the window")
@@ -244,9 +244,27 @@ final class NativeCloseGuardSmoke {
         .contains(self.scenario)
       let expected = unavailable ? "Couldn’t check unsaved Analyst work"
         : "Close with unsaved or unconfirmed Analyst changes?"
+      self.captureDecision()
       self.require(self.sheetText().contains(expected), "wrong warning category; a timeout is not a dirty-state pass")
       completion()
     }
+  }
+
+  private func captureDecision() {
+    guard let path = ProcessInfo.processInfo.environment["REB_APP_SMOKE_NATIVE_CLOSE_OUTPUT"],
+      let view = window.attachedSheet?.contentView
+    else { fail("native decision screenshot is unavailable"); return }
+    view.layoutSubtreeIfNeeded()
+    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+      fail("native decision bitmap is unavailable"); return
+    }
+    view.cacheDisplay(in: view.bounds, to: bitmap)
+    guard let data = bitmap.representation(using: .png, properties: [:]) else {
+      fail("native decision PNG is unavailable"); return
+    }
+    do {
+      try data.write(to: URL(fileURLWithPath: path).appendingPathComponent("\(scenario)-prompt.png"))
+    } catch { fail("native decision screenshot could not be written") }
   }
 
   private func sheetText() -> String {

@@ -26,7 +26,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
   private var generation: UInt64 = 0
   private var request: Request?
   private var timeout: Timer?
-  private var escapeMonitor: Any?
+  private var keyMonitor: Any?
   private var closed = false
   private let query: Query
 
@@ -98,9 +98,11 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
     let currentURL = webView?.url
     request = Request(id: id, generation: generation, url: currentURL, alert: alert,
                       quitWaiting: quit)
-    escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+    keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
       guard let self, let current = self.request,
-        event.window === current.alert.window, event.keyCode == 53
+        event.window === current.alert.window,
+        event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+        [36, 53, 76].contains(event.keyCode)
       else { return event }
       current.alert.buttons[0].performClick(nil)
       return nil
@@ -109,6 +111,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
       guard let self, self.request?.id == id else { return }
       self.finish(allow: response == .alertSecondButtonReturn && self.request?.phase != .checking)
     }
+    configureSafeButtons(alert)
     let timer = Timer(timeInterval: 5, repeats: false) { [weak self] _ in
       self?.received(nil, error: nil, id: id)
     }
@@ -148,6 +151,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
         + "have completed; closing cannot undo it. Stay to finish saving and verify the result."
       current.alert.buttons[1].isEnabled = true
       current.alert.layout()
+      configureSafeButtons(current.alert)
     } else {
       request?.phase = .unavailable
       current.alert.messageText = "Couldn’t check unsaved Analyst work"
@@ -157,7 +161,17 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
         + "Stay to retry safely."
       current.alert.buttons[1].isEnabled = true
       current.alert.layout()
+      configureSafeButtons(current.alert)
     }
+  }
+
+  private func configureSafeButtons(_ alert: NSAlert) {
+    // AppKit recomputes shortcuts during layout. Set the safe default on the
+    // presented sheet as well as after changing its warning text.
+    alert.window.defaultButtonCell = alert.buttons[0].cell as? NSButtonCell
+    alert.buttons[0].keyEquivalent = "\r"
+    alert.buttons[0].keyEquivalentModifierMask = []
+    alert.buttons[1].keyEquivalent = ""
   }
 
   private func finish(allow: Bool) {
@@ -166,8 +180,8 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
     request = nil // Reentrant sheet callbacks cannot reuse this approval.
     timeout?.invalidate()
     timeout = nil
-    if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
-    escapeMonitor = nil
+    if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+    keyMonitor = nil
     if current.alert.window.sheetParent != nil {
       window?.endSheet(current.alert.window, returnCode: .abort)
     }

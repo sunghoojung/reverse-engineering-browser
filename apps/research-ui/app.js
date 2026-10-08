@@ -5873,12 +5873,9 @@
           const {response, body} = await analystReadJSON('/api/local-analyst/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)
           });
-          if (response.status === 409) {
-            state.localAnalystPendingSave = null;
-            state.localAnalystNeedsReload = true;
-            setAnalystNotice('conflict', 'The workspace is busy or changed in another window. Your draft is retained. Retry load and review it before saving again.');
-            return false;
-          }
+          // A transport may replay a request after losing its acknowledgement.
+          // Even a 409 can follow the first attempt's commit. Reconcile the exact
+          // submitted contents instead of assuming this generation never saved.
           if (!response.ok) throw new Error(body?.error || `Analyst workspace store returned ${response.status}`);
           const expectedGeneration = pending.contents === pending.baseContents
             ? request.expected_generation : request.expected_generation + 1;

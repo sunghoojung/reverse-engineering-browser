@@ -96,25 +96,9 @@ impl Hooks {
     }
 }
 fn source_label(s: &str) -> String {
-    if s.is_empty() {
-        return "(anonymous script)".into();
-    }
-    if s.starts_with("data:") {
-        return "data:(inline script)".into();
-    }
-    if s.starts_with("http://") || s.starts_with("https://") {
-        return requests::redacted(s);
-    }
-    let s = s
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .split('#')
-        .next()
-        .unwrap_or("")
-        .to_owned();
-    validation::truncate(&s, 8192)
+    validation::truncate(s, 8192)
 }
+
 fn preview(v: &Value, capture: bool) -> Value {
     let Some(mut p) = parse::remote(v) else {
         return Value::Null;
@@ -413,7 +397,7 @@ impl Debugger {
             }
             function
         };
-        let mut definition = json!({"id":self.hooks.next.fetch_add(1,Ordering::Relaxed),"label":label,"script_id":id,"cdp_script_id":script.get("cdp_script_id").unwrap_or(&script["script_id"]),"target_id":target,"target_type":script.get("target_type").unwrap_or(&json!("page")),"entry_mode":mode,"function_expression":expression,"url":source_label(script["url"].as_str().unwrap_or("")),"line":line,"column":column,"function_kind":function["kind"],"function_start":function["start"],"function_end":function["end"],"target_line":function["body_start"]["line"],"target_column":function["body_start"]["column"],"entry_enabled":entry,"return_enabled":returns,"condition":condition,"entry_logic":entry_logic,"return_logic":return_logic,"return_mode":return_mode,"return_expression":return_expression,"return_value":value,"return_value_bytes":bytes,"resolved":null});
+        let mut definition = json!({"id":self.hooks.next.fetch_add(1,Ordering::Relaxed),"label":label,"script_id":id,"cdp_script_id":script.get("cdp_script_id").unwrap_or(&script["script_id"]),"target_id":target,"target_type":script.get("target_type").unwrap_or(&json!("page")),"entry_mode":mode,"function_expression":expression,"url":source_label(script["url"].as_str().unwrap_or("")),"url_truncated":script["url"].as_str().is_some_and(|value| value.len() > 8192),"line":line,"column":column,"function_kind":function["kind"],"function_start":function["start"],"function_end":function["end"],"target_line":function["body_start"]["line"],"target_column":function["body_start"]["column"],"entry_enabled":entry,"return_enabled":returns,"condition":condition,"entry_logic":entry_logic,"return_logic":return_logic,"return_mode":return_mode,"return_expression":return_expression,"return_value":value,"return_value_bytes":bytes,"resolved":null});
         if let Some(guard) = candidate {
             definition["candidate_guard"] = guard.clone();
         }
@@ -772,12 +756,11 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                     let source_hash = script
                         .map(|script| script["hash"].clone())
                         .unwrap_or(Value::Null);
-                    let source = source_label(
-                        script
-                            .and_then(|script| script["url"].as_str())
-                            .or(frame["url"].as_str())
-                            .unwrap_or(""),
-                    );
+                    let raw_source = script
+                        .and_then(|script| script["url"].as_str())
+                        .or(frame["url"].as_str())
+                        .unwrap_or("");
+                    let source = source_label(raw_source);
                     let hit = json!({
                         "script_id": script_id,
                         "source_hash": source_hash,
@@ -789,6 +772,7 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                         "target_type": hook["target_type"],
                         "label": hook["label"],
                         "source": source,
+                        "source_truncated": raw_source.len() > 8192,
                         "function": validation::truncate(
                             frame["functionName"].as_str().filter(|s| !s.is_empty())
                                 .unwrap_or("(anonymous)"), 256),

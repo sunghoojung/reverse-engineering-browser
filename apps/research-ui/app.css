@@ -3691,3 +3691,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .field-provenance-candidate-row { flex-direction: column; align-items: stretch; }
   .field-provenance-test-candidate { align-self: flex-end; margin: 0 8px 8px; }
 }
+
+      #traffic-capture-export .exchange-options-menu { width: min(320px, calc(100vw - 24px)); max-height: min(480px, 60vh); overflow: auto; z-index: 20; }
+      #traffic-capture-export .exchange-options-menu p { margin: 6px; font-size: 11px; line-height: 1.4; color: var(--muted); white-space: normal; overflow-wrap: anywhere; }

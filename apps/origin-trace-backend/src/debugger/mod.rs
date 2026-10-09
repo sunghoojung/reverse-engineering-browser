@@ -64,6 +64,15 @@ impl Debugger {
             state["state"] = json!("waiting");
         }
         state["network"]["capture_enabled"] = json!(options.capture_network_content);
+        state["network"]["capture_epoch"] = json!(0);
+        state["network"]["instance_id"] = json!(format!(
+            "{}:{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
         Arc::new(Self {
             options: options.clone(),
             transport: options.worker(
@@ -303,6 +312,12 @@ impl Debugger {
                 .candidate_catalog_incomplete
                 .store(incomplete, Ordering::Release);
             s["paused"] = Value::Null;
+            s["network"]["capture_epoch"] = json!(
+                s["network"]["capture_epoch"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            );
             s["network"]["target_id"] = target["id"].clone();
             s["network"]["requests"] = json!([]);
             s["network"]["dropped"] = json!(0);

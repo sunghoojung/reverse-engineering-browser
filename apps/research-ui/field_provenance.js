@@ -118,12 +118,7 @@ function revealProvenanceSite(site) {
 }
 
 function provenanceSourceURL(address) {
-  try {
-    const url = new URL(address);
-    if (!['http:', 'https:'].includes(url.protocol)) return '';
-    url.username = ''; url.password = ''; url.search = ''; url.hash = '';
-    return url.href.slice(0, 8192);
-  } catch { return ''; }
+  return typeof address === 'string' ? address.slice(0, 8192) : '';
 }
 
 // Literal text search is deterministic and inert, with UTF-16 positions matching CDP.
@@ -135,7 +130,7 @@ function fieldSourceMatches(content, needle, source, limit = 32) {
     for (; scanned < offset; scanned += 1) {
       if (content[scanned] === '\n') { line += 1; column = 0; } else column += 1;
     }
-    matches.push({script_id: source.script_id, target_id: source.target_id, source: provenanceSourceURL(source.url), source_hash: source.hash,
+    matches.push({script_id: source.script_id, target_id: source.target_id, source: provenanceSourceURL(source.url), source_truncated: source.url?.length > 8192, source_hash: source.hash,
       function: 'Text match', line, column, match_start_utf16: offset, match_end_utf16: offset + needle.length});
     offset += needle.length;
   }
@@ -290,7 +285,7 @@ function preserveProvenanceFocus(container, update) {
 function provenanceSiteRow(site, label, context = '') {
   let filename = site.source || 'Generated source';
   try { filename = new URL(site.source).pathname.split('/').pop() || new URL(site.source).host; } catch { /* Retain generated label. */ }
-  const location = `${filename}:${site.line + 1}:${site.column + 1}`;
+  const location = `${filename}:${site.line + 1}:${site.column + 1}${site.source_truncated ? ' · source URL truncated' : ''}`;
   const button = provenanceButton('', () => revealProvenanceSite(site));
   button.className = 'field-provenance-source';
   button.setAttribute('aria-label', `${label}: Open ${site.function || 'anonymous'} at ${location}`);
@@ -299,8 +294,8 @@ function provenanceSiteRow(site, label, context = '') {
   button.append(text, trafficNode('span', 'field-provenance-confidence', label), trafficNode('span', 'field-provenance-arrow', '↗'));
   button.disabled = !liveSources().some(source => source.script_id === site.script_id && source.target_id === site.target_id && site.source_hash && source.hash === site.source_hash);
   button.dataset.provenanceFocus = JSON.stringify([context, label, site.target_id, site.script_id, site.line, site.column]);
-  button.title = button.disabled ? 'Source detached. Evidence retained.' :
-    `${label === 'Observed' ? 'Observed call site' : label === 'Decoded candidate' ? 'Decoded source-text candidate' : 'Correlated candidate'} · ${site.source}\n${site.target_id} · script ${site.script_id} · ${site.source_hash || 'hash unavailable'}`;
+  button.title = (site.source_truncated ? 'Source URL truncated; retained prefix only. ' : '') + (button.disabled ? `Source detached. Evidence retained. ${site.source}` :
+    `${label === 'Observed' ? 'Observed call site' : label === 'Decoded candidate' ? 'Decoded source-text candidate' : 'Correlated candidate'} · ${site.source}\n${site.target_id} · script ${site.script_id} · ${site.source_hash || 'hash unavailable'}`);
   if (!context && Number.isSafeInteger(site.match_start_utf16)) {
     const row = trafficNode('div', 'field-provenance-candidate-row');
     const test = provenanceButton('Test this candidate', () => startCandidateExperiment(site));

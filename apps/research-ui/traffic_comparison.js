@@ -91,7 +91,7 @@ function trafficCompareRequests(left, right) {
       const key = name.toLowerCase();
       const group = groups.get(key) ?? {values: [], redacted: false};
       group.values.push(value);
-      group.redacted ||= redacted(value) || ['authorization', 'proxy-authorization', 'cookie', 'set-cookie'].includes(key);
+      group.redacted ||= redacted(value);
       hidden ||= group.redacted;
       groups.set(key, group);
     }

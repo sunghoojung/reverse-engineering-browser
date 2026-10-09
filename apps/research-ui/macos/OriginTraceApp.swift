@@ -2847,10 +2847,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let modeLabel = NSTextField(labelWithString: "Capture mode")
     modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
     let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Metadata mode excludes URL paths, sensitive headers, and bodies. Full content keeps bounded request and response data in memory for this local session and always redacts credentials."
+      "Traffic metadata has hosts only, without headers or bodies. Content mode keeps bounded raw CDP values, including credentials, in memory. Artifacts keep raw source URLs in local storage. Only an explicitly exported redacted copy is altered."
     )
     privacyLabel.textColor = .secondaryLabelColor
-    privacyLabel.maximumNumberOfLines = 4
+    privacyLabel.maximumNumberOfLines = 0
     privacyLabel.preferredMaxLayoutWidth = 420
     let keychainToggle = NSButton(
       checkboxWithTitle: "Use macOS Keychain for browser credential storage",
@@ -2871,7 +2871,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     stack.alignment = .leading
     stack.spacing = 8
     stack.distribution = .fill
-    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 216)
+    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 240)
 
     let alert = NSAlert()
     alert.alertStyle = .informational

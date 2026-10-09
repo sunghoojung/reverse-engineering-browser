@@ -107,6 +107,18 @@
                   <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
                   <button id="request-copy-url" class="secondary-button" type="button" title="Copy selected request URL">Copy URL</button>
                   <button id="request-evidence-toggle" class="secondary-button" type="button" aria-expanded="false">Evidence</button>
+                  <details id="traffic-capture-export" class="exchange-options">
+                    <summary aria-label="Export selected capture">Export capture</summary>
+                    <div class="exchange-options-menu">
+                      <p>Raw values can contain credentials. Saved copies stay on this device; sharing is your choice.</p>
+                      <button class="exchange-button" type="button" data-traffic-export="raw" data-traffic-destination="download">Save raw capture</button>
+                      <button class="exchange-button" type="button" data-traffic-export="raw" data-traffic-destination="clipboard">Copy raw capture</button>
+                      <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="download">Save redacted copy</button>
+                      <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="clipboard">Copy redacted copy</button>
+                      <p>Redacted copies remove header values and bodies, plus URL credentials, queries and fragments. Paths and other metadata may still contain secrets. Review before sharing.</p>
+                      <p data-traffic-export-status role="status" aria-live="polite"></p>
+                    </div>
+                  </details>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                 </div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">

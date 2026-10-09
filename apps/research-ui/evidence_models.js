@@ -392,6 +392,8 @@
             !isBoundedText(request.url, 64 * 1024) || !request.url || typeof request.url_truncated !== 'boolean' ||
             !isBoundedText(request.method, 32) || !request.method || typeof request.method_truncated !== 'boolean' ||
             !isBoundedText(request.resource_type, 128) || !isBoundedText(request.document_url, 64 * 1024) ||
+            (request.document_url_truncated !== undefined && typeof request.document_url_truncated !== 'boolean') ||
+            [request.request, request.response].some(side => side?.headers_truncated !== undefined && typeof side.headers_truncated !== 'boolean') ||
             typeof request.started_monotonic_ms !== 'number' || !Number.isFinite(request.started_monotonic_ms) ||
             request.started_monotonic_ms < 0 || !isSafeIntegerInRange(request.wall_time_ms, 0, Number.MAX_SAFE_INTEGER) ||
             !['pending', 'complete', 'failed'].includes(request.state) ||
@@ -411,6 +413,8 @@
 
       function isDebuggerNetwork(network) {
         return isPlainObject(network) && typeof network.capture_enabled === 'boolean' &&
+          (network.instance_id === undefined || isBoundedText(network.instance_id, 128)) &&
+          (network.capture_epoch === undefined || isSafeIntegerInRange(network.capture_epoch, 0, Number.MAX_SAFE_INTEGER)) &&
           (network.target_id === null || isBoundedText(network.target_id, 4 * 1024)) &&
           Array.isArray(network.requests) && network.requests.length <= 1000 &&
           network.requests.every(isDebuggerNetworkRequest) &&
@@ -702,6 +706,7 @@
             !['source', 'function'].includes(definition.entry_mode) ||
             !isBoundedText(definition.function_expression, 1024) ||
             !isBoundedText(definition.url, 64 * 1024) ||
+            (definition.url_truncated !== undefined && typeof definition.url_truncated !== 'boolean') ||
             !isSafeIntegerInRange(definition.line, 0, 0x7fffffff) ||
             !isSafeIntegerInRange(definition.column, 0, 0x7fffffff) ||
             !['function_declaration', 'function_expression', 'arrow_function', 'method_definition',
@@ -739,6 +744,7 @@
       function isFieldSite(site) {
         return isPlainObject(site) && isBoundedText(site.script_id, 4096) && Boolean(site.script_id) &&
           (site.source_hash === undefined || site.source_hash === null || isBoundedText(site.source_hash, 256)) && isBoundedText(site.target_id, 4096) && isBoundedText(site.source, 8192) &&
+          (site.source_truncated === undefined || typeof site.source_truncated === 'boolean') &&
           isBoundedText(site.function, 256) && isSafeIntegerInRange(site.line, 0, 0x7fffffff) &&
           isSafeIntegerInRange(site.column, 0, 0x7fffffff);
       }
@@ -755,6 +761,7 @@
           Array.isArray(value.candidates) && value.candidates.length <= 32 && value.candidates.every(candidate =>
             isPlainObject(candidate) && isSafeIntegerInRange(candidate.hit_id, 1, Number.MAX_SAFE_INTEGER) &&
             isBoundedText(candidate.script_id, 4096) && (candidate.source_hash === null || isBoundedText(candidate.source_hash, 256)) && isBoundedText(candidate.target_id, 4096) && isBoundedText(candidate.source, 8192) &&
+            (candidate.source_truncated === undefined || typeof candidate.source_truncated === 'boolean') &&
             isBoundedText(candidate.function, 256) && isSafeIntegerInRange(candidate.line, 0, 0x7fffffff) &&
             isSafeIntegerInRange(candidate.column, 0, 0x7fffffff) && ['entry', 'return'].includes(candidate.phase) &&
             ['observed', 'return_overridden'].includes(candidate.operation) && candidate.confidence === 'correlated' &&
@@ -854,6 +861,7 @@
             isSafeIntegerInRange(hit.hook_id, 1, Number.MAX_SAFE_INTEGER) &&
             isBoundedText(hit.target_id, 4 * 1024) && ['page', 'worker'].includes(hit.target_type) && isBoundedText(hit.label, 128) &&
             isBoundedText(hit.source, 8 * 1024) && isBoundedText(hit.function, 256) &&
+            (hit.source_truncated === undefined || typeof hit.source_truncated === 'boolean') &&
             ['entry', 'return'].includes(hit.category) &&
             ['observed', 'skipped', 'logic_run', 'return_overridden', 'failed'].includes(hit.operation) &&
             isSafeIntegerInRange(hit.line, 0, 0x7fffffff) && isSafeIntegerInRange(hit.column, 0, 0x7fffffff) &&
@@ -1671,6 +1679,8 @@
             request: networkBodyFromDebugger(record.request.body, record.request.headers, previousBodies?.request),
             response: networkBodyFromDebugger(record.response.body, record.response.headers, previousBodies?.response)
           };
+          exchange.request.headersTruncated = record.request.headers_truncated;
+          exchange.response.headersTruncated = record.response.headers_truncated;
           if (retainedBodies && (record.request.body.base64 || record.response.body.base64)) {
             retainedBodies.set(record.id, {
               request: {base64: record.request.body.base64, bytes: exchange.request.bytes},
@@ -1703,6 +1713,12 @@
             lastTimestamp: BigInt(Math.max(0, Math.round((record.started_monotonic_ms + (record.duration_ms ?? 0)) * 1e6))),
             protocolRequestId: record.protocol_request_id,
             initiator: record.initiator,
+            captureRecord: record,
+            captureOwner: [network.instance_id ?? null, network.capture_epoch ?? null],
+            captureLimits: network.limits,
+            captureDropped: network.dropped,
+            documentUrl: record.document_url,
+            documentUrlTruncated: record.document_url_truncated,
             urlTruncated: record.url_truncated,
             methodTruncated: record.method_truncated,
             exchange

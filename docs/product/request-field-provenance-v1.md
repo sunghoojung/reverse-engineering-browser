@@ -101,6 +101,12 @@ worker protocol, or production Python code. Each asynchronous extraction retains
 its request-time call sites and bounded hit snapshot. Session and capture revision
 checks prevent late extraction results from restoring erased evidence.
 
+Source URLs retain captured userinfo, queries, fragments and non-HTTP labels as
+inert text. An optional `source_truncated` flag marks bounded prefixes and is
+carried through from upstream hook capture. Full retained labels remain in row
+tooltips, including detached sources; replay matching/admission still uses its
+separate credential-free, query-free identity.
+
 The view uses compact source rows, concise evidence labels, and expandable
 coverage and observation details. Hashes and correlation identifiers remain
 available without crowding the primary flow.

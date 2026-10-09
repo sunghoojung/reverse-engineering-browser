@@ -164,7 +164,7 @@ make app
 This packages `build/Origin Trace.app` and opens a complete live capture
 session without a setup dialog. This research launch enables every implemented
 native capture category, the live debugger, bounded request and response content,
-and Canvas image artifacts. Credential headers remain redacted; evidence stays
+and Canvas image artifacts. Retained credentials are unmasked; evidence stays
 local. Use this profile only for authorized targets. The default isolated research
 profile uses Chromium's mock Keychain so launch does not stop on a macOS password
 prompt; do not save credentials in that profile. An explicit checkbox opts into
@@ -233,10 +233,36 @@ REB_CDP_NETWORK_CAPTURE=1 make live
 
 This enables full URLs, request and response headers, available POST data, and
 response-body retrieval for the attached tab. Authorization, cookie,
-proxy-authorization, and set-cookie values are always redacted. Request and
+proxy-authorization, set-cookie and custom header values are retained unchanged.
+URLs keep their captured userinfo, query and fragment; no navigation is performed. Request and
 response bodies are retained only in memory by the local UI bridge, limited to
 128 KiB per side, and discarded when the live session ends. The Origin Trace
 title bar visibly changes to `Live content` while this mode is active.
+Headers show explicit truncation when count, name/value or aggregate byte limits
+omit data. Document URL, request URL and method truncation are also labeled.
+Only primary CDP event headers are currently collected; extra-info headers and
+original HTTP wire order/casing/duplicate lines are not guaranteed. CDP body
+strings/base64 are not a promise of original wire bytes. Native network metadata
+still retains hosts only; enabled native artifacts retain unmasked source URLs
+in their separate local store, including in metadata-only Traffic sessions.
+
+**Export capture** exports one selected retained CDP record. **Save raw capture**
+(browser development UI) and **Copy raw capture** preserve its retained values;
+**Save redacted copy** and **Copy redacted copy** explicitly transform a separate
+copy. Bodies and all header values are omitted from that copy; URL userinfo,
+queries and fragments are stripped. Paths, header names and other metadata may
+still contain secrets. Review before sharing. Native downloads are disabled;
+clipboard copy depends on the native web view and is not a verified file-save
+fallback. Clipboard contents may sync through the user's operating system.
+
+These `reb-traffic-capture-v1` copies are distinct from the unchanged
+`reb-metadata-only-v1` evidence-package contract. The Traffic window is ephemeral,
+not a durable full HTTP archive: at most 1,000 entries are retained, oldest entries
+are evicted, and reconnect/target change/process exit can discard it. No export
+uploads data. See [Traffic capture copies v1](../../protocol/traffic-capture-copy-v1.md).
+For exact synthetic raw/redacted export checks in native WebKit or the browser,
+see [Traffic capture runtime QA](../../docs/development/traffic-capture-runtime-qa.md).
+
 The content-capture label remains visible during connection failures. If the
 native broker disconnects while CDP capture continues, the shell shows
 `Network only`; Traffic reports both the broker failure and ongoing bounded
@@ -405,7 +431,7 @@ its first matching location; selecting a content match opens Headers, Payload, o
 with Find filled in. URL, method, and status remain searchable.
 Tab, domain, and resource filters scope the search before content is inspected.
 Search never enables capture or fetches missing bodies. Binary and uncaptured
-bodies are excluded, and retained prefixes and redacted headers limit coverage.
+bodies are excluded, and retained prefixes and missing headers limit coverage.
 Large captures use an explicit 8-million UTF-16-unit search budget, newest
 requests first. A partial-search notice reports inspected and omitted coverage
 and suggests narrowing filters. See the [content search design](../../docs/product/traffic-content-search-v1.md).

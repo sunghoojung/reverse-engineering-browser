@@ -117,6 +117,8 @@ export async function checkTrafficComparisonModel(root) {
   assert.equal(headers([['a', 'x']], []).rows[0].kind, 'removed');
   assert.equal(headers([], [['a', 'x']]).rows[0].kind, 'added');
   for (const name of ['authorization', 'cookie', 'set-cookie', 'proxy-authorization', 'x-custom']) {
+    assert.equal(headers([[name, 'synthetic-secret']], [[name, 'synthetic-secret']]).status, 'equal');
+    assert.equal(headers([[name, 'synthetic-before']], [[name, 'synthetic-after']]).status, 'different');
     const value = headers([[name, '<redacted>']], [[name, '<redacted>']]);
     assert.equal(value.status, 'incomplete'); assert.equal(value.rows[0].kind, 'unknown');
     assert.match(value.message, /never establish original equality/);

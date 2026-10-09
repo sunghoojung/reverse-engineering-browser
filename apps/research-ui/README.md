@@ -260,6 +260,8 @@ These `reb-traffic-capture-v1` copies are distinct from the unchanged
 not a durable full HTTP archive: at most 1,000 entries are retained, oldest entries
 are evicted, and reconnect/target change/process exit can discard it. No export
 uploads data. See [Traffic capture copies v1](../../protocol/traffic-capture-copy-v1.md).
+For exact synthetic raw/redacted export checks in native WebKit or the browser,
+see [Traffic capture runtime QA](../../docs/development/traffic-capture-runtime-qa.md).
 
 The content-capture label remains visible during connection failures. If the
 native broker disconnects while CDP capture continues, the shell shows

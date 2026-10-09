@@ -382,11 +382,18 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Archive macOS application preview
+        if: matrix.os == 'macos-latest' && github.event_name == 'pull_request' && success()
+        run: >-
+          ditto -c -k --sequesterRsrc --keepParent
+          "build/Origin Trace.app"
+          "build/Origin-Trace-macos-preview.zip"
+
       - name: Upload macOS application preview
         if: matrix.os == 'macos-latest' && github.event_name == 'pull_request' && success()
         uses: actions/upload-artifact@v7
         with:
           name: origin-trace-macos-${{ github.run_id }}
-          path: build/Origin Trace.app
+          path: build/Origin-Trace-macos-preview.zip
           if-no-files-found: error
           retention-days: 3

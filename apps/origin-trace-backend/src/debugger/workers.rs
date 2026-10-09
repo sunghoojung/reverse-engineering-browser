@@ -544,6 +544,22 @@ mod candidate_catalog_tests {
     #[tokio::test]
     async fn candidate_worker_catalog_preserves_other_contexts_and_taints_rejected_public_ids() {
         let debugger = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        debugger.worker_catalog_event(
+            "worker",
+            &json!({"method":"Debugger.scriptParsed",
+            "params":{"scriptId":"helper", "url":"reb-automation-runner.js",
+                "hash":"opaque", "length":100, "hasSourceURL":true, "executionContextId":1, "sourceMapURL":"x".repeat(65537)}}),
+        );
+        assert_eq!(
+            debugger.snapshot()["scripts"][0]["url"],
+            "reb-automation-runner.js"
+        );
+        assert!(
+            !debugger
+                .hooks
+                .candidate_catalog_incomplete
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
         for context in [1, 2] {
             debugger.worker_catalog_event("worker", &json!({"method":"Debugger.scriptParsed", "params":{
                 "scriptId":context.to_string(), "url":"http://localhost/worker.js", "executionContextId":context

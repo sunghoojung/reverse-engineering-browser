@@ -183,7 +183,11 @@ export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel
   assert.equal(fixture.requests.length,5);assert(fixture.requests.every(request=>request.limit==='2097152'));
   const accepted=await evaluate(`(()=>{const image=document.querySelector(${JSON.stringify(card('5')+' img')}),canvas=document.createElement('canvas');
     canvas.width=canvas.height=1;const context=canvas.getContext('2d');context.drawImage(image,0,0);return {complete:image.complete,width:image.naturalWidth,height:image.naturalHeight,pixel:[...context.getImageData(0,0,1,1).data]};})()`);
-  assert.deepEqual(accepted,{complete:true,width:16,height:16,pixel:[255,0,0,255]});record({label:'native decoder pixels',...accepted});
+  assert.deepEqual({complete:accepted.complete,width:accepted.width,height:accepted.height},{complete:true,width:16,height:16});
+  // Brave's getImageData fingerprint protection flips RGB low bits. Keep the
+  // upper seven bits and alpha exact; original image/text bytes are checked below.
+  assert.deepEqual(accepted.pixel.map((value,index)=>index<3?value>>1:value),[127,0,0,255]);
+  record({label:'decoded image readback with Brave RGB low-bit protection',...accepted});
   assert(await evaluate(`state.artifacts.filter(a=>['2','3','4','5'].includes(a.artifact_id)).every(a=>a.contentVerified&&a.content===new Map(${JSON.stringify([...fixture.documents])}).get(a.artifact_id))`),'Exact captured text stays unchanged');
   assert.deepEqual(await evaluate('canvasBrowserReceipt.blocked'),[]);
   assert(await evaluate("canvasBrowserReceipt.assignments.every(item=>item.safe&&item.id==='valid')"),'Only valid tiny PNGs may reach src');

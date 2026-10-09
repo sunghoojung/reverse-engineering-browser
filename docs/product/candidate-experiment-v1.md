@@ -92,6 +92,13 @@ string baseline or a supported synchronous return override.
 
 Catalog eviction or a rejected script descriptor taints completeness until a fresh
 attached lifetime; a truncated retained catalog can never establish uniqueness.
+Automation helper descriptors remain in that complete catalog even though Sources
+and hook selectors hide their display entries. A `reb-automation-` source URL is
+never grounds for omitting a script from identity or uniqueness checks.
+Oversized source-map display URLs are omitted with an explicit
+`source_map_url_omitted` marker, while the script descriptor remains available to
+the complete scan. Script IDs, original URLs and opaque hash bounds still fail
+closed.
 A main reconnect that retains worker debugger sessions also taints completeness
 because it clears their descriptors without re-enabling those sessions. Dispose
 and create a fresh context to recover; no automatic reconnect/retest is added.

@@ -162,23 +162,30 @@ make app
 ```
 
 This packages `build/Origin Trace.app` and opens a complete live capture
-session. Before launch, the app asks whether the session should retain metadata
-only or bounded request and response content. The default isolated research
+session without a setup dialog. This research launch enables every implemented
+native capture category, the live debugger, bounded request and response content,
+and Canvas image artifacts. Credential headers remain redacted; evidence stays
+local. Use this profile only for authorized targets. The default isolated research
 profile uses Chromium's mock Keychain so launch does not stop on a macOS password
 prompt; do not save credentials in that profile. An explicit checkbox opts into
 macOS Keychain encryption when credential storage is required. The app does not
 mark the session live until the browser debugger endpoint is ready, and the
 failure dialog can retry the same privacy mode without restarting Origin Trace.
-**New Live Session…** in the application menu reopens these controls.
+Startup allows up to 60 seconds for the bounded broker, receiver, backend and
+browser readiness stages; individual helper failures are reported sooner.
+**New Live Session…** in the application menu offers metadata-only capture and
+Keychain controls. `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects metadata-only
+automatic launch, and `REB_CAPTURE_CANVAS_IMAGES=0` disables image retention.
 
 The app creates a private evidence directory and isolated browser
 profile, starts its bundled broker, artifact receiver, debugger transport,
 analysis helpers, and loopback UI, then launches Brave Browser Development with
-all safe metadata categories enabled. Closing Origin Trace stops the session
+all native capture categories enabled. Closing Origin Trace stops the session
 processes. Evidence remains under `~/Library/Application Support/Origin
 Trace/sessions/live/`.
 
-Origin Trace looks beside its app bundle, in the local `browser/worktree/`
+Origin Trace looks beside its app bundle, in the reused browser output recorded
+at packaging time, in the local `browser/worktree/`
 build output, and among registered applications for Brave Browser Development.
 A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust live
 debugger and VM analyzer, so Python is not required. A startup problem is shown explicitly
@@ -186,6 +193,15 @@ and leaves the stored-evidence interface available offline.
 Pass an explicit evidence-store or demo argument, or set
 `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`, when opening the native stored-evidence
 interface without starting Brave.
+
+For deterministic localhost QA, set `REB_LOCALHOST_ONLY=1`. This routes external
+browser requests to an unused loopback proxy and blocks external DNS while
+preserving Chromium's sandbox. Do not wrap live Brave in `sandbox-exec`: nested
+macOS sandbox initialization fails. Build commands can still use that wrapper.
+If Brave or a required live helper exits, Origin Trace reports the closed
+connection and offers retry instead of silently leaving a failed session running.
+Runtime experiments and Console commands still require explicit actions in their
+disposable contexts. Worker/proxy foundations do not yet have runtime adapters.
 
 For an explicit development session with deterministic sample evidence:
 
@@ -206,10 +222,10 @@ Open `http://127.0.0.1:7319`. For a live capture with the pinned custom Brave
 build, use `make live`. Follow the [browser setup](../../browser/README.md)
 before starting a live session.
 
-Native evidence capture retains host-level network metadata by default. Choose
-**Full request and response content** in the native launch dialog to enable CDP
-Traffic inspection for one live session. Command-line development sessions can
-select the same mode with:
+Native probes retain host-level network metadata. The automatic native launch
+also enables CDP Traffic content inspection for its live session. The optional
+**New Live Session…** controls can reduce it to metadata. Command-line development
+sessions enable CDP content inspection with:
 
 ```sh
 REB_CDP_NETWORK_CAPTURE=1 make live
@@ -504,7 +520,9 @@ CI job runs a relocated packaged app with synthetic workspaces through actual
 window close, application Quit, Stay by Return/Escape, explicit Close Anyway,
 save/pending states, coalesced requests, unavailable/untrusted documents, actual
 navigation, and injected stale/timeout replies. It verifies draft/owner retention
-and the expected warning before shutdown. The `--contract-only` mode checks build
+and the expected warning before shutdown. Quit scenarios enqueue Command-Q through
+AppKit so repeated requests follow the native event loop after a cancelled quit,
+rather than reentering `terminate` from a WebKit callback. The `--contract-only` mode checks build
 wiring only and is not evidence of native lifecycle behavior.
 
 

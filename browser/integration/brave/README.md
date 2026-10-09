@@ -6,6 +6,48 @@ ignored by the parent repository. Project-wide authorization and capture policy
 is in [SAFETY.md](../../../SAFETY.md); this guide describes the
 browser integration's enforcement details.
 
+## Native worker source foundation
+
+The dormant dedicated-worker source foundation adds bounded native compile
+observations for classic scripts and JavaScript modules. It has no production
+activation or transport yet, and the working CDP worker extractor is unchanged.
+Shared/service workers remain unsupported. See the
+[status, privacy gates, identity contract, and release checklist](../../../protocol/native-worker-source-v1.md).
+
+## Native worker metadata foundation
+
+The separate dormant [metadata queue and projection](../../../protocol/native-worker-observation-v1.md)
+models dedicated-worker lifecycle, compile identity and exact tagged direct-message
+pairs without retaining message bodies. Patch 0011 adds disabled pinned Blink
+observation points and carries a separate tag through direct in-process messages.
+The dormant [authority and acknowledged transfer state machines](../../../protocol/native-worker-transfer-v1.md)
+now define the document/partition lease and bounded batch contract. Service
+observers, Mojo adapters, production controller, broker/UI adapter and activation
+remain unimplemented.
+
+## Native proxy-container foundation
+
+The separate `proxy_policy` target provides dependency-free native policy and
+group-intent validation. It is not linked to browser routing or enabled UI.
+The separate `proxy_partition_adapter` target adds BrowserContext-owned,
+one-shot snapshot restore and typed native proxy preparation. Successful
+preparation still returns runtime-blocked; neither target is linked into routing.
+Run `make native-proxy-policy-check` for offline policy/restore/group-transfer checks.
+With an initialized, synchronized pinned Chromium checkout and generated build,
+compile and run the native adapter suite from the Chromium source directory:
+
+```sh
+autoninja -C out/Component_arm64 brave/components/reverse_engineering_browser:proxy_partition_adapter_unittests
+out/Component_arm64/proxy_partition_adapter_unittests
+```
+
+This suite evaluates native rules and parameter preparation without opening
+network contexts or sockets. It is not ordinary repository CI or browser-level
+transport/isolation coverage. See
+[the v1 contract](../../../protocol/native-proxy-containers-v1.md) and
+[pinned architecture](../../../docs/architecture/native-proxy-containers.md)
+before adding a native network hook; ordinary groups do not isolate traffic.
+
 ## Native console
 
 The disabled-by-default native console is a separate mutation path. Patch 0011
@@ -18,6 +60,9 @@ wire layouts, limits, and real-browser checks after rebuilding.
 Eligible HTTP and HTTPS documents must belong to a profile directory immediately
 inside the owned user-data root, including the fresh browser's `Default` profile.
 The user-data root itself is not a BrowserContext profile path.
+The explicit disposable root is resolved at startup to match Chromium's
+canonical profile paths, including macOS `/tmp` and `/var` aliases. An invalid
+root stays ineligible rather than admitting a fallback browser profile.
 
 ## Layout
 
@@ -60,13 +105,20 @@ Selected V8 Math functions, Intl constructors, locale-sensitive formatting,
 and timezone-offset reads emit Runtime operations through V8's existing
 use-counter callback. Each event records a fixed property or operation name and
 never retains arguments or return values. Generated non-Canvas callbacks and
-V8 counters emit the first observation of each call site per capture session,
-which preserves broad coverage during repetitive timing or Math loops.
+V8 counters deduplicate each native binding site after its first accepted
+renderer-ring insertion in a capture configuration. A full renderer ring counts
+the drop and leaves that site eligible on a later call after capacity returns.
+Concurrent same-site callers make one bounded claim attempt; configuration
+changes invalidate old claims even when a session ID is reused. This sampling
+is per renderer process and native binding site, not per JavaScript call site,
+document, or navigation. Renderer admission does not confirm downstream queue,
+broker, or evidence-store delivery and does not guarantee complete coverage.
 Lower-level Canvas, WebGL, and Web
 Audio hooks cover selected internal Blink paths; generator exclusions prevent
 double counting where those hooks overlap. The fingerprint category-mask bits
-are `1`, `2`, `4`, `8`, `16`, `32`, `64`, and `2048`; disabled or expired calls
-return before sequence assignment.
+are `1`, `2`, `4`, `8`, `16`, `32`, `64`, and `2048`; calls already disabled or
+expired at the sink return before sequence assignment. Transport admission
+rechecks the generation, session, category, and expiration before ring insertion.
 
 The V8 Math allowlist follows the cross-engine functions exercised by
 [CreepJS](https://github.com/abrahamjuliot/creepjs): `acos`, `acosh`, `asin`,

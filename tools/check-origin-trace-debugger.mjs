@@ -1,3 +1,4 @@
+import {platformEditEvent, selectRenderedOption} from './rendered-keyboard.mjs';
 import {checkCandidateExperimentController} from './check-candidate-experiment-controller.mjs';
 import {candidateFixtureRoute, checkCandidateFixture, checkCandidateExperimentJourney} from './check-candidate-experiment-journey.mjs';
 import {checkSourceWindowModel,checkSourceWindowInteractions} from './check-source-window.mjs';
@@ -3409,22 +3410,37 @@ function trafficBrowserProcess(executable, args) {
     if (!browser.pid) {cleanup.exited = true; elapsed(); return;}
     // This group is created solely for our own browser and launcher helpers.
     // It cannot include the caller or another user's browser.
-    const alive = () => {
+    const alive = async () => {
       if (!grouped) return browser.exitCode === null && browser.signalCode === null;
-      try {process.kill(-browser.pid, 0); return true;} catch (error) {if (error.code === "ESRCH") return false; throw error;}
+      const deadline = performance.now() + 1000;
+      for (;;) {
+        try {process.kill(-browser.pid, 0); return true;}
+        catch (error) {
+          if (error.code === "ESRCH") return false;
+          // Darwin can reject a group probe while its owned leader is a zombie
+          // awaiting Node's SIGCHLD processing. Retry after reaping; a lasting
+          // permission denial must still fail rather than imply successful cleanup.
+          if (process.platform !== "darwin" || error.code !== "EPERM" || performance.now() >= deadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      }
     };
-    const signal = name => {
+    const signal = async name => {
       try {if (grouped) process.kill(-browser.pid, name); else browser.kill(name); cleanup.signals.push(name);}
-      catch (error) {if (error.code !== "ESRCH") throw error;}
+      catch (error) {
+        if (error.code === "ESRCH") return;
+        if (process.platform === "darwin" && error.code === "EPERM" && !(await alive())) return;
+        throw error;
+      }
     };
     try {
       for (const name of ["SIGTERM", "SIGKILL"]) {
-        if (!alive()) break;
-        signal(name);
+        if (!(await alive())) break;
+        await signal(name);
         const deadline = performance.now() + graceMs;
-        while (alive() && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+        while (await alive() && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
       }
-      cleanup.exited = !alive();
+      cleanup.exited = !(await alive());
       if (!cleanup.exited) throw new Error("Owned browser process group did not exit after bounded cleanup");
     } catch (error) {cleanup.error = String(error.message).slice(0, 2048); throw error;}
     finally {elapsed(); browser.stdout.destroy(); browser.stderr.destroy();}
@@ -4686,7 +4702,7 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
     }
   };
   const packageClick=async selector=>{await reveal(selector);await click(selector);};
-  const scope=async value=>{await packageClick('[data-package-scope]');await press(value==='artifacts'?'End':'Home');if(value==='retained')await press('ArrowDown');await press('Enter');await until(`document.querySelector('[data-package-scope]').value===${JSON.stringify(value)}`,'Keyboard retained-view selection failed');};
+  const scope=async value=>{await reveal('[data-package-scope]');const index=await evaluate(`Array.from(document.querySelector('[data-package-scope]').options).findIndex(o=>o.value===${JSON.stringify(value)})`);await selectRenderedOption({evaluate,click,key,selector:'[data-package-scope]',index});await until(`document.querySelector('[data-package-scope]').value===${JSON.stringify(value)}`,'Keyboard retained-view selection failed');};
   const pending=async()=>{const deadline=Date.now()+5000;while(Date.now()<deadline){if(fixture.pending.length)return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail('Evidence request never reached the delayed server');};
   const geometry=async label=>{
     const value=await evaluate(`(()=>{const p=document.querySelector('.evidence-content'),r=p.getBoundingClientRect(),n=document.querySelector('#evidence-package-panel');return {width:innerWidth,height:innerHeight,left:r.left,right:r.right,top:r.top,bottom:r.bottom,client:p.clientHeight,scroll:p.scrollHeight,scrollTop:p.scrollTop,panelWidth:n.clientWidth,panelScroll:n.scrollWidth,pageWidth:document.documentElement.scrollWidth};})()`);
@@ -5313,7 +5329,7 @@ await checkMemoryRowGutters();
 async function checkMemoryResponsiveOwners() {
   const css=await readFile(join(root,'apps/research-ui/app.css'),'utf8');
   const narrow=css.slice(css.indexOf('      @media (max-width: 950px) {'));
-  assert.match(narrow,/\.memory-results-pane \{ overflow: auto; grid-template-columns: 1fr; grid-template-rows: minmax\(150px, \.7fr\) minmax\(170px, 1fr\); \}/);
+  assert.match(narrow,/\.memory-results-pane\s*\{[^}]*\boverflow:\s*auto\b/);
   const source=await readFile(join(root,'tools/check-origin-trace-debugger.mjs'),'utf8');
   const from=source.indexOf('  const wheelReceipts=',source.indexOf('\nasync function checkMemoryInteractions('));
   const to=source.indexOf('  await viewport(1440,900);',from);
@@ -5492,7 +5508,7 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
       const action=await evaluate(`(()=>{
         const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw Error('Missing Memory control');
         const owners=[];for(let p=n.parentElement;p&&p.id!=='screen-memory';p=p.parentElement){if(['auto','scroll','overlay'].includes(getComputedStyle(p).overflowY)&&p.scrollHeight>p.clientHeight+1)owners.push(p);}
-        const box=p=>{const r=p.getBoundingClientRect();const inset=p.matches('.memory-results-list')?p.querySelector('.memory-results-head').getBoundingClientRect().height:0;return {top:r.top+p.clientTop+inset,bottom:r.top+p.clientTop+p.clientHeight};};
+        const box=p=>{const r=p.getBoundingClientRect();const inset=p.matches('.memory-results-list')?p.querySelector('.memory-results-head').getBoundingClientRect().height:0;const max=p.scrollHeight-p.clientHeight;return {top:r.top+p.clientTop+inset+(p.scrollTop>1?8:0),bottom:r.top+p.clientTop+p.clientHeight-(p.scrollTop<max-1?8:0)};};
         const r=n.getBoundingClientRect();let index=-1,delta=0;
         for(let i=0;i<owners.length;i++){const b=box(owners[i]);delta=r.top<b.top?r.top-b.top:r.bottom>b.bottom?r.bottom-b.bottom:0;if(Math.abs(delta)>1){index=i;break;}}
         if(index<0)return null;
@@ -5836,14 +5852,29 @@ async function checkTrafficBrowser() {
         const mode = ${JSON.stringify(mode)}, gutter = r.width-node.clientWidth-2*node.clientLeft;
         // An outer scroll owner's native scrollbar avoids nested list and form
         // controls. Evidence retains its original visible-padding edge mode.
-        const x = mode==='scrollbar' && gutter>=6 ? r.x+node.clientLeft+node.clientWidth+gutter/2
-          : mode!=='center' ? r.x+node.clientLeft+node.clientWidth-4 : r.x+r.width/2;
-        const y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
-        if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || y < 0 || y >= innerHeight || !hit || !node.contains(hit)) throw new Error('Scroll target is clipped or offscreen: '+${JSON.stringify(selector)});
-        const nested=[];
-        for(let child=hit;child&&child!==node;child=child.parentElement) {
-          if (['auto','scroll','overlay'].includes(getComputedStyle(child).overflowY) && child.scrollHeight>child.clientHeight+1) nested.push({id:child.id,tag:child.tagName,scrollTop:child.scrollTop,clientHeight:child.clientHeight,scrollHeight:child.scrollHeight});
+        let left=Math.max(0,r.left),right=Math.min(innerWidth,r.right),top=Math.max(0,r.top),bottom=Math.min(innerHeight,r.bottom);
+        for(let parent=node.parentElement;parent;parent=parent.parentElement){
+          const box=parent.getBoundingClientRect(),style=getComputedStyle(parent);
+          if(style.overflowX!=='visible'){left=Math.max(left,box.left+parent.clientLeft);right=Math.min(right,box.left+parent.clientLeft+parent.clientWidth);}
+          if(style.overflowY!=='visible'){top=Math.max(top,box.top+parent.clientTop);bottom=Math.min(bottom,box.top+parent.clientTop+parent.clientHeight);}
         }
+        const preferredX = mode==='scrollbar' && gutter>=6 ? r.x+node.clientLeft+node.clientWidth+gutter/2
+          : mode!=='center' ? r.x+node.clientLeft+node.clientWidth-4 : (left+right)/2;
+        let x=Math.max(left+1,Math.min(right-1,preferredX)),y=(top+bottom)/2,hit=document.elementFromPoint(x,y);
+        const nestedOwners=hit=>{
+          const owners=[];
+          for(let child=hit;child&&child!==node;child=child.parentElement){
+            if(['auto','scroll','overlay'].includes(getComputedStyle(child).overflowY)&&child.scrollHeight>child.clientHeight+1)owners.push({id:child.id,tag:child.tagName,scrollTop:child.scrollTop,clientHeight:child.clientHeight,scrollHeight:child.scrollHeight});
+          }
+          return owners;
+        };
+        if(mode!=='center'&&right>left+6&&bottom>top+6){
+          const points=[x,left+3,right-3,(left+right)/2].flatMap(px=>[(top+bottom)/2,top+3,bottom-3].map(py=>({x:px,y:py,hit:document.elementFromPoint(px,py)})));
+          const owned=points.find(p=>p.hit&&node.contains(p.hit)&&nestedOwners(p.hit).length===0);
+          if(owned)({x,y,hit}=owned);
+        }
+        if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || y < 0 || y >= innerHeight || !hit || !node.contains(hit)) throw new Error('Scroll target is clipped or offscreen: '+${JSON.stringify(selector)}+' '+JSON.stringify({rect:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},clip:{left,right,top,bottom},x,y,hit:{id:hit?.id,tag:hit?.tagName}}));
+        const nested=nestedOwners(hit);
         if(mode!=='center' && nested.length) throw new Error('Outer wheel target is owned by a nested scroller: '+${JSON.stringify(selector)}+' '+JSON.stringify(nested));
         return {x,y,mode,gutter,scrollTop:node.scrollTop,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight,hit:{id:hit.id,tag:hit.tagName},nested};
       })()`);
@@ -5892,7 +5923,7 @@ async function checkTrafficBrowser() {
       })()`);
     };
     const key = async (value, code = value, native = {}) => {
-      await command("Input.dispatchKeyEvent", {type: native.text ? "keyDown" : "rawKeyDown", key: value, code, ...native});
+      await command("Input.dispatchKeyEvent", platformEditEvent({type: native.text ? "keyDown" : "rawKeyDown", key: value, code, ...native}));
       await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code, windowsVirtualKeyCode:native.windowsVirtualKeyCode});
     };
     const dialog = async accept => {

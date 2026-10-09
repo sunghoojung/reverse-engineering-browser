@@ -10,6 +10,9 @@ brave-doctor:
 brave-probe-check:
 	./scripts/brave-toolchain.sh probe-check
 
+brave-foundation-check:
+	./scripts/brave-toolchain.sh foundation-check
+
 browser-sync:
 	./scripts/sync-browser-integration.sh
 

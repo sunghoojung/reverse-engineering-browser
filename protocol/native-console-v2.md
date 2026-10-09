@@ -94,13 +94,17 @@ and page temporary variables require explicit researcher actions.
 | Retained renderer values | 128 handles; expire after 60 seconds, swept once per second |
 | Property page / depth | 16 properties plus prototype; UI depth 8; first 65536 array indices |
 | Completion | 8 path components, 24 suggestions, 1024 lexical names, 4096 names per prototype, 8 prototypes |
-| Renderer messages | 32 / 32 KiB; visible saturating drop count |
+| Renderer messages | 32 / 32 KiB serialized JSON; visible saturating drop count |
 | Browser activity | 64 events; visible saturating drop count |
 | UI transcript / history | Each 128 entries / 256 KiB; transcript also caps 8192 DOM elements; eviction is visible |
 | Snippets / activity view | 16 / 64 KiB snippets; 128 metadata records |
 | Event monitors | 8 Elements, four event types each, 60 seconds |
 | Synchronous watchdog / dispatch / reply | 200 ms / 500 ms / 2 seconds |
 | Session / await wait | One hour / ten seconds |
+
+Renderer message accounting includes JSON escaping and record metadata, so a poll
+always fits the response limit. Queue pressure evicts the oldest messages with a
+visible drop count; polling or clearing releases their encoded storage.
 
 These are transport and retained-state bounds, not a hard page heap quota.
 Retained objects can keep reachable page data alive. Key and event-type enumeration can allocate
@@ -128,6 +132,18 @@ store, clear, last, source, listeners, monitor, unmonitor and traffic. Handles
 never cross document lifetimes. The [OpenAPI contract](openapi.json) specifies
 HTTP fields, requiredness and response shapes. Runtime status is ok, error,
 exception, pending or rejected, separate from transport status.
+
+The renderer uses the project-owned `v8-native-console.h` public bridge rather
+than V8's internal debug headers. Explicit commands retain native REPL evaluation
+with debugger breaks disabled. Verified lexical completion uses the same engine
+evaluation path with side effects denied and without REPL mode; a failed lexical
+lookup stops completion. The bridge also exposes the existing bounded lexical
+enumeration without importing V8's internal check macros into Chromium code. The
+engine's REPL promise wrapper is unwrapped using its private handle provenance:
+synchronous commands show their actual result, and pending top-level await
+commands expose that result after settlement. Page-supplied promises retain
+normal promise identity and are never treated as engine wrappers. Pending REPL
+handles cannot be stored in the page; await the result before storing it.
 
 ## Verification
 

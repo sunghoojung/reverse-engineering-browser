@@ -14,6 +14,17 @@ readonly brave_jobs="${REB_BRAVE_JOBS:-}"
 readonly probe_objects=(
   "obj/brave/components/reverse_engineering_browser/queue/native_probe_queue.o"
   "obj/brave/components/reverse_engineering_browser/renderer_sink/native_probe_sink.o"
+  "obj/brave/components/reverse_engineering_browser/worker_metadata/native_worker_observation.o"
+  "obj/brave/components/reverse_engineering_browser/worker_metadata/native_worker_transfer.o"
+  "obj/brave/components/reverse_engineering_browser/browser/native_worker_authority.o"
+  "obj/brave/components/reverse_engineering_browser/browser/native_worker_transfer_gate.o"
+  "obj/brave/components/reverse_engineering_browser/renderer_sink/native_worker_observation_sink.o"
+  "obj/brave/components/reverse_engineering_browser/renderer_sink/native_worker_source.o"
+  "obj/brave/components/reverse_engineering_browser/renderer_sink/native_worker_source_sink.o"
+  "obj/brave/components/reverse_engineering_browser/renderer/native_console_agent.o"
+  "obj/brave/components/reverse_engineering_browser/renderer/native_console_messages.o"
+  "obj/brave/components/reverse_engineering_browser/renderer/native_console_runtime.o"
+  "obj/brave/components/reverse_engineering_browser/browser/native_console_session.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_probe_transport.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.o"
@@ -33,6 +44,13 @@ readonly probe_objects=(
   "obj/third_party/blink/renderer/modules/canvas/canvas/canvas_path.o"
   "obj/third_party/blink/renderer/modules/webgl/webgl/webgl_rendering_context_base.o"
   "obj/third_party/blink/renderer/core/core/v8_initializer.o"
+  "obj/third_party/blink/renderer/core/core/v8_script_runner.o"
+  "obj/third_party/blink/renderer/core/core/worker_global_scope.o"
+  "obj/third_party/blink/renderer/core/core/dedicated_worker.o"
+  "obj/third_party/blink/renderer/core/core/dedicated_worker_global_scope.o"
+  "obj/third_party/blink/renderer/core/core/dedicated_worker_messaging_proxy.o"
+  "obj/third_party/blink/renderer/core/core/worker_thread.o"
+  "obj/third_party/blink/renderer/core/core/blink_transferable_message.o"
   "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_canvas_rendering_context_2d.o"
   "obj/third_party/blink/renderer/bindings/core/v8/v8/v8_element.o"
   "obj/third_party/blink/renderer/bindings/core/v8/v8/v8_performance.o"
@@ -70,7 +88,7 @@ readonly web_audio_objects=(
 )
 
 usage() {
-  echo "Usage: $0 <doctor|gen|probe-check|build|start> [arguments...]"
+  echo "Usage: $0 <doctor|gen|probe-check|foundation-check|build|start> [arguments...]"
 }
 
 configure_xcode() {
@@ -261,7 +279,7 @@ case "${command_name}" in
       buildtools/mac/gn gen "${output_directory}"
     )
     ;;
-  probe-check)
+  probe-check|foundation-check)
     "${repository_root}/scripts/sync-browser-integration.sh"
     configure_brave_python
     touch_brave_overrides
@@ -278,6 +296,13 @@ case "${command_name}" in
       fi
       autoninja "${autoninja_arguments[@]}" "${probe_objects[@]}" \
         "${web_audio_objects[@]}"
+      if [[ "${command_name}" == foundation-check ]]; then
+        # These preparation-only targets are intentionally outside :browser.
+        # A successful full browser build would otherwise never compile them.
+        autoninja "${autoninja_arguments[@]}" \
+          brave/components/reverse_engineering_browser:proxy_partition_adapter_unittests
+        "${output_directory}/proxy_partition_adapter_unittests"
+      fi
       generated_bindings="${output_directory}/gen/third_party/blink/renderer/bindings/modules/v8"
       generated_core_bindings="${output_directory}/gen/third_party/blink/renderer/bindings/core/v8"
       declare -a generated_probe_expectations=(

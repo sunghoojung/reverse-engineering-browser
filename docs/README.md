@@ -26,6 +26,9 @@ skills under `.agents/skills/`.
 
 ## Architecture and contracts
 
+- [Native proxy container architecture](./architecture/native-proxy-containers.md)
+  documents the exact pinned Brave container path and preparation-only stage.
+
 - [Technical architecture](./architecture/technical-architecture.md)
 - [System architecture](./architecture/system-architecture.md)
 - [System architecture diagram](./architecture/system-architecture.svg)

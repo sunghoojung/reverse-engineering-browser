@@ -1,0 +1,265 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
+index 38ed358..4665fb3 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
+ 
+ #include "base/feature_list.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -386,6 +387,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript(
+       CaptureNativeDedicatedWorkerScript(
+           execution_context, classic_script.SourceText(), file_name,
+           reb::NativeWorkerSourceKind::kClassic);
++      if (reb::IsNativeWorkerObservationEnabled()) {
++        reb::worker_observation::ObserveScope(
++            execution_context, {reb::NativeWorkerOperation::kScriptCompiled,
++                                reb::NativeWorkerDirection::kNone, 0,
++                                script.ToLocalChecked()->ScriptId(),
++                                reb::NativeWorkerSourceKind::kClassic});
++      }
+     }
+     return script;
+   }
+@@ -400,6 +408,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript(
+     CaptureNativeDedicatedWorkerScript(
+         execution_context, classic_script.SourceText(), file_name,
+         reb::NativeWorkerSourceKind::kClassic);
++    if (reb::IsNativeWorkerObservationEnabled()) {
++      reb::worker_observation::ObserveScope(
++          execution_context, {reb::NativeWorkerOperation::kScriptCompiled,
++                              reb::NativeWorkerDirection::kNone, 0,
++                              script.ToLocalChecked()->ScriptId(),
++                              reb::NativeWorkerSourceKind::kClassic});
++    }
+   }
+ 
+   TRACE_EVENT_END1(
+@@ -519,6 +534,16 @@ v8::MaybeLocal<v8::Module> V8ScriptRunner::CompileModule(
+         params.GetSourceText(), file_name, reb::NativeWorkerSourceKind::kModule);
+   }
+ 
++  if (reb::IsNativeWorkerObservationEnabled() && !script.IsEmpty() &&
++      script.ToLocalChecked()->IsSourceTextModule()) {
++    reb::worker_observation::ObserveScope(
++        ExecutionContext::From(isolate->GetCurrentContext()),
++        {reb::NativeWorkerOperation::kScriptCompiled,
++         reb::NativeWorkerDirection::kNone, 0,
++         script.ToLocalChecked()->ScriptId(),
++         reb::NativeWorkerSourceKind::kModule});
++  }
++
+   TRACE_EVENT_END1(kTraceEventCategoryGroup, "v8.compileModule", "data",
+                    [&](perfetto::TracedValue context) {
+                      inspector_compile_script_event::Data(
+diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
+index 57dde66..9e07c9c 100644
+--- a/third_party/blink/renderer/core/BUILD.gn
++++ b/third_party/blink/renderer/core/BUILD.gn
+@@ -261,6 +261,7 @@ component("core") {
+   visibility = [ "//third_party/blink/*" ]
+ 
+   sources = [
++    "//brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h",
+     "core_initializer.cc",
+     "core_initializer.h",
+   ]
+diff --git a/third_party/blink/renderer/core/messaging/blink_transferable_message.h b/third_party/blink/renderer/core/messaging/blink_transferable_message.h
+index 497daf1..21ddc9f 100644
+--- a/third_party/blink/renderer/core/messaging/blink_transferable_message.h
++++ b/third_party/blink/renderer/core/messaging/blink_transferable_message.h
+@@ -5,6 +5,8 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_MESSAGING_BLINK_TRANSFERABLE_MESSAGE_H_
+ #define THIRD_PARTY_BLINK_RENDERER_CORE_MESSAGING_BLINK_TRANSFERABLE_MESSAGE_H_
+ 
++#include <array>
++#include <cstdint>
+ #include <optional>
+ 
+ #include "third_party/blink/public/common/messaging/accelerated_image_info.h"
+@@ -34,6 +36,13 @@ struct CORE_EXPORT BlinkTransferableMessage : BlinkCloneableMessage {
+   BlinkTransferableMessage& operator=(BlinkTransferableMessage&&);
+   ~BlinkTransferableMessage();
+ 
++  // REB direct dedicated-worker observation tag: session, generation, sequence.
++  // Moves preserve it through proxy/early-task handoff. Deliberately omitted
++  // from Mojo traits and FromTransferableMessage: those boundaries keep it
++  // all-zero. It carries no message content and is not an authentication
++  // capability.
++  std::array<std::uint64_t, 3> reb_native_worker_tag{};
++
+   Vector<MessagePortChannel> ports;
+ 
+   mojom::blink::UserActivationSnapshotPtr user_activation;
+diff --git a/third_party/blink/renderer/core/workers/dedicated_worker.cc b/third_party/blink/renderer/core/workers/dedicated_worker.cc
+index bc8726d..16efe7c 100644
+--- a/third_party/blink/renderer/core/workers/dedicated_worker.cc
++++ b/third_party/blink/renderer/core/workers/dedicated_worker.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/workers/dedicated_worker.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
+ 
+ #include <optional>
+ #include <utility>
+@@ -100,6 +101,10 @@ DedicatedWorker* DedicatedWorker::Create(
+ 
+   DedicatedWorker* worker = MakeGarbageCollected<DedicatedWorker>(
+       context, script_request_url, options);
++  reb::worker_observation::ObserveCreator(
++      context, worker->GetToken(),
++      {reb::NativeWorkerOperation::kObjectCreated,
++       reb::NativeWorkerDirection::kNone});
+   worker->UpdateStateIfNeeded();
+   worker->Start();
+   return worker;
+@@ -199,6 +204,11 @@ void DedicatedWorker::postMessage(ScriptState* script_state,
+           ->StoreCurrentStackTrace("Worker.postMessage");
+   uint64_t trace_id = base::trace_event::GetNextGlobalTraceId();
+   transferable_message.trace_id = trace_id;
++  reb::worker_observation::ObserveCreator(
++      GetExecutionContext(), GetToken(),
++      {reb::NativeWorkerOperation::kMessageSent,
++       reb::NativeWorkerDirection::kToWorker, trace_id},
++      &transferable_message.reb_native_worker_tag);
+   context_proxy_->PostMessageToWorkerGlobalScope(
+       std::move(transferable_message));
+   TRACE_EVENT_INSTANT(
+@@ -319,6 +329,10 @@ void DedicatedWorker::Start() {
+ 
+ void DedicatedWorker::terminate() {
+   DCHECK(!GetExecutionContext() || GetExecutionContext()->IsContextThread());
++  reb::worker_observation::ObserveCreator(
++      GetExecutionContext(), GetToken(),
++      {reb::NativeWorkerOperation::kTerminateRequested,
++       reb::NativeWorkerDirection::kNone});
+   context_proxy_->TerminateGlobalScope();
+ }
+ 
+diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
+index d69f66a..5bd7010 100644
+--- a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
++++ b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/workers/dedicated_worker_global_scope.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
+ 
+ #include <memory>
+ 
+@@ -447,6 +448,11 @@ void DedicatedWorkerGlobalScope::postMessage(ScriptState* script_state,
+   }
+   uint64_t trace_id = base::trace_event::GetNextGlobalTraceId();
+   transferable_message.trace_id = trace_id;
++  reb::worker_observation::ObserveScope(
++      this,
++      {reb::NativeWorkerOperation::kMessageSent,
++       reb::NativeWorkerDirection::kToCreator, trace_id},
++      &transferable_message.reb_native_worker_tag);
+   WorkerThreadDebugger* debugger =
+       WorkerThreadDebugger::From(script_state->GetIsolate());
+   transferable_message.sender_stack_trace_id =
+diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
+index 4255301..0dbb3e7 100644
+--- a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
++++ b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
+ 
+ #include <memory>
+ 
+@@ -315,8 +316,20 @@ void DedicatedWorkerMessagingProxy::PostMessageToWorkerObject(
+               std::move(context), GetExecutionContext(), *event);
+         },
+         perfetto::Flow::Global(event->GetTraceId()));
++    reb::worker_observation::ObserveCreator(
++        GetExecutionContext(), worker_object_->GetToken(),
++        {reb::NativeWorkerOperation::kMessageReceived,
++         reb::NativeWorkerDirection::kToCreator, message.trace_id, 0,
++         reb::NativeWorkerSourceKind::kClassic,
++         reb::worker_observation::ReceivedTag(message.reb_native_worker_tag)});
+     worker_object_->DispatchEvent(*event);
+   } else {
++    reb::worker_observation::ObserveCreator(
++        GetExecutionContext(), worker_object_->GetToken(),
++        {reb::NativeWorkerOperation::kMessageError,
++         reb::NativeWorkerDirection::kToCreator, message.trace_id, 0,
++         reb::NativeWorkerSourceKind::kClassic,
++         reb::worker_observation::ReceivedTag(message.reb_native_worker_tag)});
+     worker_object_->DispatchEvent(*MessageEvent::CreateError());
+   }
+   debugger->ExternalAsyncTaskFinished(message.sender_stack_trace_id);
+diff --git a/third_party/blink/renderer/core/workers/worker_global_scope.cc b/third_party/blink/renderer/core/workers/worker_global_scope.cc
+index a501bfd..39f0459 100644
+--- a/third_party/blink/renderer/core/workers/worker_global_scope.cc
++++ b/third_party/blink/renderer/core/workers/worker_global_scope.cc
+@@ -26,6 +26,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
+ 
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -215,6 +216,9 @@ scheduler::WorkerScheduler* WorkerGlobalScope::GetScheduler() {
+ }
+ 
+ void WorkerGlobalScope::Dispose() {
++  reb::worker_observation::ObserveScope(
++      this, {reb::NativeWorkerOperation::kGlobalScopeDisposed,
++             reb::NativeWorkerDirection::kNone});
+   if (reb::IsNativeWorkerSourceCaptureEnabled() && IsDedicatedWorkerGlobalScope()) {
+     reb::RetireNativeWorkerSource(GetExecutionContextToken().Visit([](const auto& token) {
+       return reb::NativeWorkerToken{token.value().GetHighForSerialization(),
+@@ -645,8 +649,20 @@ void WorkerGlobalScope::ReceiveMessage(BlinkTransferableMessage message) {
+               std::move(context), GetExecutionContext(), *message_event);
+         },
+         perfetto::Flow::Global(message_event->GetTraceId()));
++    reb::worker_observation::ObserveScope(
++        this,
++        {reb::NativeWorkerOperation::kMessageReceived,
++         reb::NativeWorkerDirection::kToWorker, message.trace_id, 0,
++         reb::NativeWorkerSourceKind::kClassic,
++         reb::worker_observation::ReceivedTag(message.reb_native_worker_tag)});
+     DispatchEvent(*message_event);
+   } else {
++    reb::worker_observation::ObserveScope(
++        this,
++        {reb::NativeWorkerOperation::kMessageError,
++         reb::NativeWorkerDirection::kToWorker, message.trace_id, 0,
++         reb::NativeWorkerSourceKind::kClassic,
++         reb::worker_observation::ReceivedTag(message.reb_native_worker_tag)});
+     DispatchEvent(*MessageEvent::CreateError());
+   }
+ 
+diff --git a/third_party/blink/renderer/core/workers/worker_thread.cc b/third_party/blink/renderer/core/workers/worker_thread.cc
+index ef25707..b6981ea 100644
+--- a/third_party/blink/renderer/core/workers/worker_thread.cc
++++ b/third_party/blink/renderer/core/workers/worker_thread.cc
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/workers/worker_thread.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
+ 
+ #include <atomic>
+ #include <limits>
+@@ -676,6 +677,10 @@ void WorkerThread::InitializeOnWorkerThread(
+         CreateWorkerGlobalScope(std::move(global_scope_creation_params));
+     worker_scheduler_->InitializeOnWorkerThread(global_scope_);
+     worker_reporting_proxy_.DidCreateWorkerGlobalScope(GlobalScope());
++    // Scope allocated; this does not claim successful V8
++    // initialization/evaluation.
++    reb::worker_observation::ObserveScope(
++        GlobalScope(), {reb::NativeWorkerOperation::kGlobalScopeStarted});
+ 
+     worker_inspector_controller_ = WorkerInspectorController::Create(
+         this, url_for_debugger, inspector_task_runner_,

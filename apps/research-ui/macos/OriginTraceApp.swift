@@ -2667,7 +2667,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
-  private var selectedCaptureMode = LiveCaptureMode.metadata
+  private var selectedCaptureMode = LiveCaptureMode.content
   private var selectedSystemKeychain = false
   private var automaticSessionSuppressed = false
   private var localApplicationURL: URL?
@@ -2827,14 +2827,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   private func requestAutomaticLiveSession() {
     guard !liveSessionCoordinator.isRunning else { return }
-    if let configuredMode = configuredAutomaticCaptureMode() {
-      startAutomaticLiveSession(
-        captureMode: configuredMode,
-        useSystemKeychain: configuredAutomaticSystemKeychain()
-      )
-      return
-    }
-    presentLiveSessionSetup()
+    startAutomaticLiveSession(
+      captureMode: configuredAutomaticCaptureMode(),
+      useSystemKeychain: configuredAutomaticSystemKeychain()
+    )
   }
 
   private func presentLiveSessionSetup() {
@@ -2944,11 +2940,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     )
   }
 
-  private func configuredAutomaticCaptureMode() -> LiveCaptureMode? {
+  private func configuredAutomaticCaptureMode() -> LiveCaptureMode {
     guard let value = ProcessInfo.processInfo.environment["REB_AUTOMATIC_CAPTURE_MODE"] else {
-      return nil
+      return .content
     }
-    return LiveCaptureMode(rawValue: value)
+    return LiveCaptureMode(rawValue: value) ?? .content
   }
 
   private func configuredAutomaticSystemKeychain() -> Bool {
@@ -3004,6 +3000,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       isDirectory: true
     )
     candidates.append(siblingApplication)
+
+    // Local packaging records the reused output, which may live outside this checkout.
+    if let configurationURL = Bundle.main.url(forResource: "BraveBuild", withExtension: "plist"),
+      let configuration = NSDictionary(contentsOf: configurationURL),
+      let applicationPath = configuration["ApplicationPath"] as? String
+    {
+      candidates.append(URL(fileURLWithPath: applicationPath, isDirectory: true))
+    }
 
     let repositoryRoot = applicationDirectory.deletingLastPathComponent()
     candidates.append(
@@ -3273,7 +3277,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
     let alert = NSAlert()
     alert.alertStyle = .critical
-    alert.messageText = "Live capture could not start"
+    alert.messageText = "Live session unavailable"
     alert.informativeText = message
     alert.addButton(withTitle: "Retry")
     alert.addButton(withTitle: "Continue Offline")

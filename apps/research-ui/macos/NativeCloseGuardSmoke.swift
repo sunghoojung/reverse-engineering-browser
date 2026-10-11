@@ -29,6 +29,9 @@ final class NativeCloseGuardSmoke: NSObject {
     closeGuard.requestObserver = { [weak self] event, id in
       guard let self else { return }
       print("NATIVE_CLOSE_REQUEST \(self.scenario) \(event) id=\(id.uuidString)")
+      if event.hasPrefix("sheet-response") {
+        print("NATIVE_CLOSE_SHEET_STACK \(self.scenario) \(Thread.callStackSymbols.prefix(16))")
+      }
       fflush(stdout)
     }
     require(Bundle.main.object(forInfoDictionaryKey: "NSSupportsSuddenTermination") as? Bool == false,

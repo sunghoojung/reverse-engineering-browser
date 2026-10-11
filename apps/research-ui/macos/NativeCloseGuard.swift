@@ -117,6 +117,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
     }
     alert.beginSheetModal(for: window) { [weak self] response in
       guard let self, self.request?.id == id else { return }
+      self.requestObserver?("sheet-response \(response.rawValue)", id)
       self.finish(allow: response == .alertSecondButtonReturn && self.request?.phase != .checking)
     }
     configureSafeButtons(alert)

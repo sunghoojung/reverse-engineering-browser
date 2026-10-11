@@ -230,9 +230,11 @@ node tools/check-origin-trace-native-close.mjs
 
 The native close gate exercises 14 scenarios, including clean close/Quit,
 Return/Escape safety, missing or late save-state replies, navigation, and
-repeated Close/Quit. It queues Quit through AppKit, waits for actual delegate
-receipt before choosing Stay, checks that the draft survives, then requires a
-new Close Anyway decision. The repeated scenario runs in five fresh processes;
+repeated Close/Quit. Ordinary Quit uses queued Command-Q; with a close sheet
+already open, the repeated case schedules the native Quit action in default
+run-loop mode. It waits for actual delegate receipt before choosing Stay,
+checks that the draft survives, then requires a new Close Anyway decision.
+The repeated scenario runs in five fresh processes;
 every attempt must pass. Per-attempt traces and prompt screenshots are written
 to `build/native-close-qa/` and uploaded by CI. Linux contract checks validate
 wiring and trace assertions; they do not establish native macOS behavior.

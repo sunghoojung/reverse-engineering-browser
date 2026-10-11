@@ -140,11 +140,18 @@ final class NativeCloseGuardSmoke {
   }
 
   private func queueQuit() {
-    // Quit must arrive through AppKit's event queue for every scenario. A
-    // synchronous terminate from a WK callback can nest AppKit's termination
-    // loop while the sheet is still being presented or cancelled after Stay.
+    // Never enter AppKit's termination loop synchronously from a WK callback.
+    // A repeated close already has a sheet, which consumes the synthetic
+    // Command-Q instead of invoking the application's Quit action. Schedule
+    // that action in default mode: it cannot nest the previous terminateLater
+    // modal loop while Stay's cancellation is still unwinding.
     queuedQuitCount += 1
     trace("quit-queued \(queuedQuitCount)")
+    if scenario == "repeated-close-quit" {
+      NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil,
+                    afterDelay: 0, inModes: [.default])
+      return
+    }
     for type in [NSEvent.EventType.keyDown, .keyUp] {
       guard let event = NSEvent.keyEvent(
         with: type, location: .zero, modifierFlags: [.command],

@@ -1472,11 +1472,14 @@ separate and returnable; no field values are saved to the notebook. See the
 After `make app-build` on macOS, run
 `node tools/check-origin-trace-native-close.mjs`. It opens the relocated packaged
 UI against disposable synthetic Analyst stores and tests real close/Quit sheets.
-All Quit scenarios use queued Command-Q events. A smoke-only delegate observer
-requires actual Quit delivery before the test chooses Stay or Close Anyway, so
-posting an event alone cannot satisfy the repeated-close/Quit case. Stay must
-preserve the full draft snapshot and a single coalesced query; the next close
-requires a new decision. The repeated case runs five independent times, with
+Ordinary Quit scenarios use queued Command-Q events. When a close sheet is
+already open, the repeated case schedules the native Quit action for the next
+default-mode run-loop turn, outside the WebKit callback and any previous
+termination modal loop. A smoke-only delegate observer requires actual Quit
+delivery before the test chooses Stay or Close Anyway; posting an event or
+scheduling an action alone cannot satisfy the repeated-close/Quit case.
+Stay must preserve the full draft snapshot and a single coalesced query; the next
+close requires a new decision. The repeated case runs five independent times, with
 no success-only retry. Logs and prompt PNGs are retained per attempt under
 `build/native-close-qa/`. `--contract-only` is portable wiring/trace validation,
 not native lifecycle acceptance.

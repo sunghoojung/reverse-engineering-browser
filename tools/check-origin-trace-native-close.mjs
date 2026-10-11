@@ -36,8 +36,10 @@ export async function checkNativeCloseContract() {
   assert(app.includes('closeGuard?.applicationShouldTerminate()'));
   assert(app.includes('closeSmoke?.didCheckTermination(reply)'));
   const smoke = await readFile(join(root, 'apps/research-ui/macos/NativeCloseGuardSmoke.swift'), 'utf8');
-  assert(!/NSApp\.terminate\s*\(/.test(smoke), 'Smoke Quit must use the native event queue');
+  assert(!/NSApp\.terminate\s*\(/.test(smoke), 'Smoke Quit must not enter termination synchronously');
   assert(smoke.includes('NSApp.postEvent(event, atStart: false)'));
+  assert(/NSApp\.perform\(#selector\(NSApplication\.terminate\(_:\)\), with: nil,\s*afterDelay: 0, inModes: \[\.default\]\)/.test(smoke),
+    'Repeated Quit must wait for default mode, outside the previous termination modal loop');
   const trace = events => events.map(event => `NATIVE_CLOSE_TRACE repeated-close-quit ${event}`).join('\n');
   checkRepeatedCloseTrace(trace(repeatedCloseTrace));
   for (const event of repeatedCloseTrace) {

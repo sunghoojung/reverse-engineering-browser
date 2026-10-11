@@ -5,7 +5,7 @@ import WebKit
 // Runs only inside the existing explicitly requested packaged-app smoke mode.
 // It uses the real bundled UI, AppKit close/Quit lifecycle and native sheet
 // buttons. The host script supplies only disposable synthetic workspaces.
-final class NativeCloseGuardSmoke {
+final class NativeCloseGuardSmoke: NSObject {
   private let scenario: String
   private let window: NSWindow
   private let webView: WKWebView
@@ -22,6 +22,7 @@ final class NativeCloseGuardSmoke {
     self.window = window
     self.webView = webView
     self.closeGuard = closeGuard
+    super.init()
   }
 
   func start() {
@@ -148,8 +149,9 @@ final class NativeCloseGuardSmoke {
     queuedQuitCount += 1
     trace("quit-queued \(queuedQuitCount)")
     if scenario == "repeated-close-quit" {
-      NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil,
-                    afterDelay: 0, inModes: [.default])
+      traceDispatch("quit-scheduled")
+      perform(#selector(dispatchDeferredQuit(_:)), with: nil,
+              afterDelay: 0, inModes: [.default])
       return
     }
     for type in [NSEvent.EventType.keyDown, .keyUp] {
@@ -162,6 +164,12 @@ final class NativeCloseGuardSmoke {
       ) else { fail("could not create Quit keyboard event"); return }
       NSApp.postEvent(event, atStart: false)
     }
+  }
+
+  @objc private func dispatchDeferredQuit(_ sender: Any?) {
+    traceDispatch("quit-dispatched")
+    NSApp.terminate(nil)
+    traceDispatch("quit-returned")
   }
 
   private func chooseStay() {
@@ -364,6 +372,15 @@ final class NativeCloseGuardSmoke {
     RunLoop.main.add(next, forMode: .modalPanel)
   }
 
+  private func traceDispatch(_ event: String) {
+    let mode = RunLoop.current.currentMode?.rawValue ?? "none"
+    print("NATIVE_CLOSE_DISPATCH \(scenario) \(event) mode=\(mode) "
+          + "sheet=\(window.attachedSheet != nil) modal=\(NSApp.modalWindow != nil) "
+          + "decisionReady=\(button("Close Anyway")?.isEnabled == true) "
+          + "queued=\(queuedQuitCount) observed=\(observedQuitCount)")
+    fflush(stdout)
+  }
+
   private func trace(_ event: String) {
     print("NATIVE_CLOSE_TRACE \(scenario) \(event)")
     fflush(stdout)
@@ -374,6 +391,7 @@ final class NativeCloseGuardSmoke {
   }
 
   private func fail(_ message: String) {
+    traceDispatch("failure")
     print("SMOKE_ERROR native close \(scenario): \(message)")
     exit(1)
   }

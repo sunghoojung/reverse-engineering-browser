@@ -1,25 +1,90 @@
-name: Release macOS application
+name: Validate and release paired macOS applications
 
 on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Full immutable main commit SHA that passed the paired checks"
+        required: true
+        type: string
+      release_tag:
+        description: "New release tag matching the application version (v0.3.1)"
+        required: true
+        type: string
   push:
     tags:
       - "v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/prepare-release-brave.sh"
+      - "tools/write-release-pair*.py"
+      - "tools/publish-release-pair*.py"
+      - "apps/research-ui/macos/Info.plist"
+      - "apps/origin-trace-backend/Cargo.toml"
+      - "apps/origin-trace-backend/Cargo.lock"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    outputs:
+      release_tag: ${{ steps.source.outputs.release_tag }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
 
     steps:
+      - name: Validate manual release inputs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REQUESTED_SHA: ${{ inputs.source_sha }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$REQUESTED_TAG" == v0.3.1 ]]
+
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.sha }}
+
+      - name: Verify immutable source and release version
+        id: source
+        env:
+          REQUESTED_SHA: ${{ inputs.source_sha }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' apps/research-ui/macos/Info.plist)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v${version}"
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$source_sha" == "$REQUESTED_SHA" ]]
+            [[ "$tag" == "$REQUESTED_TAG" ]]
+            [[ "$source_sha" == "$(git rev-parse origin/main)" ]]
+            if git show-ref --verify --quiet "refs/tags/$tag"; then
+              echo "Refusing to replace an existing tag: $tag" >&2
+              exit 1
+            fi
+          elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ "$GITHUB_REF_NAME" == "$tag" ]]
+          fi
+          printf 'RELEASE_TAG=%s\nRELEASE_SOURCE_SHA=%s\n' "$tag" "$source_sha" >> "$GITHUB_ENV"
+          printf 'release_tag=%s\nsource_sha=%s\n' "$tag" "$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check release metadata tooling
+        run: |
+          python3 tools/write-release-pair-test.py
+          python3 tools/publish-release-pair-test.py
 
       - name: Run release checks
         run: make check
@@ -30,17 +95,75 @@ jobs:
       - name: Verify macOS application signature
         run: codesign --verify --deep --strict "build/Origin Trace.app"
 
-      - name: Archive application
-        run: >-
-          ditto -c -k --sequesterRsrc --keepParent
-          "build/Origin Trace.app"
-          "build/Origin-Trace-${GITHUB_REF_NAME}-macos.zip"
+      - name: Prepare checksum-verified compatible Brave archive
+        run: ./scripts/prepare-release-brave.sh
 
-      - name: Create GitHub release
+      - name: Exercise the exact packaged application pair
+        run: |
+          export ORIGIN_TRACE_TEST_BROWSER="$PWD/build/release-pair/extracted/Brave Browser Development.app/Contents/MacOS/Brave Browser Development"
+          test -x "$ORIGIN_TRACE_TEST_BROWSER"
+          node tools/check-origin-trace-package.mjs
+
+      - name: Exercise native Analyst close and Quit lifecycle
+        run: node tools/check-origin-trace-native-close.mjs
+
+      - name: Preserve paired and lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: paired-release-qa-${{ github.run_id }}
+          path: |
+            build/package-qa
+            build/native-close-qa
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Archive companion and record pair provenance
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'build/Origin Trace.app/Contents/Info.plist')"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "build/Origin Trace.app" "build/release-pair/Origin-Trace-v${version}-macos.zip"
+          python3 tools/write-release-pair.py
+          (cd build/release-pair && shasum -a 256 --check SHA256SUMS-*.txt)
+
+      - name: Preserve tested release candidates
+        id: artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: paired-release-candidates-${{ github.run_id }}
+          path: |
+            build/release-pair/Origin-Trace-v*-macos.zip
+            build/release-pair/Brave-Browser-Development-v*-macos-arm64.zip
+            build/release-pair/*.provenance.json
+            build/release-pair/SHA256SUMS-*.txt
+            build/release-pair/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out only the tested release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Download the immutable tested candidate artifact
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: build/release-pair
+          digest-mismatch: error
+
+      - name: Publish the fresh tag and verified pair
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME"
-          "build/Origin-Trace-${GITHUB_REF_NAME}-macos.zip"
-          --title "Origin Trace $GITHUB_REF_NAME"
-          --generate-notes
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          RELEASE_SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+        run: python3 tools/publish-release-pair.py

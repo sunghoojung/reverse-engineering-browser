@@ -14,10 +14,46 @@ const scenarios = ['clean-close', 'clean-quit', 'file-return-close', 'folder-esc
 
 const repeatedCloseTrace = [
   'close-request 1', 'close-request 2', 'quit-queued 1', 'quit-observed 1',
-  'decision-ready 1', 'stay-click', 'stay-dismissed', 'draft-preserved queries=1',
+  'decision-ready 1', 'stay-click', 'stay-dismissed', 'draft-preserved queries=2',
   'close-request 1', 'close-request 2', 'quit-queued 2', 'quit-observed 2',
   'decision-ready 2', 'close-anyway-click',
 ];
+
+const repeatedRequestTrace = [
+  ['begin-close', 'query', 'sheet-response -1001', 'finish-cancel'],
+  ['begin-quit', 'query', 'sheet-response 1000', 'finish-cancel'],
+  ['begin-close', 'query', 'sheet-response -1001', 'finish-cancel'],
+  ['begin-quit', 'query', 'sheet-response 1001', 'finish-allow'],
+];
+
+function checkRepeatedRequests(output) {
+  const prefix = 'NATIVE_CLOSE_REQUEST repeated-close-quit ';
+  const requests = [];
+  const ids = new Set();
+  let active;
+  for (const line of output.split(/\r?\n/).filter(line => line.startsWith(prefix))) {
+    const match = line.slice(prefix.length).match(/^(.+) id=([0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12})$/);
+    assert(match, 'Malformed native request evidence');
+    const [, event, id] = match;
+    if (event.startsWith('begin-')) {
+      assert.equal(active, undefined, 'A fresh request replaced an active decision');
+      assert(!ids.has(id), 'A cancelled request UUID was reused');
+      ids.add(id);
+      active = {id, events: []};
+      requests.push(active);
+    }
+    assert.equal(active?.id, id, 'Query/decision belongs to a stale request');
+    if (event === 'coalesce-close' || event === 'coalesce-quit') {
+      assert.equal(active.events.at(-1), 'query', 'A repeated callback must join the active queried request');
+      continue;
+    }
+    active.events.push(event);
+    if (event.startsWith('finish-')) active = undefined;
+  }
+  assert.equal(active, undefined, 'A guarded decision was left unresolved');
+  assert.deepEqual(requests.map(request => request.events), repeatedRequestTrace,
+    'Each Close must abort safely before a fresh one-query Quit decision; only Close Anyway may approve');
+}
 
 function checkRepeatedCloseTrace(output) {
   const prefix = 'NATIVE_CLOSE_TRACE repeated-close-quit ';
@@ -52,10 +88,35 @@ export async function checkNativeCloseContract() {
   const earlyStay = [...repeatedCloseTrace];
   [earlyStay[3], earlyStay[5]] = [earlyStay[5], earlyStay[3]];
   assert.throws(() => checkRepeatedCloseTrace(trace(earlyStay)), 'Reject Stay before Quit delivery');
+  const requests = events => events.flatMap((request, index) => request.map(event =>
+    `NATIVE_CLOSE_REQUEST repeated-close-quit ${event} id=00000000-0000-0000-0000-00000000000${index}`)).join('\n');
+  const requestTrace = requests(repeatedRequestTrace);
+  checkRepeatedRequests(requestTrace);
+  const coalesced = repeatedRequestTrace.map(events => [...events]);
+  coalesced[0].splice(2, 0, 'coalesce-close', 'coalesce-quit');
+  checkRepeatedRequests(requests(coalesced));
+  for (const [index, request] of repeatedRequestTrace.entries()) {
+    for (const event of request) {
+      const missing = repeatedRequestTrace.map(events => [...events]);
+      missing[index] = missing[index].filter(item => item !== event);
+      assert.throws(() => checkRepeatedRequests(requests(missing)));
+    }
+  }
+  assert.throws(() => checkRepeatedRequests(requestTrace.replace(' query id=', ' query id=BAD')));
+  assert.throws(() => checkRepeatedRequests(requestTrace.replaceAll('000000000001', '000000000000')));
+  const duplicate = repeatedRequestTrace.map(events => [...events]);
+  duplicate[0].splice(2, 0, 'query');
+  assert.throws(() => checkRepeatedRequests(requests(duplicate)), 'Reject duplicate queries within one request');
+  coalesced[0].splice(4, 0, 'query');
+  assert.throws(() => checkRepeatedRequests(requests(coalesced)), 'Coalescing cannot issue another query');
+  const staleApproval = repeatedRequestTrace.map(events => [...events]);
+  staleApproval[0][3] = 'finish-allow';
+  assert.throws(() => checkRepeatedRequests(requests(staleApproval)), 'An AppKit abort cannot approve termination');
   console.log('PASS native close trace validator rejects missing and reordered lifecycle evidence');
+  console.log('PASS native request validator requires fresh UUIDs, one query per decision and explicit approval');
   const guard = await readFile(join(root, 'apps/research-ui/macos/NativeCloseGuard.swift'), 'utf8');
   assert(guard.includes('alert.window.preventsApplicationTerminationWhenModal = false'),
-    'The guard-owned sheet must route Quit through the coalesced decision');
+    'The guard-owned sheet must let Quit reach a guarded delegate decision');
   const plist = await readFile(join(root, 'apps/research-ui/macos/Info.plist'), 'utf8');
   assert(/<key>NSSupportsSuddenTermination<\/key>\s*<false\/>/.test(plist),
     'Sudden termination must not bypass the native close delegate');
@@ -105,7 +166,10 @@ async function runScenario(app, directory, name, attempt = 1) {
   }
   assert(!output.includes('SMOKE_ERROR'), output);
   assert.deepEqual([...output.matchAll(/^NATIVE_CLOSE_OK (.+)$/gm)].map(match => match[1]), [name], output);
-  if (name === 'repeated-close-quit') checkRepeatedCloseTrace(output);
+  if (name === 'repeated-close-quit') {
+    checkRepeatedCloseTrace(output);
+    checkRepeatedRequests(output);
+  }
   console.log(`PASS packaged WKWebView/AppKit lifecycle: ${label}`);
 }
 

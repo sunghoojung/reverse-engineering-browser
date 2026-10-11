@@ -138,9 +138,11 @@ Session…** offers metadata-only controls; credential headers remain redacted.
 **v0.3.0 validation note:** the tagged app build and packaging checks passed,
 but a separate [main CI run](https://github.com/sunghoojung/reverse-engineering-browser/actions/runs/37878440864)
 timed out waiting for Stay dismissal in the repeated-close/Quit scenario.
-Current source routes Quit through the existing close decision while its sheet
-is open and defers the test's native Quit action out of WebKit callbacks. The
-existing release tag and downloadable archives are unchanged.
+Current source lets Quit reach the guard while a close sheet is open. AppKit
+aborts that sheet before delivering Quit, so the guard cancels the old request
+and checks the current document in a fresh decision. The native test defers Quit
+out of WebKit callbacks and verifies each request separately. The existing
+release tag and downloadable archives are unchanged.
 
 Downloading the compiled Brave app does not require a 100+ GiB source checkout.
 Allow about 1 GiB to download and extract both apps, plus whatever space you

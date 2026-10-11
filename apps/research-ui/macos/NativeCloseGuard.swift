@@ -1,7 +1,8 @@
 import Cocoa
 import WebKit
 
-// One request covers both the window close button and application Quit. The
+// Active requests coalesce close/Quit callbacks. AppKit can abort a close sheet
+// before delivering Quit, which then requires a fresh guarded decision. The
 // native sheet prevents new editor input between the JS snapshot and close.
 // Only this app's explicitly loaded document can approve a clean shutdown.
 final class NativeCloseGuard: NSObject, NSWindowDelegate {
@@ -97,8 +98,9 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
     alert.addButton(withTitle: "Close Anyway").isEnabled = false
     alert.buttons[0].keyEquivalent = "\r"
     alert.buttons[1].keyEquivalent = ""
-    // This sheet owns the close decision. Let Quit reach our delegate so it
-    // joins that same request, instead of AppKit vetoing it before the delegate.
+    // Let Quit reach our delegate instead of being vetoed before the delegate.
+    // AppKit may abort this sheet first; that cancellation must not carry an
+    // old approval into the fresh Quit request.
     // Sudden termination is disabled in Info.plist; finish still owns approval.
     alert.window.preventsApplicationTerminationWhenModal = false
     let id = UUID()

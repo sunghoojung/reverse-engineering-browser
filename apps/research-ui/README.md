@@ -503,10 +503,12 @@ exist. The native shell separately checks the current Analyst document before
 normal window close or Quit. Its sheet keeps **Stay** as the Return/Escape default;
 **Close Anyway** requires a deliberate choice for unsaved or unconfirmed changes,
 including when the document cannot report its state. Navigation invalidates an
-older close decision. Quit while this guard's sheet is open joins the same
-pending decision instead of being rejected by AppKit before reaching the
-delegate. Only this guard-owned sheet permits that delegation; sudden termination
-remains disabled and Stay still cancels the pending Quit.
+older close decision. Quit while this guard's sheet is open can reach the
+delegate. AppKit aborts the Close sheet before delivering Quit; the guard cancels
+that request and checks the current document in a fresh Quit-owned decision.
+Callbacks that reach a still-active request coalesce without another query.
+Only this guard-owned sheet permits delegation; sudden termination remains
+disabled and Stay still cancels the pending Quit.
 Closing can interrupt a pending save and cannot undo a save
 already committed. Save and verify the result before closing. Neither warning
 protects against crashes or a forced process exit.
@@ -529,8 +531,11 @@ Command-Q through AppKit. The repeated Close/Close/Quit case defers the native
 Quit action to default run-loop mode, outside the WebKit callback and any
 previous termination modal loop. A smoke-only observer requires actual Quit
 delegate receipt before either Stay or Close Anyway; scheduling alone cannot
-satisfy the test. Stay must preserve the exact draft snapshot and one coalesced
-query before a later, separate decision. All 14 scenarios run; the repeated case
+satisfy the test. Stay must preserve the exact draft snapshot. The repeated case
+requires exactly two queries before Stay: one for the aborted Close request and
+one for the fresh Quit request. UUID traces require one query per request, the
+abort/cancel transition, and fresh requests for the later explicit approved exit.
+All 14 scenarios run; the repeated case
 runs in five fresh processes and every attempt must pass. Per-attempt logs,
 dispatch-mode diagnostics and prompt PNGs are retained in `build/native-close-qa/`
 and uploaded by CI. The `--contract-only` mode checks wiring, sheet/sudden-exit

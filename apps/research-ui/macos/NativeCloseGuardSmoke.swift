@@ -205,8 +205,12 @@ final class NativeCloseGuardSmoke: NSObject {
             let count = (observation?["count"] as? NSNumber)?.intValue
             print("NATIVE_CLOSE_QUERY \(self.scenario) \(String(describing: observation))")
             fflush(stdout)
-            let expected = self.scenario == "missing-close" ? 0 : 1
-            self.require(count == expected, "query missing or not coalesced: expected \(expected), got \(String(describing: count))")
+            // AppKit aborts the first Close sheet before delivering Quit. Each
+            // distinct request must query once; the host also validates UUIDs,
+            // the abort/cancel transition, and both subsequent button choices.
+            let expected = self.scenario == "missing-close" ? 0
+              : self.scenario == "repeated-close-quit" ? 2 : 1
+            self.require(count == expected, "unexpected query count: expected \(expected), got \(String(describing: count))")
             self.trace("draft-preserved queries=\(expected)")
             self.approveNextClose()
           }

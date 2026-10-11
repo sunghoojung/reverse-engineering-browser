@@ -6,6 +6,8 @@ import WebKit
 // Only this app's explicitly loaded document can approve a clean shutdown.
 final class NativeCloseGuard: NSObject, NSWindowDelegate {
   typealias Query = (WKWebView, @escaping (Any?, Error?) -> Void) -> Void
+  // Optional smoke diagnostics; no observer is installed in normal app use.
+  var requestObserver: ((String, UUID) -> Void)?
 
   private enum Phase {
     case checking, dirty, unavailable
@@ -79,7 +81,8 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
   }
 
   private func begin(quit: Bool) {
-    if request != nil {
+    if let current = request {
+      requestObserver?(quit ? "coalesce-quit" : "coalesce-close", current.id)
       if quit { request?.quitWaiting = true }
       return
     }
@@ -102,6 +105,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
     let currentURL = webView?.url
     request = Request(id: id, generation: generation, url: currentURL, alert: alert,
                       quitWaiting: quit)
+    requestObserver?(quit ? "begin-quit" : "begin-close", id)
     keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
       guard let self, let current = self.request,
         event.window === current.alert.window,
@@ -126,6 +130,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
       received(nil, error: nil, id: id)
       return
     }
+    requestObserver?("query", id)
     query(webView) { [weak self] result, error in
       self?.received(result, error: error, id: id)
     }
@@ -181,6 +186,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
   private func finish(allow: Bool) {
     guard let current = request else { return }
     let approved = allow && isCurrent(current)
+    requestObserver?(approved ? "finish-allow" : "finish-cancel", current.id)
     request = nil // Reentrant sheet callbacks cannot reuse this approval.
     timeout?.invalidate()
     timeout = nil

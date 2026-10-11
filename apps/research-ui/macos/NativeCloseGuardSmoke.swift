@@ -26,6 +26,11 @@ final class NativeCloseGuardSmoke: NSObject {
   }
 
   func start() {
+    closeGuard.requestObserver = { [weak self] event, id in
+      guard let self else { return }
+      print("NATIVE_CLOSE_REQUEST \(self.scenario) \(event) id=\(id.uuidString)")
+      fflush(stdout)
+    }
     require(Bundle.main.object(forInfoDictionaryKey: "NSSupportsSuddenTermination") as? Bool == false,
             "packaged app must keep sudden termination disabled")
     evaluate("showScreen('analyst'); true") { _ in
@@ -106,9 +111,16 @@ final class NativeCloseGuardSmoke: NSObject {
       });
       window.__closeSnapshot = window.__closeSnapshotNow();
       window.__closeQueries = 0;
+      window.__closeQueryStacks = [];
       if (typeof analystHasUnsavedWork === 'function') {
         const query = analystHasUnsavedWork;
-        analystHasUnsavedWork = () => { window.__closeQueries++; return query(); };
+        analystHasUnsavedWork = () => {
+          window.__closeQueries++;
+          if (window.__closeQueryStacks.length < 8) {
+            window.__closeQueryStacks.push(String(new Error().stack).slice(0, 1024));
+          }
+          return query();
+        };
       }
       true
       """) { _ in
@@ -185,9 +197,13 @@ final class NativeCloseGuardSmoke: NSObject {
       if self.scenario != "untrusted-close" {
         self.evaluate("window.__closeSnapshotNow() === window.__closeSnapshot") { unchanged in
           self.require(unchanged as? Bool == true, "Stay changed the draft or its owner/save state")
-          self.evaluate("window.__closeQueries") { value in
+          self.evaluate("({count: window.__closeQueries, stacks: window.__closeQueryStacks})") { value in
+            let observation = value as? [String: Any]
+            let count = (observation?["count"] as? NSNumber)?.intValue
+            print("NATIVE_CLOSE_QUERY \(self.scenario) \(String(describing: observation))")
+            fflush(stdout)
             let expected = self.scenario == "missing-close" ? 0 : 1
-            self.require((value as? NSNumber)?.intValue == expected, "query missing or not coalesced")
+            self.require(count == expected, "query missing or not coalesced: expected \(expected), got \(String(describing: count))")
             self.trace("draft-preserved queries=\(expected)")
             self.approveNextClose()
           }

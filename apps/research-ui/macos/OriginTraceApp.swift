@@ -2775,7 +2775,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-    closeGuard?.applicationShouldTerminate() ?? .terminateNow
+    let reply = closeGuard?.applicationShouldTerminate() ?? .terminateNow
+    closeSmoke?.didCheckTermination(reply)
+    return reply
   }
 
   func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {

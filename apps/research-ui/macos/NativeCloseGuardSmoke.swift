@@ -12,6 +12,8 @@ final class NativeCloseGuardSmoke {
   private let closeGuard: NativeCloseGuard
   private var timer: Timer?
   private var expectedExit = false
+  private var queuedQuitCount = 0
+  private var observedQuitCount = 0
   private var injectedGuard: NativeCloseGuard?
   private var callbacks: [(Any?, Error?) -> Void] = []
 
@@ -39,8 +41,19 @@ final class NativeCloseGuardSmoke {
     }
   }
 
+  // Observe the real AppKit delegate, rather than treating a posted key as a
+  // delivered Quit. A ready JS answer can otherwise beat the event queue.
+  func didCheckTermination(_ reply: NSApplication.TerminateReply) {
+    guard scenario.hasSuffix("-quit") else { return }
+    require(observedQuitCount < queuedQuitCount, "unexpected Quit delegate request")
+    require(reply == .terminateLater, "Quit did not join the guarded decision")
+    observedQuitCount += 1
+    trace("quit-observed \(observedQuitCount)")
+  }
+
   func willTerminate() {
     require(expectedExit, "AppKit terminated before an approved close")
+    require(queuedQuitCount == observedQuitCount, "Quit was not delivered before exit")
     print("NATIVE_CLOSE_OK \(scenario)")
   }
 
@@ -114,25 +127,33 @@ final class NativeCloseGuardSmoke {
 
   private func requestClose() {
     if scenario == "repeated-close-quit" {
+      trace("close-request 1")
       window.performClose(nil)
+      trace("close-request 2")
       window.performClose(nil)
-      NSApp.terminate(nil)
+      queueQuit()
     } else if scenario.hasSuffix("-quit") {
-      // A user Quit arrives through AppKit's event queue. Calling terminate
-      // reentrantly from a WK callback after Stay can precede cancellation of
-      // the previous terminateLater request and bypass the next delegate query.
-      for type in [NSEvent.EventType.keyDown, .keyUp] {
-        guard let event = NSEvent.keyEvent(
-          with: type, location: .zero, modifierFlags: [.command],
-          timestamp: ProcessInfo.processInfo.systemUptime,
-          windowNumber: window.windowNumber, context: nil,
-          characters: "q", charactersIgnoringModifiers: "q",
-          isARepeat: false, keyCode: 12
-        ) else { fail("could not create Quit keyboard event"); return }
-        NSApp.postEvent(event, atStart: false)
-      }
+      queueQuit()
     } else {
       window.performClose(nil)
+    }
+  }
+
+  private func queueQuit() {
+    // Quit must arrive through AppKit's event queue for every scenario. A
+    // synchronous terminate from a WK callback can nest AppKit's termination
+    // loop while the sheet is still being presented or cancelled after Stay.
+    queuedQuitCount += 1
+    trace("quit-queued \(queuedQuitCount)")
+    for type in [NSEvent.EventType.keyDown, .keyUp] {
+      guard let event = NSEvent.keyEvent(
+        with: type, location: .zero, modifierFlags: [.command],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber, context: nil,
+        characters: "q", charactersIgnoringModifiers: "q",
+        isARepeat: false, keyCode: 12
+      ) else { fail("could not create Quit keyboard event"); return }
+      NSApp.postEvent(event, atStart: false)
     }
   }
 
@@ -143,6 +164,7 @@ final class NativeCloseGuardSmoke {
     require(sheet.defaultButtonCell === (stay.cell as? NSButtonCell), "Stay must be the native default button")
     require(button("Close Anyway")?.keyEquivalent == "", "destructive keyboard default")
     wait(until: { self.window.attachedSheet == nil }, label: "Stay dismissal") {
+      self.trace("stay-dismissed")
       self.require(self.window.isVisible, "Stay closed the window")
       if self.scenario != "untrusted-close" {
         self.evaluate("window.__closeSnapshotNow() === window.__closeSnapshot") { unchanged in
@@ -150,6 +172,7 @@ final class NativeCloseGuardSmoke {
           self.evaluate("window.__closeQueries") { value in
             let expected = self.scenario == "missing-close" ? 0 : 1
             self.require((value as? NSNumber)?.intValue == expected, "query missing or not coalesced")
+            self.trace("draft-preserved queries=\(expected)")
             self.approveNextClose()
           }
         }
@@ -157,6 +180,7 @@ final class NativeCloseGuardSmoke {
         self.approveNextClose()
       }
     }
+    trace("stay-click")
     if scenario.contains("return") || scenario.contains("escape") {
       let escape = scenario.contains("escape")
       guard let event = NSEvent.keyEvent(
@@ -175,6 +199,7 @@ final class NativeCloseGuardSmoke {
   private func approveNextClose() {
     waitForDecision {
       self.expectedExit = true
+      self.trace("close-anyway-click")
       self.button("Close Anyway")!.performClick(nil)
     }
     requestClose()
@@ -250,8 +275,12 @@ final class NativeCloseGuardSmoke {
   }
 
   private func waitForDecision(_ completion: @escaping () -> Void) {
-    wait(until: { self.button("Close Anyway")?.isEnabled == true },
-         label: "native close decision") {
+    let expectedQuits = queuedQuitCount + (scenario.hasSuffix("-quit") ? 1 : 0)
+    wait(until: {
+      self.button("Close Anyway")?.isEnabled == true
+        && self.observedQuitCount == expectedQuits && self.queuedQuitCount == expectedQuits
+    }, label: "native close decision and queued Quit delivery") {
+      self.trace("decision-ready \(self.observedQuitCount)")
       let unavailable = ["missing-close", "throwing-quit", "malformed-close", "untrusted-close", "timeout-close"]
         .contains(self.scenario)
       let expected = unavailable ? "Couldn’t check unsaved Analyst work"
@@ -326,6 +355,11 @@ final class NativeCloseGuardSmoke {
     timer = next
     RunLoop.main.add(next, forMode: .common)
     RunLoop.main.add(next, forMode: .modalPanel)
+  }
+
+  private func trace(_ event: String) {
+    print("NATIVE_CLOSE_TRACE \(scenario) \(event)")
+    fflush(stdout)
   }
 
   private func require(_ condition: Bool, _ message: String) {

@@ -94,6 +94,10 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
     alert.addButton(withTitle: "Close Anyway").isEnabled = false
     alert.buttons[0].keyEquivalent = "\r"
     alert.buttons[1].keyEquivalent = ""
+    // This sheet owns the close decision. Let Quit reach our delegate so it
+    // joins that same request, instead of AppKit vetoing it before the delegate.
+    // Sudden termination is disabled in Info.plist; finish still owns approval.
+    alert.window.preventsApplicationTerminationWhenModal = false
     let id = UUID()
     let currentURL = webView?.url
     request = Request(id: id, generation: generation, url: currentURL, alert: alert,

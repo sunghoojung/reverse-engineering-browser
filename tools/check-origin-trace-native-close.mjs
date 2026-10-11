@@ -53,6 +53,13 @@ export async function checkNativeCloseContract() {
   [earlyStay[3], earlyStay[5]] = [earlyStay[5], earlyStay[3]];
   assert.throws(() => checkRepeatedCloseTrace(trace(earlyStay)), 'Reject Stay before Quit delivery');
   console.log('PASS native close trace validator rejects missing and reordered lifecycle evidence');
+  const guard = await readFile(join(root, 'apps/research-ui/macos/NativeCloseGuard.swift'), 'utf8');
+  assert(guard.includes('alert.window.preventsApplicationTerminationWhenModal = false'),
+    'The guard-owned sheet must route Quit through the coalesced decision');
+  const plist = await readFile(join(root, 'apps/research-ui/macos/Info.plist'), 'utf8');
+  assert(/<key>NSSupportsSuddenTermination<\/key>\s*<false\/>/.test(plist),
+    'Sudden termination must not bypass the native close delegate');
+  assert(!/enableSuddenTermination\s*\(/.test(app + guard));
   const frontend = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
   assert(frontend.includes('function analystHasUnsavedWork()'));
   console.log('PASS native close guard build wiring and frontend dependency (not lifecycle acceptance)');

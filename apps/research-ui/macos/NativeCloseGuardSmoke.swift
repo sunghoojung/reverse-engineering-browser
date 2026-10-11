@@ -26,6 +26,8 @@ final class NativeCloseGuardSmoke: NSObject {
   }
 
   func start() {
+    require(Bundle.main.object(forInfoDictionaryKey: "NSSupportsSuddenTermination") as? Bool == false,
+            "packaged app must keep sudden termination disabled")
     evaluate("showScreen('analyst'); true") { _ in
       self.waitForWorkspace(deadline: Date().addingTimeInterval(10))
     }
@@ -141,11 +143,9 @@ final class NativeCloseGuardSmoke: NSObject {
   }
 
   private func queueQuit() {
-    // Never enter AppKit's termination loop synchronously from a WK callback.
-    // A repeated close already has a sheet, which consumes the synthetic
-    // Command-Q instead of invoking the application's Quit action. Schedule
-    // that action in default mode: it cannot nest the previous terminateLater
-    // modal loop while Stay's cancellation is still unwinding.
+    // Defer the native action outside the WK completion and any previous
+    // terminateLater modal loop. The guard's sheet policy must separately let
+    // AppKit consult the delegate; scheduling alone cannot prove delivery.
     queuedQuitCount += 1
     trace("quit-queued \(queuedQuitCount)")
     if scenario == "repeated-close-quit" {
@@ -176,6 +176,7 @@ final class NativeCloseGuardSmoke: NSObject {
     guard let sheet = window.attachedSheet, let stay = button("Stay") else {
       fail("missing Stay button"); return
     }
+    require(!sheet.preventsApplicationTerminationWhenModal, "close sheet blocks the Quit delegate")
     require(sheet.defaultButtonCell === (stay.cell as? NSButtonCell), "Stay must be the native default button")
     require(button("Close Anyway")?.keyEquivalent == "", "destructive keyboard default")
     wait(until: { self.window.attachedSheet == nil }, label: "Stay dismissal") {
@@ -376,6 +377,7 @@ final class NativeCloseGuardSmoke: NSObject {
     let mode = RunLoop.current.currentMode?.rawValue ?? "none"
     print("NATIVE_CLOSE_DISPATCH \(scenario) \(event) mode=\(mode) "
           + "sheet=\(window.attachedSheet != nil) modal=\(NSApp.modalWindow != nil) "
+          + "sheetBlocksQuit=\(window.attachedSheet?.preventsApplicationTerminationWhenModal == true) "
           + "decisionReady=\(button("Close Anyway")?.isEnabled == true) "
           + "queued=\(queuedQuitCount) observed=\(observedQuitCount)")
     fflush(stdout)

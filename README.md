@@ -138,7 +138,8 @@ Session…** offers metadata-only controls; credential headers remain redacted.
 **v0.3.0 validation note:** the tagged app build and packaging checks passed,
 but a separate [main CI run](https://github.com/sunghoojung/reverse-engineering-browser/actions/runs/37878440864)
 timed out waiting for Stay dismissal in the repeated-close/Quit scenario.
-The source acceptance harness below addresses its synchronous Quit path; the
+Current source routes Quit through the existing close decision while its sheet
+is open and defers the test's native Quit action out of WebKit callbacks. The
 existing release tag and downloadable archives are unchanged.
 
 Downloading the compiled Brave app does not require a 100+ GiB source checkout.

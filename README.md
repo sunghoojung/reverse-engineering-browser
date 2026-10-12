@@ -15,21 +15,56 @@
   web applications.
 </p>
 
-## v0.2.1 released
+## Research workbench
 
-Origin Trace Traffic now has a full-width, DevTools-style request table. Paths
-and hosts are easier to read, with separate status, type, method, and timing
-columns. Live requests follow the bottom of the list; scrolling up preserves
-your place and offers a jump to new requests. Selecting a request shows its
-complete URL with a Copy URL action. The v0.2.0 session privacy and launch
-improvements remain available.
+Origin Trace connects captured requests, source bytes, runtime observations and
+local research notes in one macOS workspace. The v0.3.0 release adds:
 
-[Download Origin Trace v0.2.1](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.2.1/Origin-Trace-v0.2.1-macos.zip)
-· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.2.1)
-· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.2.0...v0.2.1)
+- **Connected investigations:** follow retained Requests, Backtraces, Sources
+  and Decoder ranges with identity-checked Back/Forward navigation. Save
+  evidence-linked investigation notebooks that survive reloads.
+- **Richer Traffic inspection:** search retained request and response content,
+  trace request fields to original source candidates, preview isolated HTML,
+  and compare captured requests and bounded response-body diffs without replay.
+- **A native Console workbench:** explicitly run JavaScript in a separate
+  disposable browser, with a persistent composer, bounded output, completion,
+  object inspection and document-scoped commands.
+- **Source and evidence tools:** search complete retained sources, explore
+  lexical references and captured WASM, inspect deobfuscation changes, and
+  compare Canvas, Memory and Float32 evidence.
+- **Safer local workflows:** protect Analyst drafts, reconcile uncertain saves,
+  and require a native Stay/Close Anyway decision before abandoning unsaved or
+  unconfirmed work. Rust services power the local backend and analysis tools.
+
+Worker and proxy foundations remain dormant; live proxy routing is not
+implemented. Read the [workspace guide](apps/research-ui/README.md) for feature
+boundaries and the [capture policy](SAFETY.md) before starting a session.
+
+[Download the latest Origin Trace + Brave pair](https://github.com/sunghoojung/reverse-engineering-browser/releases/latest)
+· [v0.3.0 archives and validation history](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.3.0)
+· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.2.2...v0.3.0)
+
+### v0.3.1 lifecycle repair and paired packaging
+
+Current source handles the real AppKit Close/Close/Quit sequence: an aborted
+Close sheet cannot approve a fresh Quit, Stay preserves the exact draft and save
+state, and Close Anyway requires a later explicit choice. Native acceptance
+checks each request UUID and runs the repeated case in five fresh processes.
+
+The v0.3.1 release pipeline builds Origin Trace and pairs it with the unchanged,
+checksum-verified v0.3.0 Brave browser. It exercises the real packaged launcher,
+live backend/debugger readiness, relocated WebKit UI and cleanup with that exact
+browser before publishing. Each pair includes source/browser provenance and
+SHA256 checksums. This does not claim a new Brave compilation, notarization,
+Finder automatic-launch acceptance or complete native capture/Canvas QA.
 
 ### Feature changelog
 
+- **v0.3.1 source:** native close/Quit lifecycle repair, per-request acceptance
+  traces, and a checksum-verified paired-release pipeline.
+- **v0.3.0:** connected investigation notebooks, richer Traffic and source
+  analysis, native Console tools, evidence comparisons, Rust runtime services,
+  and workspace save/close safeguards. See the highlights above.
 - **v0.2.1:** redesigned live Traffic as a readable full-width request table
   with path and host hierarchy, compact request metadata, follow-to-bottom
   updates, a new-request jump, and full-URL inspection and copying.
@@ -95,22 +130,34 @@ improvements remain available.
 
 ### Download the compiled macOS apps
 
-1. Download
-   [Origin Trace v0.2.1](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.2.1/Origin-Trace-v0.2.1-macos.zip)
-   and the
-   [Brave Browser Development preview](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-build-20260914/Brave-Browser-Development-brave-build-20260914-macos-arm64.zip).
+1. Download both **Origin Trace** and **Brave Browser Development for Apple
+   silicon** from the [same release](https://github.com/sunghoojung/reverse-engineering-browser/releases/latest).
+   Verify both ZIPs against that release's `SHA256SUMS` file; its pair provenance
+   records the exact companion source and reused browser pins.
 2. Unzip both files and place the applications beside each other, or install
    Brave Browser Development in `/Applications`.
 3. Open Origin Trace. It starts the capture services and an isolated custom
    Brave session automatically.
 
-The compiled apps are for Apple silicon Macs. The linked Brave Browser
-Development preview predates current probe support. Build the pinned Brave
-integration from this release's source to use every native probe; the
-downloaded preview cannot demonstrate them. Origin Trace contains no bundled
-sample evidence. The applications are ad-hoc signed but not Apple-notarized, so
-the first launch may require Control-clicking the app and choosing **Open**. The
-v0.2.1 GitHub release tag is unsigned; its merge commit is GitHub-verified.
+The compiled apps are for Apple silicon Macs. Origin Trace is built by the
+release workflow; the reused Brave bundle retains its local-build provenance.
+Read the selected release's validation results and limits. Origin Trace contains
+no bundled sample evidence. The applications are ad-hoc signed but not
+Apple-notarized.
+
+Opening Origin Trace automatically starts an isolated one-hour research session
+with the implemented capture categories, bounded request/response content and
+Canvas artifacts enabled. Use it only for authorized targets. **New Live
+Session…** offers metadata-only controls; credential headers remain redacted.
+
+**v0.3.0 validation note:** the tagged app build and packaging checks passed,
+but a separate [main CI run](https://github.com/sunghoojung/reverse-engineering-browser/actions/runs/37878440864)
+timed out waiting for Stay dismissal in the repeated-close/Quit scenario.
+Current source lets Quit reach the guard while a close sheet is open. AppKit
+aborts that sheet before delivering Quit, so the guard cancels the old request
+and checks the current document in a fresh decision. The native test defers Quit
+out of WebKit callbacks and verifies each request separately. The v0.3.0
+release tag and downloadable archives remain unchanged.
 
 Downloading the compiled Brave app does not require a 100+ GiB source checkout.
 Allow about 1 GiB to download and extract both apps, plus whatever space you
@@ -181,3 +228,34 @@ bodies are unavailable in native quiet mode.
 
 Usage, authorization, capture, and privacy boundaries are defined in
 [`SAFETY.md`](SAFETY.md).
+
+## Development and validation
+
+Repository CI covers source checks, native/Rust tests, the event path, rendered
+UI journeys, and macOS app packaging. The packaged-app lifecycle gate uses
+synthetic local Analyst workspaces and real WKWebView/AppKit decisions:
+
+```sh
+make lint
+make check
+make e2e
+make sanitize
+# macOS only:
+make app-build
+codesign --verify --deep --strict "build/Origin Trace.app"
+node tools/check-origin-trace-native-close.mjs
+```
+
+The native close gate exercises 14 scenarios, including clean close/Quit,
+Return/Escape safety, missing or late save-state replies, navigation, and
+repeated Close/Quit. Ordinary Quit uses queued Command-Q; with a close sheet
+already open, the repeated case schedules the native Quit action in default
+run-loop mode. It waits for actual delegate receipt before choosing Stay,
+checks that the draft survives, then requires a new Close Anyway decision.
+The repeated scenario runs in five fresh processes;
+every attempt must pass. Per-attempt traces and prompt screenshots are written
+to `build/native-close-qa/` and uploaded by CI. Linux contract checks validate
+wiring and trace assertions; they do not establish native macOS behavior.
+
+See [contributing](CONTRIBUTING.md), the [documentation index](docs/README.md),
+and the [repository guide](AGENTS.md) for subsystem checks and the source map.

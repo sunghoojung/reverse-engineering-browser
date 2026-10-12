@@ -55,6 +55,8 @@ shellcheck:
 	shellcheck $(SHELL_SOURCES)
 
 python-check:
+	python3 tools/write-release-pair-test.py
+	python3 tools/publish-release-pair-test.py
 	python3 tools/check-integrated-brave-state-test.py
 	python3 -m compileall -q tools
 	$(RUFF) check tools

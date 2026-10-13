@@ -1,15 +1,16 @@
 # Integrated Brave build candidate
 
-This branch combines the accepted `main` application with the original native
-Console (#112), renderer admission (#131), worker (#129 → #140 → #141), and
-proxy (#138) draft histories. The worker stack is integrated once through #141.
-Original draft PRs remain open. This aggregate is a **build-and-test candidate**;
-it must not be merged or described as a compiled release before the pinned
-browser and runtime gates below pass.
+The native Console (#112), renderer admission (#131), worker
+(#129 → #140 → #141), and proxy (#138) foundations are already integrated into
+`main`, together with later native compilation and application repairs. This
+guide builds a **new source candidate** from a recorded revision. A source merge
+or passing repository CI does not establish that revision's pinned-browser build
+or runtime acceptance; record the separate evidence below before making those
+claims. Worker and proxy foundations remain dormant.
 
 ## One build path
 
-Use a clean checkout of this integration branch on an Apple silicon Mac with
+Use a clean checkout of the intended source revision on an Apple silicon Mac with
 full Xcode (including an already accepted license), C++20 and zlib, Make,
 Python 3.8 or newer, Rust/Cargo, Node.js >=24.16.0 and <25, and Corepack or pnpm. The entrypoint never
 installs system tools, accepts licenses, changes global Xcode selection, or enables
@@ -36,8 +37,16 @@ for both invocations. For an already initialized checkout only, the existing
 The wrapper refuses a mismatched `--init` destination and stops on any failure.
 It checks all three upstream pins before mutation, rejects revision, integration,
 remote and output overrides, and refuses unrecognized upstream edits. First-run
-`--init` requires clean upstream checkouts. Repeated runs without `--init` accept
-only the exact locally recorded post-sync state for this integration commit,
+`--init` requires clean upstream checkouts. A missing checkout is initialized
+normally. A pristine unborn Brave Git repository left before the first successful
+fetch is also admitted only for `--init`: it must contain only its own `.git`, no
+index entries, refs or pending operations, and only official Brave fetch remote
+URLs. Custom hooks, hook/monitor configuration or configuration includes require
+inspection and are refused.
+This narrowly permits safe initialization to continue; a partial checkout with
+user content, a wrong remote, symlinks or initialized mismatched pins still stops.
+Repeated runs without `--init` accept only the exact locally recorded post-sync
+state for this integration commit,
 including ignored overlay/patch destinations; symlink destinations are refused.
 The private source receipt is `build/integrated-brave-state.json`. Only after
 all browser, native tests, companion build and signature steps succeed does the
@@ -63,6 +72,9 @@ the full development browser build (which prepares Brave's component GN args),
 pinned probe compilation (including the native Console runtime), the separate
 proxy adapter unit-test executable, and
 Origin Trace packaging/Console checks. It verifies the companion signature.
+The ordinary `make native-console-check` uses the real C++ bridge and Rust HTTP
+backend with a synthetic Python browser peer. Companion JavaScriptCore checks are a separate layer. Neither establishes
+execution in the patched Brave renderer.
 `make brave-foundation-check` can repeat only the pinned native compilation and
 proxy tests; `make brave-probe-check` still compiles the probe objects alone.
 The focused commands support `REB_BRAVE_OUTPUT_DIRECTORY`; this wrapper rejects
@@ -77,8 +89,10 @@ The default live launcher looks for `Brave Browser.app/Contents/MacOS/Brave Brow
 there; if Brave's channel gives the app a different name, set `REB_BRAVE_BINARY`
 to the executable actually built in that directory. The companion is
 `build/Origin Trace.app`. Use the existing [live-session path](../../browser/README.md)
-and keep both from the same integration revision. Component output is for local
-use and must not be copied as a standalone portable `.app`.
+and keep both from the same integration revision. Reusing an older browser
+requires an explicit source-compatibility review and matched-pair acceptance as
+described below. Component output is for local use and must not be copied as a
+standalone portable `.app`.
 
 ## Capability and status manifest
 
@@ -129,6 +143,19 @@ On the supported build host, also establish:
 - [ ] Start the matched apps in a fresh disposable live session. Verify baseline
       evidence, request/profile and Canvas flows, debugger/source extraction,
       experiments, and accepted main Analyst close/Stay/Discard behavior.
+- [ ] After the actual patched browser is built, run its separate native Console
+      runtime gate from this repository (substitute the real executable, not the
+      enclosing `.app` directory):
+
+      ```sh
+      python3 tools/check-native-console.py --binary build/reb-console \
+        --browser "/absolute/path/to/Brave.app/Contents/MacOS/Brave"
+      ```
+
+      This launches a disposable profile and a local fixture, explicitly opting
+      into native Console to exercise Blink/V8, timeout recovery, preview/Unicode
+      limits and teardown. It is not run by the wrapper's generic Console target;
+      keep it unverified until this command passes on the built browser.
 - [ ] Native Console: explicit document selection and opt-in; primitive success,
       errors, navigation/close invalidation, disabled state, bounded output and
       no automatic replay. Check native sampling retry after full-queue rejection.
@@ -165,5 +192,27 @@ build requires `sccache` and additional disk:
 
 Keep the matched Origin Trace companion with it, record the ZIP hash, and test
 an extracted package. This remains an ad-hoc-signed development preview until
-trusted release, signing/notarization and distribution gates pass. This branch
-does not publish a release or provide a precompiled browser download.
+trusted release, signing/notarization and distribution gates pass. These local
+build commands do not publish a release. Published app pairs and their recorded
+validation are linked from the [project README](../../README.md).
+
+## Reusing a browser with a newer companion
+
+Do not assume the early integration checkpoints `54d3150a` or `cb4036e` match
+current browser inputs. Later main commits changed native Console, worker and
+proxy compilation, integration synchronization, and artifact-source handling.
+Identical upstream pins alone do not establish source or runtime compatibility.
+
+Use a browser built from the same reviewed source revision by default. Reusing
+an older browser requires a separate comparison of all browser pins, overlays,
+ordered patches, build/sync inputs, native transports and wire contracts, plus
+matched-pair runtime acceptance. Rebuild the companion's backend, UI and workers
+together. Record the actual browser source revision, binary hash, pins, path and
+build/runtime evidence separately from the companion source revision; never
+relabel an older binary as built from new source.
+
+Let an active build finish before doing any update. Preserve its checkout,
+component output and source/completion receipts. Use a separate source checkout
+for companion-only work, and quit the old companion normally after saving work
+and responding to its draft prompts. Do not run two controllers against an
+existing session/profile or alter receipts to bypass source-preservation checks.

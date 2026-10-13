@@ -17,14 +17,60 @@ def git(directory, *arguments):
     )
 
 
-def snapshot(directory, pin, overlays=()):
+def pristine_unborn_brave(directory):
+    git_directory = directory / ".git"
+    if not git_directory.is_dir() or git_directory.is_symlink():
+        return False
+    if any(path.name != ".git" for path in directory.iterdir()):
+        return False
+    hooks = git_directory / "hooks"
+    if hooks.is_symlink() or (hooks.exists() and (
+        not hooks.is_dir() or any(not path.name.endswith(".sample") for path in hooks.iterdir())
+    )):
+        raise ValueError("Unexpected Git hooks in unborn checkout; inspect them before initialization")
+    # Check effective local/global/system configuration before commands that can
+    # consult hooks or filesystem monitors. Includes can hide executable settings.
+    configuration = subprocess.run(
+        ["git", "-C", str(directory), "config", "--name-only", "--get-regexp",
+         r"^(core\.(hookspath|fsmonitor)|include\.path|includeif\..*\.path)$"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    if configuration.returncode == 0:
+        raise ValueError("Unexpected Git hook/monitor/include configuration; inspect it before initialization")
+    if configuration.returncode != 1:
+        raise ValueError("Cannot verify Git configuration before initialization")
+    if git(directory, "ls-files", "-z") or git(directory, "for-each-ref", "--format=%(refname)"):
+        return False
+    if not git(directory, "symbolic-ref", "-q", "HEAD").startswith(b"refs/heads/"):
+        return False
+    pending = ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "rebase-apply", "rebase-merge")
+    if any((git_directory / name).exists() for name in pending):
+        return False
+    remotes = git(directory, "remote").decode().splitlines()
+    if not remotes:
+        return False
+    for name in remotes:
+        urls = git(directory, "config", "--get-all", f"remote.{name}.url").decode().splitlines()
+        if not urls or any(url != "https://github.com/brave/brave-core.git" for url in urls):
+            return False
+    return True
+
+
+def snapshot(directory, pin, overlays=(), allow_unborn=False):
+    if directory.is_symlink():
+        raise ValueError(f"Symlinked upstream checkout: {directory}")
     if not directory.exists():
         return None
     if directory.resolve() != Path(
         os.fsdecode(git(directory, "rev-parse", "--show-toplevel")).strip()
     ).resolve():
         raise ValueError(f"Not an independent Git checkout: {directory}")
-    actual = git(directory, "rev-parse", "HEAD").strip()
+    try:
+        actual = git(directory, "rev-parse", "--verify", "HEAD^{commit}").strip()
+    except subprocess.CalledProcessError:
+        if allow_unborn and pristine_unborn_brave(directory):
+            return None  # Bootstrap may safely finish its empty, official-remote checkout.
+        raise ValueError(f"Uninitialized or partial upstream checkout is not safely reusable: {directory}") from None
     expected = git(directory, "rev-parse", f"{pin}^{{commit}}").strip()
     if actual != expected:
         raise ValueError(f"Pinned revision mismatch: {directory} (expected {pin})")
@@ -143,13 +189,16 @@ def main():
     states = {}
     for name, directory in zip(pins, roots):
         pin = (args.repository / "browser/config" / f"{name}.rev").read_text().strip()
+        if directory.is_symlink():
+            raise ValueError(f"Symlinked upstream checkout: {directory}")
         # src/ can exist before Chromium initialization, but is not yet a repo.
         if name == "chromium" and not (directory / ".git").exists():
             if directory.exists() and any(path.name != "brave" for path in directory.iterdir()):
                 raise ValueError(f"Nonempty Chromium path is not a checkout: {directory}")
             states[name] = None
         else:
-            states[name] = snapshot(directory, pin, sorted(monitored[name]))
+            states[name] = snapshot(directory, pin, sorted(monitored[name]),
+                                    allow_unborn=name == "brave-core" and args.require_clean)
     identity = {
         "integration": git(args.repository, "rev-parse", "HEAD").decode().strip(),
         "brave": str(args.brave.resolve()),

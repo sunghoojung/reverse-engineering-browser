@@ -11,9 +11,10 @@ import {network} from './traffic-capture-qa.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const traffic = await readFile(join(root, 'apps/research-ui/traffic_view.js'), 'utf8');
+const catalogSource = await readFile(join(root, 'apps/research-ui/api_catalog.js'), 'utf8');
 const navigation = await readFile(join(root, 'apps/research-ui/investigation_navigation.js'), 'utf8');
 const models = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
-const api = runInNewContext(`${models}\n${traffic}\n${navigation}\n;({isApiObservationCatalog,apiCatalogIdentity,apiCatalogRequestIdentity,apiCatalogResolveSource,apiCatalogShapePath,requestsFromDebuggerNetwork,investigationRequestIdentity,investigationSame,isDebuggerResponse})`,
+const api = runInNewContext(`${models}\n${traffic}\n${catalogSource}\n${navigation}\n;({isApiObservationCatalog,apiCatalogIdentity,apiCatalogRequestIdentity,apiCatalogResolveSource,apiCatalogShapePath,apiCatalogSearchText,apiCatalogFilter,apiCatalogCompareBodies,requestsFromDebuggerNetwork,investigationRequestIdentity,investigationSame,isDebuggerResponse})`,
   {TextEncoder, TextDecoder, Uint8Array, URL, atob});
 const copy = value => JSON.parse(JSON.stringify(value));
 export async function catalogFixture() {
@@ -44,6 +45,24 @@ export async function catalogFixture() {
     endpoints:[{method:'POST',origin:'https://example.test',path:'/path',observations:[observation]}],
     limitations:['Authored bounded fixture. No real capture or target request.','Observations do not infer required fields, authentication, or a service contract.']};
   return {debuggerState,catalog};
+}
+function comparisonFixture(catalog) {
+  const result = copy(catalog), endpoint = result.endpoints[0], first = endpoint.observations[0];
+  const second = copy(first);
+  second.source = {...first.source, request_id:'synthetic-variant', started_monotonic_ms:101};
+  second.status = 201; second.query_parameters.names = ['cursor'];
+  second.request = copy(first.response);
+  const fields = second.response.body.shape.properties;
+  fields[0].types = ['number']; fields[2].observations = 1;
+  fields.splice(3, 1);
+  fields.push({path:[{kind:'property',name:'added'}],types:['null'],observations:1});
+  const third = copy(first);
+  third.source = {...first.source, request_id:'synthetic-truncated', started_monotonic_ms:102};
+  third.status = 503;
+  third.response.body = {state:'truncated',mime:'application/json',status:'unavailable',reason:'body_truncated',shape:null};
+  endpoint.observations.push(second,third);
+  Object.assign(result.coverage,{window_records:4,retained_records:5});
+  return result;
 }
 const fixture = await catalogFixture();
 assert(api.isDebuggerResponse(fixture.debuggerState));
@@ -77,16 +96,63 @@ for (const mutate of [value=>value.format='other',value=>value.coverage.capture_
   value=>value.endpoints[0].observations[0].query_parameters.names=['same','same'],
   value=>value.endpoints[0].observations[0].query_parameters.names=['雪'.repeat(100)],
   value=>value.endpoints[0].observations[0].response.body.shape.properties[0].path[0].name='x'.repeat(257),
+  value=>value.endpoints[0].observations[0].response.body.shape.properties.push({
+    ...value.endpoints[0].observations[0].response.body.shape.properties[0], path:[{name:'*',kind:'property'}]}),
   value=>value.endpoints[0].observations[0].response.body.raw='must not be accepted']) {
   const malformed = copy(fixture.catalog); mutate(malformed); assert.equal(api.isApiObservationCatalog(malformed),false);
 }
 assert.equal(JSON.stringify(fixture.debuggerState.network),original,'Catalog consumption must not alter retained raw fields');
 console.log('PASS catalog validator, independent coverage, five-value identity, rounded timestamp collision, ambiguity, typed paths, owner-safe navigation and immutable raw values');
 
+checkComparison();
 await checkController();
 await checkHistory();
 
 if (process.argv.includes('--browser') || process.argv.includes('--serve')) await checkBrowser();
+function checkComparison() {
+  const catalog = comparisonFixture(fixture.catalog);
+  assert(api.isApiObservationCatalog(catalog));
+  const before = JSON.stringify(catalog), endpoint = catalog.endpoints[0], [reference, comparison, missing] = endpoint.observations;
+  const index = [{endpoint, observations:endpoint.observations.map(observation=>({observation,text:api.apiCatalogSearchText(endpoint,observation)}))}];
+  const filtered = (query='',response='all') => api.apiCatalogFilter(index,query,response).flatMap(entry=>entry.observations);
+  assert.equal(filtered().length,3);
+  for (const query of ['/PATH','POST','EXAMPLE.TEST','content-type','token','items','name','boolean','duplicate_json_key','application/json','<img src=x onerror=alert(1)>']) assert(filtered(query).length,query);
+  for (const query of ['Bearer synthetic-auth','synthetic-json','secret-token','.*','not-observed']) assert.equal(filtered(query).length,0,query);
+  assert.equal(filtered('cursor')[0],comparison);
+  assert.equal(filtered('','json').length,2); assert.equal(filtered('','unavailable')[0],missing);
+  assert.equal(filtered('503','error')[0],missing); assert.equal(filtered('201','error').length,0);
+  const report = api.apiCatalogCompareBodies(reference.response.body,comparison.response.body);
+  assert.equal(report.available,true); assert.equal(report.differences.length,4);
+  const rows = new Map(report.differences.map(row=>[api.apiCatalogShapePath(row.path),row]));
+  assert.deepEqual(copy(rows.get('$["*"]').reference.types),['string']);
+  assert.deepEqual(copy(rows.get('$["*"]').comparison.types),['number']);
+  assert.equal(rows.get('$["items"][*]').comparison.observations,1);
+  assert.equal(rows.get('$["items"][*]["name"]').comparison,null);
+  assert.equal(rows.get('$["added"]').reference,null);
+  assert.equal(api.apiCatalogCompareBodies(reference.request.body,comparison.request.body).available,false);
+  assert.equal(api.apiCatalogCompareBodies(reference.response.body,missing.response.body).comparison,'body_truncated');
+  for (const reason of ['body_unavailable','body_truncated','base64_not_analyzed','not_json_media_type','body_byte_limit','malformed_json','duplicate_json_key','shape_resource_limit']) {
+    const body = {...missing.response.body,reason};
+    assert.equal(api.apiCatalogCompareBodies(body,reference.response.body).reference,reason);
+    assert.equal(api.apiCatalogCompareBodies(body,body).differences.length,0);
+  }
+  const same = copy(reference.response.body);
+  same.shape.properties.reverse(); same.shape.properties[0].path[0] = {name:'<img src=x onerror=alert(1)>',kind:'property'};
+  assert.equal(api.apiCatalogCompareBodies(reference.response.body,same).differences.length,0,'Property serialization and field order do not invent differences');
+  same.shape.root_type='array';
+  assert.equal(api.apiCatalogShapePath(api.apiCatalogCompareBodies(reference.response.body,same).differences[0].path),'$');
+  const special = copy(reference.response.body);
+  special.shape.properties = ['*','','a/b.c','__proto__'].map(name=>({path:[{kind:'property',name}],types:['string','null'],observations:1}));
+  special.shape.properties.push({path:[{kind:'array-element'}],types:['object'],observations:1});
+  const reordered = copy(special); reordered.shape.properties.forEach(field=>field.types.reverse());
+  assert.equal(api.apiCatalogCompareBodies(special,reordered).differences.length,0,'Type sets and typed special paths compare without collisions');
+  reordered.shape.properties[0].types=['boolean'];
+  assert.equal(api.apiCatalogCompareBodies(special,reordered).differences.length,1);
+  const maximum = prefix=>({...reference.response.body,shape:{...reference.response.body.shape,properties:Array.from({length:64},(_,i)=>({path:[{kind:'property',name:prefix+i}],types:['string'],observations:1}))}});
+  assert.equal(api.apiCatalogCompareBodies(maximum('before'),maximum('after')).differences.length,128,'Two bounded disjoint shapes remain bounded');
+  assert.equal(JSON.stringify(catalog),before,'Filtering and comparison preserve the complete input');
+  console.log('PASS structural search, response filters, typed-path/type/count differences, independent unavailable reasons, root and special-name cases, immutable bounded comparison');
+}
 async function checkBrowser() {
   const html = await readFile(join(root,'apps/research-ui/index.html'),'utf8');
   const assets = new Set(['index.html', ...[...html.matchAll(/(?:src|href)="([^"/]+\.(?:js|css))"/g)].map(match=>match[1])]);
@@ -101,6 +167,7 @@ async function checkBrowser() {
       if(mode==='pending') {held.push(()=>reply(200,fixture.catalog));return;}
       if(mode==='failure') {reply(503,{});return;}
       if(mode==='malformed') {reply(200,{format:'wrong'});return;}
+      if(mode==='comparison') {reply(200,comparisonFixture(fixture.catalog));return;}
       if(mode==='empty'||mode==='off') {const empty=copy(fixture.catalog);empty.endpoints=[];Object.assign(empty.coverage,{retained_records:0,window_records:0,older_records_not_examined:0,skipped_records:0,capture_enabled:mode==='empty',debugger_state:'unavailable'});reply(200,empty);return;}
       reply(200,fixture.catalog);return;
     }
@@ -124,7 +191,7 @@ async function checkBrowser() {
   const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{commands.delete(id);reject(new Error(`CDP timeout: ${method}`));},10000);commands.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params}));});
   const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.text+' '+JSON.stringify(result.exceptionDetails.exception));return result.result.value;};
   const key=async (key,code)=>{
-    const windowsVirtualKeyCode={Tab:9,Enter:13,Escape:27}[key];
+    const windowsVirtualKeyCode={Tab:9,Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowUp:38}[key];
     // Match the repository's native CDP input shape. Enter needs its character
     // event for native summary/button activation, not only a keydown event.
     await send('Input.dispatchKeyEvent',{type:key==='Enter'?'keyDown':'rawKeyDown',key,code,windowsVirtualKeyCode,
@@ -133,6 +200,11 @@ async function checkBrowser() {
   };
   const click=async selector=>{const point=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});n.scrollIntoView({block:'nearest'});const r=n.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});};
   const shot=async name=>{const result=await send('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(result.data,'base64'));};
+  const scrollCatalogTo=async selector=>{
+    const geometry=await evaluate(`(()=>{const c=document.querySelector('#api-catalog-content').getBoundingClientRect(),r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:c.x+c.width/2,y:c.y+c.height/2,deltaY:r.top-c.top-8};})()`);
+    await send('Input.dispatchMouseEvent',{type:'mouseWheel',...geometry,deltaX:0});
+    await until(()=>evaluate(`(()=>{const c=document.querySelector('#api-catalog-content').getBoundingClientRect(),r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return r.top>=c.top-1&&r.bottom<=c.bottom+1;})()`),'comparison result visible after pointer scroll');
+  };
   try {
     await new Promise(ready=>server.listen(0,'127.0.0.1',ready));
     if (process.argv.includes('--serve')) {
@@ -161,7 +233,16 @@ async function checkBrowser() {
       await send('Input.dispatchKeyEvent',{type:'keyDown',...shortcut});await send('Input.dispatchKeyEvent',{type:'keyUp',...shortcut});
       assert.equal(await evaluate("document.querySelector('#api-catalog').open && !document.querySelector('#screen-traffic').hidden && document.querySelector('#native-console-panel').hidden"),true,'Modal shortcuts cannot affect underlying workspace or console');
     }
-    await key('Tab','Tab');assert.equal(await evaluate('document.activeElement.id'),'api-catalog-content');
+    await key('Tab','Tab');assert.equal(await evaluate('document.activeElement.id'),'api-catalog-search');
+    await send('Input.insertText',{text:'not-observed'});
+    assert.equal(await evaluate("document.querySelectorAll('.api-catalog-endpoint').length"),0);
+    assert.match(await evaluate("document.querySelector('#api-catalog-filter-status').textContent"),/0 of 1 observations/);
+    assert.match(await evaluate("document.querySelector('#api-catalog-content').textContent"),/No observations match/);
+    assert.equal(catalogReads,1,'Typing a local filter must not fetch');
+    await key('Tab','Tab');assert.equal(await evaluate('document.activeElement.id'),'api-catalog-response');
+    await key('Tab','Tab');assert.equal(await evaluate('document.activeElement.id'),'api-catalog-clear');
+    await key('Enter','Enter');assert.equal(await evaluate('document.activeElement.id'),'api-catalog-search');
+    await key('Tab','Tab');await key('Tab','Tab');assert.equal(await evaluate('document.activeElement.id'),'api-catalog-content');
     await key('Tab','Tab');await key('Tab','Tab');
     assert.equal(await evaluate("document.activeElement.matches('.api-catalog-endpoint > summary')"),true);
     await key('Enter','Enter');
@@ -218,6 +299,50 @@ async function checkBrowser() {
       assert.equal(await evaluate("document.querySelectorAll('.api-catalog-endpoint').length"),0);
       assert.match(await evaluate("document.querySelector('#api-catalog-content').textContent"),variant==='off'?/Content capture is off/:/No eligible HTTP/);await shot(`catalog-${variant}`);
     }
+    mode='comparison';await click('#api-catalog-refresh');
+    await until(()=>evaluate("document.querySelector('#api-catalog-filter-status').textContent.includes('3 of 3 observations')"),'comparison snapshot');
+    const beforeComparisonReads=catalogReads;
+    await click('.api-catalog-endpoint > summary');
+    await until(()=>evaluate("document.querySelectorAll('.api-catalog-observation').length===3"),'comparison endpoint expansion');
+    await click('.api-catalog-compare-controls button');
+    assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/4 observed difference/);
+    assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/duplicate_json_key/);
+    assert.equal(await evaluate("document.querySelectorAll('.api-catalog-differences li').length"),4);
+    assert.equal(await evaluate("document.querySelectorAll('#api-catalog img').length"),0);
+    for(const [width,height] of [[1440,900],[760,560],[360,740]]) {
+      await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+      await evaluate("document.querySelector('.api-catalog-comparison').scrollIntoView({block:'start'})");
+      const geometry=await evaluate("(()=>{const c=document.querySelector('#api-catalog-content'),f=document.querySelector('.api-catalog-filters');return {height:c.clientHeight,overflow:document.documentElement.scrollWidth,contentOverflow:c.scrollWidth-c.clientWidth,filters:[...f.querySelectorAll('input,select,button')].map(n=>{const r=n.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})};})()");
+      assert(geometry.height>=80&&geometry.overflow<=width&&geometry.contentOverflow<=1&&geometry.filters.every(Boolean),JSON.stringify(geometry));
+      await shot(`catalog-comparison-${width}`);
+    }
+    await scrollCatalogTo('.api-catalog-differences li');
+    await shot('catalog-comparison-differences-360');
+    await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').focus()");
+    await key('End','End');
+    assert.equal(await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').value"),'2');
+    assert.equal(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),'','Changing a comparison choice clears stale results');
+    await click('.api-catalog-compare-controls button');
+    assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/body_truncated/);
+    await scrollCatalogTo('.api-catalog-comparison-result p:last-child');
+    await shot('catalog-comparison-unavailable-360');
+    // Programmatic focus avoids opening a platform select popup; the selection
+    // itself still uses keyboard input, including the same-source refusal.
+    await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').focus()");
+    await key('Home','Home');
+    assert.equal(await evaluate("document.querySelector('.api-catalog-compare-controls button').disabled"),true);
+    assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/two different captured source identities/);
+    await click('#api-catalog-search');await send('Input.insertText',{text:'cursor'});
+    assert.match(await evaluate("document.querySelector('#api-catalog-filter-status').textContent"),/1 of 3 observations/);
+    assert.equal(await evaluate("document.querySelectorAll('.api-catalog-comparison').length"),0);
+    assert.equal(await evaluate("document.querySelectorAll('.api-catalog-observation').length"),1,'Expanded endpoint stays open after filtering');
+    assert.match(await evaluate("document.querySelector('.api-catalog-observation').textContent"),/synthetic-variant/);
+    await click('#api-catalog-clear');
+    await evaluate("document.querySelector('#api-catalog-response').focus()");await key('End','End');
+    assert.match(await evaluate("document.querySelector('#api-catalog-filter-status').textContent"),/1 of 3 observations/);
+    assert.match(await evaluate("document.querySelector('.api-catalog-observation').textContent"),/503/);
+    await click('#api-catalog-clear');
+    assert.equal(catalogReads,beforeComparisonReads,'Filtering, clear, selection and comparison never fetch or send');
     await key('Escape','Escape');assert.equal(await evaluate('document.activeElement.id'),'open-api-catalog');
     assert.equal(await evaluate('JSON.stringify(state.requests[0].captureRecord)'),raw,'Raw record unchanged after catalog lifecycle');
     // Real full-ledger Traffic with a longer status and new-request control
@@ -307,7 +432,7 @@ async function checkBrowser() {
     const downloaded=await until(async()=>{try{return await readFile(join(output,'reb-client-project.raw.zip'));}catch{return null;}},'explicit client ZIP download');
     assert.equal(downloaded.readUInt32LE(0),0x04034b50);
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);
-    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download'],keyboard:['Tab focus','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
+    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download'],keyboard:['Tab filter focus','Enter clear filters','Home/End comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
     console.log(`PASS rendered catalog: keyboard and pointer, three viewports, scrolling, inert markup, raw header preservation, explicit read-only lifecycle, source invalidation. Evidence: ${output}`);
   } catch (error) {
     firstFailure=error;
@@ -369,7 +494,7 @@ async function checkBrowser() {
 
 async function checkController() {
   class Node {
-    constructor(tag='div') {this.tagName=tag;this.children=[];this.events={};this.attributes={};this.dataset={};this.text='';this.open=false;}
+    constructor(tag='div') {this.tagName=tag;this.children=[];this.events={};this.attributes={};this.dataset={};this.text='';this.open=false;this.value='';}
     set textContent(value) {this.text=String(value);this.children=[];}
     get textContent() {return this.text+this.children.map(child=>child.textContent).join('');}
     append(...children) {this.children.push(...children);}
@@ -377,17 +502,21 @@ async function checkController() {
     setAttribute(key,value) {this.attributes[key]=String(value);}
     addEventListener(type,handler) {this.events[type]=handler;}
     click() {if(!this.disabled)this.events.click?.();}
+    focus() {document.activeElement=this;}
     showModal() {this.open=true;}
     close() {this.open=false;this.events.close?.();}
   }
-  const ids=new Map(['api-catalog','open-api-catalog','api-catalog-refresh','api-catalog-status','api-catalog-content','api-catalog-close'].map(id=>[id,new Node()]));
+  const ids=new Map(['api-catalog','open-api-catalog','api-catalog-refresh','api-catalog-status','api-catalog-content','api-catalog-close','api-catalog-search','api-catalog-response','api-catalog-clear','api-catalog-filter-status'].map(id=>[id,new Node()]));
   const document={getElementById:id=>ids.get(id),createElement:tag=>new Node(tag)};
-  const install=runInNewContext(`${traffic}\ninstallApiObservationCatalog`,{document,TextEncoder,AbortController,setTimeout,clearTimeout});
-  let current=requests, opens=0, reads=0, mode='ready', release;
-  const panel=install({getRequests:()=>current,openRequest:()=>{opens++;return true;},fetchCatalog:async (path,options)=>{
+  ids.get('api-catalog-response').value='all';
+  let encodedValues=0, ledgerReads=0;
+  class CountedEncoder extends TextEncoder {encode(...args) {encodedValues++;return super.encode(...args);}}
+  const install=runInNewContext(`${traffic}\n${catalogSource}\ninstallApiObservationCatalog`,{document,TextEncoder:CountedEncoder,AbortController,setTimeout,clearTimeout});
+  let current=requests, opens=0, reads=0, mode='ready', release, supplied=fixture.catalog;
+  const panel=install({getRequests:()=>{ledgerReads++;return current;},openRequest:()=>{opens++;return true;},fetchCatalog:async (path,options)=>{
     reads++;assert.equal(path,'/api/network/catalog');assert.equal(options.cache,'no-store');assert.equal(options.method,undefined);
     if(mode==='pending')await new Promise(done=>{release=done;});
-    return {ok:mode!=='failure',status:mode==='failure'?503:200,text:async()=>JSON.stringify(mode==='malformed'?{bad:true}:fixture.catalog)};
+    return {ok:mode!=='failure',status:mode==='failure'?503:200,text:async()=>JSON.stringify(mode==='malformed'?{bad:true}:mode==='comparison'?comparisonFixture(fixture.catalog):supplied)};
   }});
   const get=id=>ids.get(id),flush=()=>new Promise(done=>setImmediate(done));
   const all=(node,predicate)=>[...(predicate(node)?[node]:[]),...node.children.flatMap(child=>all(child,predicate))];
@@ -414,8 +543,57 @@ async function checkController() {
     let stopped=false,prevented=false;get('api-catalog').events.keydown({...key,stopPropagation:()=>{stopped=true;},preventDefault:()=>{prevented=true;}});
     assert.equal(stopped,true);assert.equal(prevented,!['Escape','Tab'].includes(key.key));
   }
+  mode='comparison';get('api-catalog-refresh').click();await flush();
+  const comparisonGroup=all(get('api-catalog-content'),node=>node.className==='api-catalog-endpoint')[0];
+  comparisonGroup.open=true;comparisonGroup.events.toggle();
+  const controls=all(comparisonGroup,node=>node.className==='api-catalog-compare-controls')[0];
+  const [left,right]=all(controls,node=>node.tagName==='select');
+  const compare=all(controls,node=>node.tagName==='button')[0];
+  const result=all(comparisonGroup,node=>node.className==='api-catalog-comparison-result')[0];
+  const explicitReads=reads;
+  compare.click();assert.match(result.textContent,/4 observed difference/);assert.match(result.textContent,/duplicate_json_key/);
+  const firstResult=result.textContent;compare.click();assert.equal(result.textContent,firstResult,'Repeated compare replaces rather than duplicates the report');
+  right.value='2';right.events.change();assert.equal(result.textContent,'');compare.click();assert.match(result.textContent,/body_truncated/);
+  right.value='0';right.events.change();assert.equal(compare.disabled,true);assert.match(result.textContent,/two different captured source identities/);
+  left.value='1';left.events.change();assert.equal(compare.disabled,false);compare.click();assert.match(result.textContent,/4 observed difference/);
+  const changeSearch=value=>{get('api-catalog-search').value=value;get('api-catalog-search').events.input();};
+  changeSearch('cursor');assert.match(get('api-catalog-filter-status').textContent,/1 of 3 observations/);
+  assert.equal(all(get('api-catalog-content'),node=>node.tagName==='article').length,1,'Filtering preserves expansion and exact observation selection');
+  assert.equal(all(get('api-catalog-content'),node=>node.className==='api-catalog-comparison').length,0,'One matching observation cannot compare against hidden rows');
+  changeSearch('not-observed');assert.match(get('api-catalog-content').textContent,/No observations match/);
+  assert.match(get('api-catalog-content').textContent,/4 examined of 5 retained/,'Filtering never rewrites coverage');
+  get('api-catalog-clear').click();assert.equal(document.activeElement,get('api-catalog-search'));
+  assert.equal(all(get('api-catalog-content'),node=>node.tagName==='article').length,3);
+  get('api-catalog-response').value='error';get('api-catalog-response').events.change();
+  assert.match(get('api-catalog-filter-status').textContent,/1 of 3 observations/);assert.match(get('api-catalog-content').textContent,/503/);
+  const filteredContent=get('api-catalog-content').children;
+  mode='failure';get('api-catalog-refresh').click();await flush();assert.equal(get('api-catalog-content').children,filteredContent);
+  assert.equal(get('api-catalog-response').value,'error','Failed refresh preserves filters and the rendered result');
+  get('api-catalog-clear').click();assert.equal(reads,explicitReads+1,'Only explicit refresh fetches; filtering and comparison stay local');
+  assert.equal(JSON.stringify(fixture.debuggerState.network),original);
+  // All 64 groups expanded against the full 1,000-record ledger. Count work
+  // instead of timing: no cumulative rescan for each freshly rebuilt group.
+  current=Array.from({length:1000},(_,index)=>({...requests[0],id:`bounded-${index}`,
+    captureRecord:{...requests[0].captureRecord,id:`bounded-${index}`,started_monotonic_ms:100+index}}));
+  supplied=copy(fixture.catalog);
+  supplied.endpoints=Array.from({length:64},(_,index)=>({...copy(fixture.catalog.endpoints[0]),path:`/group-${index}`,
+    observations:[{...copy(fixture.catalog.endpoints[0].observations[0]),source:{request_id:`bounded-${index}`,target_id:requests[0].tabId,started_monotonic_ms:100+index}}]}));
+  Object.assign(supplied.coverage,{window_records:64,retained_records:64,older_records_not_examined:0,skipped_records:0});
+  assert(api.isApiObservationCatalog(supplied));
+  mode='ready';get('api-catalog-refresh').click();await flush();
+  for(const endpoint of all(get('api-catalog-content'),node=>node.className==='api-catalog-endpoint')) {endpoint.open=true;endpoint.events.toggle();}
+  const beforeLedgerReads=ledgerReads, beforeEncodedValues=encodedValues;
+  changeSearch('group');
+  assert.equal(ledgerReads-beforeLedgerReads,1,'A filtered render snapshots the Traffic ledger exactly once');
+  assert.equal(encodedValues-beforeEncodedValues,64*6,'Only 64 snapshot identities and matching Traffic identities are validated, not every unrelated retained row');
+  const sourceButtons=all(get('api-catalog-content'),node=>node.tagName==='button');
+  assert.equal(sourceButtons.length,64);assert(sourceButtons.every(button=>!button.disabled));
+  current.push({...current[0],captureOwner:['other-instance',1]});panel.sync();
+  assert.equal(sourceButtons[0].disabled,true,'Indexed lookup keeps same-ID collisions in other capture owners ambiguous');
+  assert.equal(sourceButtons[1].disabled,false);
+  current=requests;
   get('api-catalog').close();
-  console.log('PASS catalog DOM/controller: explicit-only reads, lazy disclosure, inert names, click-time expiry, raw handoff, preserved failed/malformed snapshots, canceled late responses and modal shortcut isolation (not rendered QA)');
+  console.log('PASS catalog DOM/controller: explicit-only reads, lazy disclosure, inert names, click-time expiry, raw handoff, filtered comparison controls, stale result clearing, preserved failed/malformed snapshots, canceled late responses and modal shortcut isolation (not rendered QA)');
 }
 
 async function checkHistory() {
@@ -423,7 +601,7 @@ async function checkHistory() {
   const node={id:'screen-traffic',dataset:{},textContent:'',querySelectorAll:()=>[],hidden:false};
   const document={querySelector:()=>node,activeElement:null};
   let renderedSelection='not rendered',returnNotice='';
-  const model=runInNewContext(`${traffic}\n${navigation}\n
+  const model=runInNewContext(`${traffic}\n${catalogSource}\n${navigation}\n
     investigationSelector=()=>null; investigationNotice=message=>recordNotice(message); retireInvestigationReturn=()=>{}; resumeInvestigationReturn=()=>{};
     ({investigationSnapshot,restoreInvestigation})`,{state,document,TextEncoder,recordNotice:message=>{returnNotice=message;},selectedSource:()=>null,fieldSets:{body:[]},
       selectRequest:id=>{state.selectedRequestId=id;state.trafficDetailOpen=true;},

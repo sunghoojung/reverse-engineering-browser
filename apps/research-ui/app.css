@@ -3734,3 +3734,22 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 
 #repeater-body-panel > textarea { height: auto; flex: 1; }
 #repeater-body-representation-note { flex: 0 0 auto; margin: 8px 12px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+
+.api-catalog-filters, .api-catalog-compare-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.api-catalog-filters { flex: 0 0 auto; }
+.api-catalog-filters label, .api-catalog-compare-controls label { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 12px; flex: 1 1 180px; }
+.api-catalog-filters label:first-child { flex: 2 1 220px; }
+.api-catalog-filters input, .api-catalog-filters select, .api-catalog-compare-controls select { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--text); font: inherit; }
+#api-catalog-filter-scope, #api-catalog-filter-status { margin: 6px 0; color: var(--muted); }
+.api-catalog-comparison { border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin: 6px 0; }
+.api-catalog-comparison h4 { margin: 8px 0; font-size: 12px; }
+.api-catalog-differences { padding: 0; list-style: none; font: 11px/1.6 var(--mono); }
+.api-catalog-differences li { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; padding: 8px 0; border-top: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+.api-catalog-differences strong { grid-column: 1 / -1; }
+@media (max-width: 480px) {
+  .api-catalog-filters { gap: 5px; }
+  .api-catalog-filters label:first-child { flex-basis: 100%; }
+  .api-catalog-filters label { flex-basis: 140px; }
+  .api-catalog-comparison { padding: 8px; }
+  .api-catalog-differences li { grid-template-columns: 1fr; }
+}

@@ -102,6 +102,15 @@ the debugger state lock. No new probe or network hot-path work is added.
 
 ## Local client consumption
 
+Origin Trace's catalog UI can filter the retained snapshot and compare the JSON
+structures of two observations within an exact method/origin/path group. This
+does not modify this wire contract or add a backend/network operation. Typed
+paths stay distinct, unavailable shapes remain unknown, and occurrence counts
+describe a single body. UI validation rejects duplicate typed shape paths rather
+than allowing a comparison map to overwrite them. See the
+[catalog workflow](../apps/research-ui/README.md#observed-api-catalog) for the
+controls, snapshot lifetime and exact-source handoff.
+
 Use the endpoint file belonging to the intended live session:
 
 ```sh

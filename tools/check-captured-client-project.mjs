@@ -10,7 +10,7 @@ import {runInNewContext} from 'node:vm';
 import {network} from './traffic-capture-qa.mjs';
 
 const root = resolve(new URL('..',import.meta.url).pathname);
-const code = await Promise.all(['evidence_models.js','traffic_view.js','captured_client.js'].map(name=>readFile(join(root,'apps/research-ui',name),'utf8')));
+const code = await Promise.all(['evidence_models.js','traffic_view.js','api_catalog.js','captured_client.js'].map(name=>readFile(join(root,'apps/research-ui',name),'utf8')));
 const globals = {TextEncoder,TextDecoder,Uint8Array,URL,atob,btoa,AbortController,setTimeout,clearTimeout};
 const api = runInNewContext(code.join('\n')+'\n;({requestsFromDebuggerNetwork,capturedClientCapture,capturedClientRun,capturedClientProject,capturedClientZip,capturedClientIssues,capturedClientSend})',globals);
 const copy = value => JSON.parse(JSON.stringify(value));

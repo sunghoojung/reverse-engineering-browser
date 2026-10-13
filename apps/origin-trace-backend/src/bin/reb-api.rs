@@ -15,7 +15,11 @@ struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
-    List,
+    List {
+        /// Print versioned JSON discovery, including observational-call eligibility.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the complete embedded OpenAPI document without contacting a server.
     Spec,
     Describe {
@@ -45,6 +49,10 @@ enum Action {
         /// Print a bounded JSON envelope to stderr for non-2xx HTTP responses.
         #[arg(long, conflicts_with = "show_headers")]
         json_errors: bool,
+        /// Reject non-observational API operations before reading inputs or dispatch.
+        /// This is an opt-in local guard, not authorization or capture redaction.
+        #[arg(long)]
+        read_only: bool,
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
     },
@@ -240,6 +248,49 @@ fn root_url(value: &str) -> Result<Url, Box<dyn std::error::Error>> {
     }
     Ok(url)
 }
+
+// The embedded, reviewed catalog is the only authority for this opt-in guard.
+// Do not classify by HTTP verb: some GETs control browsers or write caches,
+// while package comparison POSTs only analyze supplied data. Unknown metadata
+// fails closed. Output files and incidental server activity are not sandboxed.
+fn read_only_eligible(spec: &Value, definition: &Value) -> bool {
+    let policy = &spec["x-reb-execution-policy"];
+    if policy["version"] != 1
+        || policy["advisory"] != true
+        || policy["automatic_retry"] != "never"
+        || policy["idempotence"] != "unproven"
+    {
+        return false;
+    }
+    let execution = &definition["x-reb-execution"];
+    let Some(schema) = spec.pointer("/components/schemas/RebExecutionMetadata") else {
+        return false;
+    };
+    jsonschema::validator_for(schema).is_ok_and(|validator| validator.is_valid(execution))
+        && execution["kind"] == "operation"
+        && execution["effects"]
+            .as_array()
+            .is_some_and(|effects| effects.iter().all(|effect| effect == "analysis"))
+        && ["state_dependent_effects", "uncertainties", "confirmations"]
+            .iter()
+            .all(|field| execution[field].as_array().is_some_and(Vec::is_empty))
+}
+
+fn discovery(spec: &Value, ops: &BTreeMap<String, Operation>) -> Value {
+    json!({
+        "format": "reb-api-discovery-v1",
+        "execution_policy": spec["x-reb-execution-policy"],
+        "operations": ops.iter().map(|(id, (method, path, definition))| json!({
+            "operation_id": id,
+            "method": method,
+            "path": path,
+            "summary": definition["summary"],
+            "execution": definition["x-reb-execution"],
+            "read_only_eligible": read_only_eligible(spec, definition),
+        })).collect::<Vec<_>>()
+    })
+}
+
 async fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let options = Options::parse();
     let spec = specification()?;
@@ -249,9 +300,13 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&spec)?);
             return Ok(0);
         }
-        Action::List => {
-            for (id, (method, path, _)) in &ops {
-                println!("{id}\t{method}\t{path}");
+        Action::List { json: machine } => {
+            if *machine {
+                println!("{}", serde_json::to_string_pretty(&discovery(&spec, &ops))?);
+            } else {
+                for (id, (method, path, _)) in &ops {
+                    println!("{id}\t{method}\t{path}");
+                }
             }
             return Ok(0);
         }
@@ -274,12 +329,19 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         output,
         show_headers,
         json_errors,
+        read_only,
         timeout,
         ..
     } = options.command
     else {
         unreachable!()
     };
+    if read_only && !read_only_eligible(&spec, definition) {
+        return Err(format!(
+            "--read-only rejects operation {}; inspect its execution metadata with describe. No request was sent",
+            definition["operationId"].as_str().unwrap_or("unknown")
+        ).into());
+    }
     if !timeout.is_finite() || timeout <= 0.0 || timeout > 3600.0 {
         return Err("Timeout must be finite and between 0 and 3600 seconds".into());
     }
@@ -536,6 +598,136 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_classification_uses_effects_not_the_http_verb() {
+        let spec = specification().unwrap();
+        let ops = operations(&spec).unwrap();
+        for id in [
+            "get_health",
+            "get_api_observation_catalog",
+            "get_origin_trace",
+            "get_events",
+            "get_artifacts",
+            "inspect_wasm",
+            "validate_evidence_package",
+            "export_evidence_package",
+            "compare_evidence_packages",
+            "compare_float32",
+        ] {
+            assert!(read_only_eligible(&spec, &ops[id].2), "{id}");
+        }
+        for id in [
+            "capture_action",
+            "debugger_action",
+            "analyst_action",
+            "decoder_action",
+            "native_console_action",
+            "replace_api_collection",
+            "get_native_console",
+            "get_vm_analysis",
+            "get_debugger_source",
+            "get_source_facts",
+            "get_deobfuscation",
+        ] {
+            assert!(!read_only_eligible(&spec, &ops[id].2), "{id}");
+        }
+    }
+
+    #[test]
+    fn read_only_classification_fails_closed_on_unknown_or_incomplete_metadata() {
+        let spec = specification().unwrap();
+        let operation = operations(&spec).unwrap()["get_health"].2.clone();
+        let mut missing = operation.clone();
+        missing.as_object_mut().unwrap().remove("x-reb-execution");
+        assert!(!read_only_eligible(&spec, &missing));
+        for field in [
+            "kind",
+            "effects",
+            "state_dependent_effects",
+            "uncertainties",
+            "confirmations",
+            "prerequisites",
+            "notes",
+            "sources",
+        ] {
+            let mut incomplete = operation.clone();
+            incomplete["x-reb-execution"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(!read_only_eligible(&spec, &incomplete), "{field}");
+        }
+        for (field, value) in [
+            ("effects", json!(["unreviewed-effect"])),
+            ("effects", json!(null)),
+            ("kind", json!("action-dependent")),
+            ("uncertainties", json!(["unknown target behavior"])),
+            (
+                "state_dependent_effects",
+                json!([{"effects":["filesystem-write"],"when":"cache miss"}]),
+            ),
+            (
+                "confirmations",
+                json!([{"field":"confirmed","value":true,"when":{}}]),
+            ),
+            ("new_guard", json!(true)),
+        ] {
+            let mut unknown = operation.clone();
+            unknown["x-reb-execution"][field] = value;
+            assert!(!read_only_eligible(&spec, &unknown), "{field}");
+        }
+        for (field, value) in [
+            ("version", json!(2)),
+            ("advisory", json!(false)),
+            ("automatic_retry", json!("allowed")),
+            ("idempotence", json!(null)),
+        ] {
+            let mut unknown = spec.clone();
+            unknown["x-reb-execution-policy"][field] = value;
+            assert!(!read_only_eligible(&unknown, &operation), "{field}");
+        }
+        let mut unknown = spec.clone();
+        unknown["components"]["schemas"]
+            .as_object_mut()
+            .unwrap()
+            .remove("RebExecutionMetadata");
+        assert!(!read_only_eligible(&unknown, &operation));
+    }
+
+    #[test]
+    fn read_only_guard_and_json_discovery_are_opt_in() {
+        assert!(matches!(
+            Options::try_parse_from(["reb-api", "list"]).unwrap().command,
+            Action::List { json: false }
+        ));
+        assert!(matches!(
+            Options::try_parse_from(["reb-api", "list", "--json"])
+                .unwrap()
+                .command,
+            Action::List { json: true }
+        ));
+        let args = [
+            "reb-api",
+            "call",
+            "get_health",
+            "--base-url",
+            "http://127.0.0.1:7319",
+        ];
+        assert!(matches!(
+            Options::try_parse_from(args).unwrap().command,
+            Action::Call { read_only: false, .. }
+        ));
+        assert!(matches!(
+            Options::try_parse_from(args.into_iter().chain(["--read-only"]))
+                .unwrap()
+                .command,
+            Action::Call { read_only: true, .. }
+        ));
+        assert!(
+            Options::try_parse_from(["reb-api", "call", "get_health", "--read-only"]).is_err()
+        );
+    }
 
     fn assert_self_contained(detail: &Value) {
         for reference in references(detail).unwrap() {

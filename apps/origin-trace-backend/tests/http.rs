@@ -311,6 +311,7 @@ async fn origin_trace_exact_session_selection_over_http() {
             .args([
                 "call",
                 "get_origin_trace",
+                "--read-only",
                 "--base-url",
                 &server.url,
                 "--param",
@@ -349,6 +350,42 @@ async fn origin_trace_exact_session_selection_over_http() {
         serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
         "empty"
     );
+    let missing_cli = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["call", "get_origin_trace", "--read-only", "--endpoint-file"])
+        .arg(server.root.path().join("endpoint"))
+        .args([
+            "--param",
+            "session_id=7",
+            "--param",
+            "request_id=9007199254740995",
+            "--param",
+            "root_process_id=42",
+            "--param",
+            "root_sequence_number=9007199254740993",
+        ])
+        .output()
+        .unwrap();
+    assert!(missing_cli.status.success(), "{missing_cli:?}");
+    let missing_cli: Value = serde_json::from_slice(&missing_cli.stdout).unwrap();
+    assert_eq!(missing_cli["status"], "empty");
+    assert_eq!(missing_cli["steps"], json!([]));
+    let ambiguous_cli = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["call", "get_origin_trace", "--read-only", "--endpoint-file"])
+        .arg(server.root.path().join("endpoint"))
+        .args([
+            "--param",
+            "request_id=9007199254740995",
+            "--param",
+            "root_process_id=42",
+            "--param",
+            "root_sequence_number=9007199254740993",
+        ])
+        .output()
+        .unwrap();
+    assert!(ambiguous_cli.status.success(), "{ambiguous_cli:?}");
+    let ambiguous_cli: Value = serde_json::from_slice(&ambiguous_cli.stdout).unwrap();
+    assert_eq!(ambiguous_cli["status"], "ambiguous");
+    assert_eq!(ambiguous_cli["steps"], json!([]));
     for query in [
         format!("{root}&session_id=9007199254740992&session_id=9007199254740993"),
         format!("{root}&session_id=7&session_id=7"),
@@ -5335,7 +5372,12 @@ async fn evidence_comparison_http_cli_are_inert_and_schema_checked() {
     assert_eq!(result["page"]["next_offset"], 2);
     assert_eq!(result["comparability"]["observer_regime"], "unknown");
     let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
-        .args(["call", "compare_evidence_packages", "--endpoint-file"])
+        .args([
+            "call",
+            "compare_evidence_packages",
+            "--read-only",
+            "--endpoint-file",
+        ])
         .arg(server.root.path().join("endpoint"))
         .arg("--body-file")
         .arg(server.root.path().join("comparison.json"))
@@ -5934,9 +5976,221 @@ async fn api_observation_catalog_is_read_only_local_and_cli_discoverable() {
     let live: Value = serde_json::from_slice(&cli(&[
         "call",
         "get_api_observation_catalog",
+        "--read-only",
         "--base-url",
         &server.url,
     ]))
     .unwrap();
     assert_eq!(live, catalog);
+}
+
+#[test]
+fn cli_json_discovery_is_offline_and_preserves_legacy_list() {
+    let cli = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty());
+        output.stdout
+    };
+    let discovery: Value = serde_json::from_slice(&cli(&["list", "--json"])).unwrap();
+    assert_eq!(discovery["format"], "reb-api-discovery-v1");
+    assert_eq!(
+        discovery["execution_policy"],
+        specification()["x-reb-execution-policy"]
+    );
+    let rows = discovery["operations"].as_array().unwrap();
+    let legacy = String::from_utf8(cli(&["list"])).unwrap();
+    assert_eq!(legacy.lines().count(), rows.len());
+    for (line, row) in legacy.lines().zip(rows) {
+        assert_eq!(
+            line,
+            format!(
+                "{}\t{}\t{}",
+                row["operation_id"].as_str().unwrap(),
+                row["method"].as_str().unwrap(),
+                row["path"].as_str().unwrap()
+            )
+        );
+        assert!(row["execution"].is_object());
+        assert!(row["read_only_eligible"].is_boolean());
+    }
+    for (id, eligible) in [
+        ("get_api_observation_catalog", true),
+        ("get_origin_trace", true),
+        ("compare_evidence_packages", true),
+        ("debugger_action", false),
+        ("get_vm_analysis", false),
+        ("get_native_console", false),
+    ] {
+        assert_eq!(
+            rows.iter()
+                .find(|row| row["operation_id"] == id)
+                .unwrap()["read_only_eligible"],
+            eligible
+        );
+    }
+}
+
+#[test]
+fn cli_read_only_rejects_mutation_unknowns_and_effectful_gets_before_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let endpoint = root.path().join("endpoint");
+    std::fs::write(&endpoint, &url).unwrap();
+    let output_file = root.path().join("must-not-be-created.json");
+    for operation in [
+        "capture_action",
+        "debugger_action",
+        "analyst_action",
+        "decoder_action",
+        "native_console_action",
+        "replace_api_collection",
+        "get_native_console",
+        "get_vm_analysis",
+        "get_debugger_source",
+        "get_deobfuscation",
+        "get_source_facts",
+        "unknown_operation",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(["call", operation, "--read-only", "--endpoint-file"])
+            .arg(&endpoint)
+            .arg("--body-file")
+            .arg(root.path().join("missing-input.json"))
+            .arg("--output")
+            .arg(&output_file)
+            .args(["--timeout", "0.1"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{operation}: {output:?}");
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        if operation == "unknown_operation" {
+            assert!(error.contains("Unknown operation"), "{error}");
+        } else {
+            assert!(error.contains("--read-only rejects operation"), "{error}");
+            assert!(error.contains("No request was sent"), "{error}");
+        }
+        assert!(!output_file.exists());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "Rejected operation must never reach the selected endpoint: {operation}"
+        );
+    }
+    let missing_endpoint = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["call", "capture_action", "--read-only", "--endpoint-file"])
+        .arg(root.path().join("missing-endpoint"))
+        .arg("--body-file")
+        .arg(root.path().join("missing-input.json"))
+        .output()
+        .unwrap();
+    assert_eq!(missing_endpoint.status.code(), Some(2));
+    assert!(missing_endpoint.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&missing_endpoint.stderr)
+            .contains("--read-only rejects operation capture_action")
+    );
+}
+
+#[tokio::test]
+async fn cli_read_only_malformed_response_is_not_replayed_and_default_calls_still_work() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (guard, response, redirect) in [
+        (true, "<html>UNTRUSTED_FIXTURE</html>", false),
+        (true, "{}", true),
+        (false, "{\"fixture\":true}", false),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let body = root.path().join("action.json");
+        std::fs::write(&body, br#"{"action":"clear"}"#).unwrap();
+        let status_headers = if redirect {
+            // This local GET can retire a native session. Following the redirect
+            // would escape the operation whose metadata the CLI checked.
+            format!("307 Temporary Redirect\r\nLocation: {url}/api/native-console")
+        } else {
+            "200 OK".to_owned()
+        };
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+                assert!(headers.len() < 8192);
+            }
+            let request = String::from_utf8(headers).unwrap();
+            let length = request
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            assert!(length < 1024);
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            stream.write_all(format!("HTTP/1.1 {status_headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+            (listener, request, body)
+        });
+        let output = tokio::task::spawn_blocking(move || {
+            let mut cli = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+            cli.args([
+                "call",
+                if guard { "get_health" } else { "capture_action" },
+                "--base-url",
+                &url,
+                "--timeout",
+                "1",
+            ]);
+            if guard {
+                cli.arg("--read-only");
+            } else {
+                cli.arg("--body-file").arg(body);
+            }
+            cli.output().unwrap()
+        })
+        .await
+        .unwrap();
+        let (listener, request, body) = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("The synthetic server must finish even when CLI preflight fails")
+            .unwrap();
+        if guard {
+            assert_eq!(
+                output.status.code(),
+                Some(if redirect { 1 } else { 2 }),
+                "{output:?}"
+            );
+            assert!(output.stdout.is_empty());
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("UNTRUSTED_FIXTURE"));
+            assert!(request.starts_with("GET /api/health HTTP/1.1"));
+            assert!(body.is_empty());
+        } else {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+                json!({"fixture":true})
+            );
+            assert!(request.starts_with("POST /api/capture/actions HTTP/1.1"));
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"action":"clear"})
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "The CLI must never retry requests or follow redirects"
+        );
+    }
 }

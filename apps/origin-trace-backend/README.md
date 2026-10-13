@@ -64,6 +64,15 @@ Offline `reb-api describe OPERATION --action ACTION` also exposes source-backed
 advisory effects and prerequisites while retaining the operation's common
 guards. See the [execution metadata contract](../../protocol/http-api.md#execution-metadata).
 These annotations do not authorize execution or automatic retries.
+For local Codex and Claude Code workflows, `reb-api list --json` provides offline
+machine-readable discovery and `reb-api call ... --read-only` opts into a
+conservative pre-dispatch effect guard. The guard rejects browser controls,
+helpers, writes, multiplexed actions and unknown metadata; inert analysis POSTs
+can be eligible. It is not a privacy filter or authorization grant, and CLI
+`--output` still writes explicitly requested files. Existing calls without the
+flag are unchanged. See [local coding agents](../../docs/development/local-coding-agents.md)
+for session selection, provider-sharing boundaries, supported skill discovery
+and native-versus-HTTP limitations.
 `reb-api call get_analysis_catalog --base-url URL` returns the embedded current VM
 profile, rule definitions, and reviewed sources without touching evidence or
 starting analysis. See [Analysis Catalog v1](../../docs/product/analysis-catalog-v1.md).

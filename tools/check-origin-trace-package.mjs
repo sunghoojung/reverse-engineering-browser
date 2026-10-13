@@ -117,11 +117,14 @@ export function assertFloat32Smoke(name, value) {
 async function runClientProjectSmoke(app, directory) {
   const stores = join(directory,'client-project');
   await mkdir(stores);
+  const panelOutput = join(directory,'client-project-panels');
+  await mkdir(panelOutput);
   const child = spawn(join(app,'Contents/MacOS/OriginTrace'),[
     '--store',join(stores,'events.jsonl'),'--trace-store',join(stores,'traces.jsonl'),
     '--signal-store',join(stores,'signals.jsonl'),'--artifacts',join(stores,'artifacts'),
     '--api-collection',join(stores,'collection.json'),'--local-analyst',join(stores,'analyst.json'),
   ],{cwd:directory,env:{...process.env,REB_APP_SMOKE_TEST:'1',REB_APP_SMOKE_CLIENT_PROJECT:'1',
+    REB_APP_SMOKE_CLIENT_PROJECT_OUTPUT:panelOutput,
     REB_APP_SMOKE_NATIVE_CLOSE:'',REB_APP_SMOKE_LIVE_FAILURE:'0',REB_DISABLE_AUTOMATIC_LIVE_SESSION:'1'}});
   let output = '', timer;
   for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{output=(output+chunk).slice(-128*1024);});
@@ -194,6 +197,8 @@ async function main() {
       const log = join(temporary, `${name}.log`);
       try {await cp(log, join(reports, `${name}.log`));} catch (error) {if (error.code !== 'ENOENT') throw error;}
     }
+    try {await cp(join(temporary,'client-project-panels'),join(reports,'client-project-panels'),{recursive:true});}
+    catch (error) {if(error.code!=='ENOENT')throw error;}
     await rm(temporary, {recursive: true, force: true});
   }
 }

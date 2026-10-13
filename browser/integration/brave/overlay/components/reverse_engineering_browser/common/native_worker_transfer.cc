@@ -37,29 +37,32 @@ NativeWorkerTransferEpoch WorkerTransferEpoch(const NativeWorkerLease& lease) no
   return {lease.connection, lease.policy.session_id, lease.policy.generation};
 }
 
+NativeWorkerTransferSender::NativeWorkerTransferSender(NativeWorkerObservationQueue& queue) noexcept
+    : queue_(queue) {}
+
 NativeWorkerTransferSender::~NativeWorkerTransferSender() noexcept {
   // The endpoint exclusively owns this queue's configured capture generation.
   // A closed endpoint must not revoke a later endpoint's configuration.
   if (active_) {
-    queue_.Disable();
+    queue_.get().Disable();
   }
 }
 
 NativeWorkerTransferStatus NativeWorkerTransferSender::Configure(
     const NativeWorkerLease& lease,
     const std::uint64_t now_ns) noexcept {
-  if (active_ || queue_.IsEnabled() || queue_.Stats().queued != 0) {
+  if (active_ || queue_.get().IsEnabled() || queue_.get().Stats().queued != 0) {
     return NativeWorkerTransferStatus::kBusy;
   }
   if (!IsValidNativeWorkerLease(lease, now_ns) ||
-      queue_.Configure(lease.policy, now_ns) != NativeWorkerCaptureStatus::kAccepted) {
+      queue_.get().Configure(lease.policy, now_ns) != NativeWorkerCaptureStatus::kAccepted) {
     Increment(stats_.invalid_controls);
     return NativeWorkerTransferStatus::kInvalid;
   }
   lease_ = lease;
   pending_ = {};
   last_ack_ = {};
-  last_reported_ = queue_.Stats();
+  last_reported_ = queue_.get().Stats();
   next_batch_id_ = 1;
   last_request_id_ = 0;
   terminal_reported_ = false;
@@ -69,11 +72,11 @@ NativeWorkerTransferStatus NativeWorkerTransferSender::Configure(
 NativeWorkerTransferReply NativeWorkerTransferSender::Reply(
     const NativeWorkerTransferStatus status,
     const std::uint64_t request_id) noexcept {
-  return {status, WorkerTransferEpoch(lease_), request_id, pending_, queue_.Stats(), stats_};
+  return {status, WorkerTransferEpoch(lease_), request_id, pending_, queue_.get().Stats(), stats_};
 }
 NativeWorkerTransferReply NativeWorkerTransferSender::Close(
     const NativeWorkerTransferStatus reason) noexcept {
-  queue_.Disable();
+  queue_.get().Disable();
   Increment(stats_.retired_inflight_records, pending_.count);
   pending_ = {};
   active_ = false;
@@ -151,15 +154,15 @@ NativeWorkerTransferReply NativeWorkerTransferSender::Pull(const NativeWorkerPul
   bool busy = false;
   for (std::size_t index = 0; index < kNativeWorkerBatchCapacity; ++index) {
     NativeWorkerObservation record;
-    const auto status = queue_.Take(record, now_ns);
+    const auto status = queue_.get().Take(record, now_ns);
     if (status != NativeWorkerCaptureStatus::kAccepted) {
       busy = status == NativeWorkerCaptureStatus::kBusy;
       break;
     }
     batch.records[batch.count++] = record;
   }
-  batch.capture_stats = queue_.Stats();
-  batch.worker_retired = !queue_.IsEnabled();
+  batch.capture_stats = queue_.get().Stats();
+  batch.worker_retired = !queue_.get().IsEnabled();
   if (batch.count == 0 && batch.capture_stats == last_reported_ &&
       (!batch.worker_retired || terminal_reported_)) {
     return Reply(busy ? NativeWorkerTransferStatus::kBusy : NativeWorkerTransferStatus::kIdle,

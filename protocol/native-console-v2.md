@@ -133,6 +133,18 @@ never cross document lifetimes. The [OpenAPI contract](openapi.json) specifies
 HTTP fields, requiredness and response shapes. Runtime status is ok, error,
 exception, pending or rejected, separate from transport status.
 
+The renderer uses the project-owned `v8-native-console.h` public bridge rather
+than V8's internal debug headers. Explicit commands retain native REPL evaluation
+with debugger breaks disabled. Verified lexical completion uses the same engine
+evaluation path with side effects denied and without REPL mode; a failed lexical
+lookup stops completion. The bridge also exposes the existing bounded lexical
+enumeration without importing V8's internal check macros into Chromium code. The
+engine's REPL promise wrapper is unwrapped using its private handle provenance:
+synchronous commands show their actual result, and pending top-level await
+commands expose that result after settlement. Page-supplied promises retain
+normal promise identity and are never treated as engine wrappers. Pending REPL
+handles cannot be stored in the page; await the result before storing it.
+
 ## Verification
 
 `make native-console-check` exercises the actual bridge and HTTP API against an

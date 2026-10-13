@@ -209,11 +209,13 @@ apply_patches() {
   shift 2
   local patch_file
   for patch_file in "$@"; do
-    if git -C "${checkout_directory}" apply --check "${patch_file}" 2>/dev/null; then
-      git -C "${checkout_directory}" apply "${patch_file}"
-    elif git -C "${checkout_directory}" apply --reverse --check \
+    # An insertion can still apply forward after it was applied once.
+    # Prefer the reverse check so repeat syncs never duplicate those additions.
+    if git -C "${checkout_directory}" apply --reverse --check \
       "${patch_file}" 2>/dev/null; then
       echo "Already applied: ${patch_prefix}$(basename "${patch_file}")"
+    elif git -C "${checkout_directory}" apply --check "${patch_file}" 2>/dev/null; then
+      git -C "${checkout_directory}" apply "${patch_file}"
     else
       echo "Patch state changed after preflight: ${patch_file}" >&2
       exit 1

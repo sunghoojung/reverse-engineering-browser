@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_proxy_partition_adapter.h"
 
 #include <charconv>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <system_error>
@@ -101,12 +102,10 @@ Error DecodeSnapshot(const base::DictValue& value, PolicySnapshot& snapshot) {
       return Error::kInvalidSnapshot;
     }
     std::uint64_t generation = 0;
-    const auto parsed = std::from_chars(
-        generation_text->data(), generation_text->data() + generation_text->size(), generation);
+    const auto* generation_end = std::to_address(generation_text->cend());
+    const auto parsed = std::from_chars(generation_text->data(), generation_end, generation);
     const auto scheme = ParseScheme(*scheme_text);
-    if (parsed.ec != std::errc() ||
-        parsed.ptr != generation_text->data() + generation_text->size() || generation == 0 ||
-        !scheme) {
+    if (parsed.ec != std::errc() || parsed.ptr != generation_end || generation == 0 || !scheme) {
       return Error::kInvalidSnapshot;
     }
     snapshot.policies.push_back(

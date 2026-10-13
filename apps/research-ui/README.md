@@ -162,23 +162,30 @@ make app
 ```
 
 This packages `build/Origin Trace.app` and opens a complete live capture
-session. Before launch, the app asks whether the session should retain metadata
-only or bounded request and response content. The default isolated research
+session without a setup dialog. This research launch enables every implemented
+native capture category, the live debugger, bounded request and response content,
+and Canvas image artifacts. Retained credentials are unmasked; evidence stays
+local. Use this profile only for authorized targets. The default isolated research
 profile uses Chromium's mock Keychain so launch does not stop on a macOS password
 prompt; do not save credentials in that profile. An explicit checkbox opts into
 macOS Keychain encryption when credential storage is required. The app does not
 mark the session live until the browser debugger endpoint is ready, and the
 failure dialog can retry the same privacy mode without restarting Origin Trace.
-**New Live Session…** in the application menu reopens these controls.
+Startup allows up to 60 seconds for the bounded broker, receiver, backend and
+browser readiness stages; individual helper failures are reported sooner.
+**New Live Session…** in the application menu offers metadata-only capture and
+Keychain controls. `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects metadata-only
+automatic launch, and `REB_CAPTURE_CANVAS_IMAGES=0` disables image retention.
 
 The app creates a private evidence directory and isolated browser
 profile, starts its bundled broker, artifact receiver, debugger transport,
 analysis helpers, and loopback UI, then launches Brave Browser Development with
-all safe metadata categories enabled. Closing Origin Trace stops the session
+all native capture categories enabled. Closing Origin Trace stops the session
 processes. Evidence remains under `~/Library/Application Support/Origin
 Trace/sessions/live/`.
 
-Origin Trace looks beside its app bundle, in the local `browser/worktree/`
+Origin Trace looks beside its app bundle, in the reused browser output recorded
+at packaging time, in the local `browser/worktree/`
 build output, and among registered applications for Brave Browser Development.
 A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust live
 debugger and VM analyzer, so Python is not required. A startup problem is shown explicitly
@@ -186,6 +193,15 @@ and leaves the stored-evidence interface available offline.
 Pass an explicit evidence-store or demo argument, or set
 `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`, when opening the native stored-evidence
 interface without starting Brave.
+
+For deterministic localhost QA, set `REB_LOCALHOST_ONLY=1`. This routes external
+browser requests to an unused loopback proxy and blocks external DNS while
+preserving Chromium's sandbox. Do not wrap live Brave in `sandbox-exec`: nested
+macOS sandbox initialization fails. Build commands can still use that wrapper.
+If Brave or a required live helper exits, Origin Trace reports the closed
+connection and offers retry instead of silently leaving a failed session running.
+Runtime experiments and Console commands still require explicit actions in their
+disposable contexts. Worker/proxy foundations do not yet have runtime adapters.
 
 For an explicit development session with deterministic sample evidence:
 
@@ -206,10 +222,10 @@ Open `http://127.0.0.1:7319`. For a live capture with the pinned custom Brave
 build, use `make live`. Follow the [browser setup](../../browser/README.md)
 before starting a live session.
 
-Native evidence capture retains host-level network metadata by default. Choose
-**Full request and response content** in the native launch dialog to enable CDP
-Traffic inspection for one live session. Command-line development sessions can
-select the same mode with:
+Native probes retain host-level network metadata. The automatic native launch
+also enables CDP Traffic content inspection for its live session. The optional
+**New Live Session…** controls can reduce it to metadata. Command-line development
+sessions enable CDP content inspection with:
 
 ```sh
 REB_CDP_NETWORK_CAPTURE=1 make live
@@ -217,10 +233,36 @@ REB_CDP_NETWORK_CAPTURE=1 make live
 
 This enables full URLs, request and response headers, available POST data, and
 response-body retrieval for the attached tab. Authorization, cookie,
-proxy-authorization, and set-cookie values are always redacted. Request and
+proxy-authorization, set-cookie and custom header values are retained unchanged.
+URLs keep their captured userinfo, query and fragment; no navigation is performed. Request and
 response bodies are retained only in memory by the local UI bridge, limited to
 128 KiB per side, and discarded when the live session ends. The Origin Trace
 title bar visibly changes to `Live content` while this mode is active.
+Headers show explicit truncation when count, name/value or aggregate byte limits
+omit data. Document URL, request URL and method truncation are also labeled.
+Only primary CDP event headers are currently collected; extra-info headers and
+original HTTP wire order/casing/duplicate lines are not guaranteed. CDP body
+strings/base64 are not a promise of original wire bytes. Native network metadata
+still retains hosts only; enabled native artifacts retain unmasked source URLs
+in their separate local store, including in metadata-only Traffic sessions.
+
+**Export capture** exports one selected retained CDP record. **Save raw capture**
+(browser development UI) and **Copy raw capture** preserve its retained values;
+**Save redacted copy** and **Copy redacted copy** explicitly transform a separate
+copy. Bodies and all header values are omitted from that copy; URL userinfo,
+queries and fragments are stripped. Paths, header names and other metadata may
+still contain secrets. Review before sharing. Native downloads are disabled;
+clipboard copy depends on the native web view and is not a verified file-save
+fallback. Clipboard contents may sync through the user's operating system.
+
+These `reb-traffic-capture-v1` copies are distinct from the unchanged
+`reb-metadata-only-v1` evidence-package contract. The Traffic window is ephemeral,
+not a durable full HTTP archive: at most 1,000 entries are retained, oldest entries
+are evicted, and reconnect/target change/process exit can discard it. No export
+uploads data. See [Traffic capture copies v1](../../protocol/traffic-capture-copy-v1.md).
+For exact synthetic raw/redacted export checks in native WebKit or the browser,
+see [Traffic capture runtime QA](../../docs/development/traffic-capture-runtime-qa.md).
+
 The content-capture label remains visible during connection failures. If the
 native broker disconnects while CDP capture continues, the shell shows
 `Network only`; Traffic reports both the broker failure and ongoing bounded
@@ -389,7 +431,7 @@ its first matching location; selecting a content match opens Headers, Payload, o
 with Find filled in. URL, method, and status remain searchable.
 Tab, domain, and resource filters scope the search before content is inspected.
 Search never enables capture or fetches missing bodies. Binary and uncaptured
-bodies are excluded, and retained prefixes and redacted headers limit coverage.
+bodies are excluded, and retained prefixes and missing headers limit coverage.
 Large captures use an explicit 8-million UTF-16-unit search budget, newest
 requests first. A partial-search notice reports inspected and omitted coverage
 and suggests narrowing filters. See the [content search design](../../docs/product/traffic-content-search-v1.md).
@@ -487,7 +529,13 @@ exist. The native shell separately checks the current Analyst document before
 normal window close or Quit. Its sheet keeps **Stay** as the Return/Escape default;
 **Close Anyway** requires a deliberate choice for unsaved or unconfirmed changes,
 including when the document cannot report its state. Navigation invalidates an
-older close decision. Closing can interrupt a pending save and cannot undo a save
+older close decision. Quit while this guard's sheet is open can reach the
+delegate. AppKit aborts the Close sheet before delivering Quit; the guard cancels
+that request and checks the current document in a fresh Quit-owned decision.
+Callbacks that reach a still-active request coalesce without another query.
+Only this guard-owned sheet permits delegation; sudden termination remains
+disabled and Stay still cancels the pending Quit.
+Closing can interrupt a pending save and cannot undo a save
 already committed. Save and verify the result before closing. Neither warning
 protects against crashes or a forced process exit.
 
@@ -504,8 +552,20 @@ CI job runs a relocated packaged app with synthetic workspaces through actual
 window close, application Quit, Stay by Return/Escape, explicit Close Anyway,
 save/pending states, coalesced requests, unavailable/untrusted documents, actual
 navigation, and injected stale/timeout replies. It verifies draft/owner retention
-and the expected warning before shutdown. The `--contract-only` mode checks build
-wiring only and is not evidence of native lifecycle behavior.
+and the expected warning before shutdown. Ordinary Quit scenarios enqueue
+Command-Q through AppKit. The repeated Close/Close/Quit case defers the native
+Quit action to default run-loop mode, outside the WebKit callback and any
+previous termination modal loop. A smoke-only observer requires actual Quit
+delegate receipt before either Stay or Close Anyway; scheduling alone cannot
+satisfy the test. Stay must preserve the exact draft snapshot. The repeated case
+requires exactly two queries before Stay: one for the aborted Close request and
+one for the fresh Quit request. UUID traces require one query per request, the
+abort/cancel transition, and fresh requests for the later explicit approved exit.
+All 14 scenarios run; the repeated case
+runs in five fresh processes and every attempt must pass. Per-attempt logs,
+dispatch-mode diagnostics and prompt PNGs are retained in `build/native-close-qa/`
+and uploaded by CI. The `--contract-only` mode checks wiring, sheet/sudden-exit
+policy and trace assertions; it is not evidence of native lifecycle behavior.
 
 
 ## Code ownership

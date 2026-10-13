@@ -143,7 +143,7 @@ class NativeWorkerSourceQueue final {
   std::atomic<std::uint64_t> worker_high_{0};
   std::atomic<std::uint64_t> worker_low_{0};
   std::mutex mutex_;
-  std::unique_ptr<Slot[]> slots_;
+  std::unique_ptr<std::array<Slot, kNativeWorkerSourceCapacity>> slots_;
   NativeWorkerSourcePolicy policy_;
   NativeWorkerSourceStats stats_;
   std::atomic<std::uint64_t> contended_{0};

@@ -392,6 +392,29 @@ mod tests {
         assert!(validation::schema("DebuggerAction", &invalid, 400).is_err());
     }
     #[tokio::test]
+    async fn automation_source_urls_remain_in_candidate_coverage() {
+        use clap::Parser;
+        let debugger = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        debugger.update(|s| s["target"]["id"] = json!("page"));
+        let params = json!({"scriptId":"helper", "url":"reb-automation-before-load.js",
+            "hash":"opaque", "length":100, "hasSourceURL":true, "sourceMapURL":"x".repeat(65537)});
+        debugger
+            .event(json!({"method":"Debugger.scriptParsed","params":params}))
+            .await;
+        let snapshot = debugger.snapshot();
+        assert_eq!(catalog(&snapshot, &json!("page")).len(), 1);
+        assert_eq!(snapshot["scripts"][0]["source_map_url"], "");
+        assert_eq!(snapshot["scripts"][0]["source_map_url_omitted"], true);
+        assert!(!external(&snapshot["scripts"][0], &snapshot));
+        assert!(
+            !debugger
+                .hooks
+                .candidate_catalog_incomplete
+                .load(Ordering::Acquire)
+        );
+    }
+
+    #[tokio::test]
     async fn rejected_and_evicted_catalogs_never_claim_unique_candidate_coverage() {
         use clap::Parser;
         let options = crate::config::Options::parse_from(["test"]);

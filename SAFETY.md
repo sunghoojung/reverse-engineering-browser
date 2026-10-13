@@ -28,21 +28,37 @@ it.
 
 ## Default capture
 
-- Capture metadata, sizes, hashes, stable identifiers, and bounded previews by
-  default.
-- Do not capture credentials, authorization or proxy-authorization headers,
-  cookies, `set-cookie` values, request bodies, response bodies, or personal
-  content by default.
-- Redact sensitive fields at capture and storage boundaries. Keep routine logs
-  free of secrets and personal content.
+- Opening the packaged Origin Trace app starts a visibly labeled local research
+  session with all implemented native capture categories, bounded CDP request
+  and response content, and Canvas image artifacts enabled. Launch this profile
+  only for authorized targets and data. The session expires after one hour.
+  **New Live Session…** offers metadata-only capture;
+  `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects that mode for automatic launch.
+- Standalone probes remain inactive without an enabled session. Metadata-only
+  Traffic sessions retain native host-level observations without CDP headers or
+  bodies. This is a collection boundary, not a promise that artifact metadata
+  is secret-free: enabled artifact capture retains raw source URLs locally.
+- Retained CDP Traffic header values, URLs and bodies, and retained artifact and
+  provenance source URLs, are shown/stored without automatic credential masking.
+  Authorization, cookies, custom tokens, URL userinfo/query/fragments and personal
+  data may be present. Only collect data covered by the session authorization.
+- Operational bounds remain enforced. Missing data, truncated prefixes and
+  evictions must be visible; raw display never means complete wire capture.
+- Redaction is an explicit export-copy operation. It never rewrites retained
+  captures. The best-effort copy is not a guarantee that arbitrary secrets have
+  been removed; review it before sharing. Existing `reb-metadata-only-v1`
+  evidence packages remain a distinct explicitly selected metadata export.
+- Keep routine logs free of secrets and personal content. Never send raw captures
+  to AI services, cloud services or repositories automatically.
 
 ## Sensitive capture
 
-- Sensitive capture is disabled by default. Where a capture path supports it,
-  enable it visibly and for one session only.
+- Sensitive capture requires an enabled, visibly labeled session. The packaged
+  app's automatic research profile enables it for its bounded session;
+  standalone and metadata-only sessions leave it disabled.
 - Enable sensitive capture only when the authorization for that session
   specifically covers the data being collected. Keep the capture bounded, audit
-  the action, and document new capture paths and their redaction checks.
+  the action, and document new capture paths, their limits and explicit export-copy checks.
 - Audit commands and sensitive capture where the feature provides that audit.
 - Do not treat a session category or expiration as proof of target
   authorization. Current origin-scope limitations are described above.

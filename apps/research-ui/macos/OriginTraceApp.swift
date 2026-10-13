@@ -2667,7 +2667,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
-  private var selectedCaptureMode = LiveCaptureMode.metadata
+  private var selectedCaptureMode = LiveCaptureMode.content
   private var selectedSystemKeychain = false
   private var automaticSessionSuppressed = false
   private var localApplicationURL: URL?
@@ -2775,7 +2775,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-    closeGuard?.applicationShouldTerminate() ?? .terminateNow
+    let reply = closeGuard?.applicationShouldTerminate() ?? .terminateNow
+    closeSmoke?.didCheckTermination(reply)
+    return reply
   }
 
   func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -2827,14 +2829,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   private func requestAutomaticLiveSession() {
     guard !liveSessionCoordinator.isRunning else { return }
-    if let configuredMode = configuredAutomaticCaptureMode() {
-      startAutomaticLiveSession(
-        captureMode: configuredMode,
-        useSystemKeychain: configuredAutomaticSystemKeychain()
-      )
-      return
-    }
-    presentLiveSessionSetup()
+    startAutomaticLiveSession(
+      captureMode: configuredAutomaticCaptureMode(),
+      useSystemKeychain: configuredAutomaticSystemKeychain()
+    )
   }
 
   private func presentLiveSessionSetup() {
@@ -2851,10 +2849,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let modeLabel = NSTextField(labelWithString: "Capture mode")
     modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
     let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Metadata mode excludes URL paths, sensitive headers, and bodies. Full content keeps bounded request and response data in memory for this local session and always redacts credentials."
+      "Traffic metadata has hosts only, without headers or bodies. Content mode keeps bounded raw CDP values, including credentials, in memory. Artifacts keep raw source URLs in local storage. Only an explicitly exported redacted copy is altered."
     )
     privacyLabel.textColor = .secondaryLabelColor
-    privacyLabel.maximumNumberOfLines = 4
+    privacyLabel.maximumNumberOfLines = 0
     privacyLabel.preferredMaxLayoutWidth = 420
     let keychainToggle = NSButton(
       checkboxWithTitle: "Use macOS Keychain for browser credential storage",
@@ -2875,7 +2873,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     stack.alignment = .leading
     stack.spacing = 8
     stack.distribution = .fill
-    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 216)
+    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 240)
 
     let alert = NSAlert()
     alert.alertStyle = .informational
@@ -2944,11 +2942,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     )
   }
 
-  private func configuredAutomaticCaptureMode() -> LiveCaptureMode? {
+  private func configuredAutomaticCaptureMode() -> LiveCaptureMode {
     guard let value = ProcessInfo.processInfo.environment["REB_AUTOMATIC_CAPTURE_MODE"] else {
-      return nil
+      return .content
     }
-    return LiveCaptureMode(rawValue: value)
+    return LiveCaptureMode(rawValue: value) ?? .content
   }
 
   private func configuredAutomaticSystemKeychain() -> Bool {
@@ -3004,6 +3002,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       isDirectory: true
     )
     candidates.append(siblingApplication)
+
+    // Local packaging records the reused output, which may live outside this checkout.
+    if let configurationURL = Bundle.main.url(forResource: "BraveBuild", withExtension: "plist"),
+      let configuration = NSDictionary(contentsOf: configurationURL),
+      let applicationPath = configuration["ApplicationPath"] as? String
+    {
+      candidates.append(URL(fileURLWithPath: applicationPath, isDirectory: true))
+    }
 
     let repositoryRoot = applicationDirectory.deletingLastPathComponent()
     candidates.append(
@@ -3273,7 +3279,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
     let alert = NSAlert()
     alert.alertStyle = .critical
-    alert.messageText = "Live capture could not start"
+    alert.messageText = "Live session unavailable"
     alert.informativeText = message
     alert.addButton(withTitle: "Retry")
     alert.addButton(withTitle: "Continue Offline")

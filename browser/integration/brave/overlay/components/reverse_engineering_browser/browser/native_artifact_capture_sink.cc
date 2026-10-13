@@ -57,15 +57,6 @@ NativeArtifactKind Classify(const network::ResourceRequest& request,
   return NativeArtifactKind::kUnknown;
 }
 
-std::string SanitizedUrl(const GURL& url) {
-  GURL::Replacements replacements;
-  replacements.ClearUsername();
-  replacements.ClearPassword();
-  replacements.ClearQuery();
-  replacements.ClearRef();
-  return url.ReplaceComponents(replacements).spec();
-}
-
 std::string StatusName(const NativeArtifactReceiveStatus status) {
   switch (status) {
     case NativeArtifactReceiveStatus::kAccepted:
@@ -163,7 +154,7 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
   context->header.artifact_id = artifact_id;
   context->header.creator_event_id = creator_event_id;
   context->header.capture_origin = NativeArtifactCaptureOrigin::kNetworkResponse;
-  context->url = SanitizedUrl(request.url);
+  context->url = request.url.spec();
   context->mime_type = response_head.mime_type;
   context->reservation_bytes = reservation;
   context->request_id = request_id;
@@ -220,11 +211,11 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
     return;
   }
 
-  const std::string sanitized_url = SanitizedUrl(GURL(source_url));
+  const std::string captured_url(source_url);
   const std::string mime_type = kind == NativeArtifactKind::kJavaScript ? "text/javascript"
                                 : kind == NativeArtifactKind::kWasm     ? "application/wasm"
                                                                         : "text/plain";
-  if (sanitized_url.empty() || sanitized_url.size() > kNativeArtifactMaxUrlBytes) {
+  if (captured_url.empty() || captured_url.size() > kNativeArtifactMaxUrlBytes) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
                "generated_url_invalid");
     return;
@@ -243,11 +234,11 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
     transfer->header.flags |= kNativeArtifactFlagSensitive;
   }
   transfer->header.content_size = received.size();
-  transfer->header.url_size = static_cast<std::uint32_t>(sanitized_url.size());
+  transfer->header.url_size = static_cast<std::uint32_t>(captured_url.size());
   transfer->header.mime_type_size = static_cast<std::uint32_t>(mime_type.size());
   transfer->header.execution_context_id = execution_context_id;
   transfer->header.capture_origin = capture_origin;
-  transfer->url = sanitized_url;
+  transfer->url = captured_url;
   transfer->mime_type = mime_type;
   transfer->content.assign(received.begin(), received.end());
   if (!NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {

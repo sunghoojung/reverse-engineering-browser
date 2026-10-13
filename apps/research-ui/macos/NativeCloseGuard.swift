@@ -1,11 +1,14 @@
 import Cocoa
 import WebKit
 
-// One request covers both the window close button and application Quit. The
+// Active requests coalesce close/Quit callbacks. AppKit can abort a close sheet
+// before delivering Quit, which then requires a fresh guarded decision. The
 // native sheet prevents new editor input between the JS snapshot and close.
 // Only this app's explicitly loaded document can approve a clean shutdown.
 final class NativeCloseGuard: NSObject, NSWindowDelegate {
   typealias Query = (WKWebView, @escaping (Any?, Error?) -> Void) -> Void
+  // Optional smoke diagnostics; no observer is installed in normal app use.
+  var requestObserver: ((String, UUID) -> Void)?
 
   private enum Phase {
     case checking, dirty, unavailable
@@ -79,7 +82,8 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
   }
 
   private func begin(quit: Bool) {
-    if request != nil {
+    if let current = request {
+      requestObserver?(quit ? "coalesce-quit" : "coalesce-close", current.id)
       if quit { request?.quitWaiting = true }
       return
     }
@@ -94,10 +98,16 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
     alert.addButton(withTitle: "Close Anyway").isEnabled = false
     alert.buttons[0].keyEquivalent = "\r"
     alert.buttons[1].keyEquivalent = ""
+    // Let Quit reach our delegate instead of being vetoed before the delegate.
+    // AppKit may abort this sheet first; that cancellation must not carry an
+    // old approval into the fresh Quit request.
+    // Sudden termination is disabled in Info.plist; finish still owns approval.
+    alert.window.preventsApplicationTerminationWhenModal = false
     let id = UUID()
     let currentURL = webView?.url
     request = Request(id: id, generation: generation, url: currentURL, alert: alert,
                       quitWaiting: quit)
+    requestObserver?(quit ? "begin-quit" : "begin-close", id)
     keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
       guard let self, let current = self.request,
         event.window === current.alert.window,
@@ -109,6 +119,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
     }
     alert.beginSheetModal(for: window) { [weak self] response in
       guard let self, self.request?.id == id else { return }
+      self.requestObserver?("sheet-response \(response.rawValue)", id)
       self.finish(allow: response == .alertSecondButtonReturn && self.request?.phase != .checking)
     }
     configureSafeButtons(alert)
@@ -122,6 +133,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
       received(nil, error: nil, id: id)
       return
     }
+    requestObserver?("query", id)
     query(webView) { [weak self] result, error in
       self?.received(result, error: error, id: id)
     }
@@ -177,6 +189,7 @@ final class NativeCloseGuard: NSObject, NSWindowDelegate {
   private func finish(allow: Bool) {
     guard let current = request else { return }
     let approved = allow && isCurrent(current)
+    requestObserver?(approved ? "finish-allow" : "finish-cancel", current.id)
     request = nil // Reentrant sheet callbacks cannot reuse this approval.
     timeout?.invalidate()
     timeout = nil

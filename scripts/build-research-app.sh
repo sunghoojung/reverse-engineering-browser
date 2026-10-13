@@ -35,6 +35,29 @@ fi
 
 mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
+# Remember a reused local browser output without copying its source or bundle.
+# This optional hint never substitutes for the runtime bundle/executable checks.
+REB_PACKAGE_REPOSITORY="${repo_root}" REB_PACKAGE_RESOURCES="${resources_path}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+import plistlib
+
+root = Path(os.environ["REB_PACKAGE_REPOSITORY"])
+brave = os.environ.get("REB_BRAVE_DIRECTORY")
+receipt = root / "build/integrated-brave-state.json"
+if not brave and receipt.is_file():
+    state = json.loads(receipt.read_text())
+    brave = state.get("brave")
+output = os.environ.get("REB_BRAVE_OUTPUT_DIRECTORY")
+if not output:
+    output = Path(brave).parent / "out/Component_arm64" if brave else root / "browser/worktree/src/out/Component_arm64"
+application = Path(output) / "Brave Browser Development.app"
+if application.is_dir():
+    configuration = Path(os.environ["REB_PACKAGE_RESOURCES"]) / "BraveBuild.plist"
+    with configuration.open("wb") as destination:
+        plistlib.dump({"ApplicationPath": str(application.resolve())}, destination)
+PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
 for asset in index.html app.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js investigation_navigation.js investigation_notebook.js traffic_view.js traffic_comparison.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js app.js analyst_runner_core.js analyst_runner_node.js; do

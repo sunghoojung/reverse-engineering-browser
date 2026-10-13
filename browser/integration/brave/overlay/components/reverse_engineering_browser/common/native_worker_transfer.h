@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_WORKER_TRANSFER_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_WORKER_TRANSFER_H_
 
+#include <functional>
+
 #include "native_worker_observation.h"
 
 namespace reb {
@@ -107,8 +109,7 @@ struct NativeWorkerTransferReply final {
 // mapped region, retry loop, callback queue or per-thread remote exists here.
 class NativeWorkerTransferSender final {
  public:
-  explicit NativeWorkerTransferSender(NativeWorkerObservationQueue& queue) noexcept
-      : queue_(queue) {}
+  explicit NativeWorkerTransferSender(NativeWorkerObservationQueue& queue) noexcept;
   ~NativeWorkerTransferSender() noexcept;
   NativeWorkerTransferSender(const NativeWorkerTransferSender&) = delete;
   NativeWorkerTransferSender& operator=(const NativeWorkerTransferSender&) = delete;
@@ -128,7 +129,7 @@ class NativeWorkerTransferSender final {
   NativeWorkerTransferReply Reply(NativeWorkerTransferStatus status,
                                   std::uint64_t request_id = 0) noexcept;
   NativeWorkerTransferReply Close(NativeWorkerTransferStatus reason) noexcept;
-  NativeWorkerObservationQueue& queue_;
+  const std::reference_wrapper<NativeWorkerObservationQueue> queue_;
   NativeWorkerLease lease_;
   NativeWorkerBatch pending_;
   NativeWorkerBatchAck last_ack_;

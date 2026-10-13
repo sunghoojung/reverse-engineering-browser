@@ -39,10 +39,15 @@ pub fn property(v: &Value) -> Option<Value> {
 }
 pub fn script(p: &Value) -> Option<Value> {
     let id = p["scriptId"].as_str().filter(|s| s.len() <= 4096)?;
-    let url = p["url"]
-        .as_str()
-        .filter(|s| s.len() <= 65536 && !s.starts_with("reb-automation-"))?;
-    let mut result = json!({"script_id":id,"url":url,"hash":p["hash"].as_str().unwrap_or(""),"source_map_url":p["sourceMapURL"].as_str().unwrap_or(""),"has_source_url":p["hasSourceURL"]==true,"is_module":p["isModule"]==true,"language":if p["scriptLanguage"]=="WebAssembly" {"WebAssembly"} else {"JavaScript"}});
+    let url = p["url"].as_str().filter(|s| s.len() <= 65536)?;
+    // Source-map display metadata is not a script identity. An oversized data
+    // URL must not discard its script or falsely taint candidate completeness.
+    let source_map = p["sourceMapURL"].as_str().unwrap_or("");
+    let source_map_omitted = source_map.len() > 65536;
+    let mut result = json!({"script_id":id,"url":url,"hash":p["hash"].as_str().unwrap_or(""),"source_map_url":if source_map_omitted {""} else {source_map},"has_source_url":p["hasSourceURL"]==true,"is_module":p["isModule"]==true,"language":if p["scriptLanguage"]=="WebAssembly" {"WebAssembly"} else {"JavaScript"}});
+    if source_map_omitted {
+        result["source_map_url_omitted"] = json!(true);
+    }
     for (key, raw) in [
         ("start_line", "startLine"),
         ("start_column", "startColumn"),
@@ -53,9 +58,7 @@ pub fn script(p: &Value) -> Option<Value> {
     ] {
         result[key] = json!(p[raw].as_u64().unwrap_or(0).min(i32::MAX as u64));
     }
-    if result["hash"].as_str().unwrap().len() > 65536
-        || result["source_map_url"].as_str().unwrap().len() > 65536
-    {
+    if result["hash"].as_str().unwrap().len() > 65536 {
         return None;
     }
     Some(result)

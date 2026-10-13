@@ -1,0 +1,12 @@
+diff --git a/third_party/blink/renderer/core/exported/web_node.cc b/third_party/blink/renderer/core/exported/web_node.cc
+--- a/third_party/blink/renderer/core/exported/web_node.cc
++++ b/third_party/blink/renderer/core/exported/web_node.cc
+@@ -425,7 +425,7 @@
+         return result;
+       if (registered->Removed())
+         continue;
+-      auto* listener = DynamicTo<JSEventListener>(registered->Callback());
++      auto* listener = blink::DynamicTo<JSEventListener>(registered->Callback());
+       if (listener && !listener->GetWorldForInspector().IsMainWorld())
+         continue;
+       // JSEventListener::GetListenerObject directly returns CallbackObject.

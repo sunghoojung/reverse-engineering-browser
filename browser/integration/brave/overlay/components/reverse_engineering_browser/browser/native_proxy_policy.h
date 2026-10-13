@@ -186,6 +186,7 @@ struct PolicySnapshot {
 class PolicyRegistry {
  public:
   explicit PolicyRegistry(ProfileToken profile);
+  ~PolicyRegistry();
   PolicyRegistry(const PolicyRegistry&) = delete;
   PolicyRegistry& operator=(const PolicyRegistry&) = delete;
 

@@ -1,0 +1,85 @@
+diff --git a/BUILD.gn b/BUILD.gn
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -3548,6 +3548,7 @@
+     "include/v8-message.h",
+     "include/v8-microtask-queue.h",
+     "include/v8-microtask.h",
++    "include/v8-native-console.h",
+     "include/v8-object.h",
+     "include/v8-persistent-handle.h",
+     "include/v8-primitive-object.h",
+diff --git a/src/debug/debug-interface.cc b/src/debug/debug-interface.cc
+--- a/src/debug/debug-interface.cc
++++ b/src/debug/debug-interface.cc
+@@ -10,6 +10,7 @@
+ #include <vector>
+ 
+ #include "include/v8-function.h"
++#include "include/v8-native-console.h"
+ #include "src/api/api-inl.h"
+ #include "src/base/logging.h"
+ #include "src/base/utils/random-number-generator.h"
+@@ -1317,6 +1318,22 @@
+   }
+ }
+ 
++MaybeLocal<Value> EvaluateNativeConsole(Isolate* isolate, Local<String> source,
++                                        NativeConsoleEvaluationMode mode) {
++  const bool repl = mode == NativeConsoleEvaluationMode::kRepl;
++  return EvaluateGlobal(
++      isolate, source,
++      repl ? EvaluateGlobalMode::kDisableBreaks
++           : EvaluateGlobalMode::kDisableBreaksAndThrowOnSideEffect,
++      repl);
++}
++
++void GetNativeConsoleLexicalNames(Local<Context> context,
++                                  std::vector<Global<String>>* names,
++                                  uint32_t limit) {
++  GetConsoleLexicalNames(context, names, limit);
++}
++
+ void GetConsoleLexicalNames(v8::Local<v8::Context> v8_context,
+                             std::vector<v8::Global<v8::String>>* names,
+                             uint32_t limit) {
+diff --git a/include/v8-native-console.h b/include/v8-native-console.h
+new file mode 100644
+--- /dev/null
++++ b/include/v8-native-console.h
+@@ -0,0 +1,35 @@
++// Copyright (c) 2026 The Brave Authors. All rights reserved.
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
++
++#ifndef INCLUDE_V8_NATIVE_CONSOLE_H_
++#define INCLUDE_V8_NATIVE_CONSOLE_H_
++
++#include <stdint.h>
++
++#include <vector>
++
++#include "v8-context.h"
++#include "v8-local-handle.h"
++#include "v8-persistent-handle.h"
++#include "v8config.h"
++
++namespace v8::debug {
++
++// kRepl runs an explicitly authorized command with native REPL semantics.
++// kReadOnly denies side effects during a verified lexical identifier lookup.
++enum class NativeConsoleEvaluationMode { kRepl, kReadOnly };
++
++V8_EXPORT MaybeLocal<Value> EvaluateNativeConsole(Isolate* isolate,
++                                                  Local<String> source,
++                                                  NativeConsoleEvaluationMode mode);
++
++// Bounded lexical enumeration never reads page-global properties or getters.
++V8_EXPORT void GetNativeConsoleLexicalNames(Local<Context> context,
++                                            std::vector<Global<String>>* names,
++                                            uint32_t limit);
++
++}  // namespace v8::debug
++
++#endif  // INCLUDE_V8_NATIVE_CONSOLE_H_

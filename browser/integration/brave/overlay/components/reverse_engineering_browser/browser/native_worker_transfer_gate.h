@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_WORKER_TRANSFER_GATE_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_WORKER_TRANSFER_GATE_H_
 
+#include <functional>
+
 #include "native_worker_authority.h"
 
 namespace reb {
@@ -15,8 +17,7 @@ namespace reb {
 // The authority outlives this gate; neither is callable from renderer messages.
 class NativeWorkerTransferReceiver final {
  public:
-  explicit NativeWorkerTransferReceiver(const NativeWorkerAuthority& authority) noexcept
-      : authority_(authority) {}
+  explicit NativeWorkerTransferReceiver(const NativeWorkerAuthority& authority) noexcept;
   NativeWorkerTransferReceiver(const NativeWorkerTransferReceiver&) = delete;
   NativeWorkerTransferReceiver& operator=(const NativeWorkerTransferReceiver&) = delete;
   NativeWorkerTransferReceiver(NativeWorkerTransferReceiver&&) = delete;
@@ -38,7 +39,7 @@ class NativeWorkerTransferReceiver final {
   [[nodiscard]] std::uint64_t abandoned_requests() const noexcept { return abandoned_requests_; }
 
  private:
-  const NativeWorkerAuthority& authority_;
+  const std::reference_wrapper<const NativeWorkerAuthority> authority_;
   NativeWorkerLease lease_;
   NativeWorkerBatch pending_;
   NativeWorkerBatchAck last_ack_;

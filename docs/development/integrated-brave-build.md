@@ -1,15 +1,16 @@
 # Integrated Brave build candidate
 
-This branch combines the accepted `main` application with the original native
-Console (#112), renderer admission (#131), worker (#129 → #140 → #141), and
-proxy (#138) draft histories. The worker stack is integrated once through #141.
-Original draft PRs remain open. This aggregate is a **build-and-test candidate**;
-it must not be merged or described as a compiled release before the pinned
-browser and runtime gates below pass.
+The native Console (#112), renderer admission (#131), worker
+(#129 → #140 → #141), and proxy (#138) foundations are already integrated into
+`main`, together with later native compilation and application repairs. This
+guide builds a **new source candidate** from a recorded revision. A source merge
+or passing repository CI does not establish that revision's pinned-browser build
+or runtime acceptance; record the separate evidence below before making those
+claims. Worker and proxy foundations remain dormant.
 
 ## One build path
 
-Use a clean checkout of this integration branch on an Apple silicon Mac with
+Use a clean checkout of the intended source revision on an Apple silicon Mac with
 full Xcode (including an already accepted license), C++20 and zlib, Make,
 Python 3.8 or newer, Rust/Cargo, Node.js >=24.16.0 and <25, and Corepack or pnpm. The entrypoint never
 installs system tools, accepts licenses, changes global Xcode selection, or enables
@@ -39,12 +40,13 @@ remote and output overrides, and refuses unrecognized upstream edits. First-run
 `--init` requires clean upstream checkouts. A missing checkout is initialized
 normally. A pristine unborn Brave Git repository left before the first successful
 fetch is also admitted only for `--init`: it must contain only its own `.git`, no
-index files/refs/pending operation, and only the official Brave fetch remote URLs. Custom hooks, hook/monitor
-configuration or configuration includes require inspection and are refused.
+index entries, refs or pending operations, and only official Brave fetch remote
+URLs. Custom hooks, hook/monitor configuration or configuration includes require
+inspection and are refused.
 This narrowly permits safe initialization to continue; a partial checkout with
 user content, a wrong remote, symlinks or initialized mismatched pins still stops.
-Repeated runs without `--init` accept
-only the exact locally recorded post-sync state for this integration commit,
+Repeated runs without `--init` accept only the exact locally recorded post-sync
+state for this integration commit,
 including ignored overlay/patch destinations; symlink destinations are refused.
 The private source receipt is `build/integrated-brave-state.json`. Only after
 all browser, native tests, companion build and signature steps succeed does the
@@ -69,9 +71,9 @@ The wrapper runs the existing doctor and sync, offline native foundations,
 the full development browser build (which prepares Brave's component GN args),
 pinned probe compilation (including the native Console runtime), the separate
 proxy adapter unit-test executable, and
-Origin Trace packaging/Console checks. It verifies the companion signature. The ordinary `make native-console-check`
-uses the real C++ bridge and Rust HTTP backend with a synthetic Python browser
-peer. Companion JavaScriptCore checks are a separate layer. Neither establishes
+Origin Trace packaging/Console checks. It verifies the companion signature.
+The ordinary `make native-console-check` uses the real C++ bridge and Rust HTTP
+backend with a synthetic Python browser peer. Companion JavaScriptCore checks are a separate layer. Neither establishes
 execution in the patched Brave renderer.
 `make brave-foundation-check` can repeat only the pinned native compilation and
 proxy tests; `make brave-probe-check` still compiles the probe objects alone.
@@ -87,9 +89,10 @@ The default live launcher looks for `Brave Browser.app/Contents/MacOS/Brave Brow
 there; if Brave's channel gives the app a different name, set `REB_BRAVE_BINARY`
 to the executable actually built in that directory. The companion is
 `build/Origin Trace.app`. Use the existing [live-session path](../../browser/README.md)
-and keep both from the same integration revision, or use the explicitly verified
-source-compatible browser checkpoint described below. Component output is for local
-use and must not be copied as a standalone portable `.app`.
+and keep both from the same integration revision. Reusing an older browser
+requires an explicit source-compatibility review and matched-pair acceptance as
+described below. Component output is for local use and must not be copied as a
+standalone portable `.app`.
 
 ## Capability and status manifest
 
@@ -189,70 +192,27 @@ build requires `sccache` and additional disk:
 
 Keep the matched Origin Trace companion with it, record the ZIP hash, and test
 an extracted package. This remains an ad-hoc-signed development preview until
-trusted release, signing/notarization and distribution gates pass. This branch
-does not publish a release or provide a precompiled browser download.
+trusted release, signing/notarization and distribution gates pass. These local
+build commands do not publish a release. Published app pairs and their recorded
+validation are linked from the [project README](../../README.md).
 
-## Reuse the completed browser for the final companion update
+## Reusing a browser with a newer companion
 
-The accepted main merge for #149 is
-`f0e2b940d4790ce545869d060dfcb6ca9af312f9`. Its candidate-experiment UI/Rust
-changes are now included in this aggregate. Compared with browser-build
-checkpoints `54d3150a8ca6074a366b0ffc0a02705011bb58ef` and its startup-repair
-child `cb4036e3fd1a734bd3aa65f8106707f3ffe6b96f`, the native Brave inputs are
-unchanged: all three pins, Brave overlays, ordered Brave/Chromium/V8 patches,
-bootstrap/sync/toolchain scripts, C++ Console/debugger transports, and native
-wire headers/contracts. The changed HTTP/deobfuscator contracts belong to the
-new companion; build its backend, UI and workers together through `make app-build`.
+Do not assume the early integration checkpoints `54d3150a` or `cb4036e` match
+current browser inputs. Later main commits changed native Console, worker and
+proxy compilation, integration synchronization, and artifact-source handling.
+Identical upstream pins alone do not establish source or runtime compatibility.
 
-This is source-compatibility evidence, not proof that an existing browser binary
-finished building or passed runtime tests. Let an active build finish. Do not
-pull, switch, reset, synchronize or edit its checkout/worktree/receipts while it
-runs. Keep the entire component output in place; its `.app` depends on that
-output tree. Complete the pinned/browser gates above before treating it as a
-verified browser.
+Use a browser built from the same reviewed source revision by default. Reusing
+an older browser requires a separate comparison of all browser pins, overlays,
+ordered patches, build/sync inputs, native transports and wire contracts, plus
+matched-pair runtime acceptance. Rebuild the companion's backend, UI and workers
+together. Record the actual browser source revision, binary hash, pins, path and
+build/runtime evidence separately from the companion source revision; never
+relabel an older binary as built from new source.
 
-After the final aggregate's exact-head repository CI and review pass, use the
-final commit SHA from the PR handoff in a **separate new source checkout**. This
-builds only the new Origin Trace release bundle, including all release helpers;
-it neither bootstraps nor recompiles Brave:
-
-```sh
-git clone https://github.com/sunghoojung/reverse-engineering-browser.git reb-origin-trace-update
-cd reb-origin-trace-update
-# Replace REVIEWED_FINAL_SHA with the exact final reviewed commit from the handoff.
-git checkout --detach REVIEWED_FINAL_SHA
-make app-build
-codesign --verify --deep --strict "build/Origin Trace.app"
-```
-
-Verify the actual old development-browser bundle and executable before launch.
-Set `BRAVE_APP` to its existing absolute path, without moving or copying it:
-
-```sh
-BRAVE_APP="/absolute/path/to/existing/worktree/src/out/Component_arm64/Brave Browser Development.app"
-if test -x "$BRAVE_APP/Contents/MacOS/Brave Browser Development" &&
-   test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$BRAVE_APP/Contents/Info.plist")" = "com.brave.Browser.development"; then
-  REB_BRAVE_BINARY="$BRAVE_APP/Contents/MacOS/Brave Browser Development" \
-    "./build/Origin Trace.app/Contents/MacOS/OriginTrace"
-else
-  echo "Stop: verify the existing development-browser bundle path and identifier."
-fi
-```
-
-The launch is skipped if either check fails. Directly executing
-`Contents/MacOS/OriginTrace` carries the environment into the app; do not assume
-that an environment variable before macOS `open` reaches a LaunchServices app.
-The app validates the development bundle identifier, then passes the resolved
-browser path and all bundled helper paths to its live-session subprocess. Choose
-the session's capture boundary in the app. Wait for the old Brave build to finish,
-then quit the old Origin Trace normally, saving work and responding to its draft
-prompts, before launching the new bundle. Do not force-kill an app or run two
-session controllers against the old session/profile.
-No duplicate debug helpers are needed for this packaged route.
-
-Record the **browser source revision** (54d3150a or cb4036e, as actually used),
-resolved upstream pins, actual browser path and successful build/runtime evidence
-separately from the **new companion source revision** (`git rev-parse HEAD` in the
-new checkout). Never relabel an old browser as compiled from the new companion
-commit. The older source-state/completion receipts remain untouched. The wrapper
-is deliberately not used to waive those guards or resynchronize an old worktree.
+Let an active build finish before doing any update. Preserve its checkout,
+component output and source/completion receipts. Use a separate source checkout
+for companion-only work, and quit the old companion normally after saving work
+and responding to its draft prompts. Do not run two controllers against an
+existing session/profile or alter receipts to bypass source-preservation checks.

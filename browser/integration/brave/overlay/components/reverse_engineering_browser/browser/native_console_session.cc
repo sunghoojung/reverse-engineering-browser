@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -19,6 +18,8 @@
 #include <vector>
 
 #include "base/command_line.h"
+#include "base/containers/span.h"
+#include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
@@ -111,7 +112,11 @@ class Session final {
     started_ = true;
     retired_ = std::move(retired);
     const auto& command = *base::CommandLine::ForCurrentProcess();
-    user_data_dir_ = command.GetSwitchValuePath("user-data-dir");
+    // Chromium canonicalizes the profile root. Resolve the explicitly owned
+    // directory once at startup too: /tmp and /var are aliases on macOS.
+    user_data_dir_ = base::MakeAbsoluteFilePath(command.GetSwitchValuePath("user-data-dir"));
+    if (user_data_dir_.empty())
+      return;
     std::uint64_t id = 0;
     if (!base::StringToUint64(command.GetSwitchValueASCII("reb-native-console-session-id"), &id) ||
         !id)
@@ -137,8 +142,8 @@ class Session final {
     // threads. One command may be in flight; a timeout retires the session.
     int descriptor = -1;
     for (int attempt = 0; attempt < 40 && descriptor < 0; ++attempt) {
-      struct stat parent {
-      }, endpoint{};
+      struct stat parent = {};
+      struct stat endpoint = {};
       const auto directory = base::FilePath(path).DirName();
       if (lstat(directory.value().c_str(), &parent) != 0 || !S_ISDIR(parent.st_mode) ||
           parent.st_uid != geteuid() || (parent.st_mode & 0777) != 0700) {
@@ -244,11 +249,11 @@ class Session final {
       return;
     }
     const auto command = request.operation == NativeConsoleOperation::kRuntime
-                             ? base::JSONReader::ReadDict(source)
+                             ? base::JSONReader::ReadDict(source, base::JSON_PARSE_RFC)
                              : std::nullopt;
     const auto* operation = command ? command->FindString("operation") : nullptr;
     if (operation && *operation == "traffic") {
-      base::Value::List events;
+      base::ListValue events;
       for (auto iterator = activity_.begin(); iterator != activity_.end();) {
         if (*iterator->FindString("document_id") == base::NumberToString(request.target_id)) {
           events.Append(std::move(*iterator));
@@ -256,10 +261,10 @@ class Session final {
         } else
           ++iterator;
       }
-      base::Value::Dict value;
-      value.Set("status", "ok")
-          .Set("events", std::move(events))
-          .Set("dropped", static_cast<int>(activity_drops_));
+      base::DictValue value;
+      value.Set("status", "ok");
+      value.Set("events", std::move(events));
+      value.Set("dropped", static_cast<int>(activity_drops_));
       activity_drops_ = 0;
       if (!base::JSONWriter::Write(value, &reply->payload) ||
           reply->payload.size() > kNativeConsolePayloadLimit) {
@@ -403,13 +408,13 @@ class Session final {
       record.flags =
           (target.origin.size() > size || target.metadata_truncated ? kNativeConsoleTruncated : 0) |
           (target.main_frame ? 2 : 0);
-      std::memcpy(record.origin.data(), target.origin.data(), size);
+      base::span(record.origin).first(size).copy_from(base::span(target.origin).first(size));
       auto copy = [&](const std::string& text, auto& buffer, std::uint16_t& bytes) {
         auto bounded = text.substr(0, buffer.size());
         while (!bounded.empty() && !base::IsStringUTF8(bounded))
           bounded.pop_back();
         bytes = static_cast<std::uint16_t>(bounded.size());
-        std::memcpy(buffer.data(), bounded.data(), bounded.size());
+        base::span(buffer).first(bounded.size()).copy_from(base::span(bounded));
         if (bounded.size() < text.size())
           record.flags |= kNativeConsoleTruncated;
       };
@@ -437,7 +442,7 @@ class Session final {
         if (activity_drops_ < 2147483647)
           ++activity_drops_;
       }
-      activity_.push_back(base::Value::Dict()
+      activity_.push_back(base::DictValue()
                               .Set("event_id", base::NumberToString(next_activity_++))
                               .Set("document_id", base::NumberToString(target.id))
                               .Set("resource_id", base::NumberToString(info.request_id))
@@ -453,7 +458,7 @@ class Session final {
     }
   }
   std::vector<std::unique_ptr<ConsoleActivity>> observers_;
-  std::deque<base::Value::Dict> activity_;
+  std::deque<base::DictValue> activity_;
   std::uint64_t next_activity_ = 1;
   std::uint64_t last_evaluation_ = 0;
   unsigned activity_drops_ = 0;

@@ -234,7 +234,7 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
   await arrived('backtrace','Alt+Right');
   await click('#investigation-forward');await arrived('sources','Forward to Sources');
   await click('#investigation-forward');await arrived('tools','Forward to Decoder');
-  await click('#decoder-input');await key('a','KeyA',{windowsVirtualKeyCode:65,modifiers:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});await typeText('bmV3ZXI=');
+  await click('#decoder-input');await key('a','KeyA',{windowsVirtualKeyCode:65,modifiers:process.platform==='darwin'?4:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});await typeText('bmV3ZXI=');
   await until("toolsElements.input.value==='bmV3ZXI='",'Editing the Decoder draft through its control failed');
   assert.match(await evaluate("document.querySelector('#investigation-decoder-origin').textContent"),/Input changed/);
   await paneClick('#investigation-decoder-origin button');

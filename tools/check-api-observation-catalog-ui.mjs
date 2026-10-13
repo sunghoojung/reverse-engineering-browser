@@ -200,6 +200,11 @@ async function checkBrowser() {
   };
   const click=async selector=>{const point=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});n.scrollIntoView({block:'nearest'});const r=n.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});};
   const shot=async name=>{const result=await send('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(result.data,'base64'));};
+  const scrollCatalogTo=async selector=>{
+    const geometry=await evaluate(`(()=>{const c=document.querySelector('#api-catalog-content').getBoundingClientRect(),r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:c.x+c.width/2,y:c.y+c.height/2,deltaY:r.top-c.top-8};})()`);
+    await send('Input.dispatchMouseEvent',{type:'mouseWheel',...geometry,deltaX:0});
+    await until(()=>evaluate(`(()=>{const c=document.querySelector('#api-catalog-content').getBoundingClientRect(),r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return r.top>=c.top-1&&r.bottom<=c.bottom+1;})()`),'comparison result visible after pointer scroll');
+  };
   try {
     await new Promise(ready=>server.listen(0,'127.0.0.1',ready));
     if (process.argv.includes('--serve')) {
@@ -311,12 +316,15 @@ async function checkBrowser() {
       assert(geometry.height>=80&&geometry.overflow<=width&&geometry.contentOverflow<=1&&geometry.filters.every(Boolean),JSON.stringify(geometry));
       await shot(`catalog-comparison-${width}`);
     }
+    await scrollCatalogTo('.api-catalog-differences li');
+    await shot('catalog-comparison-differences-360');
     await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').focus()");
     await key('End','End');
     assert.equal(await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').value"),'2');
     assert.equal(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),'','Changing a comparison choice clears stale results');
     await click('.api-catalog-compare-controls button');
     assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/body_truncated/);
+    await scrollCatalogTo('.api-catalog-comparison-result p:last-child');
     await shot('catalog-comparison-unavailable-360');
     // Programmatic focus avoids opening a platform select popup; the selection
     // itself still uses keyboard input, including the same-source refusal.

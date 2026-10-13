@@ -99,6 +99,17 @@ five-second manifest or thirty-second verification deadline expires.
 This is not HTTP Range/206 pagination. Events and artifacts expose a bounded
 recent tail, not a cursor or stable exhaustive export.
 
+## Observed website API catalog
+
+`GET /api/network/catalog` (`reb-api call get_api_observation_catalog`) derives
+exact-path endpoint groups, parameter/header names and value-free JSON shapes
+from the newest 64 retained Traffic requests. Each observation retains its
+scoped source identity; missing, truncated, malformed and over-budget data stay
+explicit. Capture-off returns an empty catalog without enabling capture. Raw
+local Traffic is unchanged. This is a structural observation view, not an API
+specification or authenticated SDK. See the [v1 contract and local client
+example](api-observation-catalog-v1.md).
+
 ## Exact request trace selection
 
 `get_origin_trace` accepts optional `session_id` in addition to `request_id` and

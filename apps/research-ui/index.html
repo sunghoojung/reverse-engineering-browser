@@ -95,7 +95,7 @@
                 <div class="request-table">
                   <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
-                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-api-catalog" type="button" aria-haspopup="dialog">API catalog</button></div>
                 </div>
               </div>
 
@@ -1352,6 +1352,13 @@
           </form>
         </section>
       </div>
+
+      <dialog id="api-catalog" class="api-catalog" aria-labelledby="api-catalog-title" aria-describedby="api-catalog-scope">
+        <header class="api-catalog-header"><h2 id="api-catalog-title">Observed API catalog</h2><button id="api-catalog-refresh" class="secondary-button" type="button">Refresh snapshot</button><button id="api-catalog-close" class="secondary-button" type="button" autofocus>Close</button></header>
+        <p id="api-catalog-scope">Structural observations from the newest retained Traffic records. Not an API specification. Paths and names may contain private data. Raw Traffic is unchanged.</p>
+        <p id="api-catalog-status" role="status" aria-live="polite">Open or refresh deliberately to read a snapshot. No automatic refresh.</p>
+        <div id="api-catalog-content" class="api-catalog-content" tabindex="0" aria-label="Endpoint observations"></div>
+      </dialog>
 
       <footer class="statusbar">
         <span id="broker-status" class="broker-status">connecting to evidence</span>

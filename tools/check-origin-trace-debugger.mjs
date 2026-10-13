@@ -6530,6 +6530,50 @@ try {
       const address = trafficDevtoolsAddress(await readFile(join(profile, "DevToolsActivePort"), "utf8"));
       candidateStartup.phase='rendered journey';
       await checkCandidateExperimentJourney({address, uiURL:url, fixtureURL:fixtureUrl, root, socketFactory:trafficBrowserSocket, requestReceipts:candidateRequestReceipts});
+      // Verify real captured browser traffic through the new public HTTP/CLI
+      // boundary without generating another target request or changing evidence.
+      const requestsBeforeCatalog = candidateRequestReceipts.length;
+      let catalog, observedEndpoint;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const response = await fetch(url + '/api/network/catalog', {signal:AbortSignal.timeout(5000)});
+        assert.equal(response.status, 200);
+        catalog = await response.json();
+        observedEndpoint = catalog.endpoints.find(endpoint => endpoint.method === 'POST' && endpoint.origin === fixtureUrl && endpoint.path === '/payload');
+        if (observedEndpoint?.observations.some(observation => observation.request.body.status === 'observed' && observation.response.body.status === 'observed')) break;
+        await wait(50);
+      }
+      assert.equal(catalog.format, 'reb-api-observation-catalog-v1');
+      assert.equal(catalog.coverage.capture_enabled, true);
+      const observation = observedEndpoint?.observations.find(row => row.request.body.status === 'observed' && row.response.body.status === 'observed');
+      assert(observation, 'Real captured JSON request and response must produce observed shapes');
+      const captured = (await get()).network;
+      assert.equal(catalog.coverage.instance_id, captured.instance_id);
+      assert.equal(catalog.coverage.capture_epoch, captured.capture_epoch);
+      const original = captured.requests.find(row => row.id === observation.source.request_id && row.target_id === observation.source.target_id && row.started_monotonic_ms === observation.source.started_monotonic_ms);
+      assert(original, 'Public catalog source must resolve by all five unrounded identity values');
+      assert(original.request.body.text.includes('fixture-'), 'Raw Traffic retains its original synthetic body value');
+      for (const [side, property, type] of [['request', 'payload', 'string'], ['response', 'accepted', 'boolean']]) {
+        assert(observation[side].body.shape.properties.some(field => JSON.stringify(field.path) === JSON.stringify([{kind:'property',name:property}]) && field.types.includes(type)));
+      }
+      assert(!JSON.stringify(catalog).includes('fixture-observed'));
+      assert(!JSON.stringify(catalog).includes('fixture-worker'));
+      const cliPath = process.env.ORIGIN_TRACE_API_CLI || join(root, 'apps/origin-trace-backend/target/debug/reb-api');
+      const cliCatalog = await new Promise((resolve, reject) => {
+        const child = spawn(cliPath, ['call', 'get_api_observation_catalog', '--base-url', url], {stdio:['ignore','pipe','pipe']});
+        let output = '', error = '';
+        const timeout = setTimeout(() => { child.kill(); reject(Error('Catalog CLI deadline')); }, 10000);
+        child.stdout.on('data', chunk => { output += chunk; });
+        child.stderr.on('data', chunk => { error += chunk; });
+        child.once('error', failure => { clearTimeout(timeout); reject(failure); });
+        child.once('close', code => { clearTimeout(timeout); if (code !== 0) reject(Error('Catalog CLI failed: ' + error)); else { try { resolve(JSON.parse(output)); } catch (failure) { reject(failure); } } });
+      });
+      assert.equal(cliCatalog.format, catalog.format);
+      assert.equal(cliCatalog.coverage.instance_id, catalog.coverage.instance_id);
+      assert.equal(cliCatalog.coverage.capture_epoch, catalog.coverage.capture_epoch);
+      const cliEndpoint = cliCatalog.endpoints.find(endpoint => endpoint.method === 'POST' && endpoint.origin === fixtureUrl && endpoint.path === '/payload');
+      assert(cliEndpoint?.observations.some(row => JSON.stringify(row.source) === JSON.stringify(observation.source)), 'CLI preserves the same captured observation');
+      assert.equal(candidateRequestReceipts.length, requestsBeforeCatalog, 'Catalog HTTP/CLI reads never issue a target request');
+      console.log('PASS populated real-browser API catalog HTTP/CLI shapes, exact scoped identity, raw-value preservation and no replay');
       candidateStartup.phase='complete';
       passed++;
       continue;

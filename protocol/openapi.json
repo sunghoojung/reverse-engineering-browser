@@ -3979,6 +3979,102 @@
           "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
+    },
+    "/api/network/catalog": {
+      "get": {
+        "operationId": "get_api_observation_catalog",
+        "summary": "Inspect observed API endpoints and JSON body shapes",
+        "description": "Bounded derived structural observations of the newest 64 retained CDP Traffic records. Not an API specification. No required fields, route templates, authentication, replay, or completeness is inferred. Raw local Traffic is unchanged.",
+        "tags": [
+          "debugger"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiObservationCatalog"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal catalog serialization failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unexpected query parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Analysis admission unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads only a bounded copy of the current ephemeral Traffic tail and infers value-free JSON shapes after releasing the state lock. No capture enablement, target action, replay, process launch, source fetch, persistence, or raw-data mutation.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/debugger/api_catalog.rs",
+              "symbol": "Debugger::api_catalog"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
     }
   },
   "components": {
@@ -19222,6 +19318,585 @@
           }
         },
         "description": "Equality is limited to declared selected metadata. A null selected_metadata_equal means no selected record rows were present. Full keys are exporter declarations, not independently authenticated capture ownership. Cross-scope candidates are counted but never paired. A declared hash/size match does not verify omitted raw bytes. Nested differences summarize type/count without claiming those summaries establish equality. Stable result identity excludes page offset/limit; row identity includes exact input package IDs and facet/key references."
+      },
+      "ApiObservedJsonShape": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "root_type",
+          "node_count",
+          "max_depth_observed",
+          "properties"
+        ],
+        "properties": {
+          "root_type": {
+            "enum": [
+              "object",
+              "array",
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          },
+          "node_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2048
+          },
+          "max_depth_observed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16
+          },
+          "properties": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "types",
+                "observations"
+              ],
+              "properties": {
+                "path": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "name"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "const": "property"
+                          },
+                          "name": {
+                            "type": "string",
+                            "maxLength": 256
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "const": "array-element"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "types": {
+                  "type": "array",
+                  "maxItems": 6,
+                  "items": {
+                    "enum": [
+                      "object",
+                      "array",
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                },
+                "observations": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2048
+                }
+              }
+            }
+          }
+        }
+      },
+      "ApiObservation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "state",
+          "status",
+          "query_parameters",
+          "request",
+          "response"
+        ],
+        "properties": {
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "request_id",
+              "target_id",
+              "started_monotonic_ms"
+            ],
+            "properties": {
+              "request_id": {
+                "type": "string",
+                "maxLength": 8192
+              },
+              "target_id": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "started_monotonic_ms": {
+                "type": "number"
+              }
+            }
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "query_parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "names",
+              "omitted"
+            ],
+            "properties": {
+              "names": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "uniqueItems": true
+              },
+              "omitted": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "request": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "header_names",
+              "header_names_omitted",
+              "headers_truncated",
+              "body"
+            ],
+            "properties": {
+              "header_names": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "uniqueItems": true
+              },
+              "header_names_omitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "headers_truncated": {
+                "type": "boolean"
+              },
+              "body": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "mime",
+                  "status",
+                  "reason",
+                  "shape"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "maxLength": 32
+                  },
+                  "mime": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "description": "Validated lowercase media type only, without Content-Type parameters; empty when unavailable or invalid."
+                  },
+                  "status": {
+                    "enum": [
+                      "observed",
+                      "unavailable"
+                    ]
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "body_unavailable",
+                          "body_truncated",
+                          "base64_not_analyzed",
+                          "not_json_media_type",
+                          "body_byte_limit",
+                          "malformed_json",
+                          "duplicate_json_key",
+                          "shape_resource_limit"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "shape": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/ApiObservedJsonShape"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "status": {
+                          "const": "observed"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "reason": {
+                          "type": "null"
+                        },
+                        "shape": {
+                          "$ref": "#/components/schemas/ApiObservedJsonShape"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "shape": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "response": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "header_names",
+              "header_names_omitted",
+              "headers_truncated",
+              "body"
+            ],
+            "properties": {
+              "header_names": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "uniqueItems": true
+              },
+              "header_names_omitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "headers_truncated": {
+                "type": "boolean"
+              },
+              "body": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "mime",
+                  "status",
+                  "reason",
+                  "shape"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "maxLength": 32
+                  },
+                  "mime": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "description": "Validated lowercase media type only, without Content-Type parameters; empty when unavailable or invalid."
+                  },
+                  "status": {
+                    "enum": [
+                      "observed",
+                      "unavailable"
+                    ]
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "body_unavailable",
+                          "body_truncated",
+                          "base64_not_analyzed",
+                          "not_json_media_type",
+                          "body_byte_limit",
+                          "malformed_json",
+                          "duplicate_json_key",
+                          "shape_resource_limit"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "shape": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/ApiObservedJsonShape"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "status": {
+                          "const": "observed"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "reason": {
+                          "type": "null"
+                        },
+                        "shape": {
+                          "$ref": "#/components/schemas/ApiObservedJsonShape"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "shape": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "ApiObservationCatalog": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "format",
+          "coverage",
+          "limits",
+          "endpoints",
+          "limitations"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-api-observation-catalog-v1"
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "instance_id",
+              "capture_epoch",
+              "debugger_generation",
+              "capture_enabled",
+              "debugger_state",
+              "retained_records",
+              "window_records",
+              "older_records_not_examined",
+              "capture_dropped_records",
+              "skipped_records"
+            ],
+            "properties": {
+              "instance_id": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "capture_epoch": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "debugger_generation": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "capture_enabled": {
+                "type": "boolean"
+              },
+              "debugger_state": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "retained_records": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "window_records": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64
+              },
+              "older_records_not_examined": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "capture_dropped_records": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "skipped_records": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64
+              }
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "records",
+              "url_bytes",
+              "body_bytes",
+              "names_per_surface",
+              "name_bytes",
+              "shape_nodes",
+              "shape_depth",
+              "shape_fields",
+              "shape_path_bytes"
+            ],
+            "properties": {
+              "records": {
+                "const": 64
+              },
+              "url_bytes": {
+                "const": 8192
+              },
+              "body_bytes": {
+                "const": 32768
+              },
+              "names_per_surface": {
+                "const": 64
+              },
+              "name_bytes": {
+                "const": 256
+              },
+              "shape_nodes": {
+                "const": 2048
+              },
+              "shape_depth": {
+                "const": 16
+              },
+              "shape_fields": {
+                "const": 64
+              },
+              "shape_path_bytes": {
+                "const": 16384
+              }
+            }
+          },
+          "endpoints": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "method",
+                "origin",
+                "path",
+                "observations"
+              ],
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                "origin": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "path": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "observations": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "$ref": "#/components/schemas/ApiObservation"
+                  }
+                }
+              }
+            }
+          },
+          "limitations": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        },
+        "description": "Bounded derived structural observations of the newest 64 retained CDP Traffic records. Not an API specification. No required fields, route templates, authentication, replay, or completeness is inferred. Raw local Traffic is unchanged."
       }
     }
   },

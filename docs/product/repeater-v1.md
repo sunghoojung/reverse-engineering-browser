@@ -37,10 +37,12 @@ Variable names are restricted to stable identifier characters. Missing or
 malformed variables stop execution, and the fully resolved request is validated
 again against every URL, method, header, and body bound before it is sent.
 
-The Traffic workspace copies only the selected request's method and URL without
-query or fragment into a Repeater draft. It does not copy captured headers,
-cookies, or request content. A completed run can copy its explicit resolved
-request as bounded JSON for reproducibility.
+The Traffic workspace copies the selected request's method and URL into a
+Repeater draft, removing only the fragment. Query values and any embedded URL
+credentials remain in that editable draft; review them before execution or
+sharing. Request validation still rejects embedded credentials before sending.
+Captured headers, cookies, and request content are not copied. A completed run
+can copy its explicit resolved request as bounded JSON for reproducibility.
 
 ## History and comparison
 

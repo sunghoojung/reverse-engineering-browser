@@ -80,6 +80,23 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Exercise API catalog in installed Chrome
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-api-observation-catalog-ui.mjs --browser
+
+      - name: Upload rendered API catalog QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-catalog-ui-${{ github.run_id }}
+          path: build/api-catalog-ui
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Exercise Sources facts in installed Chrome
         if: ${{ !cancelled() }}
         run: |

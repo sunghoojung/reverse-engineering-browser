@@ -56,6 +56,35 @@ host-and-time correlations likewise cannot become exact captured trace links.
 See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
 for the identity boundary, retained limits and integration points.
 
+## Observed API catalog
+
+Choose **API catalog** in the Traffic footer to read a bounded structural
+snapshot. **Refresh snapshot** is explicit; opening the app, polling Traffic,
+and reopening a loaded catalog do not fetch it again. Expand an endpoint to see
+its observations, query/header names, independent request/response JSON shapes,
+and explicit unknown reasons. Typed paths distinguish property names (including
+`"*"`, empty names and slashes) from array elements. Coverage keeps unexamined
+older records, skipped records, capture evictions and name/header omissions
+separate. This is not a service specification or a required-field inference.
+Paths and names can still be private; no catalog export or target request occurs.
+
+**Open captured request** verifies the original backend instance, capture epoch,
+request ID, target ID and unrounded monotonic start against retained Traffic.
+Missing, changed or ambiguous sources stay visibly unavailable; URLs and native
+correlations never substitute for that identity. The action opens the existing
+Headers inspector, where Field trace and Save to Collection remain explicit
+workflows. Capture values are unchanged. A later source replacement clears its
+selection rather than silently displaying a reused request ID. Failed or
+malformed catalog refreshes preserve the previous readable snapshot; Close or
+Escape cancels a pending read. See [API observation catalog v1](../../protocol/api-observation-catalog-v1.md).
+
+Focused checks use `node tools/check-api-observation-catalog-ui.mjs`. Add
+`--browser` with `REB_UI_CHROMIUM` pointing to a sandbox-capable Chromium to test
+the authored loopback fixture at 1440×900, 760×560 and 360×740; screenshots and a
+receipt are written under `build/api-catalog-ui/`. `--serve` exposes the same
+read-only authored fixture for manual browser-development inspection. These
+checks do not substitute for native macOS QA.
+
 ## Saved investigation notebook
 
 Use **Notebook** in the toolbar to create a named local notebook, then **Pin

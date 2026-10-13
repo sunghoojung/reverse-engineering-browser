@@ -3,7 +3,34 @@ import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
 
+// Plan only native scrolling; the existing pointer helper remains the final
+// visibility/hit-test gate. The row may be clipped by either scroll owner.
+export function comparisonRequestRevealPlan({row, ledger, clip}) {
+  assert(row.height > 0 && ledger.bottom-ledger.top >= row.height && clip.bottom-clip.top >= row.height,
+    'Comparison request row must fit its ledger and visible outer pane');
+  const inner = row.top < ledger.top ? row.top-ledger.top : row.bottom > ledger.bottom ? row.bottom-ledger.bottom : 0;
+  const outer = row.top < clip.top ? row.top-clip.top : row.bottom > clip.bottom ? row.bottom-clip.bottom : 0;
+  if (Math.min(ledger.bottom,clip.bottom) <= Math.max(ledger.top,clip.top)) {
+    // A row's unpainted rect can lie inside the outer pane while its own
+    // scrollport is entirely offscreen. Reveal that scrollport before wheeling it.
+    return {owner:'.request-pane',delta:ledger.top>=clip.bottom?Math.min(ledger.bottom-clip.bottom,ledger.top-clip.top):Math.max(ledger.top-clip.top,ledger.bottom-clip.bottom)};
+  }
+  if (inner) return {owner:'#request-rows',delta:inner};
+  if (outer) return {owner:'.request-pane',delta:outer};
+  return null;
+}
+
 export async function checkTrafficComparisonController(root) {
+  const reveal={row:{top:361,bottom:389,height:28},ledger:{top:333,bottom:389},clip:{top:170,bottom:357}};
+  assert.deepEqual(comparisonRequestRevealPlan(reveal),{owner:'.request-pane',delta:32},'The CI-clipped second row needs outer-pane scrolling');
+  assert.equal(comparisonRequestRevealPlan({...reveal,row:{top:329,bottom:357,height:28},ledger:{top:301,bottom:357}}),null);
+  assert.deepEqual(comparisonRequestRevealPlan({row:{top:228,bottom:256,height:28},ledger:{top:200,bottom:228},clip:{top:100,bottom:400}}),{owner:'#request-rows',delta:28});
+  assert.deepEqual(comparisonRequestRevealPlan({row:{top:230,bottom:258,height:28},ledger:{top:500,bottom:556},clip:{top:170,bottom:357}}),{owner:'.request-pane',delta:199},'Reveal the fully offscreen ledger before wheeling its unpainted row');
+  assert.deepEqual(comparisonRequestRevealPlan({row:{top:230,bottom:258,height:28},ledger:{top:0,bottom:56},clip:{top:170,bottom:357}}),{owner:'.request-pane',delta:-170});
+  assert.deepEqual(comparisonRequestRevealPlan({row:{top:329,bottom:357,height:28},ledger:{top:357,bottom:385},clip:{top:170,bottom:357}}),{owner:'.request-pane',delta:28});
+  assert.deepEqual(comparisonRequestRevealPlan({row:{top:301,bottom:329,height:28},ledger:{top:329,bottom:357},clip:{top:170,bottom:357}}),{owner:'#request-rows',delta:-28});
+  assert.equal(comparisonRequestRevealPlan({row:{top:329,bottom:357,height:28},ledger:{top:329,bottom:357},clip:{top:170,bottom:357}}),null);
+  assert.throws(()=>comparisonRequestRevealPlan({...reveal,clip:{top:350,bottom:357}}),/must fit/,'Scrolling cannot excuse an impossibly clipped control');
   const app = await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const source = await readFile(join(root,'apps/research-ui/traffic_view.js'),'utf8');
   const navigation = await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
@@ -106,9 +133,33 @@ export async function checkCapturedComparisonInteractions({evaluate,viewport,cli
   await evaluate(`window.comparisonOriginal={requests:state.requests,sessionMode:state.sessionMode,debuggerSession:state.debuggerSession,events:state.events,eventsLimited:state.eventsLimited,broker:state.broker,eventFailureKind:state.eventFailureKind};state.debuggerSession=${JSON.stringify(emptyDebugger)};state.debuggerSession.generation=50;state.debuggerSession.target={id:'comparison-target',title:'Synthetic capture',url:'https://fixture.invalid/'};state.debuggerSession.network.target_id='comparison-target';state.debuggerSession.network.capture_enabled=true;
     state.requests=[0,1].map(i=>({id:'comparison-'+i,origin:'live',operation:'cdp_completed',tabId:'comparison-target',protocolRequestId:'protocol-'+i,firstTimestamp:BigInt(100+i),method:'POST',path:'https://fixture.invalid/compare-'+i,status:i?201:200,time:10,type:'xhr',events:[],exchange:{request:{state:'available',mime:'application/json',text:i?'{"a/b~":{"count":2},"large":9007199254740993}':'{"a/b~":{"count":1},"large":9007199254740992}',headers:[['content-type','application/json']]},response:{state:'available',mime:'application/json',text:JSON.stringify({result:i?'<img src=x onerror=alert(1)>':'baseline',rows:Array.from({length:12},(_,n)=>n+i)}),headers:[['content-type','application/json'],['x-variant',String(i)]]}}}));
     state.sessionMode='live';state.requestTabId='all';state.requestDomain='all';state.requestType='all';elements.requestFilter.value='';state.trafficWindowStart=0;state.trafficWindowAnchor=null;state.trafficSort='capture';renderRequests();renderInspector();renderShellStatus();renderNetworkNotice();`);
+  const requestReveals=[];
+  const selectRequestRow=async id=>{
+    const selector=`[data-request-id="${id}"]`, moves=[];
+    const geometry=()=>evaluate(`(()=>{const row=document.querySelector(${JSON.stringify(selector)}),ledger=elements.requestRows,pane=document.querySelector('.request-pane');
+      const r=row.getBoundingClientRect(),l=ledger.getBoundingClientRect(),p=pane.getBoundingClientRect();
+      let top=Math.max(0,p.top+pane.clientTop),bottom=Math.min(innerHeight,p.top+pane.clientTop+pane.clientHeight);
+      for(let parent=pane.parentElement;parent;parent=parent.parentElement){if(getComputedStyle(parent).overflowY==='visible')continue;
+        const box=parent.getBoundingClientRect();top=Math.max(top,box.top+parent.clientTop);bottom=Math.min(bottom,box.top+parent.clientTop+parent.clientHeight);}
+      return {row:{top:r.top,bottom:r.bottom,height:r.height},ledger:{top:l.top+ledger.clientTop,bottom:l.top+ledger.clientTop+ledger.clientHeight},clip:{top,bottom},
+        width:innerWidth,historyExpanded:document.querySelector('#investigation-navigation details').open};})()`);
+    for(let attempt=0;attempt<=4;attempt++){
+      const before=await geometry(), plan=comparisonRequestRevealPlan(before);
+      if(!plan){
+        await click(selector);
+        if(moves.length)await screenshot(`requests-comparison-${before.width}-${id}-revealed`);
+        requestReveals.push({id,before:moves[0]?.before??before,moves,after:await geometry()});return;
+      }
+      assert(attempt<4,`Could not reveal ${id} after four native scrolls: ${JSON.stringify(before)}`);
+      if(!moves.length)await screenshot(`requests-comparison-${before.width}-${id}-before-reveal`);
+      await wheel(plan.owner,plan.delta,plan.owner==='.request-pane'?'scrollbar':false);
+      moves.push({before,...plan});
+    }
+    assert.fail(`Could not reveal ${id} through its native scroll owners: ${JSON.stringify(await geometry())}`);
+  };
   const press=value=>key(value,value,{windowsVirtualKeyCode:({ArrowRight:39,Tab:9,Enter:13,Escape:27})[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
   for(const [width,height] of [[1440,900],[760,560],[360,740]]){
-    await viewport(width,height);await click('[data-request-id="comparison-0"]');
+    await viewport(width,height);await selectRequestRow('comparison-0');
     // Tabs have a native horizontal scroll strip. Start at its visible selected
     // tab using native Home, then advance with real keyboard events.
     await click('.inspector-tab[aria-selected="true"]');
@@ -117,7 +168,7 @@ export async function checkCapturedComparisonInteractions({evaluate,viewport,cli
     assert.equal(await evaluate('state.inspectorTab'),'compare');
     await press('Tab');assert.equal(await evaluate('document.activeElement.id'),'traffic-comparison-pin');await press('Enter');
     assert.equal(await evaluate('trafficComparisonController.identity.id'),'comparison-0');
-    await click('[data-request-id="comparison-1"]');
+    await selectRequestRow('comparison-1');
     assert.match(await evaluate("document.querySelector('#traffic-comparison').textContent"),/a~1b~0\/count/);
     assert.match(await evaluate("document.querySelector('#traffic-comparison').textContent"),/9007199254740993/);
     assert.equal(await evaluate("document.querySelectorAll('#traffic-comparison img').length"),0);
@@ -142,8 +193,8 @@ export async function checkCapturedComparisonInteractions({evaluate,viewport,cli
     await click('#traffic-comparison-clear');assert.equal(await evaluate('trafficComparisonController.identity'),null);
     assert.equal(await evaluate('document.activeElement.id'),'traffic-comparison-pin');
   }
-  await viewport(1440,900);await click('[data-request-id="comparison-0"]');await click('#traffic-comparison-pin');
-  await click('[data-request-id="comparison-1"]');
+  await viewport(1440,900);await selectRequestRow('comparison-0');await click('#traffic-comparison-pin');
+  await selectRequestRow('comparison-1');
   await evaluate("state.debuggerSession.generation=1;renderInspector()");
   assert.equal(await evaluate('trafficComparisonController.identity'),null);assert.match(await evaluate("document.querySelector('#traffic-comparison').textContent"),/Baseline expired/);
   await evaluate("state.debuggerSession.generation=51;renderInspector()");assert.equal(await evaluate('trafficComparisonController.identity'),null);
@@ -171,5 +222,5 @@ export async function checkCapturedComparisonInteractions({evaluate,viewport,cli
     assert(await evaluate('elements.requestRows.scrollTop>0'),'Healthy ledger responds to native wheel input');
   }
   await evaluate("Object.assign(state,comparisonOriginal);delete window.comparisonOriginal;renderRequests();renderInspector()");
-  return {viewports:[[1440,900],[760,560],[360,740]],checks:['exact baseline pin and selected request comparison','native keyboard pin/clear','JSON pointer escaping and large integers','inert text','independent narrow scrolling','unchanged refresh','generation restart and eviction expire permanently','content-sized headers without warning overlap','healthy 520-row hidden-warning/search tracks','changed JSON field visible and hit-tested at every viewport']};
+  return {viewports:[[1440,900],[760,560],[360,740]],requestReveals,checks:['exact baseline pin and selected request comparison','native keyboard pin/clear','JSON pointer escaping and large integers','inert text','independent narrow scrolling','unchanged refresh','generation restart and eviction expire permanently','content-sized headers without warning overlap','healthy 520-row hidden-warning/search tracks','changed JSON field visible and hit-tested at every viewport']};
 }

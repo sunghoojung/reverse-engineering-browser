@@ -555,7 +555,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 28, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 29, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -737,7 +737,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 28);
+    assert_eq!(operation_count, 29);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -5860,4 +5860,83 @@ async fn workspace_native_lock_interoperability() {
             409
         );
     }
+}
+
+#[tokio::test]
+async fn api_observation_catalog_is_read_only_local_and_cli_discoverable() {
+    let server = Server::start_with_helper_canaries(true).await;
+    server.file("events.jsonl", b"not consulted by Traffic catalog\n");
+    let bytes = assert_contract_response(
+        server.get("/api/network/catalog").await,
+        "get",
+        "/api/network/catalog",
+        200,
+    )
+    .await;
+    let catalog: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(catalog["format"], "reb-api-observation-catalog-v1");
+    assert_eq!(catalog["coverage"]["capture_enabled"], false);
+    assert_eq!(catalog["coverage"]["window_records"], 0);
+    assert_eq!(catalog["endpoints"], json!([]));
+    assert_eq!(
+        std::fs::read(server.root.path().join("events.jsonl")).unwrap(),
+        b"not consulted by Traffic catalog\n"
+    );
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+    assert!(!server.root.path().join("collection.json").exists());
+    assert_contract_response(
+        server.get("/api/network/catalog?limit=1000").await,
+        "get",
+        "/api/network/catalog",
+        400,
+    )
+    .await;
+    let forbidden = server
+        .client
+        .get(format!("{}/api/network/catalog", server.url))
+        .header("Origin", "https://external.test")
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(forbidden, "get", "/api/network/catalog", 403).await;
+    let cli = |args: &[&str]| {
+        let result = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        result.stdout
+    };
+    assert!(
+        String::from_utf8(cli(&["list"]))
+            .unwrap()
+            .contains("get_api_observation_catalog")
+    );
+    let description: Value =
+        serde_json::from_slice(&cli(&["describe", "get_api_observation_catalog"])).unwrap();
+    assert!(description["components"]["schemas"]["ApiObservedJsonShape"].is_object());
+    assert_schema(
+        &description,
+        &description["components"]["schemas"]["ApiObservationCatalog"],
+        &catalog,
+        "Offline API catalog schema",
+    );
+    let live: Value = serde_json::from_slice(&cli(&[
+        "call",
+        "get_api_observation_catalog",
+        "--base-url",
+        &server.url,
+    ]))
+    .unwrap();
+    assert_eq!(live, catalog);
 }

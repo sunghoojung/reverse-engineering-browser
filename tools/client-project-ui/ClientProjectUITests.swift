@@ -27,7 +27,8 @@ final class ClientProjectUITests: XCTestCase {
       XCTAssertTrue(save.waitForExistence(timeout: 15), "Missing real Save button: " + app.debugDescription)
       XCTAssertTrue(save.isEnabled, "Real Save button is disabled")
       let screenshot = app.screenshot()
-      try screenshot.pngRepresentation.write(to: URL(fileURLWithPath: output).appendingPathComponent(phase + "-panel.png"))
+      // The UI-test runner is sandboxed. XCTest owns screenshot persistence;
+      // the outer driver exports attachments and checks the native byte receipt.
       let attachment = XCTAttachment(screenshot: screenshot)
       attachment.name = phase + "-native-save-panel"
       attachment.lifetime = .keepAlways
@@ -38,11 +39,5 @@ final class ClientProjectUITests: XCTestCase {
       XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 20), .completed)
     }
     XCTAssertTrue(app.wait(for: .notRunning, timeout: 20), "Native exact-byte verification did not finish")
-    let receipt = URL(fileURLWithPath: output).appendingPathComponent("result.json")
-    let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: receipt)) as? [String: Any])
-    for key in ["savedExactBytes", "cancelNoWrite", "busyRefused", "navigationNoWrite", "writeFailureRefused", "replacementSaved"] {
-      XCTAssertEqual(result[key] as? Bool, true, key)
-    }
-    XCTAssertEqual(result["panelCount"] as? Int, 5)
   }
 }

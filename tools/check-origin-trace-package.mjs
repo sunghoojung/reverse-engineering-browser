@@ -31,7 +31,8 @@ export async function checkPackageContract() {
   assert(!clientSmoke.includes('panel.ok('),'Modern Save panels cannot be approved in process');
   assert(clientSmoke.includes('actual == expected') && clientSmoke.includes('children.isEmpty'));
   assert(clientUI.includes('XCUIApplication(url:') && clientUI.includes('save.click()'));
-  assert(clientUI.includes('savedExactBytes') && clientUI.includes('cancelNoWrite'));
+  assert(clientUI.includes('XCTAttachment(screenshot:') && !clientUI.includes('.write(to:'));
+  assert(!clientUI.includes('Data(contentsOf:'),'Byte receipts are checked outside the UI-test sandbox');
   assert.equal([...native.matchAll(/func applicationWillTerminate\(/g)].length,1,'Keep one termination delegate');
   assert.match(native, /let researchUIURL = resourcesURL\.appendingPathComponent\("research-ui", isDirectory: true\)/);
   for (const asset of ['index.html', 'analyst_runner_core.js']) {
@@ -138,11 +139,20 @@ async function runClientProjectSmoke(app, directory) {
       child.once('error',reject);
       child.once('close',(code,signal)=>code===0?done():reject(new Error(`Xcode native Save-panel test exited ${code}/${signal}\n${log}`)));
     });
-  } finally {clearTimeout(timer);await writeFile(join(directory,'client-project.log'),log);}
+  } finally {
+    clearTimeout(timer);await writeFile(join(directory,'client-project.log'),log);
+    // Use Xcode's supported attachment export outside the UI-test sandbox.
+    // Preserve the primary test failure if diagnostic export also fails.
+    try {
+      execFileSync('xcrun',['xcresulttool','export','attachments','--path',join(directory,'client-project-ui.xcresult'),
+        '--output-path',join(output,'attachments')],{cwd:directory,timeout:30000,stdio:'pipe'});
+    } catch(error) {await writeFile(join(output,'attachment-export-error.log'),String(error));}
+  }
   const receipt=JSON.parse(await readFile(join(output,'result.json'),'utf8'));
   assert.deepEqual(receipt,{savedExactBytes:true,cancelNoWrite:true,busyRefused:true,
     navigationNoWrite:true,writeFailureRefused:true,replacementSaved:true,panelCount:5});
-  for(const phase of ['save','writeFailure','replacementSave'])assert((await stat(join(output,phase+'-panel.png'))).size>0);
+  const screenshots=(await readdir(join(output,'attachments'),{recursive:true})).filter(path=>path.endsWith('.png'));
+  assert(screenshots.length>=3,'Every real Save phase must retain its XCTest screenshot');
   console.log('PASS Xcode UI-tested real native Save panels, exact ZIP bytes, Cancel/no-write, pending refusal, navigation cancellation/retry and atomic-write failure; overwrite not exercised');
 }
 

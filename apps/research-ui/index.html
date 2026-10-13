@@ -63,6 +63,7 @@
                     <option value="url">URL / method / status</option>
                     <option value="content">Include headers and bodies</option>
                   </select>
+                  <button id="open-api-catalog" class="secondary-button" type="button" aria-haspopup="dialog">API catalog</button>
                   <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
@@ -1352,6 +1353,13 @@
           </form>
         </section>
       </div>
+
+      <dialog id="api-catalog" class="api-catalog" aria-labelledby="api-catalog-title" aria-describedby="api-catalog-scope">
+        <header class="api-catalog-header"><h2 id="api-catalog-title">Observed API catalog</h2><button id="api-catalog-refresh" class="secondary-button" type="button">Refresh snapshot</button><button id="api-catalog-close" class="secondary-button" type="button" autofocus>Close</button></header>
+        <p id="api-catalog-scope">Structural observations from the newest retained Traffic records. Not an API specification. Paths and names may contain private data. Raw Traffic is unchanged.</p>
+        <p id="api-catalog-status" role="status" aria-live="polite">Open or refresh deliberately to read a snapshot. No automatic refresh.</p>
+        <div id="api-catalog-content" class="api-catalog-content" tabindex="0" aria-label="Endpoint observations"></div>
+      </dialog>
 
       <footer class="statusbar">
         <span id="broker-status" class="broker-status">connecting to evidence</span>

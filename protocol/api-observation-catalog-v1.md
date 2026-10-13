@@ -55,6 +55,35 @@ discards scalar values and detects resource limits while traversing. No partial
 shape is represented as complete. A valid observed shape says nothing about
 upstream wire completeness, authentication needs, or future API responses.
 
+## Supported observations and explicit unknowns
+
+This is a mapping of recorded HTTP exchanges, not discovery of a website's API
+surface. A URL mentioned in JavaScript, a JSON string, a redirect header or a
+pagination link never creates an endpoint. Unvisited routes, missing events,
+uncaptured worker traffic and unsupported protocols cannot be enumerated or
+counted as known omissions. The fixture matrix below defines the interpretation
+boundary; it does not claim exhaustive website or protocol coverage.
+
+| Input or situation | What is reported | What remains unknown or unsupported |
+| --- | --- | --- |
+| REST-like paths and methods | Exact observed method, normalized origin and raw path spelling | No guessed route variables, unused endpoints or allowed-method inference |
+| GraphQL operations sharing one path | One HTTP endpoint group; each body's independent JSON field/type shape | Query text, operation-name values, schema, resolver behavior and mutation semantics are not interpreted; batched arrays remain ordinary JSON arrays |
+| Repeated or encoded query names | Form-decoded, deduplicated names; malformed names counted as omitted | Values, multiplicity, ordering and distinctions lost by form decoding are not inferred |
+| Cursor, offset or page pagination | Only captured exchanges and parameter names | No page traversal, cursor values, total result count, next-page discovery or completeness inference |
+| Mixed arrays, null and empty JSON | Typed array-element paths, observed type unions and occurrence counts; `null`, `[]` and `{}` remain distinct | Missing properties do not establish optionality; empty arrays reveal no element type; bodies are not merged into a service schema |
+| JSON MIME parameters and duplicate keys | Validated lowercase media type without parameters; JSON and `application/*+json` shapes for complete retained text | Charset declarations do not verify original wire decoding; malformed JSON, duplicate keys and parser/resource failures yield an unavailable shape |
+| Multipart, form uploads and binary data | HTTP endpoint, header names and explicit body unavailability | No multipart/form field extraction, filename discovery, file analysis or base64 decoding; truncated bodies are never inferred from their prefixes |
+| Redirects, CORS preflights and errors | Only HTTP hops actually present in Traffic, with distinct source identities and observed statuses | No redirect following, inferred links between unrelated hops, successful-operation claim or authentication/CORS-policy inference |
+| SSE, NDJSON and other streaming text | Captured HTTP endpoint; loading bodies remain unavailable and unsupported media types are explicit | No event/frame or per-line JSON decoding; several JSON documents under a JSON MIME type are malformed for this single-document view |
+| WebSocket traffic | No WebSocket frame interpretation; non-HTTP(S) ledger records are skipped | CDP WebSocket-only events do not create Traffic rows, so their absence is not counted as a catalog skip; GraphQL-over-WebSocket is unsupported |
+| Missing, failed, truncated or evicted responses | Body state/reason, window exclusions and capture-eviction counters remain separate | No replacement body, automatic retry, raw-store lookup or claim that a retained body is complete wire evidence |
+| Authentication, sessions and cross-origin requests | Header names, status, exact origin and scoped instance/epoch/request/target/start identity | No copied header/body/query values or inferred auth requirement, authorization decision or cross-session fallback; paths and names still require sharing review, and different origins remain separate groups |
+
+Focused synthetic tests exercise these classifications, including real ledger
+insertion, redirect bookkeeping and retention eviction. Separate browser tests
+exercise populated capture through HTTP and CLI. Passing the tests establishes
+these bounded transformations, not completeness for an arbitrary website.
+
 ## Bounds and coverage
 
 - Newest 64 of the existing at-most-1,000 retained requests; no stable pagination

@@ -680,13 +680,17 @@ mod tests {
     async fn reused_request_identity_keeps_capture_epoch_and_exact_group_boundaries() {
         let debugger = debugger(true);
         let original = request(1, "https://example.test/same", "{}");
-        debugger.network("Network.requestWillBeSent", &original).await;
+        debugger
+            .network("Network.requestWillBeSent", &original)
+            .await;
         let first = debugger.api_catalog().unwrap();
         debugger.update(|state| {
             state["network"]["requests"] = json!([]);
             state["network"]["capture_epoch"] = json!(1);
         });
-        debugger.network("Network.requestWillBeSent", &original).await;
+        debugger
+            .network("Network.requestWillBeSent", &original)
+            .await;
         let second = debugger.api_catalog().unwrap();
         validate(&second);
         assert_ne!(
@@ -784,6 +788,302 @@ mod tests {
                 .unwrap()
                 .len(),
             MAX_NAMES
+        );
+    }
+
+    #[tokio::test]
+    async fn graphql_operations_and_pagination_values_never_invent_endpoints() {
+        let debugger = debugger(true);
+        for (id, url, body) in [
+            (
+                1,
+                "https://example.test/graphql?cursor=synthetic-page-one&limit=20&tag=a&%74ag=b&space+key=c&space%20key=d&%FF=e&%=f",
+                r#"{"operationName":"SyntheticRead","query":"query SyntheticRead { items { id } }","variables":{"cursor":"synthetic-page-one"},"unusedUrl":"https://unobserved.test/admin"}"#,
+            ),
+            (
+                2,
+                "https://example.test/graphql?cursor=synthetic-page-two&limit=10",
+                r#"{"operationName":"SyntheticMutation","query":"mutation SyntheticMutation { update }","variables":{"cursor":null}}"#,
+            ),
+        ] {
+            debugger
+                .network("Network.requestWillBeSent", &request(id, url, body))
+                .await;
+        }
+        let before = debugger.snapshot();
+        let output = debugger.api_catalog().unwrap();
+        validate(&output);
+        assert_eq!(before, debugger.snapshot());
+        assert_eq!(output["coverage"]["window_records"], 2);
+        assert_eq!(output["endpoints"].as_array().unwrap().len(), 1);
+        let endpoint = &output["endpoints"][0];
+        assert_eq!(endpoint["path"], "/graphql");
+        let observations = endpoint["observations"].as_array().unwrap();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(
+            observations[1]["query_parameters"]["names"],
+            json!(["cursor", "limit", "space key", "tag"])
+        );
+        assert_eq!(observations[1]["query_parameters"]["omitted"], 2);
+        assert_eq!(observations[0]["query_parameters"]["omitted"], 0);
+        let cursor_path = json!([
+            {"kind":"property","name":"variables"},
+            {"kind":"property","name":"cursor"}
+        ]);
+        let expected_types = [json!(["null"]), json!(["string"])];
+        for (index, types) in expected_types.into_iter().enumerate() {
+            let properties = observations[index]["request"]["body"]["shape"]["properties"]
+                .as_array()
+                .unwrap();
+            let cursor = properties
+                .iter()
+                .find(|field| field["path"] == cursor_path)
+                .unwrap();
+            assert_eq!(cursor["types"], types);
+        }
+        let text = output.to_string();
+        for value in [
+            "synthetic-page-one",
+            "synthetic-page-two",
+            "SyntheticRead",
+            "SyntheticMutation",
+            "unobserved.test",
+        ] {
+            assert!(!text.contains(value));
+        }
+    }
+
+    #[test]
+    fn mixed_arrays_null_and_empty_json_keep_per_body_observation_semantics() {
+        let shape = infer_shape(r#"[null,{},[],1,1.5,true,"synthetic-value",{"id":0},{"id":null}]"#)
+            .unwrap();
+        assert_eq!(shape["root_type"], "array");
+        assert_eq!(shape["node_count"], 12);
+        assert_eq!(shape["max_depth_observed"], 2);
+        let fields = shape["properties"].as_array().unwrap();
+        let element = fields
+            .iter()
+            .find(|field| field["path"] == json!([{"kind":"array-element"}]))
+            .unwrap();
+        assert_eq!(
+            element["types"],
+            json!(["array", "boolean", "null", "number", "object", "string"])
+        );
+        assert_eq!(element["observations"], 9);
+        let id = fields
+            .iter()
+            .find(|field| {
+                field["path"]
+                    == json!([
+                        {"kind":"array-element"},
+                        {"kind":"property","name":"id"}
+                    ])
+            })
+            .unwrap();
+        assert_eq!(id["types"], json!(["null", "number"]));
+        assert_eq!(id["observations"], 2);
+        assert!(!shape.to_string().contains("synthetic-value"));
+        for (text, root_type) in [("null", "null"), ("[]", "array"), ("{}", "object")] {
+            let empty = infer_shape(text).unwrap();
+            assert_eq!(empty["root_type"], root_type);
+            assert_eq!(empty["node_count"], 1);
+            assert_eq!(empty["properties"], json!([]));
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_bodies_and_streams_remain_explicit_unknowns() {
+        for (state, mime, text, base64, truncated, reason) in [
+            ("missing", "multipart/form-data", "", "", false, "body_unavailable"),
+            ("empty", "application/json", "", "", false, "body_unavailable"),
+            ("loading", "text/event-stream", "", "", false, "body_unavailable"),
+            ("error", "application/json", "", "", false, "body_unavailable"),
+            ("available", "application/json", "{}", "", true, "body_truncated"),
+            ("available", "application/octet-stream", "", "AAEC", false, "base64_not_analyzed"),
+            (
+                "available",
+                "multipart/form-data; boundary=synthetic-boundary",
+                "synthetic-file-content",
+                "",
+                false,
+                "not_json_media_type",
+            ),
+            (
+                "available",
+                "application/x-www-form-urlencoded",
+                "token=synthetic-token",
+                "",
+                false,
+                "not_json_media_type",
+            ),
+            (
+                "available",
+                "text/event-stream",
+                "data: {\"ok\":true}\n\n",
+                "",
+                false,
+                "not_json_media_type",
+            ),
+            ("available", "application/x-ndjson", "{}\n{}\n", "", false, "not_json_media_type"),
+            ("available", "application/json", "{}\n{}\n", "", false, "malformed_json"),
+            (
+                "available",
+                "application/json; charset=utf-8",
+                "{\"id\":1,\"id\":2}",
+                "",
+                false,
+                "duplicate_json_key",
+            ),
+        ] {
+            let side = select_side(&json!({
+                "headers": [], "headers_truncated": false,
+                "body": {"state": state, "mime": mime, "text": text,
+                    "base64": base64, "truncated": truncated}
+            }));
+            let body = body_shape(&side["body"]);
+            assert_eq!(body["status"], "unavailable", "{state}: {mime}");
+            assert_eq!(body["reason"], reason, "{state}: {mime}");
+            assert!(body["shape"].is_null());
+            assert!(!body.to_string().contains("synthetic-"));
+        }
+        let json_body = body_shape(&json!({
+            "state": "available", "mime": "application/problem+json; charset=utf-8",
+            "text": "{\"title\":null}", "truncated": false, "has_base64": false
+        }));
+        assert_eq!(json_body["status"], "observed");
+        assert_eq!(json_body["mime"], "application/problem+json");
+        let debugger = debugger(true);
+        for method in ["Network.webSocketCreated", "Network.webSocketFrameReceived"] {
+            debugger
+                .network(
+                    method,
+                    &json!({"requestId":"socket", "url":"wss://example.test/socket"}),
+                )
+                .await;
+        }
+        let output = debugger.api_catalog().unwrap();
+        validate(&output);
+        assert_eq!(output["coverage"]["window_records"], 0);
+        assert_eq!(output["endpoints"], json!([]));
+        debugger
+            .network(
+                "Network.requestWillBeSent",
+                &request(1, "wss://example.test/socket", "{}"),
+            )
+            .await;
+        let unsupported = debugger.api_catalog().unwrap();
+        validate(&unsupported);
+        assert_eq!(unsupported["coverage"]["window_records"], 1);
+        assert_eq!(unsupported["coverage"]["skipped_records"], 1);
+        assert_eq!(unsupported["endpoints"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn redirects_and_auth_statuses_preserve_only_observed_http_hops() {
+        let debugger = debugger(true);
+        debugger
+            .network(
+                "Network.requestWillBeSent",
+                &request(1, "https://first.test/start?token=synthetic-redirect", "{}"),
+            )
+            .await;
+        let mut redirected = request(1, "https://second.test/final", "{}");
+        redirected["timestamp"] = json!(3.0);
+        redirected["request"]["method"] = json!("GET");
+        redirected["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("postData");
+        redirected["redirectResponse"] = json!({
+            "status": 302,
+            "headers": {"Location":"https://second.test/final", "Set-Cookie":"synthetic-session"}
+        });
+        debugger
+            .network("Network.requestWillBeSent", &redirected)
+            .await;
+        debugger
+            .network(
+                "Network.responseReceived",
+                &json!({"requestId":"1", "response":{
+                    "status":401, "headers":{"WWW-Authenticate":"Bearer synthetic-realm"}
+                }}),
+            )
+            .await;
+        let before = debugger.snapshot();
+        let output = debugger.api_catalog().unwrap();
+        validate(&output);
+        assert_eq!(before, debugger.snapshot());
+        assert_eq!(output["endpoints"].as_array().unwrap().len(), 2);
+        let final_observation = &output["endpoints"][0]["observations"][0];
+        let redirect_observation = &output["endpoints"][1]["observations"][0];
+        assert_eq!(output["endpoints"][0]["method"], "GET");
+        assert_eq!(output["endpoints"][0]["origin"], "https://second.test");
+        assert_eq!(final_observation["status"], 401);
+        assert_eq!(final_observation["request"]["body"]["state"], "empty");
+        assert_eq!(final_observation["source"]["started_monotonic_ms"], 3000.0);
+        assert_eq!(redirect_observation["status"], 302);
+        assert_eq!(redirect_observation["source"]["started_monotonic_ms"], 2000.0);
+        assert_ne!(
+            final_observation["source"]["request_id"],
+            redirect_observation["source"]["request_id"]
+        );
+        assert_eq!(redirect_observation["response"]["body"]["state"], "missing");
+        assert_eq!(
+            redirect_observation["response"]["body"]["reason"],
+            "body_unavailable"
+        );
+        assert_eq!(
+            final_observation["response"]["header_names"],
+            json!(["www-authenticate"])
+        );
+        let text = output.to_string();
+        for value in ["synthetic-redirect", "synthetic-session", "synthetic-realm"] {
+            assert!(!text.contains(value));
+        }
+    }
+
+    #[tokio::test]
+    async fn eviction_and_invalid_sources_never_fall_back_to_matching_urls() {
+        let debugger = debugger(true);
+        for id in 0..1002 {
+            debugger
+                .network(
+                    "Network.requestWillBeSent",
+                    &request(id, "https://example.test/same", "{}"),
+                )
+                .await;
+        }
+        let output = debugger.api_catalog().unwrap();
+        validate(&output);
+        assert_eq!(output["coverage"]["retained_records"], 1000);
+        assert_eq!(output["coverage"]["older_records_not_examined"], 936);
+        assert_eq!(output["coverage"]["capture_dropped_records"], 2);
+        let observations = output["endpoints"][0]["observations"].as_array().unwrap();
+        assert_eq!(observations.len(), MAX_RECORDS);
+        assert_eq!(
+            observations[0]["source"]["request_id"],
+            "cdp:synthetic-target:1001"
+        );
+        assert_eq!(
+            observations[MAX_RECORDS - 1]["source"]["request_id"],
+            "cdp:synthetic-target:938"
+        );
+        debugger.update(|state| {
+            let rows = state["network"]["requests"].as_array_mut().unwrap();
+            rows[999]["id"] = json!("");
+            rows[998]["target_id"] = json!("");
+            rows[997]["started_monotonic_ms"] = Value::Null;
+        });
+        let invalid = debugger.api_catalog().unwrap();
+        validate(&invalid);
+        assert_eq!(invalid["coverage"]["window_records"], MAX_RECORDS);
+        assert_eq!(invalid["coverage"]["skipped_records"], 3);
+        assert_eq!(
+            invalid["endpoints"][0]["observations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_RECORDS - 3
         );
     }
 }

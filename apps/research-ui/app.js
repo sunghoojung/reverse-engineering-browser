@@ -2,6 +2,15 @@
         document.querySelector('#traffic-capture-export'),
         () => state.requests.find(request => request.id === state.selectedRequestId)
       );
+      const apiCatalogPanel = installApiObservationCatalog({
+        getRequests: () => state.requests,
+        openRequest: request => {
+          const identity = investigationRequestIdentity(request);
+          if (!identity || !openInvestigation({kind: 'request', identity, inspectorTab: 'headers',
+            relation: 'Catalog source matched the exact backend instance, capture epoch, request, target and original monotonic start. Shapes describe observations only.'})) return false;
+          return true;
+        }
+      });
 
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
@@ -1137,6 +1146,12 @@
           state.requests = state.nativeRequests;
         }
         syncTrafficComparison();
+        if (state.selectedCaptureIdentity && !apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record) {
+          resetRequestSelection();
+          state.trafficSelectionNotice = 'The selected captured request expired or its exact source changed. Choose another request.';
+          investigationNotice(state.trafficSelectionNotice, 'stale');
+        }
+        apiCatalogPanel.sync();
       }
 
       function renderShellStatus() {
@@ -1204,6 +1219,7 @@
         state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
         state.selectedRequestId = null;
+        state.selectedCaptureIdentity = null;
         state.selectedField = null;
         state.originTrace = null;
         state.selectedTraceRow = null;
@@ -1646,6 +1662,7 @@
         if (!request) return;
         if (state.selectedRequestId !== id) state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.selectedRequestId = id;
+        state.selectedCaptureIdentity = request.captureRecord ? apiCatalogRequestIdentity(request) : null;
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
         state.originTrace = null;

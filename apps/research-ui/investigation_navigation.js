@@ -2,7 +2,7 @@
  * No raw captures, drafts or DOM nodes are retained in history or browser storage. */
 /** @typedef {{type:'captured-artifact',session:string,artifact:string,sha256:string,bytes:number}} InvestigationArtifact
  * @typedef {{type:'captured-request',session:string,process:string,sequence:string,request:string}} InvestigationRequest
- * @typedef {{type:'debugger-request',id:string,target:string,protocol:string,started:string}} InvestigationDebuggerRequest
+ * @typedef {{type:'debugger-request',id:string,target:string,protocol:string,started:string,instance?:string,epoch?:number,startedMonotonicMs?:number}} InvestigationDebuggerRequest
  * All references are exact retained identities, never URL or name matches. */
 const INVESTIGATION_HISTORY_LIMIT = 24;
 const investigationId = value => {
@@ -36,6 +36,12 @@ function investigationRequestIdentity(request) {
   // CDP/native correlation is currently host+method+time. It cannot promote a
   // debugger request to an exact native-event identity.
   if (request.protocolRequestId || String(request.operation).startsWith('cdp_')) {
+    if (request.captureRecord) {
+      const exact = apiCatalogRequestIdentity(request);
+      if (!exact || typeof request.protocolRequestId !== 'string' || request.protocolRequestId.length > 4096) return null;
+      return {type: 'debugger-request', id: exact.request, target: exact.target, protocol: request.protocolRequestId,
+        started: String(request.firstTimestamp), instance: exact.instance, epoch: exact.epoch, startedMonotonicMs: exact.started};
+    }
     if (typeof request.id !== 'string' || request.id.length > 256 || typeof request.tabId !== 'string' || request.tabId.length > 256 || typeof request.protocolRequestId !== 'string' || request.protocolRequestId.length > 256) return null;
     const started = investigationId(request.firstTimestamp);
     return started ? {type: 'debugger-request', id: request.id, target: request.tabId, protocol: request.protocolRequestId, started} : null;
@@ -47,7 +53,7 @@ function investigationRequestIdentity(request) {
 function investigationSame(left, right) {
   if (!left || !right || left.type !== right.type) return false;
   const fields = { 'captured-event': ['session','process','sequence'], 'captured-request': ['session','process','sequence','request'],
-    'captured-artifact': ['session','artifact','sha256','bytes'], 'debugger-request': ['id','target','protocol','started'], 'live-script': ['id','target','hash','context','line','column','length'] }[left.type];
+    'captured-artifact': ['session','artifact','sha256','bytes'], 'debugger-request': ['id','target','protocol','started','instance','epoch','startedMonotonicMs'], 'live-script': ['id','target','hash','context','line','column','length'] }[left.type];
   return Boolean(fields) && fields.every(field => left[field] === right[field]);
 }
 function investigationResolve(identity, records, identityOf) {
@@ -126,7 +132,7 @@ function investigationSnapshot() {
     artifact: investigationArtifactIdentity(source), script: source?.source_type === 'script' ? investigationScriptIdentity(source) ?? {unavailable:true} : null,
     consoleScope: screen === 'traffic' && root.dataset.consoleTraffic === 'true' ? {session:document.querySelector('#console-experiment-traffic').dataset.session, target:document.querySelector('#console-experiment-traffic').dataset.document} : null,
     runtimeHook: screen === 'traffic' && state.selectedRuntimeHookRequest ? {...state.selectedRuntimeHookRequest} : null,
-    inspectorTab: state.inspectorTab, fieldTab: state.fieldTab, fieldPath: String(state.selectedField?.path ?? '').slice(0,1024),
+    trafficDetailOpen: Boolean(state.trafficDetailOpen), inspectorTab: state.inspectorTab, fieldTab: state.fieldTab, fieldPath: String(state.selectedField?.path ?? '').slice(0,1024),
     sourceRange: investigationSame(investigationRange?.identity, investigationArtifactIdentity(source)) ? {start:investigationRange.start,end:investigationRange.end} : null,
     traceRow: state.selectedTraceRow, traceGap: investigationSelectedGap(), decoderStep: state.decoderSelectedStepId,
     sourceFormatted: state.sourceFormatted, sourceDeobfuscated: state.sourceDeobfuscated, sourceWasm: state.sourceWasm,
@@ -169,6 +175,10 @@ function restoreInvestigation(entry) {
   try {
     if (request && state.selectedRequestId !== request.record.id) selectRequest(request.record.id, entry.request);
     if (entry.screen === 'traffic') {
+      if (entry.request === null && !entry.consoleScope && !entry.runtimeHook) {
+        resetRequestSelection(); state.trafficSelectionNotice = ''; renderRequests();
+      }
+      if (typeof entry.trafficDetailOpen === 'boolean') state.trafficDetailOpen = entry.trafficDetailOpen;
       if (entry.consoleScope) document.querySelector('#screen-traffic').dataset.consoleTraffic = 'true';
       else delete document.querySelector('#screen-traffic').dataset.consoleTraffic;
       document.querySelector('#console-experiment-traffic').hidden = !entry.consoleScope;
@@ -335,7 +345,7 @@ function openInvestigation({kind, identity, relation, inspectorTab, range}) {
     document.querySelector('#console-experiment-traffic').hidden = true;
     state.selectedRuntimeHookRequest = null;
     renderRuntimeHookTraffic();
-    if (state.selectedRequestId !== result.record.id) selectRequest(result.record.id, identity);
+    if (state.selectedRequestId !== result.record.id || kind === 'request') selectRequest(result.record.id, identity);
     if (inspectorTab) {state.inspectorTab = inspectorTab; renderInspector();}
     const ready = kind === 'trace' ? refreshOriginTrace() : null;
     const revision = investigationRevision;

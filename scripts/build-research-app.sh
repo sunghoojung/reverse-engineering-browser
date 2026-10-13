@@ -18,6 +18,8 @@ workspace_lease_source="${repo_root}/apps/research-ui/macos/NativeWorkspaceLease
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
 close_smoke_source="${repo_root}/apps/research-ui/macos/NativeCloseGuardSmoke.swift"
 close_guard_source="${repo_root}/apps/research-ui/macos/NativeCloseGuard.swift"
+client_project_export_source="${repo_root}/apps/research-ui/macos/ClientProjectExport.swift"
+client_project_smoke_source="${repo_root}/apps/research-ui/macos/ClientProjectExportSmoke.swift"
 live_session_source="${repo_root}/apps/research-ui/macos/LiveSessionCoordinator.swift"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
@@ -60,7 +62,7 @@ if application.is_dir():
 PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
-for asset in index.html app.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js investigation_navigation.js investigation_notebook.js traffic_view.js traffic_comparison.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js app.js analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js investigation_navigation.js investigation_notebook.js traffic_view.js captured_client.js traffic_comparison.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js app.js analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
@@ -123,11 +125,18 @@ xcrun swiftc -parse-as-library \
 "${repo_root}/build/check-origin-trace-gaps" \
   "${repo_root}/apps/origin-trace-backend/assets/origin-trace-gap-cases.json"
 
+node "${repo_root}/tools/check-captured-client-project.mjs"
+xcrun swiftc -parse-as-library -framework Cocoa -framework WebKit \
+  "${client_project_export_source}" "${repo_root}/tools/check-client-project-export.swift" \
+  -o "${repo_root}/build/check-client-project-export"
+"${repo_root}/build/check-client-project-export" \
+  "${repo_root}/build/client-project-qa/authored-example.zip"
+
 xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" \
+  "${swift_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

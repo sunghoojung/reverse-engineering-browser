@@ -354,6 +354,12 @@ jobs:
       - name: Build and test native tools and Rust components
         run: make check
 
+      - name: Exercise generated Go client against authored loopback fixtures
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go version
+          node tools/check-captured-client-project.mjs --go
+
       - name: Run end-to-end event path
         if: matrix.os == 'ubuntu-latest'
         run: make e2e
@@ -383,6 +389,20 @@ jobs:
         with:
           name: native-package-${{ github.run_id }}
           path: build/package-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Upload named native Save-panel screenshots
+        if: matrix.os == 'macos-latest' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-client-project-panels-${{ github.run_id }}
+          path: |
+            build/package-qa/client-project-panels/*-panel.png
+            build/package-qa/client-project-panels/phase-attachments.json
+            build/package-qa/client-project-panels/result.json
+            build/package-qa/client-project-panels/attachment-export-error.log
+            build/package-qa/client-project-panels/native-smoke.log
           if-no-files-found: ignore
           retention-days: 3
 

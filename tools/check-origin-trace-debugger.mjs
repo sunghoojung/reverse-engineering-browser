@@ -1340,7 +1340,7 @@ let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
-    state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}},
+    state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}}, capturedClientWorkflow: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, renderTrafficComparison() {}, openFieldProvenance() {},
   });

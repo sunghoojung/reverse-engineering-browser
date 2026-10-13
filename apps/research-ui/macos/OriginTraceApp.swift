@@ -141,7 +141,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/investigation_notebook.js", "/traffic_view.js", "/traffic_comparison.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/investigation_notebook.js", "/traffic_view.js", "/captured_client.js", "/traffic_comparison.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -2664,6 +2664,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
   private var closeGuard: NativeCloseGuard?
+  private var clientProjectExport: NativeClientProjectExport?
+  private var clientProjectSmoke: ClientProjectExportSmoke?
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
@@ -2740,6 +2742,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let closeGuard = NativeCloseGuard(window: window, webView: webView)
     window.delegate = closeGuard
     self.closeGuard = closeGuard
+    let clientProjectExport = NativeClientProjectExport(webView: webView, window: window)
+    configuration.userContentController.addScriptMessageHandler(
+      clientProjectExport, contentWorld: .page, name: NativeClientProjectExport.handlerName
+    )
+    self.clientProjectExport = clientProjectExport
 
     NSApp.setActivationPolicy(.regular)
     if !smokeTest {
@@ -2753,6 +2760,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return
     }
     closeGuard.prepareForLoad(requestedUIURL ?? localApplicationURL)
+    clientProjectExport.prepareForLoad(requestedUIURL ?? localApplicationURL)
     webView.load(URLRequest(url: requestedUIURL ?? localApplicationURL))
     if smokeTest && ProcessInfo.processInfo.environment["REB_APP_SMOKE_LIVE_FAILURE"] == "1" {
       // Exercise the real startup failure path without a browser or modal dialog.
@@ -2782,6 +2790,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
     closeGuard?.navigationWillStart()
+    clientProjectExport?.navigationWillStart()
   }
 
   func webView(
@@ -2790,12 +2799,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   ) {
     if navigationAction.targetFrame?.isMainFrame == true {
       closeGuard?.navigationWillStart()
+      clientProjectExport?.navigationWillStart()
     }
     decisionHandler(.allow)
   }
 
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
     closeGuard?.navigationWillStart()
+    clientProjectExport?.navigationWillStart()
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -2820,6 +2831,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    clientProjectExport?.navigationWillStart()
     closeSmoke?.willTerminate()
     liveSessionCoordinator.stop()
   }
@@ -2929,6 +2941,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           return
         }
         self.closeGuard?.prepareForLoad(nativeURL)
+        self.clientProjectExport?.prepareForLoad(nativeURL)
         webView.load(URLRequest(url: nativeURL))
         self.presentOriginTraceWindow()
       },
@@ -2958,6 +2971,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     liveSessionCoordinator.stop()
     if let localApplicationURL, let webView {
       closeGuard?.prepareForLoad(localApplicationURL)
+      clientProjectExport?.prepareForLoad(localApplicationURL)
       webView.load(URLRequest(url: localApplicationURL))
     }
     presentLiveSessionSetup()
@@ -3297,7 +3311,20 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    clientProjectExport?.navigationDidFinish(webView)
     guard smokeTest else { return }
+    if ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT"] == "1",
+      let window, let clientProjectExport
+    {
+      if let clientProjectSmoke {
+        clientProjectSmoke.didFinishNavigation()
+      } else {
+        let smoke = ClientProjectExportSmoke(webView: webView, window: window, exporter: clientProjectExport)
+        clientProjectSmoke = smoke
+        smoke.start()
+      }
+      return
+    }
     if let scenario = ProcessInfo.processInfo.environment["REB_APP_SMOKE_NATIVE_CLOSE"],
       let window, let closeGuard
     {
@@ -3327,6 +3354,21 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
             if (!response.ok || !(await response.text()).length) throw new Error(`Packaged asset failed: ${asset}`);
           }
           window.__rebSmokeAssets = assets.length;
+          const projectBridge = window.webkit?.messageHandlers?.rebClientProjectExport;
+          if (typeof projectBridge?.postMessage !== 'function') throw new Error('Native client-project save bridge missing');
+          let refusedProject = false;
+          try { await projectBridge.postMessage({format:'reb-client-project-save-v1',mode:'raw',base64:'AA=='}); }
+          catch (error) { refusedProject = String(error).includes('fixed-format validation'); }
+          if (!refusedProject) throw new Error('Native client-project save bridge accepted malformed ZIP');
+          const projectFrame = document.createElement('iframe');
+          projectFrame.src = 'about:blank';
+          await new Promise(resolve => {projectFrame.addEventListener('load',resolve,{once:true});document.body.append(projectFrame);});
+          let refusedFrame = false;
+          try { await projectFrame.contentWindow.webkit.messageHandlers.rebClientProjectExport.postMessage({format:'reb-client-project-save-v1',mode:'raw',base64:'AA=='}); }
+          catch (error) { refusedFrame = String(error).includes('owned application document'); }
+          projectFrame.remove();
+          if (!refusedFrame) throw new Error('Native client-project save bridge did not enforce main-frame ownership');
+          window.__rebSmokeClientProject = {available:true,invalidPayloadRefused:true,subframeRefused:true};
           for (const privatePath of ['analyst_runner_core.js', 'analyst_runner_node.js',
             'run-live-session.sh', 'OriginTrace.icns', 'research-ui/app.js']) {
             if ((await fetch('/' + privatePath)).status !== 404) throw new Error(`Private asset exposed: ${privatePath}`);
@@ -3509,6 +3551,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               captureMode: state.sessionMode,
               packageAssetCount: window.__rebSmokeAssets,
               packagePrivateAssetsBlocked: window.__rebSmokePrivateAssetsBlocked === true,
+              nativeClientProject: window.__rebSmokeClientProject,
               float32: window.__rebSmokeFloat32,
               stylesLoaded: [...document.styleSheets].some(sheet => sheet.href?.endsWith('/app.css')),
               nativeShell: document.documentElement.classList.contains('native-shell'),

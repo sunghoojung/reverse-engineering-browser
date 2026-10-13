@@ -12,6 +12,46 @@
         }
       });
 
+      const capturedClientWorkflow = installCapturedClientWorkflow({
+        getRequest: () => state.requests.find(request => request.id === state.selectedRequestId),
+        getRequests: () => state.requests,
+        getRun: () => selectedRepeaterEntry(),
+        contextKey: () => experimentContextKey(),
+        editRevision: () => state.repeaterDraftRevision ?? 0,
+        hasDraft: () => Boolean(elements.repeaterRequestUrl.value || elements.repeaterRequestBody.value || elements.repeaterRequestHeaders.value || state.repeaterDraftDirty || state.repeaterVariablesDirty),
+        prepareContext: async () => {
+          if (state.experimentPending || state.debuggerActionPending || repeaterState()?.active_execution) throw new TypeError('Wait for the current disposable action to finish.');
+          const created = !requestInterception()?.isolated;
+          if (created) {
+            const receipt = currentExperimentReceipt(await runExperimentAction({action:'create_request_interception_experiment'}));
+            if (!receipt) throw new TypeError(state.experimentError || 'The isolated blank page could not be confirmed.');
+          }
+          const context = requestInterception();
+          if (!context?.isolated || context.target_id !== state.debuggerSession?.target?.id || !['ready','error'].includes(context.state) ||
+              !['running','paused'].includes(state.debuggerSession?.state)) throw new TypeError('The exact disposable page is not ready.');
+          return {key:experimentContextKey(),created};
+        },
+        writeDraft: (source,context) => {
+          elements.repeaterRequestUrl.value = source.input.url;
+          elements.repeaterRequestMethod.value = source.input.method;
+          elements.repeaterRequestHeaders.value = JSON.stringify(Object.fromEntries(source.input.headers),null,2);
+          elements.repeaterRequestBody.value = source.input.body;
+          state.repeaterBodyRepresentation = {text:source.input.body,display:elements.repeaterRequestBody.value};
+          elements.repeaterRequestTimeout.value = String(source.input.timeout_ms);
+          state.repeaterSelectedHistoryId = null; state.repeaterExpectedHistoryId = null;
+          state.repeaterPrefillKey = null; state.repeaterHeadersSource = null; state.repeaterQuerySource = null;
+          markRepeaterDraftChanged(); refreshRepeaterStructuredEditors(true);
+          state.repeaterCaptureSource = {source,context,importRevision:state.repeaterDraftRevision};
+        },
+        getRunCapture: (run,context) => {
+          const retained = state.repeaterCaptureRuns;
+          const link = retained?.context === context ? retained.links.find(item => item.id === run?.id) : null;
+          return link ? {identity:retained.source.identity,evidence:retained.source.evidence,relation:link.relation} : null;
+        },
+        openRepeater: () => { state.experimentMode = 'repeater'; showScreen('experiments'); elements.repeaterRequestUrl.focus({preventScroll:true}); },
+        notice: message => { investigationNotice(message); setExperimentNotice('ready',message); }
+      });
+
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
@@ -1912,6 +1952,7 @@
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         updateSelectionSummary(request);
         trafficCaptureExport.sync();
+        capturedClientWorkflow.sync();
         document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
         const showingComparison = state.inspectorTab === 'compare';
@@ -2739,9 +2780,10 @@
 
       function prefillRepeaterRequest(force = false) {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        if (!request || state.repeaterDraftDirty && !force) return;
+        if (!request || !force && (state.repeaterDraftDirty || state.repeaterCaptureSource)) return;
         const key = `${request.id}:${request.method}:${request.path}`;
         if (!force && state.repeaterPrefillKey === key) return;
+        state.repeaterCaptureSource = null;
         state.repeaterPrefillKey = key;
         let requestUrl = request.path;
         if (!/^https?:\/\//i.test(requestUrl)) {
@@ -2757,6 +2799,7 @@
         elements.repeaterRequestTimeout.value = '15000';
         elements.repeaterRequestHeaders.value = '';
         elements.repeaterRequestBody.value = '';
+        state.repeaterBodyRepresentation = null;
         state.repeaterDraftDirty = false;
         refreshRepeaterStructuredEditors(true);
         renderRepeaterVariableStatus();
@@ -2764,6 +2807,9 @@
 
       function loadRepeaterHistoryEntry(entry, focus = false) {
         if (!entry) return;
+        state.repeaterCaptureSource = null;
+        const selectedCapture = state.requests.find(request => request.id === state.selectedRequestId);
+        state.repeaterPrefillKey = selectedCapture ? `${selectedCapture.id}:${selectedCapture.method}:${selectedCapture.path}` : null;
         state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.repeaterSelectedHistoryId = entry.id;
         state.repeaterExpectedHistoryId = null;
@@ -2773,6 +2819,7 @@
         elements.repeaterRequestHeaders.value = entry.request.headers.length
           ? JSON.stringify(repeaterHeaderObject(entry.request.headers), null, 2) : '';
         elements.repeaterRequestBody.value = entry.request.body;
+        state.repeaterBodyRepresentation = {text:entry.request.body,display:elements.repeaterRequestBody.value};
         state.repeaterDraftDirty = false;
         refreshRepeaterStructuredEditors(true);
         renderRepeaterVariableStatus();
@@ -3156,6 +3203,7 @@
         renderRepeaterHistory(repeater);
         renderRepeaterResponse(repeater);
         renderRepeaterComparison(repeater);
+        capturedClientWorkflow.sync();
       }
 
       function selectedObjectExperimentResult(experiment = objectExperimentState()) {
@@ -4057,6 +4105,9 @@
       }
 
       function clearExperimentLifetime() {
+        state.repeaterCaptureSource = null;
+        state.repeaterCaptureRuns = null;
+        state.repeaterBodyRepresentation = null;
         for (const name of ['objectConfirm', 'hooksConfirm', 'hooksFieldConfirm', 'automationConfirm']) {
           if (elements[name]) elements[name].checked = false;
         }
@@ -4579,7 +4630,11 @@
         try {
           const previousHistoryId = repeaterState()?.history.at(-1)?.id ?? 0;
           const method = elements.repeaterRequestMethod.value.trim();
-          const body = elements.repeaterRequestBody.value;
+          // Textarea.value normalizes CR/CRLF. Retain the reviewed representation
+          // until an explicit body edit (or a different editor value) replaces it.
+          const retainedBody = state.repeaterBodyRepresentation;
+          const body = retainedBody?.display === elements.repeaterRequestBody.value
+            ? retainedBody.text : elements.repeaterRequestBody.value;
           const resolvedMethod = method.toUpperCase();
           if (['GET', 'HEAD'].includes(resolvedMethod) && body && !method.includes('{{')) {
             throw new TypeError(`${resolvedMethod} requests cannot include a body.`);
@@ -4596,6 +4651,15 @@
           if (!response || !current()) return;
           const executionId = response.repeater.active_execution?.execution_id ?? response.repeater.history.at(-1)?.id;
           if (Number.isSafeInteger(executionId) && executionId > previousHistoryId) {
+            const source = state.repeaterCaptureSource;
+            if (source?.context === experimentContextKey()) {
+              const relation = source.importRevision === state.repeaterDraftRevision
+                ? 'Run submitted from the reviewed captured draft. HTTP client normalization still applies; compare retained evidence with resolved inputs.'
+                : 'Draft edited after capture import. Original capture is provenance only, not a claim of equivalent execution.';
+              const retained = state.repeaterCaptureRuns;
+              const links = retained?.context === source.context && retained.source === source.source ? retained.links : [];
+              state.repeaterCaptureRuns = {source:source.source,context:source.context,links:[...links.filter(link => link.id !== executionId),{id:executionId,relation}].slice(-24)};
+            }
             state.repeaterExpectedHistoryId = executionId;
             renderExperiment();
           }
@@ -11506,6 +11570,7 @@
       [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
         elements.repeaterRequestHeaders, elements.repeaterRequestBody].forEach(field => field.addEventListener('input', () => {
         if (field === elements.repeaterRequestUrl) state.repeaterQuerySource = null;
+        if (field === elements.repeaterRequestBody) state.repeaterBodyRepresentation = null;
         markRepeaterDraftChanged();
       }));
       elements.repeaterRequestUrl.addEventListener('change', () => {

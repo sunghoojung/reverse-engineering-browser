@@ -25,6 +25,15 @@ export async function checkPackageContract() {
     assert((await stat(join(root, 'apps/research-ui', asset))).size > 0);
   }
   const native = await readFile(join(root, 'apps/research-ui/macos/OriginTraceApp.swift'), 'utf8');
+  assert(build.includes('ClientProjectExportSmoke.swift'));
+  const clientSmoke=await readFile(join(root,'apps/research-ui/macos/ClientProjectExportSmoke.swift'),'utf8');
+  const clientUI=await readFile(join(root,'tools/client-project-ui/ClientProjectUITests.swift'),'utf8');
+  assert(!clientSmoke.includes('panel.ok('),'Modern Save panels cannot be approved in process');
+  assert(clientSmoke.includes('actual == expected') && clientSmoke.includes('children.isEmpty'));
+  assert(clientUI.includes('XCUIApplication(url:') && clientUI.includes('save.click()'));
+  assert(clientUI.includes('XCTAttachment(screenshot:') && !clientUI.includes('.write(to:'));
+  assert(!clientUI.includes('Data(contentsOf:'),'Byte receipts are checked outside the UI-test sandbox');
+  assert.equal([...native.matchAll(/func applicationWillTerminate\(/g)].length,1,'Keep one termination delegate');
   assert.match(native, /let researchUIURL = resourcesURL\.appendingPathComponent\("research-ui", isDirectory: true\)/);
   for (const asset of ['index.html', 'analyst_runner_core.js']) {
     assert(native.includes(`researchUIURL.appendingPathComponent("${asset}")`));
@@ -42,6 +51,7 @@ export async function checkPackageContract() {
   assert(coordinator.includes('resourcesURL.appendingPathComponent("run-live-session.sh")'));
   assert(native.includes('resourcesURL.appendingPathComponent("OriginTrace.icns")'));
   const removedBytes = (await Promise.all([...publicAssets, 'analyst_runner_core.js'].map(async asset => (await stat(join(root, 'apps/research-ui', asset))).size))).reduce((a, b) => a + b, 0);
+  await checkClientProjectScreenshotContract();
   console.log(`PASS packaging contract: ${assets.length} canonical assets; ${publicAssets.length + 1} redundant copies removed (${removedBytes} bytes)`);
   return {assets, publicAssets};
 }
@@ -83,6 +93,7 @@ export async function runPackagedSmoke(app, directory, name, flags = [], environ
   assert(Object.hasOwn(titles, name), `Unknown packaged smoke scenario: ${name}`);
   assert.equal(result.title, titles[name]);
   assert.equal(result.nativeShell, true);
+  assert.deepEqual(result.nativeClientProject,{available:true,invalidPayloadRefused:true,subframeRefused:true});
   assert.equal(result.stylesLoaded, true);
   assert.equal(result.smokeExerciseError, null, output);
   assert.equal(result.debuggerContractValid, true);
@@ -111,6 +122,86 @@ export function assertFloat32Smoke(name, value) {
       all_within_tolerance:true,finite_pairs:1,excluded_nonfinite_pairs:0,absolute_delta:0,relative_delta:0,ulp_distance:0,rms_delta:0}:null});
 }
 
+// xcresulttool names exported files by UUID; its manifest associates each
+// file with the explicit XCTAttachment name. Auto screenshots are not evidence
+// for a requested phase. See Apple's xcresulttool export attachments command.
+export async function validateClientProjectScreenshots(manifest, directory) {
+  assert(Array.isArray(manifest),'XCTest attachment manifest must be an array');
+  const attachments=manifest.flatMap(test=>Array.isArray(test.attachments)?test.attachments:[]);
+  const phases=['save','writeFailure','replacementSave'],used=new Set(),result=[];
+  for(const phase of phases){
+    const expected=phase+'-native-save-panel';
+    const suffix=new RegExp('^'+expected+'_[0-9]+_[0-9a-fA-F-]{36}\\.png$');
+    const matching=attachments.filter(item=>item.suggestedHumanReadableName===expected ||
+      item.suggestedHumanReadableName===expected+'.png' || suffix.test(item.suggestedHumanReadableName));
+    assert.equal(matching.length,1,'Expected one named XCTest screenshot for '+phase);
+    const name=matching[0].exportedFileName;
+    assert(typeof name==='string' && /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\.png$/.test(name) && !used.has(name),'Unsafe or reused screenshot filename');
+    used.add(name);
+    const bytes=await readFile(join(directory,name));
+    assert(bytes.length>8 && bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])),'Missing, empty or invalid PNG for '+phase);
+    result.push({phase,attachment:matching[0].suggestedHumanReadableName,exported_file:name,bytes:bytes.length});
+  }
+  return result;
+}
+
+async function checkClientProjectScreenshotContract(){
+  const directory=await mkdtemp(join(tmpdir(),'reb-attachment-contract-'));
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
+  const phases=['save','writeFailure','replacementSave'];
+  const attachments=phases.map((phase,index)=>({suggestedHumanReadableName:phase+'-native-save-panel_0_00000000-0000-0000-0000-00000000000'+index+'.png',exportedFileName:phase+'.png'}));
+  try{
+    for(const phase of phases)await writeFile(join(directory,phase+'.png'),png);
+    assert.equal((await validateClientProjectScreenshots([{attachments}],directory)).length,3);
+    const automatic=Array.from({length:4},(_,index)=>({suggestedHumanReadableName:'Automatic screenshot '+index,exportedFileName:'save.png'}));
+    await assert.rejects(validateClientProjectScreenshots([{attachments:[...attachments.slice(0,2),...automatic]}],directory),/named XCTest screenshot/);
+    await assert.rejects(validateClientProjectScreenshots([{attachments:[...attachments,attachments[0]]}],directory),/named XCTest screenshot/);
+    await assert.rejects(validateClientProjectScreenshots([{attachments:attachments.map((item,index)=>index?item:{...item,exportedFileName:'../save.png'})}],directory),/Unsafe/);
+    await assert.rejects(validateClientProjectScreenshots([{attachments:attachments.map(item=>({...item,exportedFileName:'save.png'}))}],directory),/reused/);
+    await writeFile(join(directory,'save.png'),'');await assert.rejects(validateClientProjectScreenshots([{attachments}],directory),/invalid PNG/);
+    await writeFile(join(directory,'save.png'),'not a PNG');await assert.rejects(validateClientProjectScreenshots([{attachments}],directory),/invalid PNG/);
+  }finally{await rm(directory,{recursive:true,force:true});}
+}
+
+async function runClientProjectSmoke(app, directory) {
+  const stores=join(directory,'client-project'),output=join(directory,'client-project-panels');
+  await mkdir(stores);await mkdir(output);
+  const child=spawn('xcodebuild',['test','-project',join(root,'tools/client-project-ui/ClientProjectUITests.xcodeproj'),
+    '-scheme','ClientProjectUITests','-destination','platform=macOS',
+    '-derivedDataPath',join(directory,'client-project-derived'),
+    '-resultBundlePath',join(directory,'client-project-ui.xcresult'),
+    '-parallel-testing-enabled','NO'],{cwd:directory,env:{...process.env,
+      TEST_RUNNER_REB_CLIENT_PROJECT_APP:app,TEST_RUNNER_REB_CLIENT_PROJECT_OUTPUT:output,
+      TEST_RUNNER_REB_CLIENT_PROJECT_STORES:stores}});
+  let log='',timer,exportError=null;
+  for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{log=(log+chunk).slice(-256*1024);});
+  try {
+    await new Promise((done,reject)=>{
+      timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Xcode native Save-panel test timed out\n'+log));},240000);
+      child.once('error',reject);
+      child.once('close',(code,signal)=>code===0?done():reject(new Error(`Xcode native Save-panel test exited ${code}/${signal}\n${log}`)));
+    });
+  } finally {
+    clearTimeout(timer);await writeFile(join(directory,'client-project.log'),log);
+    // Use Xcode's supported attachment export outside the UI-test sandbox.
+    // Preserve the primary test failure if diagnostic export also fails.
+    try {
+      execFileSync('xcrun',['xcresulttool','export','attachments','--path',join(directory,'client-project-ui.xcresult'),
+        '--output-path',join(output,'attachments')],{cwd:directory,timeout:30000,stdio:'pipe'});
+    } catch(error) {exportError=error;await writeFile(join(output,'attachment-export-error.log'),String(error));}
+  }
+  if(exportError)throw new Error('XCTest screenshot export failed',{cause:exportError});
+  const receipt=JSON.parse(await readFile(join(output,'result.json'),'utf8'));
+  assert.deepEqual(receipt,{savedExactBytes:true,cancelNoWrite:true,busyRefused:true,
+    navigationNoWrite:true,writeFailureRefused:true,replacementSaved:true,panelCount:5});
+  const attachmentDirectory=join(output,'attachments');
+  const manifest=JSON.parse(await readFile(join(attachmentDirectory,'manifest.json'),'utf8'));
+  const screenshots=await validateClientProjectScreenshots(manifest,attachmentDirectory);
+  for(const item of screenshots)await cp(join(attachmentDirectory,item.exported_file),join(output,item.phase+'-panel.png'));
+  await writeFile(join(output,'phase-attachments.json'),JSON.stringify(screenshots,null,2)+'\n');
+  console.log('PASS Xcode UI-tested real native Save panels, exact ZIP bytes, Cancel/no-write, pending refusal, navigation cancellation/retry and atomic-write failure; overwrite not exercised');
+}
+
 async function main() {
   const contract = await checkPackageContract();
   if (process.argv.includes('--contract-only')) return;
@@ -135,6 +226,7 @@ async function main() {
     const offline = await runPackagedSmoke(app, temporary, 'offline');
     assert.equal(new URL(offline.result.location).protocol, 'reb:');
     assert.equal(offline.result.captureMode, 'idle');
+    await runClientProjectSmoke(app,temporary);
     const demo = join(temporary, 'demo');
     await mkdir(demo);
     const events = execFileSync(join(root, 'build/reb-event-producer'));
@@ -158,10 +250,14 @@ async function main() {
     });
     console.log('PASS relocated signed package: native offline/demo/startup-failure fallback, live HTTP WebKit and out-of-repository launcher');
   } finally {
-    for (const name of ['offline', 'demo', 'fallback']) {
+    for (const name of ['offline', 'demo', 'fallback', 'client-project']) {
       const log = join(temporary, `${name}.log`);
       try {await cp(log, join(reports, `${name}.log`));} catch (error) {if (error.code !== 'ENOENT') throw error;}
     }
+    try {await cp(join(temporary,'client-project-ui.xcresult'),join(reports,'client-project-ui.xcresult'),{recursive:true});}
+    catch (error) {if(error.code!=='ENOENT')throw error;}
+    try {await cp(join(temporary,'client-project-panels'),join(reports,'client-project-panels'),{recursive:true});}
+    catch (error) {if(error.code!=='ENOENT')throw error;}
     await rm(temporary, {recursive: true, force: true});
   }
 }

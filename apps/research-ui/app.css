@@ -3722,3 +3722,15 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .api-catalog :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .api-catalog button:disabled { opacity: .5; }
 @media (max-width: 480px) { .api-catalog { padding: 10px; } .api-catalog-header h2 { flex-basis: 100%; font-size: 16px; } .api-catalog-observation { padding: 8px; } }
+
+/* Explicit capture review and one-operation client-project export. */
+.captured-client-content pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); }
+.captured-client-content details { margin-block: 10px; }
+#captured-client-review > label { display: block; margin: 10px 0; font-size: 12px; }
+#captured-client-review > label[hidden] { display: none; }
+#captured-client-review > [data-client-apply] { min-height: 30px; }
+#repeater-client-export .exchange-options-menu { right: 0; width: min(320px,calc(100vw - 24px)); max-height: 50vh; overflow: auto; }
+#repeater-client-export .exchange-options-menu p { white-space: normal; font-size: 11px; line-height: 1.4; margin: 8px; }
+
+#repeater-body-panel > textarea { height: auto; flex: 1; }
+#repeater-body-representation-note { flex: 0 0 auto; margin: 8px 12px; color: var(--muted); font-size: 11px; line-height: 1.4; }

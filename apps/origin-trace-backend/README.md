@@ -52,7 +52,9 @@ Each browser connection owns a native transport process, a bounded event queue,
 and command deadlines. Experiment actions verify browser-context ownership.
 Disposal stops owned pages, workers, recipes, requests, and retained objects.
 Worker cancellation terminates its process group, including descendants. Network
-capture defaults to metadata; sensitive field selection requires confirmation.
+capture is opt-in for standalone sessions and enabled by the packaged research
+profile. Captured Traffic values are raw by default; sensitive field selection
+for disposable experiments still requires confirmation.
 
 The API CLI embeds the versioned OpenAPI document and requires an explicit
 loopback URL or endpoint file. The VM analyzer reads bounded input prefixes,
@@ -179,3 +181,20 @@ results. Bounds, exceptional values, endian/layout assumptions and null/partial
 policies are documented in [Float32 Comparison v1](../../protocol/float32-comparison-v1.md).
 The cold operation is in-process, read-only and uses the existing I/O admission
 pool. No native capture or executable helper is involved.
+
+## Raw Traffic values and local copies
+
+CDP Traffic preserves bounded URLs and header/body values, including credentials,
+without automatic masking. Headers expose `headers_truncated`; document URLs
+expose `document_url_truncated`. Provenance source URLs carry optional
+`source_truncated`, including upstream hook truncation. Values remain inert text.
+`network.instance_id` and `network.capture_epoch` identify backend/attachment
+lifetimes; response-body completions from a retired epoch cannot update the next
+attachment's same-id record. Reconnecting still clears the ephemeral ledger.
+
+The UI can explicitly export one selected raw or best-effort redacted copy;
+see [the copy contract](../../protocol/traffic-capture-copy-v1.md). This is not
+`reb-metadata-only-v1`, whose guarded store export is unchanged. No raw capture
+is uploaded or sent to an AI service. Synthetic-only tests cover credentials,
+body forms, bounds, capture-off and retention; UI tests cover copy isolation and
+retired clipboard owners.

@@ -1,3 +1,8 @@
+      const trafficCaptureExport = installTrafficCaptureExport(
+        document.querySelector('#traffic-capture-export'),
+        () => state.requests.find(request => request.id === state.selectedRequestId)
+      );
+
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
@@ -117,7 +122,7 @@
         if (contentCapture) {
           if (active) {
             if (kind === 'empty') kind = 'active';
-            messages.push('Recording live requests and responses · sensitive headers redacted · 128 KiB body limit');
+            messages.push('Recording live requests and responses · raw values, including credentials · 128 KiB body limit');
           } else {
             if (kind !== 'malformed') kind = 'disconnected';
             messages.push(state.debuggerRefreshFailed ? 'The live debugger is disconnected.'
@@ -1155,7 +1160,7 @@
         elements.sessionMode.dataset.kind = state.sessionMode;
         elements.sessionMode.title = live
           ? contentCapture
-            ? 'CDP request and response content capture is enabled for this session. Sensitive headers are redacted and bodies are bounded.'
+            ? 'CDP request and response content capture is enabled for this session. Retained values, including credentials, are shown unchanged. Capture is bounded and local.'
             : 'Only live broker evidence is shown; sample rows are hidden.'
           : idle
             ? 'No evidence is bundled. Start a live capture to populate the workspace.'
@@ -1539,7 +1544,7 @@
         const searchMessage = !needle ? 'Search retained headers and text bodies. Content capture is unchanged.'
           : `${visible.length} matching ${visible.length === 1 ? 'request' : 'requests'} · ` +
             (search.omitted ? `Partial content search: ${search.inspected} of ${scoped.length} requests inspected, newest first. Narrow tab, domain, or type to search the rest. ` : '') +
-            'Retained text only; truncated prefixes, redacted headers, and uncaptured or binary bodies limit coverage.';
+            'Retained text only; truncated prefixes and uncaptured or binary bodies limit coverage.';
         if (elements.requestSearchStatus.textContent !== searchMessage) elements.requestSearchStatus.textContent = searchMessage;
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         const selectionCleared = state.selectedRequestId !== null && !state.requests.some(request => request.id === state.selectedRequestId);
@@ -1889,6 +1894,7 @@
         const showingExchange = ['headers', 'payload', 'preview', 'response'].includes(state.inspectorTab) || state.selectedRequestId === null;
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         updateSelectionSummary(request);
+        trafficCaptureExport.sync();
         document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
         const showingComparison = state.inspectorTab === 'compare';
@@ -3348,7 +3354,8 @@
             ? `live function ${definition.function_expression}`
             : `${functionKind} at ${definition.function_start.line + 1}:${definition.function_start.column + 1} · V8 entry search ${definition.target_line + 1}:${definition.target_column + 1}`;
           const meta = textElement('span', 'hook-definition-meta',
-            `${definition.target_type} ${definition.target_id.slice(0, 12)} · ${sourceName({url: definition.url, source_type: 'script', script_id: definition.script_id})}:${definition.line + 1}:${definition.column + 1} · ${location}${resolved} · ${behavior}`);
+            `${definition.target_type} ${definition.target_id.slice(0, 12)} · ${sourceName({url: definition.url, source_type: 'script', script_id: definition.script_id})}:${definition.line + 1}:${definition.column + 1} · ${location}${resolved} · ${behavior}${definition.url_truncated ? ' · source URL truncated' : ''}`);
+          meta.title = definition.url;
           const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'hook-remove';
           remove.textContent = 'Remove'; remove.disabled = active || state.experimentPending || state.debuggerActionPending;
           remove.setAttribute('aria-label', `Remove ${definition.label}`);
@@ -3406,7 +3413,8 @@
           const operation = textElement('span', 'hook-hit-operation', hit.operation.replaceAll('_', ' '));
           const source = sourceName({url: hit.source, source_type: 'script', script_id: ''});
           const meta = textElement('span', 'hook-hit-meta',
-            `${new Date(hit.occurred_at_ms).toLocaleTimeString()} · ${hit.target_type} ${hit.target_id.slice(0, 12)} · ${hit.category} · ${source}:${hit.line + 1}:${hit.column + 1} · session ${hit.session_id} / hook ${hit.hook_id} / hit ${hit.id}`);
+            `${new Date(hit.occurred_at_ms).toLocaleTimeString()} · ${hit.target_type} ${hit.target_id.slice(0, 12)} · ${hit.category} · ${source}:${hit.line + 1}:${hit.column + 1} · session ${hit.session_id} / hook ${hit.hook_id} / hit ${hit.id}${hit.source_truncated ? ' · source URL truncated' : ''}`);
+          meta.title = hit.source;
           const values = hit.bindings.map(binding => `${binding.name}=${debuggerValueText(binding.value)}`);
           const returnText = hit.category === 'return'
             ? `return ${debuggerValueText(hit.original_return)}${hit.replacement_return ? ` → ${debuggerValueText(hit.replacement_return)}` : ''}` : '';

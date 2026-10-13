@@ -2,7 +2,6 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use url::Url;
 
 const MAX_FRAMES: usize = 16;
 const MAX_CANDIDATES: usize = 32;
@@ -29,20 +28,7 @@ fn string_digest(value: &Value) -> Value {
 }
 
 fn source_url(value: &Value) -> String {
-    let Some(text) = value.as_str() else {
-        return String::new();
-    };
-    let Ok(mut url) = Url::parse(text) else {
-        return String::new();
-    };
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return String::new();
-    }
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_query(None);
-    url.set_fragment(None);
-    preview(url.as_str(), 8192).to_owned()
+    preview(value.as_str().unwrap_or(""), 8192).to_owned()
 }
 
 fn coordinate(value: &Value) -> bool {
@@ -83,6 +69,7 @@ fn call_sites(request: &Value) -> Result<Value, &'static str> {
             "script_id": public.and_then(|item| bounded(&item["script_id"], 4096)).filter(|id| !id.is_empty()).unwrap_or(script),
             "source_hash": public.and_then(|item| bounded(&item["hash"], 256)),
             "target_id": target, "source": source_url(&frame["url"]),
+            "source_truncated": frame["url"].as_str().is_some_and(|value| value.len() > 8192),
             "function": preview(frame["functionName"].as_str().unwrap_or(""), 256),
             "line": frame["lineNumber"], "column": frame["columnNumber"]
         }));
@@ -200,7 +187,7 @@ fn build(request: &Value) -> Result<Value, &'static str> {
         }
         if !labels.is_empty() {
             candidates.push(json!({"hit_id":hit["id"], "target_id":hit["target_id"],
-                "script_id":hit["script_id"], "source_hash":hit["source_hash"], "source":source_url(&hit["source"]),
+                "script_id":hit["script_id"], "source_hash":hit["source_hash"], "source":source_url(&hit["source"]), "source_truncated":hit["source_truncated"] == true || hit["source"].as_str().is_some_and(|value| value.len() > 8192),
                 "function":hit["function"], "line":hit["line"], "column":hit["column"],
                 "phase":hit["category"], "operation":hit["operation"], "matched_values":labels,
                 "confidence":"correlated"}));
@@ -312,13 +299,16 @@ mod tests {
         );
     }
     #[test]
-    fn sites_redact_secrets_and_report_limits_and_invalid_coordinates() {
+    fn sites_preserve_raw_urls_and_report_limits_and_invalid_coordinates() {
         let frame = json!({"scriptId":"s","url":"https://user:secret@a.test/code.js?token=private#secret","functionName":"f","lineNumber":0,"columnNumber":1});
         let mut frames = vec![frame; 17];
         frames[0]["lineNumber"] = json!(true);
         let sites=call_sites(&json!({"target_id":"t","initiator":{"stack":{"callFrames":frames,"parentId":{"id":"async"}}}})).unwrap();
         assert_eq!(sites["sites"].as_array().unwrap().len(), 15);
-        assert_eq!(sites["sites"][0]["source"], "https://a.test/code.js");
+        assert_eq!(
+            sites["sites"][0]["source"],
+            "https://user:secret@a.test/code.js?token=private#secret"
+        );
         assert_eq!(
             sites["gaps"],
             json!([
@@ -328,6 +318,37 @@ mod tests {
             ])
         );
     }
+    #[test]
+    fn source_prefix_flags_match_the_public_optional_contract() {
+        let frame = json!({"scriptId":"s","url":"雪".repeat(3000),"functionName":"f","lineNumber":0,"columnNumber":1});
+        let sites =
+            call_sites(&json!({"target_id":"t","initiator":{"stack":{"callFrames":[frame]}}}))
+                .unwrap();
+        let site = &sites["sites"][0];
+        assert_eq!(site["source_truncated"], true);
+        assert_eq!(site["source"].as_str().unwrap().len(), 8190);
+        let spec: Value =
+            serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+        jsonschema::validator_for(&spec["components"]["schemas"]["FieldCallSite"])
+            .unwrap()
+            .validate(site)
+            .unwrap();
+        let mut raw_hit = hit(1, "t", 1000);
+        raw_hit["source"] = json!("raw-prefix");
+        raw_hit["source_truncated"] = json!(true);
+        let output = build(&json!({"selected_digest":string_digest(&json!("x")),"hits":[raw_hit],"call_sites":{"sites":[],"gaps":[]},"limited":false})).unwrap();
+        let candidate = &output["candidates"][0];
+        assert_eq!(candidate["source_truncated"], true);
+        jsonschema::validator_for(&spec["components"]["schemas"]["FieldProvenanceCandidate"])
+            .unwrap()
+            .validate(candidate)
+            .unwrap();
+        assert_eq!(
+            source_url(&json!("data:text/javascript,synthetic?token#fragment")),
+            "data:text/javascript,synthetic?token#fragment"
+        );
+    }
+
     #[test]
     fn snapshot_rejects_cross_target_future_and_expired_hits_and_reports_eviction() {
         let mut hits = (1..=40).map(|id| hit(id, "t", 1000)).collect::<Vec<_>>();
@@ -352,7 +373,10 @@ mod tests {
             json!(["replacement_return"])
         );
         assert_eq!(output["candidates"][0]["confidence"], "correlated");
-        assert_eq!(output["candidates"][0]["source"], "https://a.test/code.js");
+        assert_eq!(
+            output["candidates"][0]["source"],
+            "https://user:secret@a.test/code.js?token=private#secret"
+        );
         assert!(
             output["gaps"]
                 .as_array()

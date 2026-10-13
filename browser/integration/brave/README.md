@@ -166,9 +166,9 @@ It changes pause attribution only; it does not suppress breakpoints or alter
 capture policy.
 
 When the Artifact category is authorized, the browser process recognizes
-JavaScript and WebAssembly responses, removes URL credentials, queries, and
-fragments from stored metadata, and asynchronously tees at most 16 MiB per
-response. The original response pipe remains the page's source of bytes. A
+JavaScript and WebAssembly responses, preserves the observed source URL
+(including credentials, queries and fragments) in local artifact metadata, and
+asynchronously tees at most 16 MiB per response. The original response pipe remains the page's source of bytes. A
 separate queue permits at most 16 pending artifacts and 32 MiB of queued
 content, then transfers frames over an authenticated user-only socket. Brave
 emits `artifact_captured` only after a durable receiver acknowledgment and
@@ -180,5 +180,5 @@ accepted dynamic JavaScript, and V8 exposes copied byte buffers used by
 `WebAssembly.compile`, `WebAssembly.Module`, and `WebAssembly.instantiate`.
 Renderer hooks perform one inactive atomic check, cap each submission at 16
 MiB, and send bytes one way to the browser process. The browser copies shared
-memory before validation, sanitizes the context URL, assigns the artifact ID,
+memory before validation, preserves the bounded context URL, assigns the artifact ID,
 and remains the only process that owns the authenticated artifact socket.

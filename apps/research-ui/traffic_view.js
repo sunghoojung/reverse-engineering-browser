@@ -475,6 +475,7 @@ function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch
           ? [...new URL(request.path, 'https://checkout.acme.test').searchParams] : undefined; } catch { rows = undefined; }
       }
       meta.textContent = rows ? `${rows.length} ${mode.value === 'headers' ? 'headers' : 'parameters'} · ${request?.origin === 'sample' ? 'sample data' : request?.origin === 'demo' ? 'demo evidence' : request?.origin === 'live' ? 'live metadata' : 'captured'}` : 'Not captured';
+      if (mode.value === 'headers' && record?.headersTruncated) meta.textContent += ' · truncated: only retained header names/values are shown';
       if (!rows) return message(`${mode.value === 'headers' ? side + ' headers were' : 'Query parameters were'} not captured.`);
       const matches = rows.filter(([key, value]) => `${key} ${value}`.toLowerCase().includes(query));
       const nameCounts = new Map();
@@ -604,7 +605,7 @@ function renderTrafficDetails(container, request, tab, onDecode, onTrace, find =
     if (tab === 'headers') {
       const general = trafficNode('section', 'traffic-general');
       general.append(trafficNode('h2', '', 'General'));
-      for (const label of ['Request URL', 'Request Method', 'Status', 'Source', 'Request ID', 'Browser tab', 'Capture limits']) {
+      for (const label of ['Request URL', 'Document URL', 'Request Method', 'Status', 'Source', 'Request ID', 'Browser tab', 'Capture limits']) {
         const row = trafficNode('div', 'traffic-general-row');
         row.append(trafficNode('span', '', label), trafficNode('span', 'traffic-general-value'));
         general.append(row);
@@ -625,9 +626,9 @@ function renderTrafficDetails(container, request, tab, onDecode, onTrace, find =
   container.querySelectorAll('.exchange-pane').forEach(pane => pane.updateRecord(exchange[pane.dataset.side], request));
   if (tab === 'headers') {
     const values = [request.hostOnly ? `${request.path} (host only; path and query not captured)` : request.path,
-      request.method, request.failed ? 'Failed' : request.status, trafficOriginLabel(request), request.id,
+      request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.status, trafficOriginLabel(request), request.id,
       request.tabId && request.tabId !== '0' ? request.tabId : 'Unattributed',
-      'Retained evidence only. Missing headers and bodies are not fetched.'];
+      `Retained evidence only. Missing headers and bodies are not fetched.${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
     container.querySelectorAll('.traffic-general-value').forEach((node, index) => {
       if (node.textContent !== String(values[index])) node.textContent = String(values[index]);
     });
@@ -799,4 +800,104 @@ function renderTrafficComparison(container, request, active) {
     details.append(rows); view.result.append(details);
     if (focusedSection === section.label) summary.focus({preventScroll: true});
   }
+}
+// Local selected-record export. Redaction transforms a copy, never capture state.
+function trafficCaptureDocument(request, mode = 'raw') {
+  if (!request?.captureRecord) throw new TypeError('Select a retained CDP request first.');
+  if (!['raw', 'redacted_copy'].includes(mode)) throw new TypeError('Unknown capture export mode.');
+  const record = JSON.parse(JSON.stringify(request.captureRecord));
+  if (mode === 'redacted_copy') {
+    const redactUrl = value => {
+      if (!value) return value;
+      try {
+        const url = new URL(value);
+        if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) return '<redacted>';
+        url.username = ''; url.password = ''; url.search = ''; url.hash = '';
+        return url.href;
+      } catch { return '<redacted>'; }
+    };
+    record.url = redactUrl(record.url);
+    record.document_url = redactUrl(record.document_url);
+    record.target_title = '<redacted>';
+    if (record.error_text) record.error_text = '<redacted>';
+    for (const site of record.initiator?.sites ?? []) {
+      site.source = redactUrl(site.source);
+    }
+    for (const side of [record.request, record.response]) {
+      side.headers = side.headers.map(([name]) => [name, '<redacted>']);
+      if (side.body.state === 'available') side.body.state = 'redacted';
+      side.body.text = ''; side.body.base64 = '';
+      side.body.reason = 'Body content omitted from this explicitly redacted copy.';
+    }
+  }
+  return {
+    format: 'reb-traffic-capture-v1', mode,
+    representation: 'Retained CDP strings/base64, not original HTTP wire bytes.',
+    warning: mode === 'raw'
+      ? 'Raw local capture may contain credentials and personal data. Review before sharing.'
+      : 'Best-effort redacted copy. Paths, header names and other metadata may contain secrets. Review before sharing.',
+    coverage: {
+      scope: 'One selected record from the ephemeral CDP Traffic window; not a durable session archive.',
+      headers: 'Primary CDP event headers only; extra-info headers, original casing/order and duplicate wire lines are not guaranteed.',
+      storage: 'Reconnect, target change, process exit or retention eviction can discard the live record.',
+      dropped: request.captureDropped ?? 0,
+      limits: JSON.parse(JSON.stringify(request.captureLimits ?? {}))
+    },
+    record
+  };
+}
+
+function installTrafficCaptureExport(host, getRequest) {
+  if (!host) return {sync() {}};
+  const status = host.querySelector('[data-traffic-export-status]');
+  const buttons = [...host.querySelectorAll('[data-traffic-export]')];
+  const nativeShell = document.documentElement.classList.contains('native-shell');
+  let busy = false, selection = null, revision = 0;
+  const identityOf = request => request?.captureRecord ? JSON.stringify([request.captureOwner,
+    request.tabId, request.id, request.captureRecord.started_monotonic_ms, request.captureRecord.wall_time_ms]) : null;
+  function sync() {
+    const request = getRequest();
+    const identity = identityOf(request);
+    if (identity !== selection) { selection = identity; revision++; status.textContent = ''; host.open = false; }
+    host.hidden = !request?.captureRecord;
+    for (const button of buttons) {
+      const unsupported = nativeShell && button.dataset.trafficDestination === 'download';
+      button.disabled = busy || !request?.captureRecord || unsupported;
+      button.title = unsupported ? 'Native file download is unavailable. Use Copy and save locally.' : '';
+    }
+  }
+  host.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && host.open) {
+      event.preventDefault(); event.stopPropagation(); host.open = false;
+      host.querySelector('summary').focus();
+    }
+  });
+  for (const button of buttons) button.addEventListener('click', async () => {
+    if (button.disabled || busy) return;
+    const request = getRequest();
+    sync();
+    const identity = identityOf(request), started = revision;
+    const mode = button.dataset.trafficExport;
+    try {
+      const text = JSON.stringify(trafficCaptureDocument(request, mode), null, 2) + '\n';
+      if (button.dataset.trafficDestination === 'clipboard') {
+        busy = true; sync();
+        await navigator.clipboard.writeText(text);
+        if (selection === identity && identityOf(getRequest()) === identity && revision === started) status.textContent = mode === 'raw'
+          ? 'Raw capture copied. Clipboard contains unmasked values.'
+          : 'Redacted copy copied. Review for remaining secrets before sharing.';
+      } else {
+        const url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+        const link = document.createElement('a');
+        link.href = url; link.download = mode === 'raw' ? 'selected.reb-traffic.raw.json' : 'selected.reb-traffic.redacted.json';
+        link.hidden = true; document.body.append(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        status.textContent = 'Download requested. Check your browser downloads for completion.';
+      }
+    } catch {
+      if (selection === identity && identityOf(getRequest()) === identity && revision === started) status.textContent = 'Export failed. The captured record is unchanged.';
+    } finally { busy = false; sync(); }
+  });
+  sync();
+  return {sync};
 }

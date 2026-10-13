@@ -1340,7 +1340,7 @@ let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
-    state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}},
+    state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, renderTrafficComparison() {}, openFieldProvenance() {},
   });
@@ -3176,7 +3176,7 @@ const matches = fieldHandoff.fieldSourceMatches("雪\nfixture-origin", "fixture-
 });
 assert.equal(matches[0].line, 1);
 assert.equal(matches[0].column, 0);
-assert.equal(matches[0].source, "http://127.0.0.1/source.js");
+assert.equal(matches[0].source, "http://127.0.0.1/source.js?redact=yes");
 assert.equal(fieldHandoff.provenanceDecoderBytes("\ud800"), null);
 assert.equal(fieldHandoff.provenanceDecoderBytes("\udc00"), null);
 assert.equal(new TextDecoder("utf-8", {ignoreBOM: true}).decode(

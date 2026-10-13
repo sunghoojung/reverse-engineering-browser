@@ -36,6 +36,7 @@
           elements.repeaterRequestMethod.value = source.input.method;
           elements.repeaterRequestHeaders.value = JSON.stringify(Object.fromEntries(source.input.headers),null,2);
           elements.repeaterRequestBody.value = source.input.body;
+          state.repeaterBodyRepresentation = {text:source.input.body,display:elements.repeaterRequestBody.value};
           elements.repeaterRequestTimeout.value = String(source.input.timeout_ms);
           state.repeaterSelectedHistoryId = null; state.repeaterExpectedHistoryId = null;
           state.repeaterPrefillKey = null; state.repeaterHeadersSource = null; state.repeaterQuerySource = null;
@@ -2798,6 +2799,7 @@
         elements.repeaterRequestTimeout.value = '15000';
         elements.repeaterRequestHeaders.value = '';
         elements.repeaterRequestBody.value = '';
+        state.repeaterBodyRepresentation = null;
         state.repeaterDraftDirty = false;
         refreshRepeaterStructuredEditors(true);
         renderRepeaterVariableStatus();
@@ -2817,6 +2819,7 @@
         elements.repeaterRequestHeaders.value = entry.request.headers.length
           ? JSON.stringify(repeaterHeaderObject(entry.request.headers), null, 2) : '';
         elements.repeaterRequestBody.value = entry.request.body;
+        state.repeaterBodyRepresentation = {text:entry.request.body,display:elements.repeaterRequestBody.value};
         state.repeaterDraftDirty = false;
         refreshRepeaterStructuredEditors(true);
         renderRepeaterVariableStatus();
@@ -4104,6 +4107,7 @@
       function clearExperimentLifetime() {
         state.repeaterCaptureSource = null;
         state.repeaterCaptureRuns = null;
+        state.repeaterBodyRepresentation = null;
         for (const name of ['objectConfirm', 'hooksConfirm', 'hooksFieldConfirm', 'automationConfirm']) {
           if (elements[name]) elements[name].checked = false;
         }
@@ -4626,7 +4630,11 @@
         try {
           const previousHistoryId = repeaterState()?.history.at(-1)?.id ?? 0;
           const method = elements.repeaterRequestMethod.value.trim();
-          const body = elements.repeaterRequestBody.value;
+          // Textarea.value normalizes CR/CRLF. Retain the reviewed representation
+          // until an explicit body edit (or a different editor value) replaces it.
+          const retainedBody = state.repeaterBodyRepresentation;
+          const body = retainedBody?.display === elements.repeaterRequestBody.value
+            ? retainedBody.text : elements.repeaterRequestBody.value;
           const resolvedMethod = method.toUpperCase();
           if (['GET', 'HEAD'].includes(resolvedMethod) && body && !method.includes('{{')) {
             throw new TypeError(`${resolvedMethod} requests cannot include a body.`);
@@ -11562,6 +11570,7 @@
       [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
         elements.repeaterRequestHeaders, elements.repeaterRequestBody].forEach(field => field.addEventListener('input', () => {
         if (field === elements.repeaterRequestUrl) state.repeaterQuerySource = null;
+        if (field === elements.repeaterRequestBody) state.repeaterBodyRepresentation = null;
         markRepeaterDraftChanged();
       }));
       elements.repeaterRequestUrl.addEventListener('change', () => {

@@ -70,6 +70,10 @@ can change server data. There are no automatic retries or redirect following.
 
 ## Fidelity and unsupported cases
 
+The Repeater editor displays normalized newlines, but preserves imported CR/CRLF
+body text for submission until the user explicitly edits the body. The Body tab
+discloses this distinction. History loads preserve the same representation.
+
 Raw exports preserve the original retained capture/run and exact request input
 strings, including repeated/encoded query keys and text-body whitespace. These
 are **retained CDP strings/base64, not original HTTP wire bytes**. Primary CDP

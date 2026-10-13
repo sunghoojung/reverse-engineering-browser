@@ -674,7 +674,8 @@
                   </div>
                   <div id="repeater-body-panel" class="repeater-editor-panel" role="tabpanel" data-repeater-editor-panel="body" hidden>
                     <label class="repeater-editor-label" for="repeater-request-body">Request body</label>
-                    <textarea id="repeater-request-body" form="repeater-request-form" maxlength="65536" spellcheck="false" aria-label="Request body" placeholder='{"id":"{{id}}"}'></textarea>
+                    <p id="repeater-body-representation-note">Imported body line endings are preserved until you edit this field. Editing uses the text editor’s line endings.</p>
+                    <textarea aria-describedby="repeater-body-representation-note" id="repeater-request-body" form="repeater-request-form" maxlength="65536" spellcheck="false" aria-label="Request body" placeholder='{"id":"{{id}}"}'></textarea>
                   </div>
                   <div id="repeater-settings-panel" class="repeater-editor-panel repeater-settings-panel" role="tabpanel" data-repeater-editor-panel="settings" hidden>
                     <label>Timeout (ms)<input id="repeater-request-timeout" form="repeater-request-form" type="number" value="15000" min="100" max="30000" step="100" /></label>

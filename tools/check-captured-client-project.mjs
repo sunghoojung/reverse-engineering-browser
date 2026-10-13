@@ -115,6 +115,8 @@ async function checkRepeaterIntegration() {
   Object.assign(elements.repeaterRequestUrl,{value:source.input.url});Object.assign(elements.repeaterRequestMethod,{value:'POST'});
   Object.assign(elements.repeaterRequestHeaders,{value:JSON.stringify(Object.fromEntries(source.input.headers))});
   Object.assign(elements.repeaterRequestBody,{value:inputBody});Object.assign(elements.repeaterRequestTimeout,{value:'15000'});
+  let textarea='';Object.defineProperty(elements.repeaterRequestBody,'value',{get:()=>textarea,set:value=>{textarea=value.replace(/\r\n?/g,'\n');}});
+  elements.repeaterRequestBody.value=inputBody;state.repeaterBodyRepresentation={text:inputBody,display:elements.repeaterRequestBody.value};
   let execution=0;const payloads=[];
   const production=runInNewContext(section('      function prefillRepeaterRequest(', '      function setRepeaterEditorTab(')+
     section('      async function runRepeaterRequest()', '      async function compareRepeaterResponses()')+
@@ -127,19 +129,23 @@ async function checkRepeaterIntegration() {
   });
   await production.runRepeaterRequest();assert.equal(payloads.length,1);assert.equal(payloads[0].body,inputBody);
   assert.equal(state.repeaterDraftDirty,false);production.prefillRepeaterRequest();
-  assert.equal(elements.repeaterRequestBody.value,inputBody,'Post-Send render must preserve imported draft');
+  assert.equal(elements.repeaterRequestBody.value,inputBody.replace(/\r\n?/g,'\n'),'Textarea display uses normalized line endings');
+  assert.equal(state.repeaterBodyRepresentation.text,inputBody,'Retained request preserves original CRLF');
   assert.equal(state.repeaterCaptureRuns.source,source);assert.equal(state.repeaterCaptureRuns.links[0].id,1);
   state.repeaterDraftRevision++;state.repeaterDraftDirty=true;await production.runRepeaterRequest();
   assert.equal(state.repeaterCaptureRuns.links.length,2);assert.match(state.repeaterCaptureRuns.links[1].relation,/edited after/);
   production.loadRepeaterHistoryEntry({...run,id:1});
   assert.equal(state.repeaterCaptureSource,null,'Selecting another draft retires its active import');
-  production.prefillRepeaterRequest();assert.equal(elements.repeaterRequestBody.value,inputBody,'History load is not overwritten by ordinary Traffic prefill');
+  production.prefillRepeaterRequest();assert.equal(elements.repeaterRequestBody.value,inputBody.replace(/\r\n?/g,'\n'),'History display is not overwritten by ordinary Traffic prefill');
+  assert.equal(state.repeaterBodyRepresentation.text,inputBody);
   assert.equal(state.repeaterCaptureRuns.links.length,2,'Inspecting history retains established capture provenance');
   const getRunCapture=runInNewContext('('+section('        getRunCapture: (run,context) => {','        openRepeater:').trim().replace(/^getRunCapture: /,'').replace(/,$/, '')+')',{state});
   assert.equal(getRunCapture({id:1},'ctx').evidence,source.evidence);
   assert.equal(getRunCapture({id:2},'ctx').evidence,source.evidence);
   assert.equal(getRunCapture({id:3},'ctx'),null);assert.equal(getRunCapture({id:1},'replacement'),null);
   assert.match(section('      function clearExperimentLifetime()', '      function '),/state\.repeaterCaptureRuns = null/);
+  state.repeaterBodyRepresentation=null;await production.runRepeaterRequest();
+  assert.equal(payloads.at(-1).body,inputBody.replace(/\r\n?/g,'\n'),'Explicit body edit uses editor text rather than secretly restoring CRLF');
   console.log('PASS production Repeater Send/prefill/history integration: full draft preserved after Send, bounded per-run provenance retained and context mismatches refused');
 }
 

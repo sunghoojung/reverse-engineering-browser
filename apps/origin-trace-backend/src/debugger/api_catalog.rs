@@ -1,0 +1,431 @@
+//! Cold-path, read-only interpretations of the existing bounded Traffic window.
+//! Shape path/type accumulation is adapted from morluto/rea's MIT-licensed
+//! src/domain/jsonShape.ts at bb540826d65316c164d2de8ba4ef10f81a8ad073.
+//! Copyright (c) 2026 morluto. See third_party/rea/LICENSE and README.md.
+use super::Debugger;
+use crate::error::{Error, Result};
+use serde::{Serialize, de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}};
+use serde_json::{Value, json};
+use std::{collections::{BTreeMap, BTreeSet}, fmt};
+use url::Url;
+
+const MAX_RECORDS: usize = 64;
+const MAX_URL: usize = 8192;
+const MAX_BODY: usize = 32768;
+const MAX_NAMES: usize = 64;
+const MAX_NAME: usize = 256;
+const MAX_NODES: usize = 2048;
+const MAX_DEPTH: usize = 16;
+const MAX_FIELDS: usize = 64;
+const MAX_PATH_BYTES: usize = 16384;
+
+impl Debugger {
+    pub fn api_catalog(&self) -> Result<Value> {
+        // Copy only this small tail and approved analysis inputs. Inference and
+        // URL parsing run after releasing the live debugger's state lock.
+        let (context, records) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let network = &state["network"];
+            let rows = network["requests"].as_array();
+            let total = rows.map_or(0, Vec::len);
+            let records: Vec<Value> = rows.into_iter().flatten().rev().take(MAX_RECORDS)
+                .map(select_record).collect();
+            (json!({
+                "instance_id": network["instance_id"],
+                "capture_epoch": network["capture_epoch"],
+                "debugger_generation": state["generation"],
+                "capture_enabled": network["capture_enabled"],
+                "debugger_state": state["state"],
+                "retained_records": total,
+                "window_records": records.len(),
+                "older_records_not_examined": total.saturating_sub(records.len()),
+                "capture_dropped_records": network["dropped"],
+            }), records)
+        };
+        catalog(context, records)
+    }
+}
+
+fn selected_text(value: &Value, max: usize) -> Value {
+    value.as_str().filter(|s| s.len() <= max).map_or(Value::Null, |s| json!(s))
+}
+fn select_record(row: &Value) -> Value {
+    json!({
+        "id": selected_text(&row["id"], 8192),
+        "target_id": selected_text(&row["target_id"], 4096),
+        "started_monotonic_ms": row["started_monotonic_ms"],
+        "method": selected_text(&row["method"], 32),
+        "url": selected_text(&row["url"], MAX_URL),
+        "url_truncated": row["url_truncated"],
+        "method_truncated": row["method_truncated"],
+        "state": selected_text(&row["state"], 32),
+        "status": row["status"],
+        "request": select_side(&row["request"]),
+        "response": select_side(&row["response"]),
+    })
+}
+fn select_side(side: &Value) -> Value {
+    let body = &side["body"];
+    let mut names = BTreeSet::new();
+    let mut omitted = 0;
+    for header in side["headers"].as_array().into_iter().flatten() {
+        add_name(&mut names, header[0].as_str().map(str::to_ascii_lowercase), &mut omitted);
+    }
+    json!({
+        "header_names": names,
+        "header_names_omitted": omitted,
+        "headers_truncated": side["headers_truncated"],
+        "body": {
+            "state": selected_text(&body["state"], 32),
+            "mime": media_type(&body["mime"]),
+            "truncated": body["truncated"],
+            "text": selected_text(&body["text"], MAX_BODY),
+            "has_base64": body["base64"].as_str().is_some_and(|s| !s.is_empty()),
+        }
+    })
+}
+fn add_name(names: &mut BTreeSet<String>, name: Option<String>, omitted: &mut usize) {
+    match name {
+        Some(name) if name.len() <= MAX_NAME && (names.len() < MAX_NAMES || names.contains(&name)) => {
+            names.insert(name);
+        }
+        _ => *omitted += 1,
+    }
+}
+
+fn endpoint(row: &Value) -> Option<(String, String, String, Value)> {
+    if row["url_truncated"] != false || row["method_truncated"] != false { return None; }
+    let raw = row["url"].as_str()?;
+    if raw.bytes().any(|b| b <= b' ' || b == 127 || b == b'\\') { return None; }
+    let url = Url::parse(raw).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() { return None; }
+    let method = row["method"].as_str()?;
+    if method.is_empty() || !method.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) { return None; }
+    // Preserve the observed path spelling, including percent encoding and dot
+    // segments; URL::path would normalize it. Do not infer REST route variables.
+    let authority = raw.split_once("://")?.1;
+    if authority.is_empty() || authority.starts_with(['/', '?', '#']) { return None; }
+    let rest = authority.find(['/', '?', '#']).map_or("", |i| &authority[i..]);
+    let path = rest.split(['?', '#']).next().unwrap_or("");
+    let path = if path.is_empty() { "/" } else { path };
+    let mut names = BTreeSet::new();
+    let mut omitted = 0;
+    for pair in url.query().unwrap_or("").split('&').filter(|pair| !pair.is_empty()) {
+        let name = pair.split_once('=').map_or(pair, |(name, _)| name);
+        add_name(&mut names, query_name(name), &mut omitted);
+    }
+    Some((method.into(), url.origin().ascii_serialization(), path.into(),
+        json!({"names": names, "omitted": omitted})))
+}
+
+// url::query_pairs replaces malformed UTF-8. Never turn that replacement into
+// a claimed observed parameter name; count invalid percent/UTF-8 names instead.
+fn query_name(raw: &str) -> Option<String> {
+    let mut bytes = Vec::new();
+    let mut input = raw.bytes();
+    while let Some(byte) = input.next() {
+        let byte = match byte {
+            b'+' => b' ',
+            b'%' => {
+                let high = (input.next()? as char).to_digit(16)?;
+                let low = (input.next()? as char).to_digit(16)?;
+                (high * 16 + low) as u8
+            }
+            byte => byte,
+        };
+        if bytes.len() == MAX_NAME { return None; }
+        bytes.push(byte);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn catalog(context: Value, records: Vec<Value>) -> Result<Value> {
+    let mut groups: BTreeMap<(String, String, String), Vec<Value>> = BTreeMap::new();
+    let mut skipped = 0;
+    for row in records {
+        let Some((method, origin, path, query)) = endpoint(&row) else { skipped += 1; continue; };
+        if row["id"].as_str().is_none_or(str::is_empty)
+            || row["target_id"].as_str().is_none_or(str::is_empty)
+            || row["started_monotonic_ms"].as_f64().is_none() {
+            skipped += 1; continue;
+        }
+        let mut observation = json!({
+            "source": {"request_id": row["id"], "target_id": row["target_id"],
+                "started_monotonic_ms": row["started_monotonic_ms"]},
+            "state": row["state"], "status": row["status"], "query_parameters": query,
+        });
+        for side in ["request", "response"] {
+            let mut value = row[side].clone();
+            value["body"] = body_shape(&row[side]["body"]);
+            observation[side] = value;
+        }
+        groups.entry((method, origin, path)).or_default().push(observation);
+    }
+    let endpoints: Vec<Value> = groups.into_iter().map(|((method, origin, path), observations)|
+        json!({"method": method, "origin": origin, "path": path, "observations": observations})).collect();
+    let mut coverage = context;
+    coverage["skipped_records"] = json!(skipped);
+    let output = json!({
+        "format": "reb-api-observation-catalog-v1", "coverage": coverage,
+        "limits": {"records": MAX_RECORDS, "url_bytes": MAX_URL, "body_bytes": MAX_BODY,
+            "names_per_surface": MAX_NAMES, "name_bytes": MAX_NAME, "shape_nodes": MAX_NODES,
+            "shape_depth": MAX_DEPTH, "shape_fields": MAX_FIELDS, "shape_path_bytes": MAX_PATH_BYTES},
+        "endpoints": endpoints,
+        "limitations": [
+            "Derived observations of the newest retained Traffic records only; not an API specification or proof of required/optional fields, authentication, stability, or exhaustive capture.",
+            "Sources are exact ephemeral CDP instance/epoch/request/target/start identities, not native stored-evidence identities. Reconnects and eviction can make them unavailable.",
+            "Origin is URL-normalized; path spelling is preserved (an absent path is /). Query names are form-decoded and header names lowercased. Paths and names may contain sensitive data; review before sharing.",
+            "Body values, URL credentials/query values/fragments, and header values are omitted from this additional structural view. Raw local Traffic is unchanged. Omission is not a guarantee of secret-free output.",
+            "JSON shapes describe each complete retained text body independently. Repeated array positions share typed paths. Base64, truncated, non-JSON, malformed, duplicate-key, and over-budget bodies remain explicit unknowns. No replay, source fetching, SDK authentication, or required-field inference occurs."
+        ]
+    });
+    // Defense in depth over independent count/string/path budgets, not a claim
+    // about process heap. Never publish a partially serialized catalog.
+    if serde_json::to_vec(&output).map_err(|_| Error::new(500, "Catalog serialization failed"))?.len() > 4 * 1024 * 1024 {
+        return Err(Error::new(500, "Catalog response budget exceeded"));
+    }
+    Ok(output)
+}
+
+// Only retain the validated media type, never Content-Type parameters such as
+// boundary values, profile URLs, or private application tokens.
+fn media_type(value: &Value) -> String {
+    let candidate = value.as_str().unwrap_or("").split(';').next().unwrap_or("").trim();
+    if candidate.len() > 512 { return String::new(); }
+    let Some((kind, subtype)) = candidate.split_once('/') else { return String::new(); };
+    let token = |part: &str| !part.is_empty() && part.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte));
+    if !token(kind) || !token(subtype) { return String::new(); }
+    candidate.to_ascii_lowercase()
+}
+
+fn body_shape(body: &Value) -> Value {
+    let state = body["state"].as_str().unwrap_or("unknown");
+    let mime = media_type(&body["mime"]);
+    let reason = if state != "available" { Some("body_unavailable") }
+        else if body["truncated"] != false { Some("body_truncated") }
+        else if body["has_base64"] == true { Some("base64_not_analyzed") }
+        else if mime != "application/json" && !mime.strip_prefix("application/").is_some_and(|v| v.len() > 5 && v.ends_with("+json")) { Some("not_json_media_type") }
+        else if body["text"].as_str().is_none() { Some("body_byte_limit") }
+        else { None };
+    let result = reason.map_or_else(|| infer_shape(body["text"].as_str().unwrap()), Err);
+    match result {
+        Ok(shape) => json!({"state": state, "mime": mime, "status": "observed", "reason": null, "shape": shape}),
+        Err(reason) => json!({"state": state, "mime": mime, "status": "unavailable", "reason": reason, "shape": null}),
+    }
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum Segment { Property { name: String }, ArrayElement }
+#[derive(Default)]
+struct Field { types: BTreeSet<&'static str>, observations: usize }
+#[derive(Default)]
+struct Shape {
+    fields: BTreeMap<Vec<Segment>, Field>, nodes: usize, depth: usize,
+    path_bytes: usize, fault: Option<&'static str>,
+}
+impl Shape {
+    fn fail<E: de::Error>(&mut self, reason: &'static str) -> E {
+        self.fault = Some(reason); E::custom(reason)
+    }
+    fn record<E: de::Error>(&mut self, path: &[Segment], kind: &'static str) -> std::result::Result<(), E> {
+        if self.nodes >= MAX_NODES || path.len() > MAX_DEPTH { return Err(self.fail("shape_resource_limit")); }
+        if !self.fields.contains_key(path) {
+            let bytes = serde_json::to_vec(path).map_err(E::custom)?.len();
+            if self.fields.len() >= MAX_FIELDS + 1 || self.path_bytes + bytes > MAX_PATH_BYTES { return Err(self.fail("shape_resource_limit")); }
+            self.path_bytes += bytes;
+        }
+        self.nodes += 1; self.depth = self.depth.max(path.len());
+        let field = self.fields.entry(path.to_vec()).or_default();
+        field.types.insert(kind); field.observations += 1; Ok(())
+    }
+}
+struct ShapeSeed<'a> { shape: &'a mut Shape, path: Vec<Segment> }
+impl<'de> DeserializeSeed<'de> for ShapeSeed<'_> {
+    type Value = ();
+    fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> std::result::Result<(), D::Error> { d.deserialize_any(self) }
+}
+impl<'de> Visitor<'de> for ShapeSeed<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("bounded JSON body") }
+    fn visit_unit<E: de::Error>(self) -> std::result::Result<(), E> { self.shape.record(&self.path, "null") }
+    fn visit_bool<E: de::Error>(self, _: bool) -> std::result::Result<(), E> { self.shape.record(&self.path, "boolean") }
+    fn visit_i64<E: de::Error>(self, _: i64) -> std::result::Result<(), E> { self.shape.record(&self.path, "number") }
+    fn visit_u64<E: de::Error>(self, _: u64) -> std::result::Result<(), E> { self.shape.record(&self.path, "number") }
+    fn visit_f64<E: de::Error>(self, _: f64) -> std::result::Result<(), E> { self.shape.record(&self.path, "number") }
+    fn visit_str<E: de::Error>(self, _: &str) -> std::result::Result<(), E> { self.shape.record(&self.path, "string") }
+    fn visit_string<E: de::Error>(self, _: String) -> std::result::Result<(), E> { self.shape.record(&self.path, "string") }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
+        self.shape.record(&self.path, "array")?;
+        let mut path = self.path; path.push(Segment::ArrayElement);
+        while seq.next_element_seed(ShapeSeed { shape: self.shape, path: path.clone() })?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<(), A::Error> {
+        self.shape.record(&self.path, "object")?;
+        let mut keys = BTreeSet::new();
+        while let Some(name) = map.next_key::<String>()? {
+            if name.len() > MAX_NAME { return Err(self.shape.fail("shape_resource_limit")); }
+            if !keys.insert(name.clone()) { return Err(self.shape.fail("duplicate_json_key")); }
+            let mut path = self.path.clone(); path.push(Segment::Property { name });
+            map.next_value_seed(ShapeSeed { shape: self.shape, path })?;
+        }
+        Ok(())
+    }
+}
+fn infer_shape(text: &str) -> std::result::Result<Value, &'static str> {
+    if text.len() > MAX_BODY { return Err("body_byte_limit"); }
+    let mut shape = Shape::default();
+    let mut parser = serde_json::Deserializer::from_str(text);
+    ShapeSeed { shape: &mut shape, path: Vec::new() }.deserialize(&mut parser)
+        .map_err(|_| shape.fault.unwrap_or("malformed_json"))?;
+    parser.end().map_err(|_| "malformed_json")?;
+    let root = shape.fields.remove(&Vec::new()).ok_or("malformed_json")?;
+    let properties: Vec<Value> = shape.fields.into_iter().map(|(path, field)|
+        json!({"path": path, "types": field.types, "observations": field.observations})).collect();
+    Ok(json!({"root_type": root.types.first(), "node_count": shape.nodes,
+        "max_depth_observed": shape.depth, "properties": properties}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn request(id: usize, url: &str, body: &str) -> Value {
+        json!({"requestId": id.to_string(), "timestamp": id as f64 + 1.0,
+            "request": {"url": url, "method": "POST", "postData": body,
+                "headers": {"Content-Type": "Application/JSON; token=synthetic-request-mime", "Authorization": "Bearer synthetic-header", "Cookie": "synthetic-cookie"}}})
+    }
+    fn debugger(enabled: bool) -> std::sync::Arc<Debugger> {
+        let mut options = crate::config::Options::parse_from(["test"]);
+        options.capture_network_content = enabled;
+        let debugger = Debugger::new(&options);
+        debugger.update(|s| s["target"] = json!({"id": "synthetic-target"}));
+        debugger
+    }
+    fn validate(output: &Value) {
+        let spec: Value = serde_json::from_str(include_str!("../../../../protocol/openapi.json")).unwrap();
+        let schema = json!({"$ref":"#/components/schemas/ApiObservationCatalog", "components":spec["components"]});
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        for error in validator.iter_errors(output) { panic!("Catalog schema: {error}"); }
+    }
+
+    #[tokio::test]
+    async fn catalog_uses_real_capture_and_preserves_raw_values_and_scoped_sources() {
+        let debugger = debugger(true);
+        let raw_url = "https://synthetic-user:synthetic-pass@example.test/v1/items?token=synthetic-query&id=3&id=4#synthetic-fragment";
+        debugger.network("Network.requestWillBeSent", &request(1, raw_url,
+            r#"{"items":[{"id":1,"value":"synthetic-body"},{"id":"two"}],"empty":[],"nested.key":{"/":true}}"#)).await;
+        debugger.network("Network.responseReceived", &json!({"requestId":"1", "response":{
+            "status": 201, "headers":{"Content-Type":"application/problem+json; profile=synthetic-response-mime","Set-Cookie":"synthetic-response"}}})).await;
+        debugger.update(|s| {
+            s["network"]["requests"][0]["response"]["body"] = json!({"state":"available", "mime":"application/problem+json; profile=synthetic-response-mime", "text":"{\"ok\":true}", "base64":"", "truncated":false});
+        });
+        let before = debugger.snapshot();
+        let output = debugger.api_catalog().unwrap();
+        validate(&output);
+        assert_eq!(before, debugger.snapshot(), "Derivation must not alter raw Traffic");
+        assert_eq!(output["coverage"]["instance_id"], before["network"]["instance_id"]);
+        assert_eq!(output["coverage"]["capture_epoch"], 0);
+        let endpoint = &output["endpoints"][0];
+        assert_eq!(endpoint["path"], "/v1/items");
+        assert_eq!(endpoint["origin"], "https://example.test");
+        let observation = &endpoint["observations"][0];
+        assert_eq!(observation["source"]["request_id"], before["network"]["requests"][0]["id"]);
+        assert_eq!(observation["source"]["started_monotonic_ms"], 2000.0);
+        assert_eq!(observation["query_parameters"]["names"], json!(["id", "token"]));
+        assert_eq!(observation["request"]["header_names"], json!(["authorization", "content-type", "cookie"]));
+        assert_eq!(observation["status"], 201);
+        assert_eq!(observation["response"]["body"]["status"], "observed");
+        assert_eq!(observation["request"]["body"]["mime"], "application/json");
+        assert_eq!(observation["response"]["body"]["mime"], "application/problem+json");
+        let text = output.to_string();
+        for secret in ["synthetic-user", "synthetic-pass", "synthetic-query", "synthetic-fragment", "synthetic-header", "synthetic-cookie", "synthetic-body", "synthetic-response", "synthetic-request-mime", "synthetic-response-mime"] {
+            assert!(!text.contains(secret), "Unexpected value: {secret}");
+        }
+        let shape = &observation["request"]["body"]["shape"];
+        let id = shape["properties"].as_array().unwrap().iter().find(|field|
+            field["path"] == json!([{"kind":"property","name":"items"},{"kind":"array-element"},{"kind":"property","name":"id"}])).unwrap();
+        assert_eq!(id["types"], json!(["number", "string"]));
+        assert_eq!(id["observations"], 2);
+        assert_eq!(output, debugger.api_catalog().unwrap(), "Stable snapshot yields canonical output");
+    }
+
+    #[test]
+    fn shape_paths_are_typed_and_every_parse_or_resource_failure_is_explicit() {
+        assert_eq!(query_name("%C3%A9+key"), Some("é key".into()));
+        assert_eq!(media_type(&json!(" Application/JSON; private=synthetic-secret ")), "application/json");
+        for invalid in ["application/json secret", "application/json/extra", "application/", "/json", "application/\\json", "application/\u{7f}json"] {
+            assert_eq!(media_type(&json!(invalid)), "");
+        }
+        assert_eq!(media_type(&json!(format!("application/{}", "x".repeat(512)))), "");
+        for bad in ["%FF", "%ZZ", "%", "%0"] { assert_eq!(query_name(bad), None); }
+        let shape = infer_shape(r#"{"*":1,"":null,"a/b":{"~":true},"items":[[],["x"]]}"#).unwrap();
+        assert_eq!(shape["root_type"], "object");
+        assert!(shape["properties"].as_array().unwrap().iter().any(|p| p["path"] == json!([{"kind":"property","name":"*"}])));
+        assert_eq!(infer_shape("{\"a\":1,\"a\":2}"), Err("duplicate_json_key"));
+        assert_eq!(infer_shape("{\"a\":1,\"\\u0061\":2}"), Err("duplicate_json_key"));
+        for invalid in ["{", "null null", "1e9999", "[1,]", "\u{feff}{}"] { assert!(infer_shape(invalid).is_err()); }
+        assert_eq!(infer_shape(&" ".repeat(MAX_BODY + 1)), Err("body_byte_limit"));
+        let deep = format!("{}0{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
+        assert_eq!(infer_shape(&deep), Err("shape_resource_limit"));
+        let nodes = format!("[{}]", vec!["0"; MAX_NODES].join(","));
+        assert_eq!(infer_shape(&nodes), Err("shape_resource_limit"));
+        let fields = (0..MAX_FIELDS + 1).map(|i| format!("\"p{i}\":0")).collect::<Vec<_>>().join(",");
+        assert_eq!(infer_shape(&format!("{{{fields}}}")), Err("shape_resource_limit"));
+        let long = format!("{{\"{}\":0}}", "x".repeat(MAX_NAME + 1));
+        assert_eq!(infer_shape(&long), Err("shape_resource_limit"));
+        for text in ["null", "false", "1.3", "9007199254740993", "\"x\"", "[]", "{}"] { assert!(infer_shape(text).is_ok()); }
+    }
+
+    #[tokio::test]
+    async fn tail_bounds_drops_capture_off_and_body_unknowns_are_not_complete_claims() {
+        let disabled = debugger(false);
+        disabled.network("Network.requestWillBeSent", &request(0, "https://example.test/", "{}")).await;
+        let empty = disabled.api_catalog().unwrap(); validate(&empty);
+        assert_eq!(empty["coverage"]["capture_enabled"], false);
+        assert_eq!(empty["endpoints"], json!([]));
+        let debugger = debugger(true);
+        for id in 0..70 { debugger.network("Network.requestWillBeSent", &request(id, "https://example.test/same", "{}")).await; }
+        debugger.update(|s| s["network"]["dropped"] = json!(7));
+        let output = debugger.api_catalog().unwrap(); validate(&output);
+        assert_eq!(output["coverage"]["window_records"], MAX_RECORDS);
+        assert_eq!(output["coverage"]["older_records_not_examined"], 6);
+        assert_eq!(output["coverage"]["capture_dropped_records"], 7);
+        assert_eq!(output["endpoints"].as_array().unwrap().len(), 1);
+        assert_eq!(output["endpoints"][0]["observations"].as_array().unwrap().len(), MAX_RECORDS);
+        for (field, value, reason) in [
+            ("state", json!("loading"), "body_unavailable"),
+            ("truncated", json!(true), "body_truncated"),
+            ("has_base64", json!(true), "base64_not_analyzed"),
+            ("mime", json!("text/plain"), "not_json_media_type"),
+            ("text", Value::Null, "body_byte_limit"),
+            ("text", json!("{\"a\":1,\"a\":2}"), "duplicate_json_key"),
+        ] {
+            let mut body = json!({"state":"available", "mime":"application/json", "text":"{}", "truncated":false, "has_base64":false});
+            body[field] = value;
+            let result = body_shape(&body);
+            assert_eq!(result["reason"], reason); assert!(result["shape"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_paths_methods_query_names_and_omission_counts_stay_distinct() {
+        let debugger = debugger(true);
+        for (id, path) in ["/v1/1", "/v1/2", "/a/../b", "/b", "/%62"].iter().enumerate() {
+            debugger.network("Network.requestWillBeSent", &request(id, &format!("https://example.test{path}"), "{}")).await;
+        }
+        let query = (0..MAX_NAMES+1).map(|i| format!("p{i}=synthetic")).collect::<Vec<_>>().join("&");
+        debugger.network("Network.requestWillBeSent", &request(5, &format!("https://example.test/q?{query}"), "{}")).await;
+        debugger.network("Network.requestWillBeSent", &request(6, "data:text/plain,hello", "{}")).await;
+        debugger.network("Network.requestWillBeSent", &request(7, &format!("https://example.test/{}", "x".repeat(MAX_URL)), "{}")).await;
+        let output = debugger.api_catalog().unwrap(); validate(&output);
+        assert_eq!(output["coverage"]["skipped_records"], 2);
+        assert_eq!(output["endpoints"].as_array().unwrap().len(), 6);
+        let q = output["endpoints"].as_array().unwrap().iter().find(|v| v["path"] == "/q").unwrap();
+        assert_eq!(q["observations"][0]["query_parameters"]["omitted"], 1);
+        assert_eq!(q["observations"][0]["query_parameters"]["names"].as_array().unwrap().len(), MAX_NAMES);
+    }
+}

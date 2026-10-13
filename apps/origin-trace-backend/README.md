@@ -68,6 +68,12 @@ These annotations do not authorize execution or automatic retries.
 profile, rule definitions, and reviewed sources without touching evidence or
 starting analysis. See [Analysis Catalog v1](../../docs/product/analysis-catalog-v1.md).
 
+`reb-api call get_api_observation_catalog --base-url URL` derives a bounded
+endpoint/parameter and JSON-shape catalog from the newest retained Traffic
+requests. It preserves scoped source identities and explicit unknowns, leaves
+raw Traffic unchanged, and never sends a target request. See the
+[API observation catalog contract](../../protocol/api-observation-catalog-v1.md).
+
 Request Field Trace uses `src/provenance.rs` for bounded in-process projection of
 request call sites and same-target primitive string matches. Hashes are captured
 only while selected-value capture is enabled. Request-time snapshots survive

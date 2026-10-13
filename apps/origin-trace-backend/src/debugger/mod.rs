@@ -1,3 +1,4 @@
+mod api_catalog;
 mod automation;
 mod body_diff;
 mod connection;

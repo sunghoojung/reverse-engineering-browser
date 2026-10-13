@@ -158,9 +158,32 @@ import (
 type Request struct {
     Method string ${'`'}json:"method"${'`'}
     URL string ${'`'}json:"url"${'`'}
-    Headers [][]string ${'`'}json:"headers"${'`'}
+    Headers HeaderPairs ${'`'}json:"headers"${'`'}
     Body *string ${'`'}json:"body"${'`'}
     TimeoutMS int ${'`'}json:"timeout_ms"${'`'}
+}
+// Header pairs reject JSON nulls rather than silently converting them to empty strings.
+type HeaderPairs [][]string
+func (headers *HeaderPairs) UnmarshalJSON(data []byte) error {
+    if strings.TrimSpace(string(data)) == "null" { return errors.New("Header pairs cannot be null") }
+    var pairs []json.RawMessage
+    if err:=json.Unmarshal(data,&pairs);err!=nil { return err }
+    if len(pairs)>64 { return errors.New("At most 64 header pairs are supported") }
+    result:=make(HeaderPairs,0,len(pairs))
+    for _,raw:=range pairs {
+        var members []json.RawMessage
+        if err:=json.Unmarshal(raw,&members);err!=nil { return err }
+        if len(members)!=2 { return errors.New("Each header must contain exactly two strings") }
+        pair:=make([]string,2)
+        for i,member:=range members {
+            value:=strings.TrimSpace(string(member))
+            if len(value)<2 || value[0]!='"' { return errors.New("Header names and values must be strings, never null") }
+            if err:=json.Unmarshal(member,&pair[i]);err!=nil { return err }
+        }
+        result=append(result,pair)
+    }
+    *headers=result
+    return nil
 }
 type Config struct {
     AllowedOrigin string ${'`'}json:"allowedOrigin"${'`'}
@@ -173,7 +196,8 @@ type Provenance struct {
 }
 type Result struct {
     DryRun bool ${'`'}json:"dry_run"${'`'}
-    NetworkRequests int ${'`'}json:"network_requests"${'`'}
+    NetworkRequests *int ${'`'}json:"network_requests"${'`'}
+    NetworkAttempted bool ${'`'}json:"network_attempted"${'`'}
     Ready bool ${'`'}json:"ready"${'`'}
     Problems []string ${'`'}json:"problems,omitempty"${'`'}
     Instruction string ${'`'}json:"instruction,omitempty"${'`'}
@@ -183,6 +207,64 @@ type Result struct {
     Headers [][]string ${'`'}json:"headers,omitempty"${'`'}
     Body string ${'`'}json:"body"${'`'}
     BodyTruncated bool ${'`'}json:"body_truncated"${'`'}
+}
+
+// Reject duplicate keys before decoding: Go's usual last-value/merge behavior
+// would disagree with the JavaScript client and could change a reviewed method.
+func uniqueJSON(decoder *json.Decoder, depth int) error {
+    if depth>64 { return errors.New("JSON nesting exceeds 64 levels") }
+    value,err:=decoder.Token()
+    if err!=nil { return err }
+    delimiter,container:=value.(json.Delim)
+    if !container { return nil }
+    switch delimiter {
+    case '{':
+        seen:=map[string]bool{}
+        for decoder.More() {
+            key,err:=decoder.Token();if err!=nil { return err }
+            name,ok:=key.(string);if !ok || seen[name] { return errors.New("Duplicate or malformed JSON object key") }
+            seen[name]=true
+            if err:=uniqueJSON(decoder,depth+1);err!=nil { return err }
+        }
+    case '[':
+        for decoder.More() { if err:=uniqueJSON(decoder,depth+1);err!=nil { return err } }
+    default: return errors.New("Unexpected JSON delimiter")
+    }
+    _,err=decoder.Token()
+    return err
+}
+func exactFields(data []byte, allowed, required []string) (map[string]json.RawMessage,error) {
+    var fields map[string]json.RawMessage
+    if err:=json.Unmarshal(data,&fields);err!=nil { return nil,err }
+    if fields==nil { return nil,errors.New("A JSON object is required") }
+    permitted:=map[string]bool{};for _,key:=range allowed { permitted[key]=true }
+    if allowed!=nil { for key:=range fields { if !permitted[key] { return nil,errors.New("Unknown or incorrectly cased request/configuration key") } } }
+    for _,key:=range required { if _,ok:=fields[key];!ok { return nil,errors.New("A complete request object is required") } }
+    return fields,nil
+}
+func (request *Request) UnmarshalJSON(data []byte) error {
+    keys:=[]string{"method","url","headers","body","timeout_ms"}
+    if _,err:=exactFields(data,keys,keys);err!=nil { return err }
+    type plain Request
+    var value plain
+    if err:=json.Unmarshal(data,&value);err!=nil { return err }
+    *request=Request(value)
+    return nil
+}
+func (config *Config) UnmarshalJSON(data []byte) error {
+    if _,err:=exactFields(data,[]string{"allowedOrigin","request"},nil);err!=nil { return err }
+    type plain Config
+    var value plain
+    if err:=json.Unmarshal(data,&value);err!=nil { return err }
+    *config=Config(value)
+    return nil
+}
+func (provenance *Provenance) UnmarshalJSON(data []byte) error {
+    fields,err:=exactFields(data,nil,[]string{"format","mode","problems"});if err!=nil { return err }
+    // Other provenance fields are extensible data, never case-folded aliases.
+    if err:=json.Unmarshal(fields["format"],&provenance.Format);err!=nil { return err }
+    if err:=json.Unmarshal(fields["mode"],&provenance.Mode);err!=nil { return err }
+    return json.Unmarshal(fields["problems"],&provenance.Problems)
 }
 
 // ReadJSON bounds local inputs and rejects invalid Unicode instead of accepting
@@ -210,6 +292,9 @@ func ReadJSON(path string, target any) error {
         if _, err := fmt.Sscanf(string(data[i+3:i+7]), "%04x", &low); err != nil || low < 0xdc00 || low > 0xdfff { return errors.New("unpaired Unicode surrogate") }
         i += 6
     }
+    decoder:=json.NewDecoder(strings.NewReader(string(data)));decoder.UseNumber()
+    if err:=uniqueJSON(decoder,0);err!=nil { return err }
+    if _,err:=decoder.Token();err!=io.EOF { return errors.New("Unexpected trailing JSON data") }
     return json.Unmarshal(data, target)
 }
 
@@ -280,11 +365,13 @@ func Send(ctx context.Context, input Request, config Config, provenance Provenan
     if config.Request==nil && (provenance.Format!="reb-client-project-v1" || provenance.Mode!="raw" || len(provenance.Problems)>0) {
         problems=append(problems,"Provide a complete reviewed config.request for redacted, unknown or unsupported evidence")
     }
-    result:=Result{DryRun:!send,Ready:len(problems)==0,Problems:problems,Instruction:"Review evidence/config.json, set allowedOrigin, then explicitly run with --send"}
+    zero,one:=0,1
+    result:=Result{DryRun:!send,NetworkRequests:&zero,Ready:len(problems)==0,Problems:problems,Instruction:"Review evidence/config.json, set allowedOrigin, then explicitly run with --send"}
     if !send { return result,nil }
     if len(problems)>0 { return result,errors.New(strings.Join(problems,"; ")) }
     parsed,_:=requestURL(input.URL)
     if config.AllowedOrigin!=origin(parsed) { return result,errors.New("config.allowedOrigin must exactly match the reviewed request origin") }
+    if err:=ctx.Err();err!=nil { return result,err }
     request,err:=http.NewRequestWithContext(ctx,input.Method,input.URL,strings.NewReader(*input.Body))
     if err!=nil { return result,err }
     for _,pair:=range input.Headers { request.Header.Set(pair[0],pair[1]) }
@@ -296,16 +383,28 @@ func Send(ctx context.Context, input Request, config Config, provenance Provenan
     defer transport.CloseIdleConnections()
     client:=&http.Client{Transport:transport,Timeout:time.Duration(input.TimeoutMS)*time.Millisecond,
         CheckRedirect:func(*http.Request,[]*http.Request)error{return http.ErrUseLastResponse}}
+    // Errors before receiving a response cannot prove whether the server saw it.
+    result.NetworkAttempted=true
+    result.Instruction="The server may have processed this request; check its state before deciding whether another send is safe. No automatic retry occurred."
+    result.NetworkRequests=nil
     response,err:=client.Do(request)
     if err!=nil { return result,err }
+    result.NetworkRequests=&one
+    result.Status=response.StatusCode
+    result.URL=response.Request.URL.String()
     defer response.Body.Close()
     body,err:=io.ReadAll(io.LimitReader(response.Body,65537))
-    if err!=nil { return result,err }
+    if err!=nil {
+        if len(body)>65536 { body=body[:65536] }
+        result.Body=strings.ToValidUTF8(string(body),"\ufffd")
+        result.BodyTruncated=true
+        return result,err
+    }
     truncated:=len(body)>65536;if truncated { body=body[:65536] }
     headers:=[][]string{};names:=make([]string,0,len(response.Header))
     for name:=range response.Header { names=append(names,name) };sort.Strings(names)
     for _,name:=range names { for _,value:=range response.Header[name] { headers=append(headers,[]string{name,value}) } }
-    return Result{Ready:true,NetworkRequests:1,Status:response.StatusCode,URL:response.Request.URL.String(),
+    return Result{Ready:true,NetworkAttempted:true,NetworkRequests:&one,Status:response.StatusCode,URL:response.Request.URL.String(),
         Headers:headers,Body:strings.ToValidUTF8(string(body),"\ufffd"),BodyTruncated:truncated},nil
 }
 `,
@@ -346,7 +445,11 @@ func main() {
         fmt.Fprintln(os.Stderr,"Usage: from go/, go run ./cmd/request-001 [--send]");os.Exit(2)
     }
     result,err:=services.Request001(context.Background(),"..",send)
-    if err!=nil { fmt.Fprintln(os.Stderr,err);os.Exit(1) }
+    if err!=nil {
+        fmt.Fprintln(os.Stderr,err)
+        if result.NetworkAttempted { fmt.Fprintln(os.Stderr,result.Instruction) }
+        os.Exit(1)
+    }
     encoder:=json.NewEncoder(os.Stdout);encoder.SetIndent("","  ")
     if err:=encoder.Encode(result);err!=nil { fmt.Fprintln(os.Stderr,err);os.Exit(1) }
 }

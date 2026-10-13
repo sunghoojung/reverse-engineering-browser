@@ -241,6 +241,8 @@ async function checkGeneratedGoProject() {
     await materialize(api.capturedClientProject(source,'raw'));
     const compiler=await command('go',['version'],cwd,{env:environment});assert.equal(compiler.code,0,compiler.stderr);assert.match(compiler.stdout,/go version go1\./,'A real installed Go compiler is required');
     const build=await command('go',['build','-o','../request001','./cmd/request-001'],cwd,{env:environment,timeout:90000});assert.equal(build.code,0,build.stderr);
+    await writeFile(join(cwd,'client/client_test.go'),await readFile(join(root,'tools/client-project-go_test.txt'),'utf8'));
+    const tests=await command('go',['test','./...'],cwd,{env:environment,timeout:90000});assert.equal(tests.code,0,tests.stdout+tests.stderr);
     const vet=await command('go',['vet','./...'],cwd,{env:environment,timeout:90000});assert.equal(vet.code,0,vet.stderr);
     const execute=(...args)=>command(join(folder,'request001'),args,cwd);
     let result=await execute();assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).dry_run,true);assert.equal(seen.length,0);
@@ -256,7 +258,7 @@ async function checkGeneratedGoProject() {
     await config({allowedOrigin:origin,request:override});result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).status,302);assert.equal(seen.length,2);
     for(const path of ['/large','/exact-limit','/slow']){
       await config({allowedOrigin:origin,request:{...override,url:origin+path,timeout_ms:100}});result=await execute('--send');
-      if(path==='/slow')assert.notEqual(result.code,0,'Timeout is reported without retry');
+      if(path==='/slow'){assert.notEqual(result.code,0,'Timeout is reported without retry');assert.match(result.stderr,/check its state/);}
       else {assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).body.length,65536);assert.equal(JSON.parse(result.stdout).body_truncated,path==='/large');}
     }
     assert.equal(seen.length,5);
@@ -266,6 +268,7 @@ async function checkGeneratedGoProject() {
     }
     await materialize(api.capturedClientProject(source,'raw'));
     for(const request of [{...override,headers:[['X-Latin1','é']]},{...override,url:origin+'/雪'},
+      {...override,headers:[['X-Null',null]]},{...override,headers:[[null,'value']]},{...override,headers:[null]},
       {...override,headers:[['X-Broken']]},{...override,timeout_ms:99},{...override,timeout_ms:30001},
       {...override,headers:[['Content-Type','text/plain; charset=utf-8; charset=ascii']]}]){
       await config({allowedOrigin:origin,request});result=await execute('--send');assert.notEqual(result.code,0,result.stderr);assert.equal(seen.length,5);
@@ -279,9 +282,9 @@ async function checkGeneratedGoProject() {
     result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(seen.length,6);assert.equal(seen[5].method,'PATCH');assert.equal(seen[5].body,'😀\r\nexact');
     const output=join(root,'build/client-project-qa');await mkdir(output,{recursive:true});
     await writeFile(join(output,'go-validation.json'),JSON.stringify({status:'passed',compiler:compiler.stdout.trim(),fixture:'authored loopback only',requests:seen.length,
-      checks:['go build/vet','default dry run','exact method/raw query/ASCII headers/UTF-8 CRLF body','no cookie/credential sharing','cross-origin redirects stopped','timeout/response bounds','unsupported capture matrix','explicit complete replacement']},null,2)+'\n');
+      checks:['go build/test/vet','cancellation and honest error accounting','TLS certificate verification','strict shared JSON decoding','default dry run','exact method/raw query/ASCII headers/UTF-8 CRLF body','no cookie/credential sharing','cross-origin redirects stopped','timeout/response bounds','unsupported capture matrix','explicit complete replacement']},null,2)+'\n');
   } finally {server.closeAllConnections();await new Promise(done=>server.close(done));await rm(directory,{recursive:true,force:true});}
-  console.log('PASS generated Go build/vet and actual net/http loopback fidelity, explicit send/origin/configuration gates, unsupported matrix, redirects, timeout and response bounds');
+  console.log('PASS generated Go build/test/vet and actual net/http loopback fidelity, explicit send/origin/configuration gates, unsupported matrix, redirects, timeout and response bounds');
 }
 
 async function checkController() {

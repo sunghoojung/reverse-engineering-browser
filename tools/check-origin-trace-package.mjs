@@ -26,6 +26,12 @@ export async function checkPackageContract() {
   }
   const native = await readFile(join(root, 'apps/research-ui/macos/OriginTraceApp.swift'), 'utf8');
   assert(build.includes('ClientProjectExportSmoke.swift'));
+  const clientSmoke=await readFile(join(root,'apps/research-ui/macos/ClientProjectExportSmoke.swift'),'utf8');
+  const clientUI=await readFile(join(root,'tools/client-project-ui/ClientProjectUITests.swift'),'utf8');
+  assert(!clientSmoke.includes('panel.ok('),'Modern Save panels cannot be approved in process');
+  assert(clientSmoke.includes('actual == expected') && clientSmoke.includes('children.isEmpty'));
+  assert(clientUI.includes('XCUIApplication(url:') && clientUI.includes('save.click()'));
+  assert(clientUI.includes('savedExactBytes') && clientUI.includes('cancelNoWrite'));
   assert.equal([...native.matchAll(/func applicationWillTerminate\(/g)].length,1,'Keep one termination delegate');
   assert.match(native, /let researchUIURL = resourcesURL\.appendingPathComponent\("research-ui", isDirectory: true\)/);
   for (const asset of ['index.html', 'analyst_runner_core.js']) {
@@ -115,34 +121,29 @@ export function assertFloat32Smoke(name, value) {
 }
 
 async function runClientProjectSmoke(app, directory) {
-  const stores = join(directory,'client-project');
-  await mkdir(stores);
-  const panelOutput = join(directory,'client-project-panels');
-  await mkdir(panelOutput);
-  const child = spawn(join(app,'Contents/MacOS/OriginTrace'),[
-    '--store',join(stores,'events.jsonl'),'--trace-store',join(stores,'traces.jsonl'),
-    '--signal-store',join(stores,'signals.jsonl'),'--artifacts',join(stores,'artifacts'),
-    '--api-collection',join(stores,'collection.json'),'--local-analyst',join(stores,'analyst.json'),
-  ],{cwd:directory,env:{...process.env,REB_APP_SMOKE_TEST:'1',REB_APP_SMOKE_CLIENT_PROJECT:'1',
-    REB_APP_SMOKE_CLIENT_PROJECT_OUTPUT:panelOutput,
-    REB_APP_SMOKE_NATIVE_CLOSE:'',REB_APP_SMOKE_LIVE_FAILURE:'0',REB_DISABLE_AUTOMATIC_LIVE_SESSION:'1'}});
-  let output = '', timer;
-  for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{output=(output+chunk).slice(-128*1024);});
+  const stores=join(directory,'client-project'),output=join(directory,'client-project-panels');
+  await mkdir(stores);await mkdir(output);
+  const child=spawn('xcodebuild',['test','-project',join(root,'tools/client-project-ui/ClientProjectUITests.xcodeproj'),
+    '-scheme','ClientProjectUITests','-destination','platform=macOS',
+    '-derivedDataPath',join(directory,'client-project-derived'),
+    '-resultBundlePath',join(directory,'client-project-ui.xcresult'),
+    '-parallel-testing-enabled','NO'],{cwd:directory,env:{...process.env,
+      TEST_RUNNER_REB_CLIENT_PROJECT_APP:app,TEST_RUNNER_REB_CLIENT_PROJECT_OUTPUT:output,
+      TEST_RUNNER_REB_CLIENT_PROJECT_STORES:stores}});
+  let log='',timer;
+  for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{log=(log+chunk).slice(-256*1024);});
   try {
     await new Promise((done,reject)=>{
-      timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Client-project panel smoke timed out\n'+output));},45000);
+      timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Xcode native Save-panel test timed out\n'+log));},240000);
       child.once('error',reject);
-      child.once('close',(code,signal)=>code===0?done():reject(new Error(`Client-project panel smoke exited ${code}/${signal}\n${output}`)));
+      child.once('close',(code,signal)=>code===0?done():reject(new Error(`Xcode native Save-panel test exited ${code}/${signal}\n${log}`)));
     });
-  } finally {clearTimeout(timer);await writeFile(join(directory,'client-project.log'),output);}
-  assert(!output.includes('SMOKE_ERROR'),output);
-  assert.deepEqual([...output.matchAll(/^NATIVE_CLIENT_PROJECT_PHASE (.+)$/gm)].map(match=>match[1]),
-    ['cancel','save','writeFailure','navigation','replacementSave'],output);
-  const receipts=[...output.matchAll(/^NATIVE_CLIENT_PROJECT_OK (.+)$/gm)];
-  assert.equal(receipts.length,1,output);
-  assert.deepEqual(JSON.parse(receipts[0][1]),{savedExactBytes:true,cancelNoWrite:true,busyRefused:true,
+  } finally {clearTimeout(timer);await writeFile(join(directory,'client-project.log'),log);}
+  const receipt=JSON.parse(await readFile(join(output,'result.json'),'utf8'));
+  assert.deepEqual(receipt,{savedExactBytes:true,cancelNoWrite:true,busyRefused:true,
     navigationNoWrite:true,writeFailureRefused:true,replacementSaved:true,panelCount:5});
-  console.log('PASS packaged native client-project real Save/Cancel panels, exact ZIP bytes, pending refusal, navigation cancellation/retry and atomic-write failure; overwrite not exercised');
+  for(const phase of ['save','writeFailure','replacementSave'])assert((await stat(join(output,phase+'-panel.png'))).size>0);
+  console.log('PASS Xcode UI-tested real native Save panels, exact ZIP bytes, Cancel/no-write, pending refusal, navigation cancellation/retry and atomic-write failure; overwrite not exercised');
 }
 
 async function main() {
@@ -197,6 +198,8 @@ async function main() {
       const log = join(temporary, `${name}.log`);
       try {await cp(log, join(reports, `${name}.log`));} catch (error) {if (error.code !== 'ENOENT') throw error;}
     }
+    try {await cp(join(temporary,'client-project-ui.xcresult'),join(reports,'client-project-ui.xcresult'),{recursive:true});}
+    catch (error) {if(error.code!=='ENOENT')throw error;}
     try {await cp(join(temporary,'client-project-panels'),join(reports,'client-project-panels'),{recursive:true});}
     catch (error) {if(error.code!=='ENOENT')throw error;}
     await rm(temporary, {recursive: true, force: true});

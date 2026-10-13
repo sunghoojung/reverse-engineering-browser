@@ -79,6 +79,7 @@ final class ClientProjectExportSmoke: NSObject {
 
   private func run(_ next: Phase) {
     phase = next
+    window.title = "Client project smoke: \(next.rawValue)"
     reply = nil
     stage("request-bridge")
     phaseDirectory = directory.appendingPathComponent(next.rawValue, isDirectory: true)
@@ -122,7 +123,6 @@ final class ClientProjectExportSmoke: NSObject {
       self.trace("panel-ready defaultEnabled=\(String(describing: panel.defaultButtonCell?.isEnabled))")
       self.require(panel.directoryURL?.resolvingSymlinksInPath() == self.phaseDirectory.resolvingSymlinksInPath(),
                    "panel did not open the owned temporary directory")
-      self.capturePanel(panel)
       if self.phase == .cancel {
         self.stage("request-while-pending")
         self.webView.callAsyncJavaScript("""
@@ -150,23 +150,10 @@ final class ClientProjectExportSmoke: NSObject {
           }
         }
       } else {
-        // Since macOS 10.15 NSSavePanel.ok(_:) cannot be invoked directly:
-        // https://developer.apple.com/documentation/appkit/nssavepanel/ok(_:)
-        // Deliver Return through the owned key window's normal event path.
-        // This exercises the real remote panel, including its validation; no
-        // modal response, selected URL or bridge completion is manufactured.
-        self.schedule("save-action") {
-          self.stage("save-key-dispatched")
-          for type in [NSEvent.EventType.keyDown, .keyUp] {
-            guard let event = NSEvent.keyEvent(with: type, location: .zero,
-              modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-              windowNumber: panel.windowNumber, context: nil, characters: "\r",
-              charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)
-            else { self.fail("cannot construct the owned panel Return event"); return }
-            panel.sendEvent(event)
-          }
-          self.trace("save-key-returned")
-        }
+        // Apple hosts Save panels in a separate process. The Xcode UI test
+        // clicks the real Save control; direct ok(_:) and synthetic in-process
+        // keyboard events cannot approve it. No native completion is fabricated.
+        self.stage("await-xcode-save-click", timeout: 30)
       }
     }
   }
@@ -215,6 +202,15 @@ final class ClientProjectExportSmoke: NSObject {
       do { try manager.removeItem(at: directory) }
       catch { fail("cannot clean up owned temporary directory") }
       print("NATIVE_CLIENT_PROJECT_OK {\"savedExactBytes\":true,\"cancelNoWrite\":true,\"busyRefused\":true,\"navigationNoWrite\":true,\"writeFailureRefused\":true,\"replacementSaved\":true,\"panelCount\":5}")
+      if let output = ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT_OUTPUT"] {
+        let result: [String: Any] = ["savedExactBytes": true, "cancelNoWrite": true,
+          "busyRefused": true, "navigationNoWrite": true, "writeFailureRefused": true,
+          "replacementSaved": true, "panelCount": 5]
+        do {
+          let bytes = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+          try bytes.write(to: URL(fileURLWithPath: output).appendingPathComponent("result.json"))
+        } catch { fail("cannot write the native test receipt") }
+      } else { fail("native UI-test receipt destination is missing") }
       fflush(stdout)
       schedule("quit") { NSApp.terminate(nil) }
     }
@@ -237,27 +233,6 @@ final class ClientProjectExportSmoke: NSObject {
     action()
   }
 
-  private func capturePanel(_ panel: NSSavePanel) {
-    guard let output = ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT_OUTPUT"],
-      let view = panel.contentView
-    else { trace("panel-render-unavailable"); return }
-    // Render only this authored test's owned NSView, without screen recording,
-    // desktop capture, Accessibility permissions or any additional user access.
-    stage("render-panel")
-    view.layoutSubtreeIfNeeded()
-    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
-      trace("panel-bitmap-unavailable"); return
-    }
-    view.cacheDisplay(in: view.bounds, to: bitmap)
-    guard let bytes = bitmap.representation(using: .png, properties: [:]) else {
-      trace("panel-png-unavailable"); return
-    }
-    do {
-      try bytes.write(to: URL(fileURLWithPath: output).appendingPathComponent(phase.rawValue + "-panel.png"))
-      trace("panel-rendered")
-    } catch { trace("panel-render-write-failed") }
-  }
-
   private func trace(_ event: String) {
     let mode = RunLoop.current.currentMode?.rawValue ?? "none"
     print("NATIVE_CLIENT_PROJECT_TRACE \(phase.rawValue) \(event) mode=\(mode) "
@@ -265,14 +240,14 @@ final class ClientProjectExportSmoke: NSObject {
     fflush(stdout)
   }
 
-  private func stage(_ label: String) {
+  private func stage(_ label: String, timeout: TimeInterval = 10) {
     trace(label)
     watchdog?.cancel()
     // This is independent of the AppKit run loop: a blocked native call must
     // identify its stage, not silently hang until the outer process timeout.
     let marker = phase.rawValue + "/" + label
     let next = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-    next.schedule(deadline: .now() + 10)
+    next.schedule(deadline: .now() + timeout)
     next.setEventHandler {
       let message = "SMOKE_ERROR native client-project stage timed out: " + marker + "\n"
       FileHandle.standardError.write(Data(message.utf8))

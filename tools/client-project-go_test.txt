@@ -1,0 +1,96 @@
+// Compiled inside the exported module by check-captured-client-project.mjs --go.
+package client
+
+import (
+    "context"
+    "encoding/json"
+    "io"
+    "log"
+    "net/http"
+    "net/http/httptest"
+    "os"
+    "path/filepath"
+    "sync/atomic"
+    "strings"
+    "testing"
+)
+
+func authoredRequest(url string) Request {
+    body:="authored POST\r\n雪"
+    return Request{Method:"POST",URL:url,Headers:HeaderPairs{},Body:&body,TimeoutMS:500}
+}
+func TestNetworkErrorAccounting(t *testing.T) {
+    var seen atomic.Int32
+    server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){seen.Add(1);w.WriteHeader(200)}))
+    defer server.Close()
+    input:=authoredRequest(server.URL)
+    provenance:=Provenance{Format:"reb-client-project-v1",Mode:"raw"}
+    ctx,cancel:=context.WithCancel(context.Background());cancel()
+    result,err:=Send(ctx,input,Config{AllowedOrigin:server.URL},provenance,true)
+    if err==nil || result.NetworkAttempted || result.NetworkRequests==nil || *result.NetworkRequests!=0 || seen.Load()!=0 {
+        t.Fatalf("pre-canceled context must remain network-free: %+v %v",result,err)
+    }
+    ctx,cancel=context.WithCancel(context.Background());defer cancel()
+    release:=make(chan struct{})
+    delayed:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+        io.Copy(io.Discard,r.Body);seen.Add(1);cancel();<-release
+    }))
+    defer delayed.Close()
+    input=authoredRequest(delayed.URL)
+    result,err=Send(ctx,input,Config{AllowedOrigin:delayed.URL},provenance,true)
+    close(release)
+    if strings.Contains(result.Instruction,"--send") || !strings.Contains(result.Instruction,"check its state") {t.Fatal("unsafe post-attempt retry instruction")}
+    if err==nil || !result.NetworkAttempted || result.NetworkRequests!=nil || seen.Load()!=1 {
+        t.Fatalf("canceled observed POST must report attempted and unknown request count: %+v %v",result,err)
+    }
+    short:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){w.Header().Set("Content-Length","20");io.WriteString(w,"short")}))
+    defer short.Close()
+    input=authoredRequest(short.URL)
+    result,err=Send(context.Background(),input,Config{AllowedOrigin:short.URL},provenance,true)
+    if err==nil || !result.NetworkAttempted || result.NetworkRequests==nil || *result.NetworkRequests!=1 || result.Status!=200 || result.URL!=short.URL || result.Body!="short" || !result.BodyTruncated {
+        t.Fatalf("failed response read still confirms a sent request: %+v %v",result,err)
+    }
+}
+func TestTLSVerificationStaysEnabled(t *testing.T) {
+    var seen atomic.Int32
+    server:=httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){seen.Add(1)}))
+    server.Config.ErrorLog=log.New(io.Discard,"",0)
+    server.StartTLS();defer server.Close()
+    result,err:=Send(context.Background(),authoredRequest(server.URL),Config{AllowedOrigin:server.URL},Provenance{Format:"reb-client-project-v1",Mode:"raw"},true)
+    if err==nil || !result.NetworkAttempted || result.NetworkRequests!=nil || seen.Load()!=0 {
+        t.Fatalf("untrusted authored TLS certificate must be refused before HTTP: %+v %v",result,err)
+    }
+}
+func TestStrictSharedJSON(t *testing.T) {
+    request:=`{"method":"GET","url":"http://127.0.0.1/","headers":[],"body":"","timeout_ms":100}`
+    config:=`{"allowedOrigin":"http://127.0.0.1","request":`+request+`}`
+    directory:=t.TempDir();path:=filepath.Join(directory,"input.json")
+    for name,data:=range map[string]string{
+        "folded method":`{"method":"GET","METHOD":"DELETE","url":"http://127.0.0.1/","headers":[],"body":"","timeout_ms":100}`,
+        "duplicate method":`{"method":"GET","method":"DELETE","url":"http://127.0.0.1/","headers":[],"body":"","timeout_ms":100}`,
+        "null header":`{"method":"GET","url":"http://127.0.0.1/","headers":[["X",null]],"body":"","timeout_ms":100}`,
+        "incomplete":`{"method":"GET"}`,
+    } {
+        if err:=os.WriteFile(path,[]byte(data),0600);err!=nil {t.Fatal(err)}
+        var parsed Request
+        if err:=ReadJSON(path,&parsed);err==nil {t.Fatal("accepted "+name)}
+    }
+    for name,data:=range map[string]string{
+        "merge replacement":`{"allowedOrigin":"http://127.0.0.1","request":`+request+`,"request":{"method":"DELETE"}}`,
+        "folded origin":`{"allowedOrigin":"http://127.0.0.1","ALLOWedorigin":"http://other.invalid","request":`+request+`}`,
+    } {
+        if err:=os.WriteFile(path,[]byte(data),0600);err!=nil {t.Fatal(err)}
+        var parsed Config
+        if err:=ReadJSON(path,&parsed);err==nil {t.Fatal("accepted "+name)}
+    }
+    if err:=os.WriteFile(path,[]byte(config),0600);err!=nil {t.Fatal(err)}
+    var parsed Config
+    if err:=ReadJSON(path,&parsed);err!=nil || parsed.Request.Method!="GET" {t.Fatalf("valid shared config rejected: %v",err)}
+    if err:=os.WriteFile(path,[]byte(strings.Repeat("[",66)+"0"+strings.Repeat("]",66)),0600);err!=nil {t.Fatal(err)}
+    var nested any
+    if err:=ReadJSON(path,&nested);err==nil {t.Fatal("accepted excessive JSON nesting")}
+    var provenance Provenance
+    if err:=json.Unmarshal([]byte(`{"format":"reb-client-project-v1","mode":"redacted_copy","Mode":"raw","problems":[],"future":{"ok":true}}`),&provenance);err!=nil || provenance.Mode!="redacted_copy" {
+        t.Fatalf("provenance aliases must not override exact fields: %+v %v",provenance,err)
+    }
+}

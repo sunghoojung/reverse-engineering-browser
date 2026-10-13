@@ -97,6 +97,10 @@ need deliberate reviewed reconstruction. Header casing/order, automatic
 User-Agent, Content-Length and Connection differ from captured wire traffic.
 TLS certificate verification remains enabled. There is no claim of browser
 TLS or HTTP/2 fingerprint parity and no Mimic dependency in this version.
+Go rejects duplicate JSON object keys, incorrectly cased request/config keys
+and null header values instead of allowing silent decoder coercion. Library
+error results distinguish a network attempt from confirmed request counts: a
+transport error before any response reports an unknown (`null`) count, not zero.
 
 The initial runnable clients support one complete UTF-8 text request with a
 supported uppercase method, complete HTTP(S) URL, at most 64 header pairs and
@@ -135,17 +139,23 @@ provenance and local configuration, but it is not a security boundary.
   server, no implicit sends, redirects, timeouts, response bounds, draft
   ownership/interruption and native save-result controller handling.
 - Add `--go` to the client-project check with an installed Go compiler for
-  generated `go build`/`go vet` and authored loopback transport tests. This is
+  generated `go build`/`go test`/`go vet` and authored loopback transport tests,
+  including cancellation accounting, strict JSON decoding and untrusted TLS
+  certificate refusal. This is
   required in Ubuntu CI. The test disables module/toolchain downloads.
 - `node tools/check-api-observation-catalog-ui.mjs --browser`: real UI catalog
   handoff, unsupported review, dirty draft confirmation, narrow desktop window
   geometry, exact draft values and explicit ZIP download. Uses authored data.
 - `make app-build`: compiled native archive checks and normal app build.
   Packaged WebKit smoke validates owned-page malformed-payload rejection and
-  subframe refusal. A separate packaged smoke uses authored bytes and five real
-  Save panels for Cancel/no-write, exact saved bytes, repeated-request refusal,
+  subframe refusal. A test-only Xcode UI bundle targets the already-built,
+  relocated app and clicks Apple's out-of-process Save panel. Its native smoke
+  uses authored bytes and five real panels for Cancel/no-write, exact saved bytes, repeated-request refusal,
   actual atomic-write failure, navigation cancellation and replacement-document
   save. Test hooks require both explicit native smoke flags and accept no JS
-  destination. Overwrite confirmation and content-process termination during a
+  destination. Xcode screenshots and its result bundle are retained with the
+  package diagnostics. The runner must already support Xcode UI testing; the
+  test never changes Accessibility, TCC or system security settings.
+  Overwrite confirmation and content-process termination during a
   save are not runtime-exercised. A Linux cloud environment cannot compile or
   visually verify the macOS panel; report macOS CI evidence separately.

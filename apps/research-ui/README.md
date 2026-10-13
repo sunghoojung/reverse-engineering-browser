@@ -58,7 +58,7 @@ for the identity boundary, retained limits and integration points.
 
 ## Observed API catalog
 
-Choose **API catalog** beside Traffic search to read a bounded structural
+Choose **API catalog** in the Traffic footer to read a bounded structural
 snapshot. **Refresh snapshot** is explicit; opening the app, polling Traffic,
 and reopening a loaded catalog do not fetch it again. Expand an endpoint to see
 its observations, query/header names, independent request/response JSON shapes,

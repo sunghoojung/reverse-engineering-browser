@@ -2787,6 +2787,7 @@
       .request-window button:hover { color: var(--text); background: var(--panel-3); }
       .request-window button:disabled { opacity: .45; cursor: default; }
       .request-window #request-latest { color: var(--accent); }
+      .request-window #open-api-catalog { color: var(--accent); font-weight: 500; }
       .selection-strip { min-height: 35px; gap: 5px; padding: 5px 8px; flex-wrap: wrap; }
       .selection-strip .secondary-button { min-height: 25px; padding: 3px 6px; font-size: 10px; }
       .selection-url { min-width: 80px; flex: 1 1 160px; max-height: 2.8em; overflow: hidden; overflow-wrap: anywhere; white-space: normal; font-size: 11px; }

@@ -120,6 +120,7 @@ function investigationNotice(message, status = 'ready') {
 function investigationSnapshot() {
   const screen = investigationScreen(), root = document.querySelector(`#screen-${screen}`);
   const request = state.requests.find(item => item.id === state.selectedRequestId);
+  const requestIdentity = investigationRequestIdentity(request);
   const source = selectedSource();
   const scroll = [];
   const panes = '.exchange-content, .detail-pane, .sources-editor, .sources-navigator, .debug-panes, .trace-inspector, .trace-list-pane, .decoder-column, .tools-shell, #request-rows, #source-code-wrap, #source-tree, #backtrace-steps, #decoder-input, #decoder-output, #evidence-rows, #evidence-inspector, #evidence-package-mode';
@@ -128,7 +129,8 @@ function investigationSnapshot() {
     const selector = investigationSelector(node, root);
     if (selector) scroll.push({selector, top: Math.min(node.scrollTop, 1e8), left: Math.min(node.scrollLeft, 1e8)});
   }
-  return {screen, label: investigationNames[screen] ?? 'workspace', evidence: screen === 'evidence' ? evidenceWorkspace.snapshot() : null, request: investigationRequestIdentity(request),
+  return {screen, label: investigationNames[screen] ?? 'workspace', evidence: screen === 'evidence' ? evidenceWorkspace.snapshot() : null, request: requestIdentity,
+    requestSelectionKind: state.selectedRequestId === null ? 'empty' : requestIdentity ? 'exact' : 'unavailable',
     artifact: investigationArtifactIdentity(source), script: source?.source_type === 'script' ? investigationScriptIdentity(source) ?? {unavailable:true} : null,
     consoleScope: screen === 'traffic' && root.dataset.consoleTraffic === 'true' ? {session:document.querySelector('#console-experiment-traffic').dataset.session, target:document.querySelector('#console-experiment-traffic').dataset.document} : null,
     runtimeHook: screen === 'traffic' && state.selectedRuntimeHookRequest ? {...state.selectedRuntimeHookRequest} : null,
@@ -144,6 +146,9 @@ function investigationSnapshot() {
 }
 function restoreInvestigation(entry) {
   let request, source;
+  if (['traffic','backtrace','evidence'].includes(entry.screen) && !entry.consoleScope && !entry.runtimeHook && entry.requestSelectionKind === 'unavailable') {
+    investigationNotice('Return unavailable: the previously selected request had no exact retained identity. Select a retained request explicitly.', 'unavailable'); return false;
+  }
   if (entry.screen === 'sources' && entry.script?.unavailable) {
     investigationNotice('Return unavailable: the original live script identity was unknown or exceeded the bounded navigation metadata limit.', 'unavailable'); return false;
   }
@@ -175,7 +180,7 @@ function restoreInvestigation(entry) {
   try {
     if (request && state.selectedRequestId !== request.record.id) selectRequest(request.record.id, entry.request);
     if (entry.screen === 'traffic') {
-      if (entry.request === null && !entry.consoleScope && !entry.runtimeHook) {
+      if (entry.requestSelectionKind === 'empty' && entry.request === null && !entry.consoleScope && !entry.runtimeHook) {
         resetRequestSelection(); state.trafficSelectionNotice = ''; renderRequests();
       }
       if (typeof entry.trafficDetailOpen === 'boolean') state.trafficDetailOpen = entry.trafficDetailOpen;

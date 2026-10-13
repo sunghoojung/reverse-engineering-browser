@@ -342,13 +342,21 @@ async function checkHistory() {
     ({investigationSnapshot,restoreInvestigation})`,{state,document,TextEncoder,selectedSource:()=>null,fieldSets:{body:[]},
       selectRequest:id=>{state.selectedRequestId=id;state.trafficDetailOpen=true;},
       resetRequestSelection:()=>{state.selectedRequestId=null;state.selectedCaptureIdentity=null;},renderRequests:()=>{renderedSelection=state.selectedRequestId;},renderInspector:()=>{},showScreen:()=>{}});
-  const empty=model.investigationSnapshot();assert.equal(empty.request,null);assert.equal(empty.trafficDetailOpen,false);
+  const empty=model.investigationSnapshot();assert.equal(empty.request,null);assert.equal(empty.requestSelectionKind,'empty');assert.equal(empty.trafficDetailOpen,false);
   state.selectedRequestId=requests[0].id;state.selectedCaptureIdentity=identity;state.trafficDetailOpen=true;
-  const opened=model.investigationSnapshot();
+  const opened=model.investigationSnapshot();assert.equal(opened.requestSelectionKind,'exact');
   assert.equal(model.restoreInvestigation(empty),true);assert.equal(state.selectedRequestId,null);assert.equal(state.trafficDetailOpen,false);assert.equal(state.selectedCaptureIdentity,null);assert.equal(renderedSelection,null,'Null selection immediately repaints Traffic rows');
   assert.equal(model.restoreInvestigation(opened),true);assert.equal(state.selectedRequestId,requests[0].id);assert.equal(state.trafficDetailOpen,true);
   state.trafficDetailOpen=false;const closed=model.investigationSnapshot();state.trafficDetailOpen=true;
   assert.equal(model.restoreInvestigation(closed),true);assert.equal(state.selectedRequestId,requests[0].id);assert.equal(state.trafficDetailOpen,false,'Previously selected but closed inspector stays closed on Back');
+  state.requests=[{id:'authored-demo-row',origin:'demo'}];state.selectedRequestId='authored-demo-row';
+  const unavailable=model.investigationSnapshot();assert.equal(unavailable.request,null);assert.equal(unavailable.requestSelectionKind,'unavailable');
+  assert.equal(model.restoreInvestigation(unavailable),false,'A selected row without exact identity is not an empty-selection return');
+  assert.equal(state.selectedRequestId,'authored-demo-row','Refused return leaves current evidence untouched');
+  state.requests=[{id:'authored-demo-row',origin:'demo',path:'changed'}];state.selectedRequestId='different-current-selection';
+  assert.equal(model.restoreInvestigation(unavailable),false,'An unavailable identity must not rebind a reused row ID');
+  assert.equal(state.selectedRequestId,'different-current-selection');
+  state.requests=requests;
   await new Promise(done=>setImmediate(done));
-  console.log('PASS catalog Traffic history: Back restores unselected/closed state; Forward restores exact capture; selected but closed inspector round-trips');
+  console.log('PASS catalog Traffic history: Back restores unselected/closed state; Forward restores exact capture; selected but closed inspector round-trips; selected-but-unidentifiable returns refuse without rebinding');
 }

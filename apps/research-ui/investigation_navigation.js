@@ -147,7 +147,7 @@ function investigationSnapshot() {
 function restoreInvestigation(entry) {
   let request, source;
   if (['traffic','backtrace','evidence'].includes(entry.screen) && !entry.consoleScope && !entry.runtimeHook && entry.requestSelectionKind === 'unavailable') {
-    investigationNotice('Return unavailable: the previously selected request had no exact retained identity. Select a retained request explicitly.', 'unavailable'); return false;
+    investigationNotice('Return unavailable: the previously selected request had no exact retained identity. Nothing was fetched or recaptured. Select a retained request explicitly.', 'unavailable'); return false;
   }
   if (entry.screen === 'sources' && entry.script?.unavailable) {
     investigationNotice('Return unavailable: the original live script identity was unknown or exceeded the bounded navigation metadata limit.', 'unavailable'); return false;

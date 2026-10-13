@@ -220,6 +220,24 @@ async function checkBrowser() {
     }
     await key('Escape','Escape');assert.equal(await evaluate('document.activeElement.id'),'open-api-catalog');
     assert.equal(await evaluate('JSON.stringify(state.requests[0].captureRecord)'),raw,'Raw record unchanged after catalog lifecycle');
+    // Real full-ledger Traffic with a longer status and new-request control
+    // keeps every footer action reachable. The existing Requests suite checks
+    // the independent 56px-ledger / 80px-preview split-pane invariant.
+    if(await evaluate("document.querySelector('#investigation-navigation details').open"))await click('#investigation-navigation details > summary');
+    await click('[data-request-id="synthetic-json"]');await click('#request-detail-close');await click('#request-filter');
+    await send('Input.insertText',{text:'new'});
+    await until(()=>evaluate("JSON.parse(state.trafficFilterKey)[3]==='new' && document.querySelectorAll('#request-rows .request-row').length===0"),'settled Traffic filter before new arrivals');
+    for(let index=1;index<=2;index++)fixture.debuggerState.network.requests.push({...copy(fixture.debuggerState.network.requests[0]),
+      id:`footer-new-${index}`,protocol_request_id:`footer-new-${index}`,url:`https://example.test/new-${index}`,started_monotonic_ms:101+index});
+    await until(()=>evaluate("state.requests.length===3 && !document.querySelector('#request-latest').hidden"),'new Traffic footer controls');
+    assert.match(await evaluate("document.querySelector('#request-window-status').textContent"),/Selection outside filter/);
+    const footer=await evaluate(`(()=>{const pane=document.querySelector('.request-pane').getBoundingClientRect(),
+      table=document.querySelector('.request-table').getBoundingClientRect(),rows=document.querySelector('#request-rows').getBoundingClientRect();
+      return {ledger:Math.min(rows.bottom,pane.bottom,table.bottom)-Math.max(rows.top,pane.top,table.top),
+        controls:[...document.querySelectorAll('.request-window button:not([hidden])')].map(button=>{const r=button.getBoundingClientRect();
+          return {id:button.id,visible:r.width>0&&r.left>=0&&r.right<=innerWidth&&r.top>=pane.top&&r.bottom<=Math.min(pane.bottom,table.bottom,innerHeight)};})};})()`);
+    assert(footer.ledger>=56,JSON.stringify(footer));assert.equal(footer.controls.length,5);
+    assert(footer.controls.every(control=>control.visible),JSON.stringify(footer));await shot('catalog-traffic-footer-360');
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);
     await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty'],keyboard:['Tab focus','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
     console.log(`PASS rendered catalog: keyboard and pointer, three viewports, scrolling, inert markup, raw header preservation, explicit read-only lifecycle, source invalidation. Evidence: ${output}`);
@@ -336,10 +354,10 @@ async function checkHistory() {
   const state={requests,selectedRequestId:null,trafficDetailOpen:false,selectedCaptureIdentity:null,inspectorTab:'headers',fieldTab:'body',selectedField:null};
   const node={id:'screen-traffic',dataset:{},textContent:'',querySelectorAll:()=>[],hidden:false};
   const document={querySelector:()=>node,activeElement:null};
-  let renderedSelection='not rendered';
+  let renderedSelection='not rendered',returnNotice='';
   const model=runInNewContext(`${traffic}\n${navigation}\n
-    investigationSelector=()=>null; investigationNotice=()=>{}; retireInvestigationReturn=()=>{}; resumeInvestigationReturn=()=>{};
-    ({investigationSnapshot,restoreInvestigation})`,{state,document,TextEncoder,selectedSource:()=>null,fieldSets:{body:[]},
+    investigationSelector=()=>null; investigationNotice=message=>recordNotice(message); retireInvestigationReturn=()=>{}; resumeInvestigationReturn=()=>{};
+    ({investigationSnapshot,restoreInvestigation})`,{state,document,TextEncoder,recordNotice:message=>{returnNotice=message;},selectedSource:()=>null,fieldSets:{body:[]},
       selectRequest:id=>{state.selectedRequestId=id;state.trafficDetailOpen=true;},
       resetRequestSelection:()=>{state.selectedRequestId=null;state.selectedCaptureIdentity=null;},renderRequests:()=>{renderedSelection=state.selectedRequestId;},renderInspector:()=>{},showScreen:()=>{}});
   const empty=model.investigationSnapshot();assert.equal(empty.request,null);assert.equal(empty.requestSelectionKind,'empty');assert.equal(empty.trafficDetailOpen,false);
@@ -353,6 +371,7 @@ async function checkHistory() {
   const unavailable=model.investigationSnapshot();assert.equal(unavailable.request,null);assert.equal(unavailable.requestSelectionKind,'unavailable');
   assert.equal(model.restoreInvestigation(unavailable),false,'A selected row without exact identity is not an empty-selection return');
   assert.equal(state.selectedRequestId,'authored-demo-row','Refused return leaves current evidence untouched');
+  assert.match(returnNotice,/Return unavailable:.*Nothing was fetched or recaptured/);
   state.requests=[{id:'authored-demo-row',origin:'demo',path:'changed'}];state.selectedRequestId='different-current-selection';
   assert.equal(model.restoreInvestigation(unavailable),false,'An unavailable identity must not rebind a reused row ID');
   assert.equal(state.selectedRequestId,'different-current-selection');

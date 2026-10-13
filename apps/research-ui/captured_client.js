@@ -128,6 +128,232 @@ async function capturedClientSend(input, {config = {},send = false,provenance = 
   } finally { clearTimeout(timer); }
 }
 
+// Fixed standard-library Go project; captured inputs remain shared JSON data.
+function capturedClientGoFiles() {
+  return {
+    "go/go.mod":"module reb.local/observed\n\ngo 1.23.0\n",
+    "go/client/client.go":String.raw`// Package client sends only a complete, explicitly reviewed text request.
+// It uses standard net/http HTTP/1.1, not the captured browser's TLS profile.
+package client
+
+import (
+    "context"
+    "crypto/tls"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "mime"
+    "net"
+    "net/http"
+    "net/url"
+    "os"
+    "regexp"
+    "sort"
+    "strings"
+    "time"
+    "unicode/utf8"
+)
+
+type Request struct {
+    Method string ${'`'}json:"method"${'`'}
+    URL string ${'`'}json:"url"${'`'}
+    Headers [][]string ${'`'}json:"headers"${'`'}
+    Body *string ${'`'}json:"body"${'`'}
+    TimeoutMS int ${'`'}json:"timeout_ms"${'`'}
+}
+type Config struct {
+    AllowedOrigin string ${'`'}json:"allowedOrigin"${'`'}
+    Request *Request ${'`'}json:"request"${'`'}
+}
+type Provenance struct {
+    Format string ${'`'}json:"format"${'`'}
+    Mode string ${'`'}json:"mode"${'`'}
+    Problems []string ${'`'}json:"problems"${'`'}
+}
+type Result struct {
+    DryRun bool ${'`'}json:"dry_run"${'`'}
+    NetworkRequests int ${'`'}json:"network_requests"${'`'}
+    Ready bool ${'`'}json:"ready"${'`'}
+    Problems []string ${'`'}json:"problems,omitempty"${'`'}
+    Instruction string ${'`'}json:"instruction,omitempty"${'`'}
+    Status int ${'`'}json:"status,omitempty"${'`'}
+    URL string ${'`'}json:"url,omitempty"${'`'}
+    RedirectFollowed bool ${'`'}json:"redirect_followed"${'`'}
+    Headers [][]string ${'`'}json:"headers,omitempty"${'`'}
+    Body string ${'`'}json:"body"${'`'}
+    BodyTruncated bool ${'`'}json:"body_truncated"${'`'}
+}
+
+// ReadJSON bounds local inputs and rejects invalid Unicode instead of accepting
+// encoding/json's replacement characters. Unknown provenance fields are data.
+func ReadJSON(path string, target any) error {
+    file, err := os.Open(path)
+    if err != nil { return err }
+    defer file.Close()
+    data, err := io.ReadAll(io.LimitReader(file, 1048577))
+    if err != nil { return err }
+    if len(data) > 1048576 || !utf8.Valid(data) { return errors.New("JSON exceeds 1 MiB or contains invalid UTF-8") }
+    // A JSON escape starts at an unescaped backslash. Surrogates must pair.
+    for i := 0; i < len(data); i++ {
+        if data[i] != '\\' { continue }
+        i++
+        if i >= len(data) || data[i] != 'u' { continue }
+        if i+4 >= len(data) { return errors.New("incomplete Unicode escape") }
+        var code uint16
+        if _, err := fmt.Sscanf(string(data[i+1:i+5]), "%04x", &code); err != nil { return err }
+        i += 4
+        if code >= 0xdc00 && code <= 0xdfff { return errors.New("unpaired Unicode surrogate") }
+        if code < 0xd800 || code > 0xdbff { continue }
+        if i+6 >= len(data) || data[i+1] != '\\' || data[i+2] != 'u' { return errors.New("unpaired Unicode surrogate") }
+        var low uint16
+        if _, err := fmt.Sscanf(string(data[i+3:i+7]), "%04x", &low); err != nil || low < 0xdc00 || low > 0xdfff { return errors.New("unpaired Unicode surrogate") }
+        i += 6
+    }
+    return json.Unmarshal(data, target)
+}
+
+var token = regexp.MustCompile("^[!#$%&'*+.^_${'`'}|~0-9A-Za-z-]+$")
+var method = regexp.MustCompile("^[A-Z][A-Z0-9!#$%&'*+.^_${'`'}|~-]{0,31}$")
+var textMedia = regexp.MustCompile("^(text/[a-z0-9.+-]+|application/(json|[a-z0-9.-]+\\+json|xml|[a-z0-9.-]+\\+xml|x-www-form-urlencoded|graphql|x-ndjson|ndjson))$")
+var forbidden = map[string]bool{
+    "authorization":true, "proxy-authorization":true, "cookie":true, "cookie2":true, "set-cookie":true,
+    "host":true, "content-length":true, "connection":true, "transfer-encoding":true,
+    "accept-charset":true, "accept-encoding":true, "access-control-request-headers":true,
+    "access-control-request-method":true, "date":true, "dnt":true, "expect":true,
+    "keep-alive":true, "origin":true, "referer":true, "te":true, "trailer":true,
+    "upgrade":true, "user-agent":true, "via":true, "content-encoding":true,
+}
+func printableASCII(value string) bool {
+    for _, character := range value { if character < 32 || character > 126 { return false } }
+    return true
+}
+func forbiddenMethod(value string) bool { return value == "CONNECT" || value == "TRACE" || value == "TRACK" }
+func requestURL(value string) (*url.URL, error) {
+    parsed, err := url.Parse(value)
+    if err != nil || len(value)>8192 || !printableASCII(value) || strings.ContainsAny(value," \\#") ||
+        !(strings.HasPrefix(value,"http://") || strings.HasPrefix(value,"https://")) ||
+        parsed.Hostname()=="" || parsed.User!=nil || parsed.Opaque!="" || strings.Contains(parsed.Host,"%") {
+        return nil, errors.New("Go requires a complete ASCII HTTP(S) URL without credentials, fragment, whitespace or escapes in its host; original evidence is unchanged")
+    }
+    return parsed,nil
+}
+func origin(parsed *url.URL) string {
+    host, port := strings.ToLower(parsed.Hostname()),parsed.Port()
+    if port == "80" && parsed.Scheme == "http" || port == "443" && parsed.Scheme == "https" { port = "" }
+    if port != "" { host = net.JoinHostPort(host,port) } else if strings.Contains(host,":") { host = "["+host+"]" }
+    return parsed.Scheme+"://"+host
+}
+func Issues(input Request) []string {
+    problems := []string{}
+    if !method.MatchString(input.Method) || forbiddenMethod(input.Method) { problems=append(problems,"Unsupported uppercase HTTP method") }
+    if _,err:=requestURL(input.URL);err!=nil { problems=append(problems,err.Error()) }
+    if input.Headers==nil || len(input.Headers)>64 { problems=append(problems,"At most 64 complete header pairs are required") }
+    seen,total:=map[string]bool{},0
+    for _,pair:=range input.Headers {
+        if len(pair)!=2 { problems=append(problems,"Malformed header pair");continue }
+        name,value:=pair[0],pair[1];lower:=strings.ToLower(name);total+=len(name)+len(value)
+        if !token.MatchString(name) || len(name)>128 || len(value)>2048 || !printableASCII(value) || strings.TrimSpace(value)!=value { problems=append(problems,"Go supports only bounded ASCII header values without surrounding whitespace or controls") }
+        if seen[lower] { problems=append(problems,"Duplicate header names are unsupported") };seen[lower]=true
+        if forbidden[lower] || strings.HasPrefix(lower,"sec-") || strings.HasPrefix(lower,"proxy-") { problems=append(problems,"Credential, transport, browser-controlled or encoded-body header requires manual reconstruction") }
+        if lower=="x-http-method" || lower=="x-http-method-override" || lower=="x-method-override" {
+            for _,part:=range strings.Split(value,",") { if forbiddenMethod(strings.ToUpper(strings.TrimSpace(part))) { problems=append(problems,"Unsupported method override") } }
+        }
+        if lower=="content-type" {
+            media,params,err:=mime.ParseMediaType(value)
+            if err!=nil || !textMedia.MatchString(media) { problems=append(problems,"Only complete recognized text media types are supported") }
+            charset:=strings.ToLower(params["charset"])
+            if charset!="" && charset!="utf-8" && charset!="utf8" { problems=append(problems,"Only UTF-8 request bodies are supported") }
+        }
+    }
+    if total>16384 { problems=append(problems,"Headers exceed 16 KiB") }
+    if input.Body==nil || !utf8.ValidString(*input.Body) || len(*input.Body)>65536 { problems=append(problems,"Complete UTF-8 body of at most 64 KiB is required") }
+    if (input.Method=="GET" || input.Method=="HEAD") && input.Body!=nil && *input.Body!="" { problems=append(problems,"GET/HEAD bodies are unsupported") }
+    if input.TimeoutMS<100 || input.TimeoutMS>30000 { problems=append(problems,"Timeout must be 100-30000 ms") }
+    return problems
+}
+
+// Send performs no network access unless send is true and all review gates pass.
+func Send(ctx context.Context, input Request, config Config, provenance Provenance, send bool) (Result,error) {
+    if config.Request!=nil { input=*config.Request }
+    problems:=Issues(input)
+    if config.Request==nil && (provenance.Format!="reb-client-project-v1" || provenance.Mode!="raw" || len(provenance.Problems)>0) {
+        problems=append(problems,"Provide a complete reviewed config.request for redacted, unknown or unsupported evidence")
+    }
+    result:=Result{DryRun:!send,Ready:len(problems)==0,Problems:problems,Instruction:"Review evidence/config.json, set allowedOrigin, then explicitly run with --send"}
+    if !send { return result,nil }
+    if len(problems)>0 { return result,errors.New(strings.Join(problems,"; ")) }
+    parsed,_:=requestURL(input.URL)
+    if config.AllowedOrigin!=origin(parsed) { return result,errors.New("config.allowedOrigin must exactly match the reviewed request origin") }
+    request,err:=http.NewRequestWithContext(ctx,input.Method,input.URL,strings.NewReader(*input.Body))
+    if err!=nil { return result,err }
+    for _,pair:=range input.Headers { request.Header.Set(pair[0],pair[1]) }
+    // A fresh HTTP/1.1 transport avoids pooled-connection replay and ambient
+    // proxies/cookies. TLS verification stays enabled. Header order/casing and
+    // framing remain net/http's, not captured wire evidence.
+    transport:=&http.Transport{DisableKeepAlives:true,DisableCompression:true,MaxResponseHeaderBytes:65536,
+        TLSNextProto:map[string]func(string,*tls.Conn)http.RoundTripper{}}
+    defer transport.CloseIdleConnections()
+    client:=&http.Client{Transport:transport,Timeout:time.Duration(input.TimeoutMS)*time.Millisecond,
+        CheckRedirect:func(*http.Request,[]*http.Request)error{return http.ErrUseLastResponse}}
+    response,err:=client.Do(request)
+    if err!=nil { return result,err }
+    defer response.Body.Close()
+    body,err:=io.ReadAll(io.LimitReader(response.Body,65537))
+    if err!=nil { return result,err }
+    truncated:=len(body)>65536;if truncated { body=body[:65536] }
+    headers:=[][]string{};names:=make([]string,0,len(response.Header))
+    for name:=range response.Header { names=append(names,name) };sort.Strings(names)
+    for _,name:=range names { for _,value:=range response.Header[name] { headers=append(headers,[]string{name,value}) } }
+    return Result{Ready:true,NetworkRequests:1,Status:response.StatusCode,URL:response.Request.URL.String(),
+        Headers:headers,Body:strings.ToValidUTF8(string(body),"\ufffd"),BodyTruncated:truncated},nil
+}
+`,
+    "go/services/service001.go":String.raw`// Package services contains only the one observed operation; names imply no API schema.
+package services
+
+import (
+    "context"
+    "errors"
+    "os"
+    "path/filepath"
+    "reb.local/observed/client"
+)
+
+func Request001(ctx context.Context, root string, send bool) (client.Result,error) {
+    var input client.Request
+    var provenance client.Provenance
+    var config client.Config
+    if err:=client.ReadJSON(filepath.Join(root,"requests","request-001.json"),&input);err!=nil { return client.Result{},err }
+    if err:=client.ReadJSON(filepath.Join(root,"provenance.json"),&provenance);err!=nil { return client.Result{},err }
+    if err:=client.ReadJSON(filepath.Join(root,"config.json"),&config);err!=nil && !errors.Is(err,os.ErrNotExist) { return client.Result{},err }
+    return client.Send(ctx,input,config,provenance,send)
+}
+`,
+    "go/cmd/request-001/main.go":String.raw`package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "os"
+    "reb.local/observed/services"
+)
+
+func main() {
+    send:=false
+    if len(os.Args)==2 && os.Args[1]=="--send" { send=true } else if len(os.Args)!=1 {
+        fmt.Fprintln(os.Stderr,"Usage: from go/, go run ./cmd/request-001 [--send]");os.Exit(2)
+    }
+    result,err:=services.Request001(context.Background(),"..",send)
+    if err!=nil { fmt.Fprintln(os.Stderr,err);os.Exit(1) }
+    encoder:=json.NewEncoder(os.Stdout);encoder.SetIndent("","  ")
+    if err:=encoder.Encode(result);err!=nil { fmt.Fprintln(os.Stderr,err);os.Exit(1) }
+}
+`,
+  };
+}
+
 function capturedClientProject(source, mode) {
   if (!['raw','redacted_copy'].includes(mode)) throw new TypeError('Choose raw or explicitly redacted project export.');
   const raw = mode === 'raw', input = raw ? source.input : capturedClientRedactInput(source.input);
@@ -139,6 +365,7 @@ function capturedClientProject(source, mode) {
     limitations:['One observed operation only; no endpoint discovery or generated service schema.',
       'Retained CDP representations are not original HTTP wire bytes; duplicate wire headers, original casing/order and extra-info headers may be absent.',
       'HTTP clients normalize URLs and headers. TLS, compression, CORS, storage and cookies differ from the original browser.',
+      'Go uses standard net/http HTTP/1.1, no browser TLS fingerprint emulation, ambient proxy, cookie jar or automatic decompression. It requires ASCII URLs/header values; other original values remain evidence.',
       'This example omits credentials, blocks unsupported headers and uses manual redirects. Repeater follows redirects.',
       'Missing, binary, multipart or truncated request representations require explicit configuration; no prefix is claimed complete.',
       'Raw files can contain credentials or personal data. Redacted names, paths and provenance can still be sensitive. Review before sharing.']};
@@ -160,12 +387,13 @@ function capturedClientProject(source, mode) {
   }
   add('requests/request-001.json',json(input));
   add('config.example.json',json({allowedOrigin:'',request:null}));
+  for (const [path,text] of Object.entries(capturedClientGoFiles())) add(path,text);
   add('.gitignore','config.json\n.env*\nrequests/*.json\nevidence/\nprovenance.json\n');
   add('package.json',json({name:'reb-observed-client',private:true,type:'module',engines:{node:'>=22'},scripts:{example:'node examples/request-001.mjs',send:'node examples/request-001.mjs --send'}}));
   add('src/client.mjs',`// Generated local client. Inputs are data, never evaluated code.\n${capturedClientIssues.toString()}\n${capturedClientSend.toString()}\nexport {capturedClientSend as sendRequest};\n`);
   add('src/services/service-001.mjs',"import {readFile} from 'node:fs/promises';\nimport {sendRequest} from '../client.mjs';\nconst read = async path => JSON.parse(await readFile(new URL(path,import.meta.url),'utf8'));\nexport async function request001(options = {}) {\n  const [input,provenance] = await Promise.all([read('../../requests/request-001.json'),read('../../provenance.json')]);\n  return sendRequest(input,{...options,provenance});\n}\n");
   add('examples/request-001.mjs',"import {readFile} from 'node:fs/promises';\nimport {request001} from '../src/services/service-001.mjs';\nconst args = process.argv.slice(2);\nif(args.some(arg=>arg!=='--send') || args.length>1) throw new Error('Usage: node examples/request-001.mjs [--send]');\nlet config = {};\ntry {config=JSON.parse(await readFile(new URL('../config.json',import.meta.url),'utf8'));} catch(error) {if(error.code!=='ENOENT')throw error;}\nconsole.log(JSON.stringify(await request001({config,send:args.includes('--send')}),null,2));\n");
-  add('README.md',`# One observed API operation\n\nThis project contains one reviewed request representation, not a discovered API specification or SDK. service-001 groups only the observed origin in provenance.json; the neutral filenames contain no captured paths or secrets.\n\n## Run deliberately\n\n1. Use Node.js 22 or newer. No packages or install step are required.\n2. Run \`node examples/request-001.mjs\` for a dry run. It never sends a request.\n3. Review requests/request-001.json and evidence/. Copy config.example.json to config.json and set allowedOrigin to the exact authorized origin.\n4. For a redacted or unsupported export, supply a complete reviewed request object in config.request, using the request file's method/url/headers/body/timeout_ms shape. Headers are pairs, not an object. Never paste credentials into a request intended for this credential-omitting client.\n5. Only when authorized, run \`node examples/request-001.mjs --send\`. This can change server data for mutating methods. It sends once, without retries, and does not follow redirects.\n\n## Layout\n\n- src/client.mjs: bounded HTTP client and input checks\n- src/services/service-001.mjs: the one observed operation\n- requests/request-001.json: data, never executable source\n- examples/request-001.mjs: explicit dry-run/send entry point\n- config.example.json: local configuration placeholders\n- provenance.json: capture/run identity, unresolved problems and limitations\n- evidence/: retained original evidence in raw mode, or its explicitly labeled redacted copy\n\n## Fidelity and privacy\n\nExport mode: ${mode}. Raw evidence is preserved even when the client cannot faithfully replay it. Unsupported headers, duplicate header names, multipart, binary and truncated bodies are never silently rewritten into a claimed complete request. Review provenance.json before use. HTTP client header order/casing, automatic headers, URL normalization, cookies, redirects, TLS, compression and CORS behavior can differ. A successful response is not proof that an API operation is equivalent or authorized. Response text is limited to 64 KiB and its truncation is reported.\n\nRaw values stay raw in this explicit export. Redacted copies remove header values and bodies and strip URL credentials/query/fragment; names, paths and identifiers can still be sensitive. Do not publish these files without review. The included .gitignore excludes local configuration, request data, evidence and provenance.\n`);
+  add('README.md',`# One observed API operation\n\nThis project contains one reviewed request representation, not a discovered API specification or SDK. service-001 groups only the observed origin in provenance.json; the neutral filenames contain no captured paths or secrets.\n\n## Go first\n\nUse Go 1.23 or newer. No third-party modules or install step are needed. From the go/ folder, run \`go run ./cmd/request-001\` for a dry run. Review the shared root-level request, provenance and config.json as described below. Only \`go run ./cmd/request-001 --send\` sends. Run commands from go/ so the shared JSON files resolve to their parent folder.\n\n## JavaScript and shared review steps\n\n1. Use Node.js 22 or newer. No packages or install step are required.\n2. Run \`node examples/request-001.mjs\` for a dry run. It never sends a request.\n3. Review requests/request-001.json and evidence/. Copy config.example.json to config.json and set allowedOrigin to the exact authorized origin.\n4. For a redacted or unsupported export, supply a complete reviewed request object in config.request, using the request file's method/url/headers/body/timeout_ms shape. Headers are pairs, not an object. Never paste credentials into a request intended for this credential-omitting client.\n5. Only when authorized, run \`node examples/request-001.mjs --send\`. This can change server data for mutating methods. It sends once, without retries, and does not follow redirects.\n\n## Layout\n\n- go/go.mod: dependency-free Go module\n- go/client/client.go: bounded standard net/http client and validation\n- go/services/service001.go: one observed operation using shared JSON\n- go/cmd/request-001/main.go: dry-run/send example\n- src/client.mjs: bounded JavaScript HTTP client and input checks\n- src/services/service-001.mjs: the one observed operation\n- requests/request-001.json: data, never executable source\n- examples/request-001.mjs: explicit dry-run/send entry point\n- config.example.json: local configuration placeholders\n- provenance.json: capture/run identity, unresolved problems and limitations\n- evidence/: retained original evidence in raw mode, or its explicitly labeled redacted copy\n\n## Fidelity and privacy\n\nExport mode: ${mode}. Raw evidence is preserved even when the client cannot faithfully replay it. Unsupported headers, duplicate header names, multipart, binary and truncated bodies are never silently rewritten into a claimed complete request. Review provenance.json before use. HTTP client header order/casing, automatic headers, URL normalization, cookies, redirects, TLS, compression and CORS behavior can differ. Go uses standard net/http HTTP/1.1 with no ambient proxy, cookie jar or automatic decompression. ASCII URLs and header values only are supported in Go; non-ASCII originals remain evidence, never silently converted. Its TLS handshake is not a browser fingerprint. TypeScript and Python clients are not included in this version. A successful response is not proof that an API operation is equivalent or authorized. Response text is limited to 64 KiB and its truncation is reported.\n\nRaw values stay raw in this explicit export. Redacted copies remove header values and bodies and strip URL credentials/query/fragment; names, paths and identifiers can still be sensitive. Do not publish these files without review. The included .gitignore excludes local configuration, request data, evidence and provenance.\n`);
   return {files,provenance,bytes:capturedClientZip(files)};
 }
 

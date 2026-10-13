@@ -150,12 +150,22 @@ final class ClientProjectExportSmoke: NSObject {
           }
         }
       } else {
-        // Use AppKit's ordinary Save action, retaining its normal destination
-        // and validation behavior. No modal return code is manufactured.
+        // Since macOS 10.15 NSSavePanel.ok(_:) cannot be invoked directly:
+        // https://developer.apple.com/documentation/appkit/nssavepanel/ok(_:)
+        // Deliver Return through the owned key window's normal event path.
+        // This exercises the real remote panel, including its validation; no
+        // modal response, selected URL or bridge completion is manufactured.
         self.schedule("save-action") {
-          self.trace("save-dispatched")
-          panel.ok(nil)
-          self.trace("save-returned")
+          self.stage("save-key-dispatched")
+          for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard let event = NSEvent.keyEvent(with: type, location: .zero,
+              modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+              windowNumber: panel.windowNumber, context: nil, characters: "\r",
+              charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)
+            else { self.fail("cannot construct the owned panel Return event"); return }
+            panel.sendEvent(event)
+          }
+          self.trace("save-key-returned")
         }
       }
     }

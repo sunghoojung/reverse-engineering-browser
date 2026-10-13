@@ -1,7 +1,7 @@
 # Captured request client project v1
 
 This cold-path workflow joins one retained Traffic observation to a reviewed
-Repeater draft and an organized, dependency-free Node.js project. It does not
+Repeater draft and an organized project with dependency-free Go and JavaScript clients. It does not
 discover unused endpoints, infer service semantics, or generate a complete SDK.
 The [capture and authorization policy](../../SAFETY.md) still applies.
 
@@ -45,6 +45,10 @@ reb-client-project/
   .gitignore
   config.example.json
   provenance.json
+  go/go.mod
+  go/client/client.go
+  go/services/service001.go
+  go/cmd/request-001/main.go
   src/client.mjs
   src/services/service-001.mjs
   requests/request-001.json
@@ -60,7 +64,12 @@ executable client source. ZIP entries are deterministic stored UTF-8 records
 with CRC-32, no compression, encryption, symlinks or ZIP64. Limits: 16 files,
 1 MiB per file, 2 MiB per archive, 768 KiB per retained evidence document.
 
-Run `node examples/request-001.mjs` with Node.js 22+ for a dry run. No package
+Go is the first entry point: from `go/`, run `go run ./cmd/request-001`
+with Go 1.23+ for a dry run, or append `--send` after reviewing configuration.
+Both clients share the root request, provenance, evidence and config files.
+TypeScript and Python generators are not included in this version.
+
+Run `node examples/request-001.mjs` with Node.js 22+ for the JavaScript dry run. No package
 installation is needed. Copy `config.example.json` to `config.json`, review the
 request and set `allowedOrigin` to its exact authorized origin. Only an explicit
 `--send` sends a request. Redacted/unsupported projects additionally require a
@@ -81,7 +90,15 @@ events may omit duplicate wire lines, extra-info headers, casing/order and
 other browser state. HTTP client URL/header normalization, automatic headers,
 TLS, compression, CORS and storage behavior can differ.
 
-The initial runnable client supports one complete UTF-8 text request with a
+Go uses standard `net/http` HTTP/1.1 with a fresh transport per deliberate send,
+no ambient proxy, cookie jar or automatic response decompression. It requires
+ASCII URLs and header values; non-ASCII originals remain in the evidence and
+need deliberate reviewed reconstruction. Header casing/order, automatic
+User-Agent, Content-Length and Connection differ from captured wire traffic.
+TLS certificate verification remains enabled. There is no claim of browser
+TLS or HTTP/2 fingerprint parity and no Mimic dependency in this version.
+
+The initial runnable clients support one complete UTF-8 text request with a
 supported uppercase method, complete HTTP(S) URL, at most 64 header pairs and
 64 KiB body. It rejects Fetch-forbidden methods, URL credentials/fragments,
 duplicate header names, header whitespace/control/encoding losses, non-UTF-8
@@ -117,6 +134,9 @@ provenance and local configuration, but it is not a security boundary.
   independent reader, generated Node client against an authored loopback
   server, no implicit sends, redirects, timeouts, response bounds, draft
   ownership/interruption and native save-result controller handling.
+- Add `--go` to the client-project check with an installed Go compiler for
+  generated `go build`/`go vet` and authored loopback transport tests. This is
+  required in Ubuntu CI. The test disables module/toolchain downloads.
 - `node tools/check-api-observation-catalog-ui.mjs --browser`: real UI catalog
   handoff, unsupported review, dirty draft confirmation, narrow desktop window
   geometry, exact draft values and explicit ZIP download. Uses authored data.

@@ -97,8 +97,9 @@ reviewed draft to a retained run and its known source provenance.
 Raw and explicitly redacted projects use a fixed folder layout with README,
 client source, one service/operation, request data, dry-run example,
 configuration placeholders and evidence/provenance. macOS uses a native Save
-dialog; browser development downloads the ZIP. The dependency-free Node.js
-example defaults to no network and requires a reviewed origin plus `--send`.
+dialog; browser development downloads the ZIP. Dependency-free Go and JavaScript
+examples share the same request/evidence/configuration folders. Go is the first
+entry point; both default to no network and require a reviewed origin plus `--send`.
 See [Client project v1](../../docs/product/client-project-v1.md) for limits,
 unsupported cases, layout, privacy and validation.
 

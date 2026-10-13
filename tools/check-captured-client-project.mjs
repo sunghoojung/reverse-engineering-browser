@@ -5,7 +5,7 @@ import {readFile, writeFile, mkdir, mkdtemp, rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
-import {join, resolve} from 'node:path';
+import {join, resolve, dirname} from 'node:path';
 import {runInNewContext} from 'node:vm';
 import {network} from './traffic-capture-qa.mjs';
 
@@ -37,6 +37,7 @@ assert(!file(redacted,'requests/request-001.json').includes('exact-value'));
 assert(!file(redacted,'requests/request-001.json').includes('duplicate'));
 assert.equal(JSON.parse(file(redacted,'requests/request-001.json')).url,'https://example.test/a%2Fb');
 assert(!file(redacted,'evidence/capture.json').includes('response-secret'));
+assert.equal(raw.files.length,14);assert(raw.files.some(item=>item.path==='reb-client-project/go/services/service001.go'));
 assert(raw.files.every(item=>!item.path.includes('example.test')&&!item.path.includes('a%2F')));
 
 const problems = [
@@ -103,6 +104,7 @@ assert.equal(api.capturedClientProject(api.capturedClientRun(run,'ctx'),'raw').p
 console.log('PASS exact capture/run evidence, structured project layout, redacted-copy immutability, unsupported input matrix and deterministic safe bounded ZIP');
 
 await checkGeneratedProject();
+if(process.argv.includes('--go')) await checkGeneratedGoProject();
 await checkController();
 await checkRepeaterIntegration();
 
@@ -149,10 +151,10 @@ async function checkRepeaterIntegration() {
   console.log('PASS production Repeater Send/prefill/history integration: full draft preserved after Send, bounded per-run provenance retained and context mismatches refused');
 }
 
-async function command(command,args,cwd) {
+async function command(command,args,cwd,options={}) {
   return new Promise((done,reject)=>{
-    const child=spawn(command,args,{cwd,stdio:['ignore','pipe','pipe']}),parts=[],errors=[];
-    const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Bounded test command timed out'));},15000);
+    const child=spawn(command,args,{cwd,env:options.env ?? process.env,stdio:['ignore','pipe','pipe']}),parts=[],errors=[];
+    const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Bounded test command timed out'));},options.timeout ?? 15000);
     child.stdout.on('data',part=>parts.push(part));child.stderr.on('data',part=>errors.push(part));child.on('error',reject);
     child.on('close',code=>{clearTimeout(timer);done({code,stdout:Buffer.concat(parts).toString(),stderr:Buffer.concat(errors).toString()});});
   });
@@ -216,6 +218,70 @@ async function checkGeneratedProject() {
     await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',fixture:'authored loopback only',requests:seen.length,checks:['ZIP CRC and extraction','generated syntax','default dry run','exact method/query/header/text body','origin gate','manual redirect','timeout without retry','bounded response','credential refusal','redacted explicit configuration']},null,2)+'\n');
   } finally {server.closeAllConnections();await new Promise(done=>server.close(done));await rm(directory,{recursive:true,force:true});}
   console.log('PASS generated project extracted by Python, Node syntax, no network until explicit Send, exact supported request values, redirect/origin/credential guards, timeout and response bound');
+}
+
+async function checkGeneratedGoProject() {
+  const seen=[];
+  const server=createServer(async(request,response)=>{
+    const chunks=[];for await(const chunk of request)chunks.push(chunk);
+    seen.push({method:request.method,url:request.url,headers:request.headers,body:Buffer.concat(chunks).toString('utf8')});
+    if(request.url==='/redirect'){response.writeHead(302,{Location:'http://127.0.0.1:1/never-follow','Set-Cookie':'synthetic-only=1'});response.end();return;}
+    if(request.url==='/slow'){setTimeout(()=>response.end('late'),250);return;}
+    if(request.url==='/large'||request.url==='/exact-limit'){response.end('x'.repeat(request.url==='/large'?65537:65536));return;}
+    response.end('{"ok":true}');
+  });
+  await new Promise(done=>server.listen(0,'127.0.0.1',done));
+  const origin='http://127.0.0.1:'+server.address().port,directory=await mkdtemp(join(tmpdir(),'reb-go-project-'));
+  const cwd=join(directory,'reb-client-project/go'),folder=join(directory,'reb-client-project');
+  const source=capture(fixture(origin+'/a%2Fb?x=1&%78=2&empty=&q=a+b&q=a%20b'));
+  const materialize=async(project)=>{for(const item of project.files){const path=join(directory,item.path);await mkdir(dirname(path),{recursive:true});await writeFile(path,item.text);}};
+  const config=async value=>writeFile(join(folder,'config.json'),JSON.stringify(value));
+  const environment={...process.env,GOTOOLCHAIN:'local',GOPROXY:'off',GOSUMDB:'off'};
+  try {
+    await materialize(api.capturedClientProject(source,'raw'));
+    const compiler=await command('go',['version'],cwd,{env:environment});assert.equal(compiler.code,0,compiler.stderr);assert.match(compiler.stdout,/go version go1\./,'A real installed Go compiler is required');
+    const build=await command('go',['build','-o','../request001','./cmd/request-001'],cwd,{env:environment,timeout:90000});assert.equal(build.code,0,build.stderr);
+    const vet=await command('go',['vet','./...'],cwd,{env:environment,timeout:90000});assert.equal(vet.code,0,vet.stderr);
+    const execute=(...args)=>command(join(folder,'request001'),args,cwd);
+    let result=await execute();assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).dry_run,true);assert.equal(seen.length,0);
+    result=await execute('--send');assert.notEqual(result.code,0);assert.match(result.stderr,/allowedOrigin/);assert.equal(seen.length,0);
+    result=await execute('--unexpected');assert.notEqual(result.code,0);assert.equal(seen.length,0);
+    await config({allowedOrigin:origin});result=await execute();assert.equal(result.code,0);assert.equal(seen.length,0);
+    result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(seen.length,1);
+    assert.deepEqual(seen[0],{method:'POST',url:'/a%2Fb?x=1&%78=2&empty=&q=a+b&q=a%20b',
+      headers:{host:origin.slice(7),'user-agent':'Go-http-client/1.1','content-length':String(Buffer.byteLength(inputBody)),
+        'content-type':'application/json; charset=utf-8','x-authored':'exact-value',connection:'close'},body:inputBody});
+    assert.equal(seen[0].headers.cookie,undefined);assert.equal(seen[0].headers.authorization,undefined);
+    const override={...copy(source.input),method:'GET',body:'',headers:[],url:origin+'/redirect'};
+    await config({allowedOrigin:origin,request:override});result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).status,302);assert.equal(seen.length,2);
+    for(const path of ['/large','/exact-limit','/slow']){
+      await config({allowedOrigin:origin,request:{...override,url:origin+path,timeout_ms:100}});result=await execute('--send');
+      if(path==='/slow')assert.notEqual(result.code,0,'Timeout is reported without retry');
+      else {assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).body.length,65536);assert.equal(JSON.parse(result.stdout).body_truncated,path==='/large');}
+    }
+    assert.equal(seen.length,5);
+    for(const [name,mutate] of problems){
+      const value=fixture(origin+'/blocked');mutate(value);await materialize(api.capturedClientProject(capture(value),'raw'));
+      await config({allowedOrigin:origin});result=await execute('--send');assert.notEqual(result.code,0,name);assert.equal(seen.length,5,name+' must be refused before networking');
+    }
+    await materialize(api.capturedClientProject(source,'raw'));
+    for(const request of [{...override,headers:[['X-Latin1','é']]},{...override,url:origin+'/雪'},
+      {...override,headers:[['X-Broken']]},{...override,timeout_ms:99},{...override,timeout_ms:30001},
+      {...override,headers:[['Content-Type','text/plain; charset=utf-8; charset=ascii']]}]){
+      await config({allowedOrigin:origin,request});result=await execute('--send');assert.notEqual(result.code,0,result.stderr);assert.equal(seen.length,5);
+    }
+    await writeFile(join(folder,'config.json'),' {"request":{"body":"\\ud800"}}');result=await execute();assert.notEqual(result.code,0);
+    await config({allowedOrigin:'http://wrong.test',request:override});result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5);
+    await materialize(api.capturedClientProject(source,'redacted_copy'));await config({allowedOrigin:origin});
+    result=await execute();assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).ready,false);
+    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5);
+    await config({allowedOrigin:origin,request:{...override,url:origin+'/configured',method:'PATCH',body:'😀\r\nexact'}});
+    result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(seen.length,6);assert.equal(seen[5].method,'PATCH');assert.equal(seen[5].body,'😀\r\nexact');
+    const output=join(root,'build/client-project-qa');await mkdir(output,{recursive:true});
+    await writeFile(join(output,'go-validation.json'),JSON.stringify({status:'passed',compiler:compiler.stdout.trim(),fixture:'authored loopback only',requests:seen.length,
+      checks:['go build/vet','default dry run','exact method/raw query/ASCII headers/UTF-8 CRLF body','no cookie/credential sharing','cross-origin redirects stopped','timeout/response bounds','unsupported capture matrix','explicit complete replacement']},null,2)+'\n');
+  } finally {server.closeAllConnections();await new Promise(done=>server.close(done));await rm(directory,{recursive:true,force:true});}
+  console.log('PASS generated Go build/vet and actual net/http loopback fidelity, explicit send/origin/configuration gates, unsupported matrix, redirects, timeout and response bounds');
 }
 
 async function checkController() {

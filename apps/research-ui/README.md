@@ -85,6 +85,23 @@ receipt are written under `build/api-catalog-ui/`. `--serve` exposes the same
 read-only authored fixture for manual browser-development inspection. These
 checks do not substitute for native macOS QA.
 
+## Captured request client projects
+
+From an exact Traffic capture, **Export capture → Review captured request in
+Repeater** previews retained method, URL/query, headers and text body before
+copying an isolated draft. Existing drafts require replacement confirmation;
+unsupported inputs remain explicit. Creating the draft never sends the request.
+Repeater's separate **Send** action and **Export project** menu connect the
+reviewed draft to a retained run and its known source provenance.
+
+Raw and explicitly redacted projects use a fixed folder layout with README,
+client source, one service/operation, request data, dry-run example,
+configuration placeholders and evidence/provenance. macOS uses a native Save
+dialog; browser development downloads the ZIP. The dependency-free Node.js
+example defaults to no network and requires a reviewed origin plus `--send`.
+See [Client project v1](../../docs/product/client-project-v1.md) for limits,
+unsupported cases, layout, privacy and validation.
+
 ## Saved investigation notebook
 
 Use **Notebook** in the toolbar to create a named local notebook, then **Pin

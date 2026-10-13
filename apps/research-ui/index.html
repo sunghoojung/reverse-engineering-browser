@@ -115,6 +115,11 @@
                       <button class="exchange-button" type="button" data-traffic-export="raw" data-traffic-destination="clipboard">Copy raw capture</button>
                       <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="download">Save redacted copy</button>
                       <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="clipboard">Copy redacted copy</button>
+                      <button class="exchange-button" type="button" data-client-capture="draft">Review captured request in Repeater</button>
+                      <button class="exchange-button" type="button" data-client-capture="raw">Export raw client project</button>
+                      <button class="exchange-button" type="button" data-client-capture="redacted_copy">Export redacted client project</button>
+                      <p data-client-export-support></p>
+                      <p>Client projects contain one observed operation, source evidence, configuration and a dry-run example. Unsupported inputs remain explicit; no request is sent by export.</p>
                       <p>Redacted copies remove header values and bodies, plus URL credentials, queries and fragments. Paths and other metadata may still contain secrets. Review before sharing.</p>
                       <p data-traffic-export-status role="status" aria-live="polite"></p>
                     </div>
@@ -638,6 +643,7 @@
                   <button id="repeater-create" class="secondary-button" type="button">Start session</button>
                   <button id="repeater-dispose" class="secondary-button" type="button" disabled>End session</button>
                   <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
+                  <details class="exchange-options" id="repeater-client-export"><summary>Export project</summary><div class="exchange-options-menu"><p>Export the selected retained run as a one-operation Node.js project. Raw evidence can contain private data. Sending the example requires explicit configuration and --send.</p><button class="exchange-button" type="button" data-client-run-export="raw" disabled>Download raw project</button><button class="exchange-button" type="button" data-client-run-export="redacted_copy" disabled>Download redacted project</button><p data-client-export-support></p></div></details>
                 </div>
               </div>
 
@@ -1360,6 +1366,14 @@
         <div id="api-catalog-content" class="api-catalog-content" tabindex="0" aria-label="Endpoint observations"></div>
       </dialog>
 
+      <dialog id="captured-client-review" class="api-catalog" aria-labelledby="captured-client-title">
+        <header class="api-catalog-header"><h2 id="captured-client-title">Review captured request</h2><button class="secondary-button" type="button" data-client-close autofocus>Cancel</button></header>
+        <div class="api-catalog-content captured-client-content" data-client-review-content tabindex="0" aria-label="Captured request and replay limitations"></div>
+        <p data-client-review-status role="status" aria-live="polite"></p>
+        <label data-client-replace-label><input type="checkbox" data-client-replace /> Replace the existing Repeater draft with this reviewed capture</label>
+        <button class="secondary-button" type="button" data-client-apply disabled>Create isolated draft</button>
+      </dialog>
+
       <footer class="statusbar">
         <span id="broker-status" class="broker-status">connecting to evidence</span>
         <span id="request-summary"><span id="request-count">0</span> <span id="request-count-label">requests loaded</span></span>
@@ -1379,6 +1393,7 @@
     <script src="source_facts.js"></script>
     <script src="traffic_comparison.js"></script>
     <script src="traffic_view.js"></script>
+    <script src="captured_client.js"></script>
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>
     <script src="pane_layout.js"></script>

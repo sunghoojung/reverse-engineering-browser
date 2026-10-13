@@ -25,6 +25,8 @@ export async function checkPackageContract() {
     assert((await stat(join(root, 'apps/research-ui', asset))).size > 0);
   }
   const native = await readFile(join(root, 'apps/research-ui/macos/OriginTraceApp.swift'), 'utf8');
+  assert(build.includes('ClientProjectExportSmoke.swift'));
+  assert.equal([...native.matchAll(/func applicationWillTerminate\(/g)].length,1,'Keep one termination delegate');
   assert.match(native, /let researchUIURL = resourcesURL\.appendingPathComponent\("research-ui", isDirectory: true\)/);
   for (const asset of ['index.html', 'analyst_runner_core.js']) {
     assert(native.includes(`researchUIURL.appendingPathComponent("${asset}")`));
@@ -83,6 +85,7 @@ export async function runPackagedSmoke(app, directory, name, flags = [], environ
   assert(Object.hasOwn(titles, name), `Unknown packaged smoke scenario: ${name}`);
   assert.equal(result.title, titles[name]);
   assert.equal(result.nativeShell, true);
+  assert.deepEqual(result.nativeClientProject,{available:true,invalidPayloadRefused:true,subframeRefused:true});
   assert.equal(result.stylesLoaded, true);
   assert.equal(result.smokeExerciseError, null, output);
   assert.equal(result.debuggerContractValid, true);
@@ -111,6 +114,34 @@ export function assertFloat32Smoke(name, value) {
       all_within_tolerance:true,finite_pairs:1,excluded_nonfinite_pairs:0,absolute_delta:0,relative_delta:0,ulp_distance:0,rms_delta:0}:null});
 }
 
+async function runClientProjectSmoke(app, directory) {
+  const stores = join(directory,'client-project');
+  await mkdir(stores);
+  const child = spawn(join(app,'Contents/MacOS/OriginTrace'),[
+    '--store',join(stores,'events.jsonl'),'--trace-store',join(stores,'traces.jsonl'),
+    '--signal-store',join(stores,'signals.jsonl'),'--artifacts',join(stores,'artifacts'),
+    '--api-collection',join(stores,'collection.json'),'--local-analyst',join(stores,'analyst.json'),
+  ],{cwd:directory,env:{...process.env,REB_APP_SMOKE_TEST:'1',REB_APP_SMOKE_CLIENT_PROJECT:'1',
+    REB_APP_SMOKE_NATIVE_CLOSE:'',REB_APP_SMOKE_LIVE_FAILURE:'0',REB_DISABLE_AUTOMATIC_LIVE_SESSION:'1'}});
+  let output = '', timer;
+  for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{output=(output+chunk).slice(-128*1024);});
+  try {
+    await new Promise((done,reject)=>{
+      timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Client-project panel smoke timed out\n'+output));},45000);
+      child.once('error',reject);
+      child.once('close',(code,signal)=>code===0?done():reject(new Error(`Client-project panel smoke exited ${code}/${signal}\n${output}`)));
+    });
+  } finally {clearTimeout(timer);await writeFile(join(directory,'client-project.log'),output);}
+  assert(!output.includes('SMOKE_ERROR'),output);
+  assert.deepEqual([...output.matchAll(/^NATIVE_CLIENT_PROJECT_PHASE (.+)$/gm)].map(match=>match[1]),
+    ['cancel','save','writeFailure','navigation','replacementSave'],output);
+  const receipts=[...output.matchAll(/^NATIVE_CLIENT_PROJECT_OK (.+)$/gm)];
+  assert.equal(receipts.length,1,output);
+  assert.deepEqual(JSON.parse(receipts[0][1]),{savedExactBytes:true,cancelNoWrite:true,busyRefused:true,
+    navigationNoWrite:true,writeFailureRefused:true,replacementSaved:true,panelCount:5});
+  console.log('PASS packaged native client-project real Save/Cancel panels, exact ZIP bytes, pending refusal, navigation cancellation/retry and atomic-write failure; overwrite not exercised');
+}
+
 async function main() {
   const contract = await checkPackageContract();
   if (process.argv.includes('--contract-only')) return;
@@ -135,6 +166,7 @@ async function main() {
     const offline = await runPackagedSmoke(app, temporary, 'offline');
     assert.equal(new URL(offline.result.location).protocol, 'reb:');
     assert.equal(offline.result.captureMode, 'idle');
+    await runClientProjectSmoke(app,temporary);
     const demo = join(temporary, 'demo');
     await mkdir(demo);
     const events = execFileSync(join(root, 'build/reb-event-producer'));
@@ -158,7 +190,7 @@ async function main() {
     });
     console.log('PASS relocated signed package: native offline/demo/startup-failure fallback, live HTTP WebKit and out-of-repository launcher');
   } finally {
-    for (const name of ['offline', 'demo', 'fallback']) {
+    for (const name of ['offline', 'demo', 'fallback', 'client-project']) {
       const log = join(temporary, `${name}.log`);
       try {await cp(log, join(reports, `${name}.log`));} catch (error) {if (error.code !== 'ENOENT') throw error;}
     }

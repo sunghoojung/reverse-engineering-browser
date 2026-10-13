@@ -1364,6 +1364,13 @@
         <header class="api-catalog-header"><h2 id="api-catalog-title">Observed API catalog</h2><button id="api-catalog-refresh" class="secondary-button" type="button">Refresh snapshot</button><button id="api-catalog-close" class="secondary-button" type="button" autofocus>Close</button></header>
         <p id="api-catalog-scope">Structural observations from the newest retained Traffic records. Not an API specification. Paths and names may contain private data. Raw Traffic is unchanged.</p>
         <p id="api-catalog-status" role="status" aria-live="polite">Open or refresh deliberately to read a snapshot. No automatic refresh.</p>
+        <div class="api-catalog-filters">
+          <label>Find observed structure<input id="api-catalog-search" type="search" disabled maxlength="256" autocomplete="off" placeholder="Path, method, status or field name" aria-describedby="api-catalog-filter-scope"></label>
+          <label>Response<select id="api-catalog-response" disabled><option value="all">Any response</option><option value="json">Observed JSON</option><option value="unavailable">Unavailable shape</option><option value="error">HTTP errors (400–599)</option></select></label>
+          <button id="api-catalog-clear" class="secondary-button" type="button" disabled>Clear filters</button>
+        </div>
+        <p id="api-catalog-filter-scope">Local substring search of endpoint and structural names only; no captured values or target requests.</p>
+        <p id="api-catalog-filter-status" role="status" aria-live="polite"></p>
         <div id="api-catalog-content" class="api-catalog-content" tabindex="0" aria-label="Endpoint observations"></div>
       </dialog>
 
@@ -1394,6 +1401,7 @@
     <script src="source_facts.js"></script>
     <script src="traffic_comparison.js"></script>
     <script src="traffic_view.js"></script>
+    <script src="api_catalog.js"></script>
     <script src="captured_client.js"></script>
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>

@@ -31,7 +31,9 @@ REA's API-surface view and accumulator were also reviewed:
 and
 [`WebNetworkApiSurfaceAccumulator.ts`](https://github.com/morluto/rea/blob/bb540826d65316c164d2de8ba4ef10f81a8ad073/src/domain/analysisView/WebNetworkApiSurfaceAccumulator.ts).
 Their retained-record grouping, source ordinals, and coverage reporting inform
-future workflow work. REB does not copy REA's inferred route substitutions: this
+REB's snapshot-local filtering and two-observation structural comparison.
+Those UI functions are independently implemented; no additional REA code is
+copied. REB does not copy REA's inferred route substitutions: this
 catalog retains exact observed paths and per-observation scoped identities.
 
 No REA runtime, npm dependencies, providers, native bridges, or code from REA's

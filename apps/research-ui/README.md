@@ -68,6 +68,33 @@ older records, skipped records, capture evictions and name/header omissions
 separate. This is not a service specification or a required-field inference.
 Paths and names can still be private; no catalog export or target request occurs.
 
+Use **Find observed structure** to narrow that snapshot by a case-insensitive
+literal substring: method, origin/path, HTTP status, lifecycle, query/header
+name, JSON property path/type, media type, or unavailable-shape reason. Captured
+values and source identifiers are not searched. **Response** limits matches to
+observed JSON, unavailable shapes, or HTTP errors (400–599). Match counts never
+replace the original coverage counts; no match means no match in this bounded
+snapshot. Clear filters restores the snapshot and returns focus to search.
+
+Expand a group with two matching observations and choose **Reference
+observation** and **Comparison observation**, then **Compare observed
+structure**. Request and response JSON are compared independently, including
+root type, typed property/array paths, type sets and within-body occurrence
+counts. A path seen only in one body is not evidence of an optional field or a
+changed API contract. Missing, truncated, malformed and unsupported bodies keep
+their exact unknown reasons; none become empty schemas. Equal structures do not
+prove equal values or equivalent behavior. Each numbered observation retains
+its exact captured-source link below the comparison.
+
+Comparison is local, read-only and deliberate. Selecting a different source
+clears the previous report, and the same source cannot be compared with itself.
+Filtering keeps expanded endpoint groups open but resets comparison choices to
+the matching observations, so hidden rows cannot supply a comparison. A failed
+refresh preserves the current filters and results. A successful refresh replaces
+the snapshot and clears its old comparisons. Close/reopen retains the current
+snapshot without another read. Source links continue to validate current Traffic
+independently of the retained structural report.
+
 **Open captured request** verifies the original backend instance, capture epoch,
 request ID, target ID and unrounded monotonic start against retained Traffic.
 Missing, changed or ambiguous sources stay visibly unavailable; URLs and native
@@ -625,6 +652,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `request_value_test.js` | Ephemeral request-value capture controls, observation selection, and comparison rendering |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js`, `traffic_comparison.js` | Bounded request/response views, exact retained comparison ownership, lossless structural JSON comparison, explicit missing-data states, and labeled sample exchanges |
+| `api_catalog.js` | Catalog contract validation, exact capture identities shared with navigation/client exports, snapshot-local structural filtering and observed-shape comparison |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |

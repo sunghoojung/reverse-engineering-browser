@@ -51,6 +51,7 @@ export async function checkPackageContract() {
   assert(coordinator.includes('resourcesURL.appendingPathComponent("run-live-session.sh")'));
   assert(native.includes('resourcesURL.appendingPathComponent("OriginTrace.icns")'));
   const removedBytes = (await Promise.all([...publicAssets, 'analyst_runner_core.js'].map(async asset => (await stat(join(root, 'apps/research-ui', asset))).size))).reduce((a, b) => a + b, 0);
+  await checkClientProjectScreenshotContract();
   console.log(`PASS packaging contract: ${assets.length} canonical assets; ${publicAssets.length + 1} redundant copies removed (${removedBytes} bytes)`);
   return {assets, publicAssets};
 }
@@ -121,6 +122,47 @@ export function assertFloat32Smoke(name, value) {
       all_within_tolerance:true,finite_pairs:1,excluded_nonfinite_pairs:0,absolute_delta:0,relative_delta:0,ulp_distance:0,rms_delta:0}:null});
 }
 
+// xcresulttool names exported files by UUID; its manifest associates each
+// file with the explicit XCTAttachment name. Auto screenshots are not evidence
+// for a requested phase. See Apple's xcresulttool export attachments command.
+export async function validateClientProjectScreenshots(manifest, directory) {
+  assert(Array.isArray(manifest),'XCTest attachment manifest must be an array');
+  const attachments=manifest.flatMap(test=>Array.isArray(test.attachments)?test.attachments:[]);
+  const phases=['save','writeFailure','replacementSave'],used=new Set(),result=[];
+  for(const phase of phases){
+    const expected=phase+'-native-save-panel';
+    const suffix=new RegExp('^'+expected+'_[0-9]+_[0-9a-fA-F-]{36}\\.png$');
+    const matching=attachments.filter(item=>item.suggestedHumanReadableName===expected ||
+      item.suggestedHumanReadableName===expected+'.png' || suffix.test(item.suggestedHumanReadableName));
+    assert.equal(matching.length,1,'Expected one named XCTest screenshot for '+phase);
+    const name=matching[0].exportedFileName;
+    assert(typeof name==='string' && /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\.png$/.test(name) && !used.has(name),'Unsafe or reused screenshot filename');
+    used.add(name);
+    const bytes=await readFile(join(directory,name));
+    assert(bytes.length>8 && bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])),'Missing, empty or invalid PNG for '+phase);
+    result.push({phase,attachment:matching[0].suggestedHumanReadableName,exported_file:name,bytes:bytes.length});
+  }
+  return result;
+}
+
+async function checkClientProjectScreenshotContract(){
+  const directory=await mkdtemp(join(tmpdir(),'reb-attachment-contract-'));
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
+  const phases=['save','writeFailure','replacementSave'];
+  const attachments=phases.map((phase,index)=>({suggestedHumanReadableName:phase+'-native-save-panel_0_00000000-0000-0000-0000-00000000000'+index+'.png',exportedFileName:phase+'.png'}));
+  try{
+    for(const phase of phases)await writeFile(join(directory,phase+'.png'),png);
+    assert.equal((await validateClientProjectScreenshots([{attachments}],directory)).length,3);
+    const automatic=Array.from({length:4},(_,index)=>({suggestedHumanReadableName:'Automatic screenshot '+index,exportedFileName:'save.png'}));
+    await assert.rejects(validateClientProjectScreenshots([{attachments:[...attachments.slice(0,2),...automatic]}],directory),/named XCTest screenshot/);
+    await assert.rejects(validateClientProjectScreenshots([{attachments:[...attachments,attachments[0]]}],directory),/named XCTest screenshot/);
+    await assert.rejects(validateClientProjectScreenshots([{attachments:attachments.map((item,index)=>index?item:{...item,exportedFileName:'../save.png'})}],directory),/Unsafe/);
+    await assert.rejects(validateClientProjectScreenshots([{attachments:attachments.map(item=>({...item,exportedFileName:'save.png'}))}],directory),/reused/);
+    await writeFile(join(directory,'save.png'),'');await assert.rejects(validateClientProjectScreenshots([{attachments}],directory),/invalid PNG/);
+    await writeFile(join(directory,'save.png'),'not a PNG');await assert.rejects(validateClientProjectScreenshots([{attachments}],directory),/invalid PNG/);
+  }finally{await rm(directory,{recursive:true,force:true});}
+}
+
 async function runClientProjectSmoke(app, directory) {
   const stores=join(directory,'client-project'),output=join(directory,'client-project-panels');
   await mkdir(stores);await mkdir(output);
@@ -131,7 +173,7 @@ async function runClientProjectSmoke(app, directory) {
     '-parallel-testing-enabled','NO'],{cwd:directory,env:{...process.env,
       TEST_RUNNER_REB_CLIENT_PROJECT_APP:app,TEST_RUNNER_REB_CLIENT_PROJECT_OUTPUT:output,
       TEST_RUNNER_REB_CLIENT_PROJECT_STORES:stores}});
-  let log='',timer;
+  let log='',timer,exportError=null;
   for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{log=(log+chunk).slice(-256*1024);});
   try {
     await new Promise((done,reject)=>{
@@ -146,13 +188,17 @@ async function runClientProjectSmoke(app, directory) {
     try {
       execFileSync('xcrun',['xcresulttool','export','attachments','--path',join(directory,'client-project-ui.xcresult'),
         '--output-path',join(output,'attachments')],{cwd:directory,timeout:30000,stdio:'pipe'});
-    } catch(error) {await writeFile(join(output,'attachment-export-error.log'),String(error));}
+    } catch(error) {exportError=error;await writeFile(join(output,'attachment-export-error.log'),String(error));}
   }
+  if(exportError)throw new Error('XCTest screenshot export failed',{cause:exportError});
   const receipt=JSON.parse(await readFile(join(output,'result.json'),'utf8'));
   assert.deepEqual(receipt,{savedExactBytes:true,cancelNoWrite:true,busyRefused:true,
     navigationNoWrite:true,writeFailureRefused:true,replacementSaved:true,panelCount:5});
-  const screenshots=(await readdir(join(output,'attachments'),{recursive:true})).filter(path=>path.endsWith('.png'));
-  assert(screenshots.length>=3,'Every real Save phase must retain its XCTest screenshot');
+  const attachmentDirectory=join(output,'attachments');
+  const manifest=JSON.parse(await readFile(join(attachmentDirectory,'manifest.json'),'utf8'));
+  const screenshots=await validateClientProjectScreenshots(manifest,attachmentDirectory);
+  for(const item of screenshots)await cp(join(attachmentDirectory,item.exported_file),join(output,item.phase+'-panel.png'));
+  await writeFile(join(output,'phase-attachments.json'),JSON.stringify(screenshots,null,2)+'\n');
   console.log('PASS Xcode UI-tested real native Save panels, exact ZIP bytes, Cancel/no-write, pending refusal, navigation cancellation/retry and atomic-write failure; overwrite not exercised');
 }
 

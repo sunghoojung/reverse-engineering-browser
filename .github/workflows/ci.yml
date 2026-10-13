@@ -392,6 +392,20 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Upload named native Save-panel screenshots
+        if: matrix.os == 'macos-latest' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-client-project-panels-${{ github.run_id }}
+          path: |
+            build/package-qa/client-project-panels/*-panel.png
+            build/package-qa/client-project-panels/phase-attachments.json
+            build/package-qa/client-project-panels/result.json
+            build/package-qa/client-project-panels/attachment-export-error.log
+            build/package-qa/client-project-panels/native-smoke.log
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Exercise native Analyst close and Quit lifecycle
         if: matrix.os == 'macos-latest'
         run: node tools/check-origin-trace-native-close.mjs

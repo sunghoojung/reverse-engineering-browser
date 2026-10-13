@@ -34,6 +34,13 @@ final class ClientProjectExportSmoke: NSObject {
   func start() {
     require(ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
       && ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT"] == "1", "smoke mode required")
+    // XCUIApplication does not forward the launched app's standard streams to
+    // xcodebuild. Retain authored smoke diagnostics beside its native receipt.
+    if let output = ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT_OUTPUT"] {
+      let path = URL(fileURLWithPath: output).appendingPathComponent("native-smoke.log").path
+      require(freopen(path, "w", stdout) != nil && dup2(fileno(stdout), fileno(stderr)) >= 0,
+              "cannot retain native smoke diagnostics")
+    }
     NSApp.activate(ignoringOtherApps: true)
     directory = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("reb-client-project-smoke-" + UUID().uuidString,
                                                                  isDirectory: true)
@@ -86,7 +93,13 @@ final class ClientProjectExportSmoke: NSObject {
     do { try manager.createDirectory(at: phaseDirectory, withIntermediateDirectories: false) }
     catch { fail("cannot create phase directory") }
     webView.callAsyncJavaScript("""
-      return await window.webkit.messageHandlers.rebClientProjectExport.postMessage(window.__nativeProjectSmokePayload);
+      try {
+        return {fulfilled:true,value:await window.webkit.messageHandlers.rebClientProjectExport.postMessage(window.__nativeProjectSmokePayload)};
+      } catch (error) {
+        // Preserve the actual rejected bridge message. WebKit wraps a rejected
+        // async result in an NSError whose localizedDescription is generic.
+        return {fulfilled:false,message:String(error)};
+      }
       """, arguments: [:], in: nil, in: .page) { result in
       self.trace("script-reply \(next.rawValue)")
       // Reload destroys the old JavaScript promise. The native cancellation
@@ -94,12 +107,17 @@ final class ClientProjectExportSmoke: NSObject {
       if next == .navigation { return }
       switch result {
       case .success(let value):
-        let status = (value as? [String: Any])?["status"] as? String
-        self.require(status == (next == .cancel ? "canceled" : "saved"), "wrong save result")
-        self.require(next != .writeFailure, "filesystem failure incorrectly reported saved")
+        guard let outcome = value as? [String: Any], let fulfilled = outcome["fulfilled"] as? Bool
+        else { self.fail("missing bridge outcome"); return }
+        if next == .writeFailure {
+          self.require(!fulfilled && (outcome["message"] as? String)?.contains("could not be saved") == true,
+                       "filesystem failure did not return the expected rejection")
+        } else {
+          let status = (outcome["value"] as? [String: Any])?["status"] as? String
+          self.require(fulfilled && status == (next == .cancel ? "canceled" : "saved"), "wrong save result")
+        }
       case .failure(let error):
-        self.require(next == .writeFailure && error.localizedDescription.contains("could not be saved"),
-                     "unexpected bridge failure: \(error.localizedDescription)")
+        self.fail("unexpected JavaScript evaluation failure: \(error.localizedDescription)")
       }
       self.stage("wait-panel-dismissal")
       self.wait(until: { self.window.attachedSheet == nil }, label: "panel dismissal") {

@@ -342,7 +342,7 @@ impl Shape {
         }
         if !self.fields.contains_key(path) {
             let bytes = serde_json::to_vec(path).map_err(E::custom)?.len();
-            if self.fields.len() >= MAX_FIELDS + 1 || self.path_bytes + bytes > MAX_PATH_BYTES {
+            if self.fields.len() > MAX_FIELDS || self.path_bytes + bytes > MAX_PATH_BYTES {
                 return Err(self.fail("shape_resource_limit"));
             }
             self.path_bytes += bytes;
@@ -468,7 +468,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../../protocol/openapi.json")).unwrap();
         let schema = json!({"$ref":"#/components/schemas/ApiObservationCatalog", "components":spec["components"]});
         let validator = jsonschema::validator_for(&schema).unwrap();
-        for error in validator.iter_errors(output) {
+        if let Some(error) = validator.iter_errors(output).next() {
             panic!("Catalog schema: {error}");
         }
     }
@@ -855,8 +855,9 @@ mod tests {
 
     #[test]
     fn mixed_arrays_null_and_empty_json_keep_per_body_observation_semantics() {
-        let shape = infer_shape(r#"[null,{},[],1,1.5,true,"synthetic-value",{"id":0},{"id":null}]"#)
-            .unwrap();
+        let shape =
+            infer_shape(r#"[null,{},[],1,1.5,true,"synthetic-value",{"id":0},{"id":null}]"#)
+                .unwrap();
         assert_eq!(shape["root_type"], "array");
         assert_eq!(shape["node_count"], 12);
         assert_eq!(shape["max_depth_observed"], 2);
@@ -894,12 +895,54 @@ mod tests {
     #[tokio::test]
     async fn unsupported_bodies_and_streams_remain_explicit_unknowns() {
         for (state, mime, text, base64, truncated, reason) in [
-            ("missing", "multipart/form-data", "", "", false, "body_unavailable"),
-            ("empty", "application/json", "", "", false, "body_unavailable"),
-            ("loading", "text/event-stream", "", "", false, "body_unavailable"),
-            ("error", "application/json", "", "", false, "body_unavailable"),
-            ("available", "application/json", "{}", "", true, "body_truncated"),
-            ("available", "application/octet-stream", "", "AAEC", false, "base64_not_analyzed"),
+            (
+                "missing",
+                "multipart/form-data",
+                "",
+                "",
+                false,
+                "body_unavailable",
+            ),
+            (
+                "empty",
+                "application/json",
+                "",
+                "",
+                false,
+                "body_unavailable",
+            ),
+            (
+                "loading",
+                "text/event-stream",
+                "",
+                "",
+                false,
+                "body_unavailable",
+            ),
+            (
+                "error",
+                "application/json",
+                "",
+                "",
+                false,
+                "body_unavailable",
+            ),
+            (
+                "available",
+                "application/json",
+                "{}",
+                "",
+                true,
+                "body_truncated",
+            ),
+            (
+                "available",
+                "application/octet-stream",
+                "",
+                "AAEC",
+                false,
+                "base64_not_analyzed",
+            ),
             (
                 "available",
                 "multipart/form-data; boundary=synthetic-boundary",
@@ -924,8 +967,22 @@ mod tests {
                 false,
                 "not_json_media_type",
             ),
-            ("available", "application/x-ndjson", "{}\n{}\n", "", false, "not_json_media_type"),
-            ("available", "application/json", "{}\n{}\n", "", false, "malformed_json"),
+            (
+                "available",
+                "application/x-ndjson",
+                "{}\n{}\n",
+                "",
+                false,
+                "not_json_media_type",
+            ),
+            (
+                "available",
+                "application/json",
+                "{}\n{}\n",
+                "",
+                false,
+                "malformed_json",
+            ),
             (
                 "available",
                 "application/json; charset=utf-8",
@@ -1022,7 +1079,10 @@ mod tests {
         assert_eq!(final_observation["request"]["body"]["state"], "empty");
         assert_eq!(final_observation["source"]["started_monotonic_ms"], 3000.0);
         assert_eq!(redirect_observation["status"], 302);
-        assert_eq!(redirect_observation["source"]["started_monotonic_ms"], 2000.0);
+        assert_eq!(
+            redirect_observation["source"]["started_monotonic_ms"],
+            2000.0
+        );
         assert_ne!(
             final_observation["source"]["request_id"],
             redirect_observation["source"]["request_id"]

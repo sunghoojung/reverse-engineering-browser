@@ -94,8 +94,8 @@ async function checkBrowser() {
   const server = createServer(async (request,response) => {
     if(request.headers.host !== `127.0.0.1:${server.address().port}`) {response.writeHead(400);response.end();return;}
     const reply = (status,value,type='application/json') => {response.writeHead(status,{'Content-Type':type,'Cache-Control':'no-store'});response.end(type==='application/json'?JSON.stringify(value):value);};
-    if(request.method !== 'GET') {mutations.push(request.url);reply(405,{});return;}
-    const path = request.url.split('?')[0]; logs.push(path);
+    if(request.method !== 'GET') {mutations.push(request.url.slice(0,1024));if(mutations.length>64)mutations.shift();reply(405,{});return;}
+    const path = request.url.split('?')[0]; logs.push(path.slice(0,1024));if(logs.length>256)logs.shift();
     if(path === '/api/network/catalog') {
       catalogReads++;
       if(mode==='pending') {held.push(()=>reply(200,fixture.catalog));return;}
@@ -115,12 +115,22 @@ async function checkBrowser() {
   const directory=await mkdtemp(join(tmpdir(),'reb-api-catalog-ui-'));
   const output=resolve(process.env.REB_API_CATALOG_QA_OUTPUT || join(root,'build/api-catalog-ui'));
   await mkdir(output,{recursive:true});
-  let browser, socket, sequence=0; const commands=new Map();
+  await rm(join(output,'validation.json'),{force:true});
+  await rm(join(output,'failure.png'),{force:true});
+  let browser, socket, sequence=0, diagnostics='', phase='fixture startup', firstFailure=null, browserClosed=false; const commands=new Map();
+  const grouped=process.platform!=='win32';
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-  async function until(check,description) {for(let i=0;i<200;i++){const value=await check();if(value)return value;await delay(50);}throw new Error(`Timed out: ${description}`);}
+  async function until(check,description) {phase=description;for(let i=0;i<200;i++){const value=await check();if(value)return value;await delay(50);}throw new Error(`Timed out: ${description}`);}
   const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{commands.delete(id);reject(new Error(`CDP timeout: ${method}`));},10000);commands.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params}));});
   const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.text+' '+JSON.stringify(result.exceptionDetails.exception));return result.result.value;};
-  const key=async (key,code)=>{await send('Input.dispatchKeyEvent',{type:'keyDown',key,code,windowsVirtualKeyCode:{Tab:9,Enter:13,Escape:27}[key]});await send('Input.dispatchKeyEvent',{type:'keyUp',key,code});};
+  const key=async (key,code)=>{
+    const windowsVirtualKeyCode={Tab:9,Enter:13,Escape:27}[key];
+    // Match the repository's native CDP input shape. Enter needs its character
+    // event for native summary/button activation, not only a keydown event.
+    await send('Input.dispatchKeyEvent',{type:key==='Enter'?'keyDown':'rawKeyDown',key,code,windowsVirtualKeyCode,
+      ...(key==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
+    await send('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode});
+  };
   const click=async selector=>{const point=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});n.scrollIntoView({block:'nearest'});const r=n.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});};
   const shot=async name=>{const result=await send('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(result.data,'base64'));};
   try {
@@ -131,13 +141,14 @@ async function checkBrowser() {
       return;
     }
     const executable=process.env.REB_UI_CHROMIUM || '/usr/bin/chromium';
-    browser=spawn(executable,['--headless=new','--remote-debugging-port=0',`--user-data-dir=${directory}`,'--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--disable-sync','about:blank'],{stdio:['ignore','ignore','pipe']});
-    let diagnostics=''; browser.stderr.on('data',chunk=>{diagnostics=(diagnostics+chunk).slice(-8192);}); browser.on('error',error=>{diagnostics+=error.message;});
+    browser=spawn(executable,['--headless=new','--remote-debugging-port=0',`--user-data-dir=${directory}`,'--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--disable-sync','about:blank'],{detached:grouped,stdio:['ignore','ignore','pipe']});
+    browser.once('close',()=>{browserClosed=true;});
+    browser.stderr.on('data',chunk=>{diagnostics=(diagnostics+chunk).slice(-8192);}); browser.on('error',error=>{diagnostics=(diagnostics+error.message).slice(-8192);});
     const port=await until(async()=>{if(browser.exitCode!==null||browser.signalCode!==null)throw new Error(`Browser startup failed (${browser.exitCode ?? browser.signalCode}): ${diagnostics}`);try{return (await readFile(join(directory,'DevToolsActivePort'),'utf8')).split('\n')[0];}catch{return null;}},'sandboxed Chromium startup');
     const pages=await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     socket=new WebSocket(pages.find(page=>page.type==='page').webSocketDebuggerUrl);
     await new Promise((ready,reject)=>{socket.addEventListener('open',ready,{once:true});socket.addEventListener('error',reject,{once:true});});
-    socket.addEventListener('message',event=>{const message=JSON.parse(event.data);if(message.method==='Runtime.exceptionThrown')errors.push(message.params.exceptionDetails);const command=commands.get(message.id);if(command){clearTimeout(command.timer);commands.delete(message.id);if(message.error)command.reject(new Error(message.error.message));else command.resolve(message.result);}});
+    socket.addEventListener('message',event=>{const message=JSON.parse(event.data);if(message.method==='Runtime.exceptionThrown'){errors.push(message.params.exceptionDetails);if(errors.length>32)errors.shift();}const command=commands.get(message.id);if(command){clearTimeout(command.timer);commands.delete(message.id);if(message.error)command.reject(new Error(message.error.message));else command.resolve(message.result);}});
     await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});
     await until(()=>evaluate("typeof state !== 'undefined' && state.requests.length===1"),'loaded real Traffic UI');
@@ -212,10 +223,61 @@ async function checkBrowser() {
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);
     await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty'],keyboard:['Tab focus','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
     console.log(`PASS rendered catalog: keyboard and pointer, three viewports, scrolling, inert markup, raw header preservation, explicit read-only lifecycle, source invalidation. Evidence: ${output}`);
+  } catch (error) {
+    firstFailure=error;
+    // Persist the first failure before browser teardown. Only the authored local
+    // fixture is ever loaded; bound text diagnostics independently of screenshots.
+    const failure={status:'failed',phase,error:String(error.stack ?? error).slice(0,8192),browser_stderr:diagnostics.slice(-8192),
+      browser_exit:browser?.exitCode ?? null,browser_signal:browser?.signalCode ?? null,catalog_reads:catalogReads,
+      requests:logs.slice(-256),mutations:mutations.slice(-64),runtime_errors:JSON.stringify(errors).slice(0,16384),rendered:false};
+    if(socket?.readyState===WebSocket.OPEN) {
+      try {await shot('failure');failure.rendered=true;failure.screenshot='failure.png';}
+      catch(captureError){failure.screenshot_error=String(captureError).slice(0,2048);}
+      try {failure.dom=await evaluate(`(()=>{const active=document.activeElement, dialog=document.querySelector('#api-catalog');
+        const box=node=>{const r=node?.getBoundingClientRect();return r?{x:r.x,y:r.y,width:r.width,height:r.height}:null;};
+        return {url:location.href,ready:document.readyState,viewport:{width:innerWidth,height:innerHeight},
+          focus:active?{tag:active.tagName,id:active.id,classes:active.className,text:active.textContent.slice(0,256)}:null,
+          catalog_open:dialog?.open ?? null,catalog_box:box(dialog),
+          catalog_status:document.querySelector('#api-catalog-status')?.textContent.slice(0,2048),
+          catalog_content:document.querySelector('#api-catalog-content')?.textContent.slice(0,4096),
+          selected_request:typeof state==='undefined'?null:state.selectedRequestId,
+          traffic_detail_open:typeof state==='undefined'?null:state.trafficDetailOpen,
+          selected_rows:[...document.querySelectorAll('#request-rows [aria-selected="true"]')].slice(0,4).map(node=>node.dataset.requestId),
+          screens:[...document.querySelectorAll('.screen:not([hidden])')].map(node=>node.id)};})()`);}
+      catch(inspectError){failure.dom_error=String(inspectError).slice(0,2048);}
+    }
+    try {await writeFile(join(output,'validation.json'),JSON.stringify(failure,null,2)+'\n');}
+    catch(writeError){console.error('Could not save catalog failure receipt:',String(writeError).slice(0,2048));}
+    console.error(`Catalog browser failure at ${phase}; diagnostics: ${output}`);
+    throw error;
   } finally {
-    held.splice(0).forEach(release=>release());for(const command of commands.values())clearTimeout(command.timer);socket?.close();
-    if(browser && browser.exitCode===null){browser.kill('SIGTERM');await Promise.race([new Promise(done=>browser.once('exit',done)),delay(3000)]);if(browser.exitCode===null)browser.kill('SIGKILL');}
-    server.closeAllConnections();await new Promise(done=>server.close(done));await rm(directory,{recursive:true,force:true});
+    const cleanupErrors=[];let profileReleased=!browser?.pid;
+    const cleanup=async task=>{try{await task();}catch(error){cleanupErrors.push(String(error).slice(0,2048));}};
+    await cleanup(async()=>{held.splice(0).forEach(release=>release());for(const command of commands.values())clearTimeout(command.timer);socket?.close();});
+    await cleanup(async()=>{
+      if(!browser?.pid)return;
+      const alive=()=>{if(!grouped)return !browserClosed;try{process.kill(-browser.pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;throw error;}};
+      // The detached process group belongs only to this authored browser run.
+      // Stop launcher helpers too, then await close before removing their profile.
+      for(const signal of ['SIGTERM','SIGKILL']) {
+        if(!alive()&&browserClosed)break;
+        try{if(grouped)process.kill(-browser.pid,signal);else browser.kill(signal);}catch(error){if(error.code!=='ESRCH')throw error;}
+        const deadline=Date.now()+2000;
+        while((alive()||!browserClosed)&&Date.now()<deadline)await delay(25);
+      }
+      if(alive()||!browserClosed)throw new Error('Owned catalog browser did not close after bounded cleanup');
+      profileReleased=true;
+    });
+    await cleanup(async()=>{server.closeAllConnections();await new Promise(done=>server.close(done));});
+    if(profileReleased)await cleanup(()=>rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:100}));
+    else cleanupErrors.push(`Retained owned profile ${directory}: browser termination was not verified.`);
+    if(cleanupErrors.length) {
+      console.error('Catalog browser cleanup:',cleanupErrors.join('; '));
+      await cleanup(async()=>{let receipt={};try{receipt=JSON.parse(await readFile(join(output,'validation.json'),'utf8'));}catch{}
+        await writeFile(join(output,'validation.json'),JSON.stringify({...receipt,status:'failed',cleanup_errors:cleanupErrors},null,2)+'\n');});
+      // A cleanup failure must never hide the original assertion or timeout.
+      if(!firstFailure)throw new Error(`Catalog browser cleanup failed: ${cleanupErrors.join('; ')}`);
+    }
   }
 }
 

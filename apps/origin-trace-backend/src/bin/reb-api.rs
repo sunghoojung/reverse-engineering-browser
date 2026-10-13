@@ -698,7 +698,9 @@ mod tests {
     #[test]
     fn read_only_guard_and_json_discovery_are_opt_in() {
         assert!(matches!(
-            Options::try_parse_from(["reb-api", "list"]).unwrap().command,
+            Options::try_parse_from(["reb-api", "list"])
+                .unwrap()
+                .command,
             Action::List { json: false }
         ));
         assert!(matches!(
@@ -716,17 +718,21 @@ mod tests {
         ];
         assert!(matches!(
             Options::try_parse_from(args).unwrap().command,
-            Action::Call { read_only: false, .. }
+            Action::Call {
+                read_only: false,
+                ..
+            }
         ));
         assert!(matches!(
             Options::try_parse_from(args.into_iter().chain(["--read-only"]))
                 .unwrap()
                 .command,
-            Action::Call { read_only: true, .. }
+            Action::Call {
+                read_only: true,
+                ..
+            }
         ));
-        assert!(
-            Options::try_parse_from(["reb-api", "call", "get_health", "--read-only"]).is_err()
-        );
+        assert!(Options::try_parse_from(["reb-api", "call", "get_health", "--read-only"]).is_err());
     }
 
     fn assert_self_contained(detail: &Value) {

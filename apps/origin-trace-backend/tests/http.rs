@@ -6026,9 +6026,7 @@ fn cli_json_discovery_is_offline_and_preserves_legacy_list() {
         ("get_native_console", false),
     ] {
         assert_eq!(
-            rows.iter()
-                .find(|row| row["operation_id"] == id)
-                .unwrap()["read_only_eligible"],
+            rows.iter().find(|row| row["operation_id"] == id).unwrap()["read_only_eligible"],
             eligible
         );
     }
@@ -6145,7 +6143,11 @@ async fn cli_read_only_malformed_response_is_not_replayed_and_default_calls_stil
             let mut cli = Command::new(env!("CARGO_BIN_EXE_reb-api"));
             cli.args([
                 "call",
-                if guard { "get_health" } else { "capture_action" },
+                if guard {
+                    "get_health"
+                } else {
+                    "capture_action"
+                },
                 "--base-url",
                 &url,
                 "--timeout",

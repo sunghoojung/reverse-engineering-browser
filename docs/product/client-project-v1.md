@@ -1,7 +1,8 @@
 # Captured request client project v1
 
 This cold-path workflow joins one retained Traffic observation to a reviewed
-Repeater draft and an organized project with dependency-free Go and JavaScript clients. It does not
+Repeater draft and an organized project with dependency-free standard Go and JavaScript clients plus
+an explicitly enabled experimental Go profile adapter. It does not
 discover unused endpoints, infer service semantics, or generate a complete SDK.
 The [capture and authorization policy](../../SAFETY.md) still applies.
 
@@ -47,6 +48,7 @@ reb-client-project/
   provenance.json
   go/go.mod
   go/client/client.go
+  go/client/mimic.go           # optional build tag, excluded by default
   go/services/service001.go
   go/cmd/request-001/main.go
   src/client.mjs
@@ -77,6 +79,143 @@ complete reviewed `config.request`; evidence files remain unchanged. Changing
 the target requires an explicit matching origin configuration. Mutating methods
 can change server data. There are no automatic retries or redirect following.
 
+## Explicit configuration and response checks
+
+`config.example.json` now carries `configVersion: "reb-client-config-v1"`.
+Missing version remains compatible with older local configs; other supplied
+values and unknown keys fail. Configuration is edited in the exported folder;
+no new UI selector changes a capture or silently sends a request.
+
+- `transport`: `{ "mode": "standard", "browserProfile": null }` by default.
+- `timeoutMs`: null inherits request `timeout_ms`; 100–30,000 overrides the
+  entire send/read deadline. Request/config numeric tokens are safe integers,
+  without fraction/exponent coercion.
+- `redirectPolicy`: `manual` returns the first response; `error` reports any
+  3xx as `redirect_refused`. Neither follows a same-origin or cross-origin hop.
+- `cookiePolicy`: only `omit` is supported. No automatic cookie/session sharing.
+- `responseChecks`: `statuses` (up to 32 distinct HTTP statuses), `contentType`
+  (one lowercase media type without parameters), and `jsonFields` (up to 32
+  explicit RFC 6901 pointer/type/optional-equality checks).
+
+An authored stock-operation example is:
+
+```json
+{
+  "statuses": [200],
+  "contentType": "application/json",
+  "jsonFields": [
+    {"pointer":"/availability","type":"string","equals":"in_stock"},
+    {"pointer":"/quantity","type":"number","equals":4}
+  ]
+}
+```
+
+No fields are inferred from a single capture. Empty status/field arrays and null
+media type disable those checks. With none configured, the result reports
+`validation: {"configured":false,"passed":false}`; HTTP 200 alone is not a
+validated operation. A login page, unexpected status, missing quantity, null,
+wrong type and wrong value remain distinct outcomes.
+
+Pointers are at most 1,024 UTF-8 bytes and 32 segments; empty selects the root,
+`~1` encodes slash and `~0` tilde. Array indexes are canonical decimal integers.
+Types are null, boolean, number, string, array and object. Equality is limited
+to matching scalar types and safe integer numbers. A numeric response equality
+requires an exact integer token (no fractional/exponent notation), avoiding
+rounding/underflow matches. JSON checks reject duplicate keys, invalid UTF-8 or
+Unicode escapes, malformed/trailing input and nesting beyond 64. Content-Type
+parameters are ignored but repeated fields are rejected. Configured checks
+never validate a truncated response. This is bounded validation, not JSON Schema
+or an inferred business model.
+
+Library error codes distinguish `invalid_input`, `invalid_config`,
+`unsupported_transport`, `unsupported_profile`, `wrong_origin`, `network`,
+`timeout`, Go `canceled`, `response_read`, `redirect_refused`,
+`response_status`, `response_content_type`, `response_truncated`, `response_json`,
+`response_field_missing`, `response_field_type` and `response_field_value`.
+File parsing may fail earlier. Go returns a typed `*client.ClientError` plus
+Result; Node errors carry `code` and `result`. Neither error text nor automatic
+logs dump captured response bodies. A transport error is not proof the server
+did nothing; the CLI warns to check server state before another deliberate send.
+
+## Optional Go profile adapter
+
+`go/client/mimic.go` is excluded unless built with `-tags mimic`. It targets
+[the exact saucesteals/mimic v1.0.2 source](https://github.com/saucesteals/mimic/tree/946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e)
+(commit `946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e`, MIT). This API uses
+`mimic.NewTransport(mimic.TransportOptions{...})` and the fhttp client, not the
+incompatible current-main standard-net/http API.
+
+This is an experimental source-only adapter; standard Go and JavaScript clients
+remain available without the optional dependency. Before setup, resolve its
+applicable permissions and notice obligations: fhttp v1.0.1's license grant and
+notice chain remain unresolved. Its pinned repository has no
+LICENSE/COPYING/NOTICE file, and Go-derived headers do not establish permissions
+for all fork changes. See the [upstream license issue](https://github.com/useflyent/fhttp/issues/19).
+Resolve these requirements before enabling or distributing the optional
+dependency. The export contains no third-party source or binary.
+
+Go 1.24+ is required for the optional dependency. After those requirements are
+resolved, the generated README gives explicit pinned `go get`,
+build and run steps. Ordinary builds remain dependency-free and never download
+it. Review and retain resulting module/sum files before use.
+
+Only this coherent profile is accepted:
+
+```json
+{"mode":"browser-profile","browserProfile":{"browser":"chrome","version":"133.0.0.0","platform":"linux"}}
+```
+
+Mimic v1.0.2 maps all versions >=133 to uTLS `HelloChrome_133`; accepting newer
+version strings would overstate support. Other brands/platforms/versions fail
+before network. A standard build or Node client selecting the profile reports
+`unsupported_transport`, never a silent downgrade. This is a selected
+compatibility target, not evidence of the captured browser's exact build.
+The allowlisted profile supplies matching User-Agent and low-entropy Client
+Hints. It does not restore Accept-CH policy, browser state or credentials.
+
+The adapter passes its own direct fhttp transport, avoiding Mimic's ambient
+proxy default. Certificate verification remains enabled; jars, automatic
+decompression and redirect following remain disabled. It creates a fresh
+single-use connection transport and permits one transport dial invocation.
+fhttp's internal HTTP2 retries must not create a second request: the guard
+refuses another connection and the pinned single-use H2 pool refuses another
+stream. Treat this runtime boundary as unverified until the tagged fixture lane
+passes at the exact revision under review; source and test assertions alone are
+not a passing acceptance result.
+
+The explicit `node tools/check-captured-client-project.mjs --go --mimic` lane
+builds/tests/vets the tagged module separately from standard `--go`. Its authored
+fixtures assert HTTP header/profile coherence, dry-run/origin/redirect/cookie
+boundaries, and certificate rejection. Owned HTTPS fixtures additionally require
+successful ALPN HTTP/1.1 and HTTP/2 for GET, empty POST and text-body POST, with
+exactly one connection and request. An isolated test subprocess trusts only its
+ephemeral fixture CA through Go's certificate verifier; it never changes the OS
+trust store or disables verification. Wrong-hostname and unknown-issuer cases
+must still fail before an HTTP request reaches the server.
+
+The H2 fault fixtures inject REFUSED_STREAM or GOAWAY with last-stream ID zero
+only after receiving END_STREAM and the complete authored body. They count all
+accepted connections and decoded request streams, requiring one of each and an
+honest unknown-outcome error from the guarded client. Empty-POST negative controls
+remove the dial guard and must observe a second complete request before stopping,
+showing that the fixture reaches the underlying retry path. These cases do not
+cover every fault timing or GOAWAY variant.
+
+Only a successful exact-revision run establishes these bounded fixture results.
+The lane prints its verbose test output and writes `mimic-test.log` plus
+`mimic-validation.json` under `build/client-project-qa/`. Its offline module
+receipt enumerates tagged package/test dependencies, not the complete lazy module
+graph. ClientHello/HTTP2 equivalence against a pinned browser and complete
+transitive license notices remain separate unverified gates. The pinned fhttp
+v1.0.1 repository has no root LICENSE/COPYING/NOTICE file; resolve its notice chain
+before distributing dependency code or binaries. No third-party source or binary
+is bundled in the export.
+
+No perfect TLS/browser fingerprint is claimed; JA3 alone is insufficient.
+HTTP3/QUIC, browser execution fallback, automatic credential acquisition and
+arbitrary-target testing are unsupported. Raw local evidence and best-effort
+redacted exports retain their existing separate policy.
+
 ## Fidelity and unsupported cases
 
 The Repeater editor displays normalized newlines, but preserves imported CR/CRLF
@@ -96,11 +235,16 @@ ASCII URLs and header values; non-ASCII originals remain in the evidence and
 need deliberate reviewed reconstruction. Header casing/order, automatic
 User-Agent, Content-Length and Connection differ from captured wire traffic.
 TLS certificate verification remains enabled. There is no claim of browser
-TLS or HTTP/2 fingerprint parity and no Mimic dependency in this version.
-Go rejects duplicate JSON object keys, incorrectly cased request/config keys
-and null header values instead of allowing silent decoder coercion. Library
+TLS or HTTP/2 fingerprint parity in the default lane. The optional profile lane
+is a separately configured, source-pinned compatibility candidate described above.
+Both generated file loaders reject duplicate JSON object keys, unknown or
+incorrectly cased request/config keys, invalid Unicode and null header values instead of allowing silent decoder coercion. Library
 error results distinguish a network attempt from confirmed request counts: a
 transport error before any response reports an unknown (`null`) count, not zero.
+Partial response failures preserve observed status, URL, headers and bounded body.
+The Node client uses direct built-in HTTP(S), independent of ambient Fetch
+dispatchers and proxy variables, with explicit certificate verification and no
+automatic decompression.
 
 The initial runnable clients support one complete UTF-8 text request with a
 supported uppercase method, complete HTTP(S) URL, at most 64 header pairs and
@@ -142,7 +286,13 @@ provenance and local configuration, but it is not a security boundary.
   generated `go build`/`go test`/`go vet` and authored loopback transport tests,
   including cancellation accounting, strict JSON decoding and untrusted TLS
   certificate refusal. This is
-  required in Ubuntu CI. The test disables module/toolchain downloads.
+  required in Ubuntu CI. This standard lane disables module/toolchain downloads.
+- Add `--mimic` only for the explicit optional lane. With an installed Go 1.24+
+  compiler it fetches the exact upstream source pin through the Go proxy/sum
+  database into a temporary project, then runs `go build/test/vet -tags mimic`
+  offline. CI requests both lanes. No toolchain is installed automatically.
+  Tagged compile/runtime evidence must be reported separately; standard Go
+  success is not profile-provider coverage.
 - `node tools/check-api-observation-catalog-ui.mjs --browser`: real UI catalog
   handoff, unsupported review, dirty draft confirmation, narrow desktop window
   geometry, exact draft values and explicit ZIP download. Uses authored data.

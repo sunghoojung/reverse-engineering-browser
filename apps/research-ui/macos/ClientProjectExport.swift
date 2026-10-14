@@ -30,7 +30,7 @@ struct ClientProjectArchive {
     "provenance.json", "requests/request-001.json", "config.example.json",
     ".gitignore", "package.json", "src/client.mjs", "src/services/service-001.mjs",
     "examples/request-001.mjs", "README.md", "go/go.mod", "go/client/client.go",
-    "go/services/service001.go", "go/cmd/request-001/main.go"
+    "go/services/service001.go", "go/cmd/request-001/main.go", "go/client/mimic.go"
   ].map { "reb-client-project/" + $0 })
   static let evidencePaths: Set<String> = [
     "reb-client-project/evidence/capture.json", "reb-client-project/evidence/repeater-run.json"

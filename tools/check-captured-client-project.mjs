@@ -37,7 +37,7 @@ assert(!file(redacted,'requests/request-001.json').includes('exact-value'));
 assert(!file(redacted,'requests/request-001.json').includes('duplicate'));
 assert.equal(JSON.parse(file(redacted,'requests/request-001.json')).url,'https://example.test/a%2Fb');
 assert(!file(redacted,'evidence/capture.json').includes('response-secret'));
-assert.equal(raw.files.length,14);assert(raw.files.some(item=>item.path==='reb-client-project/go/services/service001.go'));
+assert.equal(raw.files.length,15);assert(raw.files.some(item=>item.path==='reb-client-project/go/services/service001.go'));
 assert(raw.files.every(item=>!item.path.includes('example.test')&&!item.path.includes('a%2F')));
 
 const problems = [
@@ -104,7 +104,9 @@ assert.equal(api.capturedClientProject(api.capturedClientRun(run,'ctx'),'raw').p
 console.log('PASS exact capture/run evidence, structured project layout, redacted-copy immutability, unsupported input matrix and deterministic safe bounded ZIP');
 
 await checkGeneratedProject();
+await checkConfiguredProject();
 if(process.argv.includes('--go')) await checkGeneratedGoProject();
+if(process.argv.includes('--mimic')) await checkGeneratedMimicProject();
 await checkController();
 await checkRepeaterIntegration();
 
@@ -348,4 +350,125 @@ async function checkController() {
   for(const mode of ['saved','canceled','failed']) {bridgeMode=mode;await exports[0].click();assert.match(notice,mode==='saved'?/saved locally/:mode==='canceled'?/canceled.*No archive/:/failed.*authored save denial/);}
   assert.equal(bridgeCalls,3);assert.equal(downloads,2,'Native export never falls through to unsupported blob download');
   console.log('PASS capture review controller: explicit-only creation/export, dirty guard, changed/expired/ambiguous sources, canceled or edited late creation, context ownership and modal shortcut isolation');
+}
+
+async function checkConfiguredProject() {
+  const seen=[];
+  const responses={
+    '/stock':[200,'application/json; charset=utf-8','{"sku":"fixture-001","availability":"in_stock","quantity":4,"store":{"a/b":{"~key":true}},"variants":[null]}'],
+    '/login':[200,'text/html','<form>Authored login</form>'],
+    '/unauthorized':[401,'application/json','{"error":"authored"}'],
+    '/malformed':[200,'application/json','{"quantity":'],
+    '/duplicate':[200,'application/json','{"quantity":4,"quantity":0}'],
+    '/rounding':[200,'application/json','{"quantity":9007199254740991.4}'],
+    '/underflow':[200,'application/json','{"quantity":1e-400}'],
+    '/exponent':[200,'application/json','{"quantity":4e0}'],
+    '/null':[200,'application/json','{"quantity":null}'],
+    '/large':[200,'application/json',JSON.stringify({padding:'x'.repeat(65536)})],
+    '/surrogate':[200,'application/json','{"quantity":"\\ud800"}'],
+    '/redirect':[302,'text/plain',''],
+  };
+  const server=createServer(async(request,response)=>{
+    for await(const chunk of request) { void chunk; }
+    seen.push({url:request.url,headers:request.headers});
+    if(request.url==='/slow'){setTimeout(()=>response.end('late'),250);return;}
+    if(request.url==='/short'){response.writeHead(200,{'Content-Type':'application/json','Content-Length':'100'});response.end('{"part":');return;}
+    if(request.url==='/partial-timeout'){response.writeHead(200,{'Content-Type':'application/json'});response.write('{"part":');setTimeout(()=>response.end('1}'),250);return;}
+    if(request.url==='/invalid-utf8'){response.writeHead(200,{'Content-Type':'application/json'});response.end(Buffer.from([123,34,120,34,58,34,255,34,125]));return;}
+    const [status,type,body]=responses[request.url]??responses['/stock'];
+    response.writeHead(status,{'Content-Type':type,...(status===302?{Location:'/unexpected','Set-Cookie':'authored=1'}:{})});response.end(body);
+  });
+  await new Promise(done=>server.listen(0,'127.0.0.1',done));
+  const origin='http://127.0.0.1:'+server.address().port,directory=await mkdtemp(join(tmpdir(),'reb-client-policy-'));
+  try {
+    const project=api.capturedClientProject(capture(fixture(origin+'/stock')),'raw');
+    for(const item of project.files){const path=join(directory,item.path);await mkdir(dirname(path),{recursive:true});await writeFile(path,item.text);}
+    const folder=join(directory,'reb-client-project');
+    const {sendRequest,parseClientJSON,parseInputJSON}=await import(join(folder,'src/client.mjs'));
+    const input={method:'GET',url:origin+'/stock',headers:[],body:'',timeout_ms:15000};
+    const provenance={format:'reb-client-project-v1',mode:'raw',problems:[]};
+    const valid={configVersion:'reb-client-config-v1',allowedOrigin:origin,transport:{mode:'standard',browserProfile:null},timeoutMs:500,redirectPolicy:'manual',cookiePolicy:'omit',responseChecks:{statuses:[200],contentType:'application/json',jsonFields:[
+      {pointer:'/availability',type:'string',equals:'in_stock'},
+      {pointer:'/quantity',type:'number',equals:4},
+      {pointer:'/store/a~1b/~0key',type:'boolean',equals:true},
+      {pointer:'/variants/0',type:'null',equals:null},
+    ]}};
+    const send=(config=valid,path='/stock',enabled=true)=>sendRequest({...input,url:origin+path},{config,provenance,send:enabled});
+    const refuses=async(config,path,code)=>assert.rejects(()=>send(config,path),error=>error.code===code,code+' '+path);
+    let result=await send(valid,'/stock',false);assert.equal(result.ready,true);assert.equal(seen.length,0);
+    result=await send();assert.equal(result.validation.passed,true);assert.equal(result.network_requests,1);
+    for(const [path,code] of [['/login','response_content_type'],['/unauthorized','response_status'],['/malformed','response_json'],['/duplicate','response_json'],['/invalid-utf8','response_json'],['/surrogate','response_json'],['/large','response_truncated']])await refuses(valid,path,code);
+    const field=(pointer,type,equals)=>({...valid,responseChecks:{jsonFields:[{pointer,type,...(equals===undefined?{}:{equals})}]}});
+    for(const [config,path,code] of [
+      [field('/missing','number'),'/stock','response_field_missing'],[field('/quantity','string'),'/stock','response_field_type'],
+      [field('/availability','string','out_of_stock'),'/stock','response_field_value'],[field('/quantity','number'),'/null','response_field_type'],
+      [field('/quantity','number',9007199254740991),'/rounding','response_field_value'],[field('/quantity','number',0),'/underflow','response_field_value'],
+      [field('/quantity','number',4),'/exponent','response_field_value'],[field('/variants/length','number'),'/stock','response_field_missing'],
+      [field('/__proto__','object'),'/stock','response_field_missing'],[{...valid,timeoutMs:100},'/slow','timeout'],
+    ])await refuses(config,path,code);
+    for(const path of ['/short','/partial-timeout']){
+      await assert.rejects(()=>send({...valid,timeoutMs:100},path),error=>{
+        assert.equal(error.code,path==='/short'?'response_read':'timeout');assert.equal(error.result.network_requests,1);
+        assert.equal(error.result.url,origin+path);assert.equal(error.result.status,200);assert.equal(error.result.body,'{"part":');assert.equal(error.result.body_truncated,true);return true;
+      });
+    }
+    const manual={...valid,responseChecks:{}};
+    result=await send(manual,'/redirect');assert.equal(result.status,302);assert.equal(result.validation.configured,false);assert.equal(result.validation.passed,false);
+    await refuses({...manual,redirectPolicy:'error'},'/redirect','redirect_refused');
+    assert(!seen.some(request=>request.url==='/unexpected'));
+    await send();assert(seen.every(request=>!request.headers.cookie&&!request.headers.authorization));
+    const count=seen.length;
+    for(const config of [null,[],{...valid,unknown:true},{...valid,configVersion:'future'},{...valid,timeoutMs:99},{...valid,timeoutMs:30001},
+      {...valid,cookiePolicy:'browser'},{...valid,redirectPolicy:'follow'}, {...valid,responseChecks:{statuses:[200,200]}},
+      {...valid,responseChecks:{contentType:'application/json; charset=utf-8'}}, {...valid,responseChecks:{jsonFields:[{pointer:'/x~2',type:'string'}]}},
+      {...valid,responseChecks:{jsonFields:[{pointer:'/x',type:'number',equals:1.5}]}}, {...valid,responseChecks:{jsonFields:[{pointer:'/x',type:'object',equals:{}}]}},
+    ])await refuses(config,'/stock','invalid_config');
+    await refuses({...valid,transport:{mode:'browser-profile',browserProfile:{browser:'chrome',version:'133.0.0.0',platform:'linux'}}},'/stock','unsupported_transport');
+    await refuses({...valid,transport:{mode:'browser'}},'/stock','unsupported_transport');
+    await refuses({...valid,transport:{mode:'standard',browserProfile:{browser:'chrome'}}},'/stock','unsupported_profile');
+    await refuses({...valid,allowedOrigin:'https://wrong.test'},'/stock','wrong_origin');assert.equal(seen.length,count);
+    for(const text of ['{"x":1,"x":2}','{"x":"\\ud800"}', '1 trailing','{"nested":{"x":1,"\\u0078":2}}'])assert.throws(()=>parseClientJSON(text));
+    assert.equal(parseClientJSON('{"__proto__":{"inert":true}}').__proto__.inert,true);
+    for(const text of ['{"timeoutMs":100.00000000000000001}','{"equals":9007199254740991.4}','{"equals":1e-400}'])assert.throws(()=>parseInputJSON(text));
+    await writeFile(join(folder,'config.json'),JSON.stringify(valid));
+    const ambient=await command(process.execPath,['examples/request-001.mjs','--send'],folder,{env:{...process.env,HTTP_PROXY:'http://127.0.0.1:1',HTTPS_PROXY:'http://127.0.0.1:1',ALL_PROXY:'http://127.0.0.1:1',NO_PROXY:'',no_proxy:'',NODE_USE_ENV_PROXY:'1'}});
+    assert.equal(ambient.code,0,ambient.stderr);assert.equal(seen.length,count+1,'Explicit direct transport ignores ambient proxy routing');
+    await writeFile(join(folder,'config.json'),'{"allowedOrigin":"'+origin+'","allowedOrigin":"'+origin+'"}');
+    const duplicate=await command(process.execPath,['examples/request-001.mjs','--send'],folder);assert.notEqual(duplicate.code,0);assert.equal(seen.length,count+1);
+    console.log('PASS configurable generated Node client: exact policy gates, authored stock result, status/media/JSON field errors, numeric precision, partial-response accounting, strict JSON, timeout, no redirects/cookies/proxy or implicit profile fallback');
+  } finally {server.closeAllConnections();await new Promise(done=>server.close(done));await rm(directory,{recursive:true,force:true});}
+}
+
+async function checkGeneratedMimicProject() {
+  // Explicit opt-in only: downloads the exact source pin into a temporary module.
+  // Default --go remains dependency-free with downloads disabled.
+  const directory=await mkdtemp(join(tmpdir(),'reb-mimic-project-'));
+  const cwd=join(directory,'reb-client-project/go');
+  const offline={...process.env,GOTOOLCHAIN:'local',GOPROXY:'off',GOSUMDB:'off'};
+  try {
+    const project=api.capturedClientProject(source,'raw');
+    for(const item of project.files){const path=join(directory,item.path);await mkdir(dirname(path),{recursive:true});await writeFile(path,item.text);}
+    const compiler=await command('go',['version'],cwd,{env:offline});assert.equal(compiler.code,0,compiler.stderr);assert.match(compiler.stdout,/go version go1\./);
+    const pin='github.com/saucesteals/mimic@946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e';
+    const install=await command('go',['get',pin],cwd,{env:{...offline,GOPROXY:'https://proxy.golang.org',GOSUMDB:'sum.golang.org'},timeout:120000});assert.equal(install.code,0,install.stdout+install.stderr);
+    await writeFile(join(cwd,'client/client_test.go'),await readFile(join(root,'tools/client-project-go_test.txt'),'utf8'));
+    await writeFile(join(cwd,'client/mimic_test.go'),await readFile(join(root,'tools/client-project-mimic_test.txt'),'utf8'));
+    await writeFile(join(cwd,'client/mimic_tls_test.go'),await readFile(join(root,'tools/client-project-mimic-tls_test.txt'),'utf8'));
+    let testEvidence='';
+    for(const stage of ['build','test','vet']){
+      const result=await command('go',[stage,...(stage==='test'?['-v']:[]),'-tags','mimic','./...'],cwd,{env:offline,timeout:90000});assert.equal(result.code,0,result.stdout+result.stderr);
+      if(stage==='test'){testEvidence=result.stdout+result.stderr;process.stdout.write(testEvidence);}
+    }
+    // Enumerate the packages already built/tested, not the full lazy module
+    // graph: `go list -m all` can request unrelated metadata with GOPROXY=off.
+    const modules=await command('go',['list','-deps','-test','-tags','mimic','-f','{{with .Module}}{{.Path}} {{.Version}}{{end}}','./...'],cwd,{env:offline});assert.equal(modules.code,0,modules.stderr);
+    const moduleVersions=[...new Set(modules.stdout.split('\n').map(line=>line.trim()).filter(Boolean))].sort();
+    assert(moduleVersions.includes('github.com/saucesteals/mimic v1.0.2'));
+    const output=join(root,'build/client-project-qa');await mkdir(output,{recursive:true});
+    await writeFile(join(output,'mimic-test.log'),testEvidence);
+    await writeFile(join(output,'mimic-validation.json'),JSON.stringify({status:'passed',compiler:compiler.stdout.trim(),pin,modules:moduleVersions,moduleScope:'tagged package and test dependencies',
+      checks:['tagged Go build/test/vet','owned HTTP loopback profile header coherence','dry-run/origin/profile gates','redirect/cookie boundaries','untrusted TLS rejection','owned trusted HTTPS H1/H2 with isolated explicit CA','hostname/issuer verification','REFUSED_STREAM/GOAWAY connection and request-stream counts including empty POST','unguarded negative controls demonstrate retransmission'],
+      unverified:['browser-reference TLS/HTTP2 equivalence','HTTP3 unsupported','transitive license completeness']},null,2)+'\n');
+    console.log('PASS optional pinned Mimic tagged build/test/vet, owned HTTPS H1/H2 and bounded H2 retry-fault fixtures; browser fingerprint equivalence remains unverified');
+  } finally {await rm(directory,{recursive:true,force:true});}
 }

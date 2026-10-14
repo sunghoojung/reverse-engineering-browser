@@ -6240,7 +6240,10 @@
                   "deflate-compress",
                   "deflate-decompress",
                   "json-pretty",
-                  "json-minify"
+                  "json-minify",
+                  "protobuf-inspect",
+                  "grpc-web-inspect",
+                  "grpc-web-text-inspect"
                 ]
               },
               "input_base64": {

@@ -19,6 +19,9 @@ final class NativeDecoderService {
     "base36-decode", "gzip-compress", "gzip-decompress", "zlib-compress",
     "zlib-decompress", "deflate-compress", "deflate-decompress", "json-pretty",
     "json-minify",
+    "protobuf-inspect",
+    "grpc-web-inspect",
+    "grpc-web-text-inspect",
   ]
   private static let algorithms = ["HS256", "HS384", "HS512", "none"]
 

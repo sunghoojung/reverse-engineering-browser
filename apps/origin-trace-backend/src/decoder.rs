@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
 use tokio::{process::Command, sync::Mutex};
 
-const OPERATIONS: [&str; 18] = [
+const OPERATIONS: [&str; 21] = [
     "base64-encode",
     "base64-decode",
     "base64url-encode",
@@ -26,6 +26,9 @@ const OPERATIONS: [&str; 18] = [
     "deflate-decompress",
     "json-pretty",
     "json-minify",
+    "protobuf-inspect",
+    "grpc-web-inspect",
+    "grpc-web-text-inspect",
 ];
 pub struct Decoder {
     path: PathBuf,

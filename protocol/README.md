@@ -224,3 +224,5 @@ cross-session ambiguities, unknown observer comparability, deterministic bounded
 pages and the local HTTP/CLI contract.
 
 - [Investigation notebook v1](investigation-notebook-v1.md): bounded local research notes and exact retained evidence pins in the existing Analyst library.
+
+[WebSocket capture v1](websocket-capture-v1.md) specifies bounded CDP message identities, raw payload encoding, loss counters and Traffic inspection.

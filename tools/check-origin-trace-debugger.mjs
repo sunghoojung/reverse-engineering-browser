@@ -1,3 +1,4 @@
+import {checkWebSocketInteractions} from './check-websocket-ui.mjs';
 import {platformEditEvent, selectRenderedOption} from './rendered-keyboard.mjs';
 import {checkCandidateExperimentController} from './check-candidate-experiment-controller.mjs';
 import {candidateFixtureRoute, checkCandidateFixture, checkCandidateExperimentJourney} from './check-candidate-experiment-journey.mjs';
@@ -6182,7 +6183,8 @@ async function checkTrafficBrowser() {
     await evaluate("(async()=>{const started=performance.now();while(state.refreshing||state.debuggerRefreshing){if(performance.now()-started>5000)throw Error('Prior Traffic refresh did not settle');await new Promise(resolve=>setTimeout(resolve,20));}})()");
     const capturedComparison = await checkCapturedComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,emptyDebugger:JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'))});
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
-    validation = {capturedComparison,status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
+    const websocketInspection=await checkWebSocketInteractions({evaluate,viewport,click,key,screenshot});
+    validation = {websocketInspection,capturedComparison,status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
     }
     diagnostics.phase = "validated";
     }

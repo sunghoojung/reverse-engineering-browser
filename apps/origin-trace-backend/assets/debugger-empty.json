@@ -21,6 +21,22 @@
       "body_bytes": 131072,
       "headers": 128,
       "header_bytes": 65536
+    },
+    "websockets": {
+      "format": "reb-websocket-capture-v1",
+      "connections": [],
+      "frames": [],
+      "next_connection": 0,
+      "next_frame": 0,
+      "dropped_connections": 0,
+      "dropped_frames": 0,
+      "orphan_events": 0,
+      "malformed_events": 0,
+      "limits": {
+        "connections": 64,
+        "frames": 512,
+        "payload_bytes": 4096
+      }
     }
   },
   "settings": {

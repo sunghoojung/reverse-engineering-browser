@@ -3753,3 +3753,19 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .api-catalog-comparison { padding: 8px; }
   .api-catalog-differences li { grid-template-columns: 1fr; }
 }
+
+/* Bounded inert WebSocket message inspection; no content-derived layout. */
+.websocket-inspector { margin: 8px 12px; padding: 10px; border: 1px solid var(--border, #444); border-radius: 8px; min-width: 0; }
+.websocket-inspector > summary { cursor: pointer; }
+.websocket-inspector p { overflow-wrap: anywhere; }
+.websocket-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.websocket-controls select { max-width: 100%; min-width: 0; }
+.websocket-controls select:first-child { flex: 1 1 220px; }
+.websocket-frames { max-height: 320px; overflow: auto; }
+.websocket-frames details { margin: 8px 0; }
+.websocket-frames pre { max-height: 180px; max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.websocket-inspector :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+#screen-traffic:not([hidden]):not([data-console-traffic="true"]):has(> .websocket-inspector:not([hidden])) { grid-template-rows: auto auto minmax(0, 1fr); }
+#screen-traffic > .websocket-inspector { grid-row: 2; max-height: min(320px, 45vh); overflow: auto; }
+#screen-traffic:has(> .websocket-inspector:not([hidden])) > .traffic-grid { grid-row: 3; }
+.websocket-inspector[hidden] { display: none; }

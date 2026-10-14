@@ -69,3 +69,5 @@ source discovery before explicit capture/arming and the genuine Page baseline.
 Target-relevant stale-source refusal remains a separate boundary.
 
 Use `node tools/export-captured-har.mjs --input request.json --output request.har` for bounded offline [HAR 1.2 export](../docs/product/har-export-v1.md). New source timing is required; unknown required phases are refused, never filled with zeros.
+
+Use `node tools/vm-semantics.mjs --help` for offline VM trace inspection, exact-step retrieval and declarative opcode hypothesis validation. The [v1 contract](../protocol/vm-semantics-v1.md) distinguishes supplied state observations, inferred candidates and unknown semantics. The same workflow is in the existing VM findings view.

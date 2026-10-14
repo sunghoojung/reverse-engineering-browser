@@ -1590,3 +1590,5 @@ Binding requires a unique complete UTF-8 digest match and strict synchronous-bod
 worker admission, never a copied script ID or URL match. Original evidence remains
 separate and returnable; no field values are saved to the notebook. See the
 [identity, consent, bounds and research contract](../../docs/product/candidate-experiment-v1.md).
+
+The existing VM findings view now includes an explicit local [execution semantics workflow](../../protocol/vm-semantics-v1.md): bounded trace import, state changes, opcode candidates and hypothesis counterexamples. It preserves existing detection findings and does not claim native guest-opcode capture.

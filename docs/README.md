@@ -29,6 +29,9 @@ skills under `.agents/skills/`.
 - [Local Codex and Claude Code workflows](development/local-coding-agents.md):
   explicit session selection, guarded CLI inspection, exact evidence correlation,
   and offline client authoring with synthetic tests
+- [Website action to verified narrow client](development/website-replication-workflow.md):
+  existing-tool investigation loop, exact evidence, controlled hypotheses and an
+  owned stock-check example with explicit unrun integration stages
 - [Fast local Brave builds](development/fast-browser-builds.md)
 
 ## Architecture and contracts

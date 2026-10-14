@@ -79,6 +79,7 @@ javascript-check:
 	node tools/check-traffic-capture.mjs
 	node tools/check-traffic-capture-qa.mjs
 	node tools/check-captured-client-project.mjs
+	node tools/check-stockcheck-investigation.mjs
 	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-package.mjs --contract-only

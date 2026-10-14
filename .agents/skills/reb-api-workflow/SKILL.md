@@ -88,3 +88,15 @@ Return the exact evidence references, bounded findings, offline code/test
 results, unknowns and any next approval needed. For repository edits, apply
 [reb-validation](../reb-validation/SKILL.md); report native macOS checks as
 unavailable on Linux rather than implying the packaged app was tested.
+
+## Investigate a behavior end to end
+
+When the task is to replicate a website behavior, follow
+[the existing-tool investigation loop](../../../docs/development/website-replication-workflow.md).
+Start with one action and an independent semantic oracle; connect exact request
+and source evidence, record competing hypotheses, and use approved disposable
+hooks or one-variable experiments only when needed. Keep each claim observed,
+hypothesized, tested, or unknown. Existing UI handoffs fill the current exact-read
+and export CLI gaps; do not invent operations or silently execute captured code.
+The owned stock-check check is component integration, not proof of a live REB
+agent journey. Report those verification layers separately.

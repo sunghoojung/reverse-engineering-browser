@@ -56,3 +56,12 @@ binds the Page candidate, then uses the owned Worker button to create a new
 separate target. It verifies the Page binding survives that unrelated target's
 source discovery before explicit capture/arming and the genuine Page baseline.
 Target-relevant stale-source refusal remains a separate boundary.
+
+## Owned stock-check investigation
+
+`node tools/check-stockcheck-investigation.mjs` combines the reviewed authored
+fixture action, owned loopback HTTP, existing project exporter, generated Node
+transport and semantic domain adapter. It records hypothesis tests and meaningful
+failures without claiming live capture or hooks. See
+[the fixture guide](fixtures/stockcheck/README.md) for retained output and the
+separate real-REB journey. This adds no production instrumentation path.

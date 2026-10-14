@@ -236,3 +236,11 @@ and the full gate in [AGENTS.md](../../AGENTS.md). Report exact selected evidenc
 references, useful findings, code and synthetic-test results, unsupported cases,
 and any action awaiting approval. Exclude raw captures and unrelated settings
 from shared deliverables.
+
+## Combine the existing investigation tools
+
+For a complete action → request → source → hypothesis → experiment → client
+workflow, use [Website replication workflow](website-replication-workflow.md).
+It maps every stage to the current CLI or explicit UI handoff and provides an
+owned stock-check example. The Node lane exercises authored action/HTTP/export
+components; it does not claim live REB capture, hooks or a native export run.

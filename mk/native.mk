@@ -9,6 +9,7 @@ ARTIFACT_RECEIVER_BINARY := $(BUILD_DIR)/reb-artifact-receiver
 HEAP_SNAPSHOT_BINARY := $(BUILD_DIR)/reb-heap-snapshot
 DECODER_BINARY := $(BUILD_DIR)/reb-decoder
 DEBUGGER_TRANSPORT_BINARY := $(BUILD_DIR)/reb-debugger-transport
+NATIVE_VM_FIXTURE_BINARY := $(BUILD_DIR)/reb-native-vm-fixture
 NATIVE_CONSOLE_BINARY := $(BUILD_DIR)/reb-console
 NATIVE_CONSOLE_MESSAGES_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_console_messages.o
 NATIVE_CONSOLE_IO_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_console_io.o
@@ -24,6 +25,7 @@ ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-back
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
 APP_BINARIES := \
+	$(NATIVE_VM_FIXTURE_BINARY) \
 	$(DEMO_BINARY) \
 	$(PRODUCER_BINARY) \
 	$(BROKER_BINARY) \
@@ -33,6 +35,8 @@ APP_BINARIES := \
 	$(DECODER_BINARY) \
 	$(DEBUGGER_TRANSPORT_BINARY) \
 	$(NATIVE_CONSOLE_BINARY)
+$(NATIVE_VM_FIXTURE_BINARY): $(BUILD_DIR)/apps/reb-native-vm-fixture/main.o $(BUILD_DIR)/src/analysis/native_vm_recorder.o
+
 $(DEMO_BINARY): $(BUILD_DIR)/apps/reb-event-demo/main.o \
 	$(BUILD_DIR)/src/capture/event.o $(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT)
 $(BUILD_DIR)/apps/reb-event-demo/main.o: CPPFLAGS += -Ibrowser/integration/brave/overlay

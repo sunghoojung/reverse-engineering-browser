@@ -24,6 +24,10 @@ contract.
 preparation-only native policy and group ownership contract. Browser routing
 and UI activation remain unavailable pending the documented browser gates.
 
+[Owned native VM fixture v1](native-vm-fixture-v1.md) defines the cooperative
+local recorder and deterministic fixture export. Browser capture and VM-view
+ingestion are not implemented by that contract.
+
 ## Two representations
 
 1. Native hot paths use the fixed 320-byte C++ `EventRecord` in

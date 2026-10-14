@@ -11,4 +11,7 @@ include mk/quality.mk
 .PHONY: native-console native-console-build native-console-check
 .PHONY: native-proxy-policy-check brave-foundation-check
 
-all: demo producer broker artifact-producer artifact-receiver heap-snapshot decoder debugger-transport native-console-build
+all: native-vm-fixture demo producer broker artifact-producer artifact-receiver heap-snapshot decoder debugger-transport native-console-build
+
+.PHONY: native-vm-fixture native-vm-recorder-check
+native-vm-fixture: $(NATIVE_VM_FIXTURE_BINARY)

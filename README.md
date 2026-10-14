@@ -130,9 +130,9 @@ boundaries and the [capture policy](SAFETY.md) before starting a session.
   stack frames, and VM-related findings.
 - **Research workflows:** save requests to collections, replay isolated
   requests, run controlled experiments, and keep local analyst notes.
-- **Local and bounded capture:** evidence remains on the machine. Sensitive
-  request headers are redacted, bodies are capped at 128 KiB in CDP capture,
-  and native queues and artifact transfers have explicit limits.
+- **Local and bounded capture:** evidence remains on the machine. Enabled CDP
+  content capture retains raw URLs and headers, including credentials. Bodies
+  are capped at 128 KiB; native queues and artifact transfers have explicit limits.
 - **Native quiet mode:** run native evidence capture without attaching DevTools
   when request and response content is not required.
 
@@ -160,7 +160,8 @@ Apple-notarized.
 Opening Origin Trace automatically starts an isolated one-hour research session
 with the implemented capture categories, bounded request/response content and
 Canvas artifacts enabled. Use it only for authorized targets. **New Live
-Session…** offers metadata-only controls; credential headers remain redacted.
+Session…** offers metadata-only controls. Enabled content capture can retain
+credentials without automatic masking; review captures before sharing.
 
 **Validation history:** the v0.3.0 tagged app build and packaging checks passed,
 but a separate [main CI run](https://github.com/sunghoojung/reverse-engineering-browser/actions/runs/37878440864)
@@ -195,9 +196,12 @@ Origin Trace and the custom Brave browser open together. Browse in that Brave
 window and select requests in the **Traffic** tab. Close Brave to end the
 session. Captured evidence is stored under `build/sessions/live/`.
 
-CDP content capture is explicit because it can retain page content. It redacts
-authorization, cookie, proxy-authorization, and set-cookie headers. Streaming,
-cached, internal, or already-evicted response bodies may be unavailable.
+CDP content capture is explicit because it can retain raw page content, URLs,
+and headers, including authorization and cookies, without automatic masking.
+An explicitly selected best-effort redacted copy does not modify the raw capture
+and is not a guarantee that the copy contains no secrets; see the
+[Traffic copy contract](protocol/traffic-capture-copy-v1.md). Streaming, cached,
+internal, or already-evicted response bodies may be unavailable.
 
 Fingerprint operation names are captured by default. To also retain the exact
 image returned by `HTMLCanvasElement.toDataURL()` for this one session, add

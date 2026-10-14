@@ -7,6 +7,8 @@ mod fields;
 mod heap;
 mod hooks;
 mod network;
+mod network_request;
+pub(crate) use network_request::NetworkRequestSelection;
 mod objects;
 mod parse;
 mod repeater;

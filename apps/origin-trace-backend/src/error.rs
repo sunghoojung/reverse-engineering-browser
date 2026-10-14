@@ -39,11 +39,20 @@ pub enum Cause {
     TransportFailure,
     InvalidReply,
 }
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionReason {
+    StaleCapture,
+    RequestNotRetained,
+    AmbiguousRequest,
+}
 // No arbitrary strings, identifiers, JSON, or diagnostics can enter details.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Details {
     #[serde(skip_serializing_if = "Option::is_none")]
     phase: Option<Phase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection_reason: Option<SelectionReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cause: Option<Cause>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +70,15 @@ impl Reason {
         Self {
             code,
             details: Details::default(),
+        }
+    }
+    pub fn selection(code: Code, selection_reason: SelectionReason) -> Self {
+        Self {
+            code,
+            details: Details {
+                selection_reason: Some(selection_reason),
+                ..Details::default()
+            },
         }
     }
     pub fn at(code: Code, phase: Phase) -> Self {

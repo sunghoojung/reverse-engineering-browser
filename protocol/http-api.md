@@ -222,6 +222,53 @@ Sources are inert metadata; this endpoint does not fetch URLs, read evidence, ru
 source, or write the VM cache. The [analysis catalog guide](../docs/product/analysis-catalog-v1.md)
 explains evidence levels and compatibility.
 
+## Exact retained Traffic request
+
+`GET /api/network/request` (`get_network_request`) returns one unchanged retained
+CDP Traffic record. Supply all five original identity fields:
+
+- `instance_id`: nonempty, at most 128 UTF-8 bytes
+- `capture_epoch`: canonical unsigned decimal, at most 9007199254740991
+- `request_id`: the public Traffic ID, nonempty, at most 8192 UTF-8 bytes
+- `target_id`: nonempty, at most 4096 UTF-8 bytes
+- `started_monotonic_ms`: the original finite, nonnegative binary64 value as a
+  JSON number spelling, at most 64 bytes, without whitespace or rounding
+
+The encoded query is capped at 40960 bytes. Unknown, duplicate, missing and
+empty fields, malformed percent escapes, invalid UTF-8, and invalid numbers
+return 400 `invalid_request`. Form query decoding applies: encode a literal `+`
+as `%2B`; the CLI encodes `--param` values for you. Exponent notation is allowed
+for the timestamp. It is not a canonical uint64 or a rounded display time.
+
+The owner instance and epoch are checked first. A mismatch returns 409
+`state_conflict` with `details.selection_reason=stale_capture`. Otherwise, two
+or more retained rows with the same public request ID return 409
+`state_conflict` with `selection_reason=ambiguous_request`, even when only one
+matches target and start. An absent exact ID/target/start match returns 404
+`target_unavailable` with `selection_reason=request_not_retained`. These fixed
+errors contain no alternative IDs, selected content or unrelated diagnostics.
+Never substitute a URL, protocol request ID, nearby time, target or session.
+
+The closed success envelope is `format: reb-network-request-v1`, `source`
+(the five identity fields), `debugger_generation`, and `request` (the complete
+raw retained row). The nested row remains source-owned and partially modeled in
+OpenAPI so its existing fields are preserved. The adapter takes one state lock,
+checks ownership and uniqueness across the retained window, measures JSON
+escaping, and copies only the selected row. The complete serialized envelope is
+capped at 8 MiB. Oversized results fail wholly with 413 `resource_limit`; no
+truncated replacement or partial response is returned.
+
+This is an inert read eligible for `--read-only`. It does not obtain a full
+debugger snapshot, fetch a body or source, reconnect, enable capture, launch a
+helper, replay, or write state. Capture-off or disconnected sessions can still
+return an exact retained record. An empty/evicted window stays unavailable.
+Concurrent later capture can change the row after this coherent snapshot.
+Original raw URLs, headers, text/base64 bodies, truncation flags and missing,
+loading or error states are retained. The result may contain credentials or
+personal data; get specific sharing authorization before putting it in agent
+context, and never upload raw captures automatically. No native stored-evidence
+`reb://` handler is added. See the [local agent workflow](../docs/development/local-coding-agents.md#2-correlate-without-substituting-identities).
+
 ## Authentication and locality
 
 There is **no bearer token, API key, login, or OAuth scheme** on this HTTP API.
@@ -308,7 +355,7 @@ retry mutations after a timeout or dropped connection.
 
 ## Execution metadata
 
-All 28 operations and all 75 top-level request action variants, including the 60
+All HTTP operations and all 75 top-level request action variants, including the 60
 debugger actions, carry version 1 `x-reb-execution` metadata. It is a source-owned,
 static advisory catalog. It does not grant permission, verify target ownership,
 report current availability, replace server validation, or prove that an action

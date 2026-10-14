@@ -592,7 +592,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 29, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 30, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -774,7 +774,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 29);
+    assert_eq!(operation_count, 30);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -6019,6 +6019,7 @@ fn cli_json_discovery_is_offline_and_preserves_legacy_list() {
     }
     for (id, eligible) in [
         ("get_api_observation_catalog", true),
+        ("get_network_request", true),
         ("get_origin_trace", true),
         ("compare_evidence_packages", true),
         ("debugger_action", false),
@@ -6195,4 +6196,183 @@ async fn cli_read_only_malformed_response_is_not_replayed_and_default_calls_stil
             "The CLI must never retry requests or follow redirects"
         );
     }
+}
+
+#[tokio::test]
+async fn exact_network_request_has_closed_selection_safe_errors_and_offline_discovery() {
+    let server = Server::start_with_helper_canaries(true).await;
+    server.file(
+        "events.jsonl",
+        b"synthetic unrelated store must not be read or changed\n",
+    );
+    let before: Value = server.get("/api/debugger").await.json().await.unwrap();
+    let network = &before["network"];
+    let params = [
+        (
+            "instance_id",
+            network["instance_id"].as_str().unwrap().to_owned(),
+        ),
+        ("capture_epoch", network["capture_epoch"].to_string()),
+        ("request_id", "synthetic-selected-request".to_owned()),
+        ("target_id", "synthetic-selected-target".to_owned()),
+        ("started_monotonic_ms", "100.0000001".to_owned()),
+    ];
+    let path = |params: &[(String, String)]| {
+        format!(
+            "/api/network/request?{}",
+            url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(params.iter().map(|(key, value)| (key, value)))
+                .finish()
+        )
+    };
+    let params: Vec<(String, String)> = params
+        .into_iter()
+        .map(|(key, value)| (key.into(), value))
+        .collect();
+    let bytes = assert_contract_response(
+        server.get(&path(&params)).await,
+        "get",
+        "/api/network/request",
+        404,
+    )
+    .await;
+    let error: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(error["code"], "target_unavailable");
+    assert_eq!(
+        error["details"],
+        json!({"selection_reason":"request_not_retained"})
+    );
+    assert!(!String::from_utf8_lossy(&bytes).contains("synthetic"));
+    for index in 0..params.len() {
+        let mut missing = params.clone();
+        missing.remove(index);
+        assert_contract_response(
+            server.get(&path(&missing)).await,
+            "get",
+            "/api/network/request",
+            400,
+        )
+        .await;
+        let mut duplicate = params.clone();
+        duplicate.push(params[index].clone());
+        assert_contract_response(
+            server.get(&path(&duplicate)).await,
+            "get",
+            "/api/network/request",
+            400,
+        )
+        .await;
+    }
+    let mut extra = params.clone();
+    extra.push(("fallback".into(), "synthetic-private-diagnostic".into()));
+    assert_contract_response(
+        server.get(&path(&extra)).await,
+        "get",
+        "/api/network/request",
+        400,
+    )
+    .await;
+    for (field, invalid) in [
+        ("instance_id", ""),
+        ("request_id", ""),
+        ("capture_epoch", "01"),
+        ("capture_epoch", "9007199254740992"),
+        ("started_monotonic_ms", "NaN"),
+        ("started_monotonic_ms", "-1"),
+        ("started_monotonic_ms", " 1"),
+    ] {
+        let mut changed = params.clone();
+        changed.iter_mut().find(|(key, _)| key == field).unwrap().1 = invalid.into();
+        assert_contract_response(
+            server.get(&path(&changed)).await,
+            "get",
+            "/api/network/request",
+            400,
+        )
+        .await;
+    }
+    for invalid in ["%", "%GG", "%FF", "%C3%28"] {
+        let malformed = path(&params).replace("synthetic-selected-request", invalid);
+        assert_contract_response(
+            server.get(&malformed).await,
+            "get",
+            "/api/network/request",
+            400,
+        )
+        .await;
+    }
+    for field in ["instance_id", "capture_epoch"] {
+        let mut stale = params.clone();
+        stale.iter_mut().find(|(key, _)| key == field).unwrap().1 = if field == "capture_epoch" {
+            "1"
+        } else {
+            "synthetic-stale-owner"
+        }
+        .into();
+        let bytes = assert_contract_response(
+            server.get(&path(&stale)).await,
+            "get",
+            "/api/network/request",
+            409,
+        )
+        .await;
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["code"], "state_conflict");
+        assert_eq!(
+            error["details"],
+            json!({"selection_reason":"stale_capture"})
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("synthetic"));
+    }
+    let forbidden = server
+        .client
+        .get(format!("{}{}", server.url, path(&params)))
+        .header("Origin", "https://external.test")
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(forbidden, "get", "/api/network/request", 403).await;
+    let offline = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "get_network_request"])
+        .output()
+        .unwrap();
+    assert!(offline.status.success());
+    let description: Value = serde_json::from_slice(&offline.stdout).unwrap();
+    assert!(description["components"]["schemas"]["NetworkRequestResponse"].is_object());
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+    cli.args([
+        "call",
+        "get_network_request",
+        "--read-only",
+        "--json-errors",
+        "--base-url",
+        &server.url,
+    ]);
+    for (key, value) in &params {
+        cli.arg("--param").arg(format!("{key}={value}"));
+    }
+    let result = cli.output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert_eq!(error["http_status"], 404);
+    assert_eq!(
+        error["details"],
+        json!({"selection_reason":"request_not_retained"})
+    );
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("synthetic"));
+    let after: Value = server.get("/api/debugger").await.json().await.unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        std::fs::read(server.root.path().join("events.jsonl")).unwrap(),
+        b"synthetic unrelated store must not be read or changed\n"
+    );
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+    assert!(!server.root.path().join("collection.json").exists());
 }

@@ -138,6 +138,14 @@ for endpoint in catalog["endpoints"]:
         print(observation["source"]["request_id"], body["status"], body["reason"])
 ```
 
+For an explicitly approved raw source, use `get_network_request` with coverage
+`instance_id`/`capture_epoch` and source `request_id`/`target_id`/
+`started_monotonic_ms`. Keep the timestamp unrounded. It retrieves exactly one
+retained Traffic row, rejects stale/ambiguous/missing identities, and never
+fetches missing content or falls back to another row. Raw values require a
+separate sharing review; the read-only guard is not a privacy filter. See the
+[exact request contract](http-api.md#exact-retained-traffic-request).
+
 This first slice supplies observations for a human-reviewed API consumer. It
 does not generate an authenticated SDK, infer credentials, validate replay, or
 make authorization decisions. The source-pinned adaptation and MIT notice are

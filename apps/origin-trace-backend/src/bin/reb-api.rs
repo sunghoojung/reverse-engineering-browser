@@ -606,6 +606,7 @@ mod tests {
         for id in [
             "get_health",
             "get_api_observation_catalog",
+            "get_network_request",
             "get_origin_trace",
             "get_events",
             "get_artifacts",
@@ -783,9 +784,16 @@ mod tests {
         assert_eq!(value["code"], typed["code"]);
         assert_eq!(value["details"], typed["details"]);
         assert_eq!(value["error_truncated"], false);
+        for reason in ["stale_capture", "request_not_retained", "ambiguous_request"] {
+            let typed = json!({"error":"Exact selection unavailable","code":"state_conflict",
+                "details":{"selection_reason":reason}});
+            let value = bounded_http_error(&spec, 409, &serde_json::to_vec(&typed).unwrap());
+            assert_eq!(value["details"], typed["details"]);
+        }
         for details in [
             json!({"raw":"private"}),
             json!({"phase":"invented"}),
+            json!({"selection_reason":"synthetic-private-unknown"}),
             json!({"expected_generation":u64::MAX}),
         ] {
             let value = bounded_http_error(

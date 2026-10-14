@@ -83,6 +83,20 @@ requests. It preserves scoped source identities and explicit unknowns, leaves
 raw Traffic unchanged, and never sends a target request. See the
 [API observation catalog contract](../../protocol/api-observation-catalog-v1.md).
 
+`reb-api call get_network_request --read-only` retrieves exactly one retained
+Traffic row using the catalog's original instance, epoch, public request ID,
+target ID and unrounded monotonic start. It rejects stale owners, duplicate
+public IDs and missing exact records rather than fetching or substituting data.
+The raw row and its existing truncation/unavailability flags are preserved;
+the complete JSON response is capped at 8 MiB, including escaping. The operation
+does not copy a full debugger snapshot or contact a target. Raw values can be
+sensitive even with the read-only guard. See the
+[exact request contract](../../protocol/http-api.md#exact-retained-traffic-request)
+and [agent workflow](../../docs/development/local-coding-agents.md).
+The existing synthetic candidate-bridge browser journey verifies populated
+HTTP/CLI raw-row fidelity and no replay; unit cases cover stale, ambiguous,
+evicted, redirect-hop, body-completion and whole-response size boundaries.
+
 Request Field Trace uses `src/provenance.rs` for bounded in-process projection of
 request call sites and same-target primitive string matches. Hashes are captured
 only while selected-value capture is enabled. Request-time snapshots survive

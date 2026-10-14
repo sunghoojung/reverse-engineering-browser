@@ -59,6 +59,7 @@ make origin-trace-backend
 REB_API=apps/origin-trace-backend/target/debug/reb-api
 "$REB_API" list --json
 "$REB_API" describe get_api_observation_catalog
+"$REB_API" describe get_network_request
 "$REB_API" describe get_origin_trace
 ```
 
@@ -165,6 +166,36 @@ fields match: coverage `instance_id` and `capture_epoch`, plus source
 `request_id`, `target_id` and `started_monotonic_ms`. Retain
 `debugger_generation` as snapshot context. Refresh, reconnect or eviction can
 make the exact source unavailable; never substitute a similar path or time.
+
+After authorizing the raw row to enter this provider's context, use
+`get_network_request` to retrieve that exact retained source. Copy the original
+five values from the approved catalog, preserving the unrounded timestamp:
+
+```sh
+# Synthetic examples only; replace all five from the approved observation.
+"$REB_API" call get_network_request --endpoint-file "$ENDPOINT" --read-only \
+  --json-errors --param instance_id=synthetic-owner --param capture_epoch=0 \
+  --param request_id=cdp:synthetic-target:1 --param target_id=synthetic-target \
+  --param started_monotonic_ms=100.0000001 --output selected-traffic.json
+```
+
+The closed response contains `format: reb-network-request-v1`, the five-field
+`source`, `debugger_generation`, and one unchanged raw `request`. Headers,
+URLs, text/base64 bodies and all existing truncation and unavailable-body flags
+are preserved. It never fetches a missing body, reconnects or reads the full
+debugger snapshot. The complete JSON is bounded to 8 MiB, including escaping;
+an oversized record fails entirely with 413 `resource_limit`.
+
+Stop this investigation branch on 409 `state_conflict` with
+`details.selection_reason=stale_capture` (instance/epoch changed), 409 with
+`selection_reason=ambiguous_request` (duplicate retained public ID, even if
+only one row matches the other fields), or 404 `target_unavailable` with
+`selection_reason=request_not_retained` (no exact record). Do not fall back to
+`get_debugger`, retry with rounded time, choose a similar row, or automatically
+refresh selection. `--json-errors` exposes these allowlisted reasons without
+raw capture diagnostics. A later explicit researcher selection can establish a
+new identity. See the [wire contract](../../protocol/http-api.md#exact-retained-traffic-request)
+for exact parameter limits and strict encoding rules.
 
 Native request traces use a different identity domain. Only when the researcher
 has selected a native request with its exact recorded identifiers, call:

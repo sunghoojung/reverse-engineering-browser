@@ -6572,8 +6572,43 @@ try {
       assert.equal(cliCatalog.coverage.capture_epoch, catalog.coverage.capture_epoch);
       const cliEndpoint = cliCatalog.endpoints.find(endpoint => endpoint.method === 'POST' && endpoint.origin === fixtureUrl && endpoint.path === '/payload');
       assert(cliEndpoint?.observations.some(row => JSON.stringify(row.source) === JSON.stringify(observation.source)), 'CLI preserves the same captured observation');
-      assert.equal(candidateRequestReceipts.length, requestsBeforeCatalog, 'Catalog HTTP/CLI reads never issue a target request');
-      console.log('PASS populated real-browser API catalog HTTP/CLI shapes, exact scoped identity, raw-value preservation and no replay');
+      const selection = {
+        instance_id: catalog.coverage.instance_id,
+        capture_epoch: String(catalog.coverage.capture_epoch),
+        request_id: observation.source.request_id,
+        target_id: observation.source.target_id,
+        started_monotonic_ms: String(observation.source.started_monotonic_ms),
+      };
+      const exactResponse = await fetch(url + '/api/network/request?' + new URLSearchParams(selection), {signal:AbortSignal.timeout(5000)});
+      assert.equal(exactResponse.status, 200);
+      assert.equal(exactResponse.headers.get('cache-control'), 'no-store');
+      const exact = await exactResponse.json();
+      assert.deepEqual(Object.keys(exact).sort(), ['debugger_generation', 'format', 'request', 'source']);
+      assert.equal(exact.format, 'reb-network-request-v1');
+      assert.deepEqual(exact.request, original, 'Exact HTTP retrieval preserves the complete retained raw row');
+      assert.deepEqual(exact.source, {...selection, capture_epoch:catalog.coverage.capture_epoch, started_monotonic_ms:observation.source.started_monotonic_ms});
+      assert(exact.debugger_generation >= catalog.coverage.debugger_generation, 'A later body-completion generation must not invalidate the capture identity');
+      const cliExact = await new Promise((resolve, reject) => {
+        const args = ['call', 'get_network_request', '--base-url', url, '--read-only', '--json-errors'];
+        for (const [key, value] of Object.entries(selection)) args.push('--param', key + '=' + value);
+        const child = spawn(cliPath, args, {stdio:['ignore','pipe','pipe']});
+        let output = '', error = '';
+        const timeout = setTimeout(() => { child.kill(); reject(Error('Exact request CLI deadline')); }, 10000);
+        child.stdout.on('data', chunk => { output += chunk; });
+        child.stderr.on('data', chunk => { error += chunk; });
+        child.once('error', failure => { clearTimeout(timeout); reject(failure); });
+        child.once('close', code => { clearTimeout(timeout); if (code !== 0) reject(Error('Exact request CLI failed: ' + error)); else { try { resolve(JSON.parse(output)); } catch (failure) { reject(failure); } } });
+      });
+      assert.deepEqual(cliExact.source, exact.source);
+      assert.deepEqual(cliExact.request, original, 'Read-only CLI retrieves the same raw row without a debugger snapshot');
+      const staleResponse = await fetch(url + '/api/network/request?' + new URLSearchParams({...selection, instance_id:selection.instance_id + '-stale'}), {signal:AbortSignal.timeout(5000)});
+      assert.equal(staleResponse.status, 409);
+      const stale = await staleResponse.json();
+      assert.equal(stale.code, 'state_conflict');
+      assert.deepEqual(stale.details, {selection_reason:'stale_capture'});
+      assert(!Object.hasOwn(stale, 'request'), 'Stale retrieval never substitutes a live row');
+      assert.equal(candidateRequestReceipts.length, requestsBeforeCatalog, 'Catalog and exact-request HTTP/CLI reads never issue a target request');
+      console.log('PASS populated real-browser catalog and exact request HTTP/CLI, raw-row fidelity, stale-owner rejection and no replay');
       candidateStartup.phase='complete';
       passed++;
       continue;

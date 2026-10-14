@@ -2,7 +2,7 @@ use crate::{
     analysis_catalog,
     analyst::Analyst,
     config::Options,
-    debugger::Debugger,
+    debugger::{Debugger, NetworkRequestSelection},
     decoder::Decoder,
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
@@ -203,7 +203,18 @@ impl App {
     async fn receiver_connected(&self) -> bool {
         socket_connected(self.options.artifact_socket.as_deref()).await
     }
-    async fn get(&self, path: &str, q: &Query, headers: &HeaderMap) -> Result<Response> {
+    async fn get(&self, path: &str, raw_query: &str, headers: &HeaderMap) -> Result<Response> {
+        if path == "/api/network/request" {
+            // Bound and strictly decode this identity before the legacy query
+            // parser can allocate or replace malformed UTF-8.
+            let selection = NetworkRequestSelection::parse(raw_query)?;
+            let debugger = self.debugger.clone();
+            let bytes = self
+                .blocking(move || debugger.network_request(&selection))
+                .await?;
+            return Ok(([("content-type", "application/json")], bytes).into_response());
+        }
+        let q = Query::new(raw_query);
         let mut etag = None;
         let value = match path {
             "/api/health" => {
@@ -734,9 +745,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
         {
             return Err(Error::new(403, "Local request origin rejected"));
         }
-        let query = Query::new(parts.uri.query().unwrap_or(""));
         if parts.method == Method::GET {
-            app.get(path, &query, &parts.headers).await
+            app.get(path, parts.uri.query().unwrap_or(""), &parts.headers)
+                .await
         } else if parts.method == Method::POST {
             let maximum = validation::SPEC["paths"][path]["post"]["x-max-body-bytes"]
                 .as_u64()

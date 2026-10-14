@@ -94,3 +94,59 @@ func TestStrictSharedJSON(t *testing.T) {
         t.Fatalf("provenance aliases must not override exact fields: %+v %v",provenance,err)
     }
 }
+
+func TestConfigurationAndResponseChecks(t *testing.T) {
+    stringValue:=func(value string)*string{return &value}
+    number:=func(value int)*int{return &value}
+    input:=authoredRequest("http://127.0.0.1")
+    valid:=Config{ConfigVersion:"reb-client-config-v1",AllowedOrigin:"http://127.0.0.1",TimeoutMS:number(500),RedirectPolicy:stringValue("manual"),CookiePolicy:stringValue("omit"),
+        ResponseChecks:&ResponseChecks{Statuses:[]int{200},ContentType:stringValue("application/json"),JSONFields:[]JSONField{
+            {Pointer:"/availability",Type:"string",Equals:json.RawMessage(`"in_stock"`)},
+            {Pointer:"/quantity",Type:"number",Equals:json.RawMessage(`4`)},
+            {Pointer:"/store/a~1b/~0key",Type:"boolean",Equals:json.RawMessage(`true`)},
+            {Pointer:"/variants/0",Type:"null",Equals:json.RawMessage(`null`)},
+        }}}
+    policy,err:=configure(valid,input);if err!=nil {t.Fatal(err)}
+    body:=`{"availability":"in_stock","quantity":4,"store":{"a/b":{"~key":true}},"variants":[null]}`
+    response:=func(text string)Result{return Result{Status:200,Headers:[][]string{{"Content-Type","application/json; charset=utf-8"}},Body:text}}
+    result:=response(body)
+    if err:=ValidateResponse(&result,policy);err!=nil || !result.Validation.Passed {t.Fatalf("valid authored stock response: %+v %v",result,err)}
+    cases:=[]struct{name,body,code string;field JSONField}{
+        {"missing",body,"response_field_missing",JSONField{Pointer:"/absent",Type:"number"}},
+        {"null",`{"quantity":null}`,"response_field_type",JSONField{Pointer:"/quantity",Type:"number"}},
+        {"wrong type",body,"response_field_type",JSONField{Pointer:"/quantity",Type:"string"}},
+        {"wrong value",body,"response_field_value",JSONField{Pointer:"/quantity",Type:"number",Equals:json.RawMessage(`3`)}},
+        {"rounding",`{"quantity":9007199254740991.4}`,"response_field_value",JSONField{Pointer:"/quantity",Type:"number",Equals:json.RawMessage(`9007199254740991`)}},
+        {"underflow",`{"quantity":1e-400}`,"response_field_value",JSONField{Pointer:"/quantity",Type:"number",Equals:json.RawMessage(`0`)}},
+        {"exponent",`{"quantity":4e0}`,"response_field_value",JSONField{Pointer:"/quantity",Type:"number",Equals:json.RawMessage(`4`)}},
+        {"malformed",`{"quantity":`,"response_json",JSONField{Pointer:"/quantity",Type:"number"}},
+        {"duplicate",`{"quantity":4,"quantity":0}`,"response_json",JSONField{Pointer:"/quantity",Type:"number"}},
+        {"surrogate",`{"quantity":"\ud800"}`,"response_json",JSONField{Pointer:"/quantity",Type:"string"}},
+        {"array member",body,"response_field_missing",JSONField{Pointer:"/variants/length",Type:"number"}},
+    }
+    for _,item:=range cases {t.Run(item.name,func(t *testing.T){
+        itemPolicy:=policy;itemPolicy.ResponseChecks=ResponseChecks{JSONFields:[]JSONField{item.field}}
+        result:=response(item.body);err:=ValidateResponse(&result,itemPolicy)
+        typed,ok:=err.(*ClientError);if !ok || typed.Code!=item.code {t.Fatalf("expected %s, got %v",item.code,err)}
+    })}
+    for name,mutate:=range map[string]func(*Result){
+        "response_status":func(result *Result){result.Status=401},
+        "response_content_type":func(result *Result){result.Headers=[][]string{{"Content-Type","text/html"}}},
+        "response_truncated":func(result *Result){result.BodyTruncated=true},
+        "response_json":func(result *Result){result.BodyInvalidUTF8=true},
+    }{result:=response(body);mutate(&result);err:=ValidateResponse(&result,policy);typed,ok:=err.(*ClientError);if !ok || typed.Code!=name {t.Fatalf("expected %s, got %v",name,err)}}
+    for _,config:=range []Config{
+        {ConfigVersion:"future"},{TimeoutMS:number(99)},{TimeoutMS:number(30001)},{RedirectPolicy:stringValue("follow")},{CookiePolicy:stringValue("browser")},
+        {ResponseChecks:&ResponseChecks{Statuses:[]int{200,200}}},{ResponseChecks:&ResponseChecks{ContentType:stringValue("application/json; charset=utf-8")}},
+        {ResponseChecks:&ResponseChecks{JSONFields:[]JSONField{{Pointer:"/bad~2",Type:"string"}}}},
+        {ResponseChecks:&ResponseChecks{JSONFields:[]JSONField{{Pointer:"/x",Type:"number",Equals:json.RawMessage(`1.5`)}}}},
+        {ResponseChecks:&ResponseChecks{JSONFields:[]JSONField{{Pointer:"/x",Type:"object",Equals:json.RawMessage(`{}`)}}}},
+    }{if _,err:=configure(config,input);err==nil {t.Fatalf("accepted invalid config: %+v",config)}}
+    saved:=browserProfileSend;browserProfileSend=nil;defer func(){browserProfileSend=saved}()
+    for _,config:=range []Config{
+        {Transport:&TransportConfig{Mode:"browser"}},
+        {Transport:&TransportConfig{Mode:"standard",BrowserProfile:&BrowserProfile{Browser:"chrome"}}},
+        {Transport:&TransportConfig{Mode:"browser-profile",BrowserProfile:&BrowserProfile{Browser:"chrome",Version:"133.0.0.0",Platform:"linux"}}},
+        {Transport:&TransportConfig{Mode:"browser-profile",BrowserProfile:&BrowserProfile{Browser:"chrome",Version:"137.0.0.0",Platform:"linux"}}},
+    }{if _,err:=configure(config,input);err==nil {t.Fatalf("accepted unsupported transport: %+v",config)}}
+}

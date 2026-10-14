@@ -1,0 +1,51 @@
+//go:build mimic
+
+// The explicit --mimic lane installs a pinned dependency in its temporary module.
+// These loopback tests are not an HTTPS/H2 fingerprint equivalence measurement.
+package client
+
+import (
+    "context"
+    "io"
+    "log"
+    "net/http"
+    "net/http/httptest"
+    "strings"
+    "sync/atomic"
+    "testing"
+)
+
+func TestMimicProfileHTTP(t *testing.T) {
+    var seen atomic.Int32
+    server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+        seen.Add(1)
+        if !strings.Contains(r.Header.Get("User-Agent"),"X11; Linux x86_64") || !strings.Contains(r.Header.Get("User-Agent"),"Chrome/133.0.0.0") {t.Error("incoherent profile User-Agent")}
+        if r.Header.Get("Sec-Ch-Ua-Platform")!=`"Linux"` || !strings.Contains(r.Header.Get("Sec-Ch-Ua"),`"133"`) {t.Error("incoherent profile Client Hints")}
+        if r.Header.Get("Cookie")!="" || r.Header.Get("Authorization")!="" {t.Error("unexpected credentials")}
+        if r.URL.Path=="/redirect" {w.Header().Set("Location","/never");w.Header().Set("Set-Cookie","authored=1");w.WriteHeader(302);return}
+        w.Header().Set("Content-Type","application/json");io.WriteString(w,`{"availability":"in_stock","quantity":4}`)
+    }));defer server.Close()
+    t.Setenv("HTTP_PROXY","http://127.0.0.1:1");t.Setenv("HTTPS_PROXY","http://127.0.0.1:1")
+    input:=authoredRequest(server.URL);config:=Config{AllowedOrigin:server.URL,Transport:&TransportConfig{Mode:"browser-profile",BrowserProfile:&BrowserProfile{Browser:"chrome",Version:"133.0.0.0",Platform:"linux"}}}
+    provenance:=Provenance{Format:"reb-client-project-v1",Mode:"raw"}
+    dry,err:=Send(context.Background(),input,config,provenance,false)
+    if err!=nil || !dry.Ready || seen.Load()!=0 {t.Fatalf("dry run sent or failed: %+v %v",dry,err)}
+    result,err:=Send(context.Background(),input,config,provenance,true)
+    if err!=nil || result.Status!=200 || seen.Load()!=1 {t.Fatalf("profile send: %+v %v",result,err)}
+    input.URL=server.URL+"/redirect";result,err=Send(context.Background(),input,config,provenance,true)
+    if err!=nil || result.Status!=302 || seen.Load()!=2 {t.Fatalf("redirect followed or failed: %+v %v",result,err)}
+    input.URL=server.URL;_,err=Send(context.Background(),input,config,provenance,true)
+    if err!=nil || seen.Load()!=3 {t.Fatal("repeated deliberate send failed",err)}
+    config.Transport.BrowserProfile.Version="137.0.0.0"
+    _,err=Send(context.Background(),input,config,provenance,true)
+    if err==nil || seen.Load()!=3 {t.Fatal("unmatched version sent")}
+}
+
+func TestMimicRejectsUntrustedTLS(t *testing.T) {
+    var seen atomic.Int32
+    server:=httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){seen.Add(1)}))
+    server.Config.ErrorLog=log.New(io.Discard,"",0);server.StartTLS();defer server.Close()
+    config:=Config{AllowedOrigin:server.URL,Transport:&TransportConfig{Mode:"browser-profile",BrowserProfile:&BrowserProfile{Browser:"chrome",Version:"133.0.0.0",Platform:"linux"}}}
+    result,err:=Send(context.Background(),authoredRequest(server.URL),config,Provenance{Format:"reb-client-project-v1",Mode:"raw"},true)
+    if err==nil || seen.Load()!=0 || !result.NetworkAttempted || result.NetworkRequests!=nil {t.Fatalf("certificate/accounting boundary: %+v %v",result,err)}
+}

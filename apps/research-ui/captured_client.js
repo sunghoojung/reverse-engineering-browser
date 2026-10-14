@@ -105,26 +105,151 @@ function capturedClientZip(files) {
   return output;
 }
 
-async function capturedClientSend(input, {config = {},send = false,provenance = {}} = {}) {
-  const request = config.request ?? input;
-  const issues = capturedClientIssues(request);
-  if (!config.request && (provenance.mode !== 'raw' || provenance.problems?.length)) issues.push('Provide a complete reviewed config.request; the exported evidence is redacted or unsupported.');
-  if (!send) return {dry_run:true,network_requests:0,ready:issues.length === 0,problems:issues,method:request?.method,
-    instruction:'Review evidence and config.json, set allowedOrigin, then explicitly run the example with --send.'};
-  if (issues.length) throw new TypeError(issues.join(' '));
-  if (typeof config.allowedOrigin !== 'string' || new URL(request.url).origin !== config.allowedOrigin) throw new TypeError('config.allowedOrigin must exactly match the reviewed request origin.');
-  const controller = new AbortController(), timer = setTimeout(() => controller.abort(),request.timeout_ms);
-  try {
-    const response = await fetch(request.url,{method:request.method,headers:request.headers,body:request.body === '' ? undefined : request.body,
-      credentials:'omit',cache:'no-store',redirect:'manual',referrerPolicy:'no-referrer',signal:controller.signal});
-    const reader = response.body?.getReader(), chunks = []; let count = 0, truncated = false;
-    if (reader) for (;;) {
-      const {done,value} = await reader.read(); if (done) break;
-      const remaining = 65536-count; chunks.push(value.subarray(0,remaining)); count += Math.min(remaining,value.length);
-      if (value.length > remaining) { truncated = true; await reader.cancel(); break; }
+function capturedClientFailure(code, message, result = null) {
+  const error = new Error(message); error.name = 'ClientError'; error.code = code; error.result = result; return error;
+}
+
+// Shared configuration describes supported policies, never captured browser state.
+function capturedClientConfig(config, request) {
+  const fail = message => { throw capturedClientFailure('invalid_config',message); };
+  const object = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
+  if (!object(config,['configVersion','allowedOrigin','request','transport','timeoutMs','redirectPolicy','cookiePolicy','responseChecks'])) fail('Unknown or malformed client configuration.');
+  if (config.configVersion !== undefined && config.configVersion !== 'reb-client-config-v1') fail('Unsupported configVersion.');
+  const transport = config.transport ?? {mode:'standard',browserProfile:null};
+  if (!object(transport,['mode','browserProfile']) || typeof transport.mode !== 'string') fail('transport requires a supported mode.');
+  if (transport.mode !== 'standard') throw capturedClientFailure('unsupported_transport','JavaScript supports standard HTTP only; browser-profile transport requires the optional Go Mimic build. No fallback was attempted.');
+  if (transport.browserProfile != null) throw capturedClientFailure('unsupported_profile','Standard HTTP does not accept a browser profile.');
+  const timeoutMs = config.timeoutMs ?? request?.timeout_ms;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) fail('timeoutMs must be 100–30000 ms.');
+  const redirectPolicy = config.redirectPolicy ?? 'manual', cookiePolicy = config.cookiePolicy ?? 'omit';
+  if (!['manual','error'].includes(redirectPolicy)) fail('redirectPolicy must be manual or error; redirects are never followed.');
+  if (cookiePolicy !== 'omit') fail('cookiePolicy must be omit; browser cookies are never acquired.');
+  const checks = config.responseChecks ?? {statuses:[],contentType:null,jsonFields:[]};
+  if (!object(checks,['statuses','contentType','jsonFields'])) fail('Malformed responseChecks.');
+  const statuses = checks.statuses ?? [], contentType = checks.contentType ?? null, jsonFields = checks.jsonFields ?? [];
+  if (!Array.isArray(statuses) || statuses.length > 32 || statuses.some(value => !Number.isInteger(value) || value < 100 || value > 599) || new Set(statuses).size !== statuses.length) fail('statuses must be at most 32 distinct HTTP status integers.');
+  if (contentType !== null && (typeof contentType !== 'string' || contentType.length > 128 || !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(contentType))) fail('contentType must be a lowercase media type without parameters.');
+  if (!Array.isArray(jsonFields) || jsonFields.length > 32) fail('At most 32 JSON field checks are supported.');
+  for (const field of jsonFields) {
+    if (!object(field,['pointer','type','equals']) || typeof field.pointer !== 'string' || new TextEncoder().encode(field.pointer).length > 1024 || (field.pointer !== '' && !field.pointer.startsWith('/')) || /~(?![01])/.test(field.pointer) || field.pointer.split('/').length > 33) fail('Each JSON field requires a bounded RFC 6901 pointer.');
+    if (!['null','boolean','number','string','array','object'].includes(field.type)) fail('Each JSON field requires an explicit supported type.');
+    if (Object.hasOwn(field,'equals') && !(field.equals === null && field.type === 'null' || typeof field.equals === 'string' && field.type === 'string' && new TextEncoder().encode(field.equals).length <= 2048 || typeof field.equals === 'boolean' && field.type === 'boolean' || Number.isSafeInteger(field.equals) && field.type === 'number')) fail('equals supports matching scalar types and safe integer numbers only.');
+  }
+  return {transport,timeoutMs,redirectPolicy,cookiePolicy,responseChecks:{statuses,contentType,jsonFields}};
+}
+
+// JSON.parse alone silently accepts duplicate keys. Scan bounded response JSON
+// first, then use its ordinary parser; this scanner never evaluates input.
+function capturedClientJSON(text, numberLexemes = null) {
+  if (typeof text !== 'string' || new TextEncoder().encode(text).length > 1048576) throw new SyntaxError('JSON exceeds 1 MiB.');
+  let index = 0;
+  const fail = () => { throw new SyntaxError('Malformed, duplicate-key or excessively nested JSON.'); };
+  const space = () => { while (/[\x20\t\r\n]/.test(text[index] ?? '\0')) index++; };
+  const string = () => {
+    const start = index++; let escaped = false;
+    while (index < text.length) {
+      const character = text[index++];
+      if (!escaped && character === '"') { const decoded = JSON.parse(text.slice(start,index)); if (Array.from(decoded).some(part => part.codePointAt(0) >= 0xd800 && part.codePointAt(0) <= 0xdfff)) fail(); return decoded; }
+      if (!escaped && character === '\\') escaped = true; else escaped = false;
     }
-    const bytes = new Uint8Array(count); let offset = 0; for (const part of chunks) { bytes.set(part,offset); offset += part.length; }
-    return {status:response.status,url:response.url,redirect_followed:false,headers:[...response.headers],body:new TextDecoder().decode(bytes),body_truncated:truncated};
+    fail();
+  };
+  const value = (depth,path = '') => {
+    if (depth > 64) fail(); space();
+    if (text[index] === '"') { string(); return; }
+    const opening = text[index];
+    if (opening === '{' || opening === '[') {
+      index++; space(); const end = opening === '{' ? '}' : ']', keys = new Set();
+      if (text[index] === end) { index++; return; }
+      let element = 0;
+      for (;;) {
+        let key = String(element++);
+        if (opening === '{') { if (text[index] !== '"') fail(); key = string(); if (keys.has(key)) fail(); keys.add(key); space(); if (text[index++] !== ':') fail(); }
+        value(depth+1,path+'/'+key.replace(/~/g,'~0').replace(/\//g,'~1')); space(); if (text[index] === end) { index++; return; }
+        if (text[index++] !== ',') fail(); space();
+      }
+    }
+    const token = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(index));
+    if (!token) fail(); if (numberLexemes && /^-?[0-9]/.test(token[0])) numberLexemes.set(path,token[0]); index += token[0].length;
+  };
+  value(0); space(); if (index !== text.length) fail(); return JSON.parse(text);
+}
+
+function capturedClientInputJSON(text) {
+  const numbers = new Map(), value = capturedClientJSON(text,numbers);
+  for (const token of numbers.values()) if (!/^-?(0|[1-9][0-9]*)$/.test(token) || !Number.isSafeInteger(Number(token))) throw new SyntaxError('Request/config numbers must be exact safe integer tokens.');
+  return value;
+}
+
+function capturedClientValidateResponse(result, policy) {
+  const fail = (code,message) => { throw capturedClientFailure(code,message,result); };
+  const checks = policy.responseChecks;
+  result.validation = {configured:!!(checks.statuses.length || checks.contentType || checks.jsonFields.length),passed:false};
+  if (policy.redirectPolicy === 'error' && result.status >= 300 && result.status <= 399) fail('redirect_refused','Redirect response refused; no redirect was followed.');
+  if (checks.statuses.length && !checks.statuses.includes(result.status)) fail('response_status','Response status does not match the configured accepted statuses.');
+  const contentTypes = result.headers.filter(([name]) => name.toLowerCase() === 'content-type');
+  const contentType = contentTypes[0]?.[1].split(';')[0].trim().toLowerCase();
+  if (checks.contentType && (contentTypes.length !== 1 || contentType !== checks.contentType)) fail('response_content_type','Response Content-Type does not match the configured media type.');
+  if (result.validation.configured && result.body_truncated) fail('response_truncated','A bounded or incomplete response cannot pass configured response checks.');
+  if (checks.jsonFields.length) {
+    const numberLexemes = new Map();
+    let body; try { if (result.body_invalid_utf8) throw new SyntaxError(); body = capturedClientJSON(result.body,numberLexemes); } catch { fail('response_json','Response is not complete valid JSON with unique keys.'); }
+    for (const field of checks.jsonFields) {
+      let value = body;
+      const parts = field.pointer === '' ? [] : field.pointer.slice(1).split('/').map(part => part.replace(/~1/g,'/').replace(/~0/g,'~'));
+      for (const part of parts) {
+        if (value === null || typeof value !== 'object' || Array.isArray(value) && !/^(0|[1-9][0-9]*)$/.test(part) || !Object.hasOwn(value,part)) fail('response_field_missing','A configured JSON pointer is absent from the response.');
+        value = value[part];
+      }
+      const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+      if (type !== field.type || type === 'number' && !Number.isFinite(value)) fail('response_field_type','A configured JSON field has the wrong type.');
+      if (Object.hasOwn(field,'equals') && field.type === 'number' && (!/^-?(0|[1-9][0-9]*)$/.test(numberLexemes.get(field.pointer) ?? '') || BigInt(numberLexemes.get(field.pointer)) !== BigInt(field.equals))) fail('response_field_value','Numeric equals requires an exact safe integer JSON token, without fractions or exponent notation.');
+      if (Object.hasOwn(field,'equals') && value !== field.equals) fail('response_field_value','A configured JSON field has an unexpected value.');
+    }
+  }
+  result.validation.passed = result.validation.configured;
+  return result;
+}
+
+async function capturedClientSend(input, {config = {},send = false,provenance = {}} = {}) {
+  const request = config?.request ?? input;
+  const issues = capturedClientIssues(request); let policy, configurationError;
+  if (request && Object.keys(request).some(key => !['method','url','headers','body','timeout_ms'].includes(key))) issues.push('Unknown or incorrectly cased request key.');
+  try { policy = capturedClientConfig(config,request); } catch (error) { configurationError = error; issues.push(error.message); }
+  if (!config?.request && (provenance.format !== 'reb-client-project-v1' || provenance.mode !== 'raw' || provenance.problems?.length)) issues.push('Provide a complete reviewed config.request; the exported evidence is redacted or unsupported.');
+  if (!send) return {dry_run:true,network_requests:0,ready:issues.length === 0,problems:issues,method:request?.method,policy,
+    instruction:'Review evidence and config.json, set allowedOrigin, then explicitly run the example with --send.'};
+  if (configurationError) throw configurationError;
+  if (issues.length) throw capturedClientFailure('invalid_input',issues.join(' '));
+  if (typeof config.allowedOrigin !== 'string' || new URL(request.url).origin !== config.allowedOrigin) throw capturedClientFailure('wrong_origin','config.allowedOrigin must exactly match the reviewed request origin.');
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(),policy.timeoutMs);
+  let result = {network_attempted:true,network_requests:null,instruction:'The server may have processed this request; check its state before deciding whether another send is safe. No automatic retry occurred.'};
+  try {
+    // Generated projects use Node's built-in direct transport, independent of
+    // ambient Fetch dispatchers, HTTP_PROXY and NODE_USE_ENV_PROXY.
+    const {request:sendRequest} = await import(new URL(request.url).protocol === 'https:' ? 'node:https' : 'node:http');
+    result = await new Promise((resolve,reject) => {
+      const outbound = sendRequest(request.url,{method:request.method,headers:Object.fromEntries(request.headers),agent:false,rejectUnauthorized:true,signal:controller.signal},response => {
+        const chunks = []; let count = 0;
+        const headers = []; for (let index=0;index<response.rawHeaders.length;index+=2) headers.push([response.rawHeaders[index],response.rawHeaders[index+1]]);
+        const snapshot = truncated => {
+          const bytes = new Uint8Array(count); let offset = 0; for (const chunk of chunks) { bytes.set(chunk,offset); offset+=chunk.length; }
+          let body, invalidUTF8 = false; try { body = new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes); } catch { body = new TextDecoder('utf-8',{ignoreBOM:true}).decode(bytes); invalidUTF8 = true; }
+          return {...result,network_requests:1,status:response.statusCode,url:request.url,redirect_followed:false,headers,body,body_invalid_utf8:invalidUTF8,body_truncated:truncated};
+        };
+        result = snapshot(false);
+        response.on('data',chunk => { const remaining = 65536-count; chunks.push(chunk.subarray(0,remaining)); count += Math.min(remaining,chunk.length); result = snapshot(false); if (chunk.length > remaining) { resolve(snapshot(true)); response.destroy(); } });
+        response.on('end',() => resolve(snapshot(false)));
+        response.on('error',error => reject(capturedClientFailure(controller.signal.aborted ? 'timeout' : 'response_read',controller.signal.aborted ? 'Request deadline expired; no automatic retry occurred.' : 'Response body could not be read completely.',snapshot(true))));
+      });
+      outbound.on('error',error => reject(error));
+      outbound.end(request.body);
+    });
+    return capturedClientValidateResponse(result,policy);
+  } catch (error) {
+    if (error.name === 'ClientError') throw error;
+    if (result.status) result.body_truncated = true;
+    throw capturedClientFailure(controller.signal.aborted ? 'timeout' : result.status ? 'response_read' : 'network',controller.signal.aborted ? 'Request deadline expired; no automatic retry occurred.' : 'Transport failed; the server outcome may be unknown.',result);
   } finally { clearTimeout(timer); }
 }
 
@@ -132,6 +257,69 @@ async function capturedClientSend(input, {config = {},send = false,provenance = 
 function capturedClientGoFiles() {
   return {
     "go/go.mod":"module reb.local/observed\n\ngo 1.23.0\n",
+    "go/client/mimic.go":String.raw`//go:build mimic
+
+// Optional transport, pinned to github.com/saucesteals/mimic v1.0.2
+// (946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e), MIT.
+// Enable only after the explicit dependency/review steps in README.md.
+// This is a named compatibility candidate, not captured-browser equivalence.
+package client
+
+import (
+    "context"
+    "errors"
+    "net"
+    "net/http"
+    "strings"
+    "sync/atomic"
+    "time"
+
+    fhttp "github.com/saucesteals/fhttp"
+    "github.com/saucesteals/mimic"
+)
+
+func init() { browserProfileSend=sendMimic }
+
+func sendMimic(ctx context.Context,input Request,profile BrowserProfile) (*http.Response,func(),error) {
+    if profile.Browser!="chrome" || profile.Version!="133.0.0.0" || profile.Platform!="linux" {
+        return nil,nil,errors.New("unsupported browser profile")
+    }
+    deadline:=time.Duration(input.TimeoutMS)*time.Millisecond
+    // fhttp's H2 stack can retry REFUSED_STREAM/GOAWAY. Single-use connections
+    // plus one transport dial invocation refuse another stream/connection for this send.
+    // Keep the transport fresh per operation; never share it or add a proxy.
+    var dialed atomic.Bool
+    base:=&fhttp.Transport{Proxy:nil,DisableKeepAlives:true,DisableCompression:true,
+        ForceAttemptHTTP2:true,MaxResponseHeaderBytes:65536,TLSHandshakeTimeout:deadline,
+        DialContext:func(ctx context.Context,network,address string)(net.Conn,error){
+            if !dialed.CompareAndSwap(false,true) { return nil,errors.New("additional transport connection refused; review server state before another send") }
+            return (&net.Dialer{}).DialContext(ctx,network,address)
+        }}
+    transport,err:=mimic.NewTransport(mimic.TransportOptions{Version:profile.Version,
+        Brand:mimic.BrandChrome,Platform:mimic.PlatformLinux,Transport:base})
+    if err!=nil { return nil,nil,err }
+    cleanup:=transport.CloseIdleConnections
+    if base.TLSNextProto["h2"]==nil { cleanup();return nil,nil,errors.New("pinned HTTP/2 profile initialization is unavailable") }
+    request,err:=fhttp.NewRequestWithContext(ctx,input.Method,input.URL,strings.NewReader(*input.Body))
+    if err!=nil { cleanup();return nil,nil,err }
+    // Prevent body replay where the underlying transport checks GetBody. Empty
+    // bodies are additionally protected by the single-dial-invocation/single-use boundary.
+    request.GetBody=nil
+    for _,pair:=range input.Headers { request.Header.Set(pair[0],pair[1]) }
+    client:=&fhttp.Client{Transport:transport,Timeout:deadline,
+        CheckRedirect:func(*fhttp.Request,[]*fhttp.Request)error{return fhttp.ErrUseLastResponse}}
+    response,err:=client.Do(request)
+    if err!=nil { cleanup();return nil,nil,err }
+    standardRequest,err:=http.NewRequestWithContext(ctx,input.Method,input.URL,nil)
+    if err!=nil { response.Body.Close();cleanup();return nil,nil,err }
+    // TLS state types differ; do not invent a crypto/tls observation or cast it.
+    return &http.Response{Status:response.Status,StatusCode:response.StatusCode,
+        Proto:response.Proto,ProtoMajor:response.ProtoMajor,ProtoMinor:response.ProtoMinor,
+        Header:http.Header(response.Header),Body:response.Body,ContentLength:response.ContentLength,
+        Close:response.Close,Uncompressed:response.Uncompressed,Trailer:http.Header(response.Trailer),
+        Request:standardRequest},cleanup,nil
+}
+`,
     "go/client/client.go":String.raw`// Package client sends only a complete, explicitly reviewed text request.
 // It uses standard net/http HTTP/1.1, not the captured browser's TLS profile.
 package client
@@ -144,6 +332,7 @@ import (
     "fmt"
     "io"
     "mime"
+    "strconv"
     "net"
     "net/http"
     "net/url"
@@ -186,9 +375,189 @@ func (headers *HeaderPairs) UnmarshalJSON(data []byte) error {
     return nil
 }
 type Config struct {
+    ConfigVersion string ${'`'}json:"configVersion"${'`'}
     AllowedOrigin string ${'`'}json:"allowedOrigin"${'`'}
     Request *Request ${'`'}json:"request"${'`'}
+    Transport *TransportConfig ${'`'}json:"transport"${'`'}
+    TimeoutMS *int ${'`'}json:"timeoutMs"${'`'}
+    RedirectPolicy *string ${'`'}json:"redirectPolicy"${'`'}
+    CookiePolicy *string ${'`'}json:"cookiePolicy"${'`'}
+    ResponseChecks *ResponseChecks ${'`'}json:"responseChecks"${'`'}
 }
+type TransportConfig struct {
+    Mode string ${'`'}json:"mode"${'`'}
+    BrowserProfile *BrowserProfile ${'`'}json:"browserProfile"${'`'}
+}
+type BrowserProfile struct {
+    Browser string ${'`'}json:"browser"${'`'}
+    Version string ${'`'}json:"version"${'`'}
+    Platform string ${'`'}json:"platform"${'`'}
+}
+type ResponseChecks struct {
+    Statuses []int ${'`'}json:"statuses"${'`'}
+    ContentType *string ${'`'}json:"contentType"${'`'}
+    JSONFields []JSONField ${'`'}json:"jsonFields"${'`'}
+}
+type JSONField struct {
+    Pointer string ${'`'}json:"pointer"${'`'}
+    Type string ${'`'}json:"type"${'`'}
+    Equals json.RawMessage ${'`'}json:"equals,omitempty"${'`'}
+}
+type Validation struct {
+    Configured bool ${'`'}json:"configured"${'`'}
+    Passed bool ${'`'}json:"passed"${'`'}
+}
+type Policy struct {
+    Transport TransportConfig ${'`'}json:"transport"${'`'}
+    TimeoutMS int ${'`'}json:"timeoutMs"${'`'}
+    RedirectPolicy string ${'`'}json:"redirectPolicy"${'`'}
+    CookiePolicy string ${'`'}json:"cookiePolicy"${'`'}
+    ResponseChecks ResponseChecks ${'`'}json:"responseChecks"${'`'}
+}
+type ClientError struct { Code string; Message string }
+func (err *ClientError) Error() string { return err.Code+": "+err.Message }
+func failure(code,message string) error { return &ClientError{Code:code,Message:message} }
+
+func strictObject(data []byte, allowed, required []string) error {
+    fields,err:=exactFields(data,allowed,required);if err!=nil { return err }
+    for _,key:=range required { if string(fields[key])=="null" { return errors.New("Required configuration fields cannot be null") } }
+    return nil
+}
+func (value *TransportConfig) UnmarshalJSON(data []byte) error {
+    if err:=strictObject(data,[]string{"mode","browserProfile"},[]string{"mode"});err!=nil { return err }
+    type plain TransportConfig;var parsed plain
+    if err:=json.Unmarshal(data,&parsed);err!=nil { return err };*value=TransportConfig(parsed);return nil
+}
+func (value *BrowserProfile) UnmarshalJSON(data []byte) error {
+    keys:=[]string{"browser","version","platform"}
+    if err:=strictObject(data,keys,keys);err!=nil { return err }
+    type plain BrowserProfile;var parsed plain
+    if err:=json.Unmarshal(data,&parsed);err!=nil { return err };*value=BrowserProfile(parsed);return nil
+}
+func (value *ResponseChecks) UnmarshalJSON(data []byte) error {
+    if err:=strictObject(data,[]string{"statuses","contentType","jsonFields"},nil);err!=nil { return err }
+    type plain ResponseChecks;var parsed plain
+    if err:=json.Unmarshal(data,&parsed);err!=nil { return err };*value=ResponseChecks(parsed);return nil
+}
+func (value *JSONField) UnmarshalJSON(data []byte) error {
+    if err:=strictObject(data,[]string{"pointer","type","equals"},[]string{"pointer","type"});err!=nil { return err }
+    type plain JSONField;var parsed plain
+    if err:=json.Unmarshal(data,&parsed);err!=nil { return err };*value=JSONField(parsed);return nil
+}
+
+var mediaType = regexp.MustCompile("^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
+var pointerEscape = regexp.MustCompile("~[^01]|~$")
+var arrayIndex = regexp.MustCompile("^(0|[1-9][0-9]*)$")
+var integerToken = regexp.MustCompile("^-?(0|[1-9][0-9]*)$")
+// The optional build-tag adapter registers one audited profile implementation.
+// Missing adapters are explicit errors, never a downgrade to standard HTTP.
+var browserProfileSend func(context.Context,Request,BrowserProfile) (*http.Response,func(),error)
+func configure(config Config,input Request) (Policy,error) {
+    policy:=Policy{Transport:TransportConfig{Mode:"standard"},TimeoutMS:input.TimeoutMS,RedirectPolicy:"manual",CookiePolicy:"omit"}
+    if config.ConfigVersion!="" && config.ConfigVersion!="reb-client-config-v1" { return policy,failure("invalid_config","Unsupported configVersion") }
+    if config.Transport!=nil { policy.Transport=*config.Transport }
+    if config.TimeoutMS!=nil { policy.TimeoutMS=*config.TimeoutMS }
+    if config.RedirectPolicy!=nil { policy.RedirectPolicy=*config.RedirectPolicy }
+    if config.CookiePolicy!=nil { policy.CookiePolicy=*config.CookiePolicy }
+    if config.ResponseChecks!=nil { policy.ResponseChecks=*config.ResponseChecks }
+    invalid:=func(message string)(Policy,error){return policy,failure("invalid_config",message)}
+    if policy.TimeoutMS<100 || policy.TimeoutMS>30000 { return invalid("timeoutMs must be 100-30000 ms") }
+    if policy.RedirectPolicy!="manual" && policy.RedirectPolicy!="error" { return invalid("redirectPolicy must be manual or error; redirects are never followed") }
+    if policy.CookiePolicy!="omit" { return invalid("cookiePolicy must be omit; browser cookies are never acquired") }
+    switch policy.Transport.Mode {
+    case "standard":
+        if policy.Transport.BrowserProfile!=nil { return policy,failure("unsupported_profile","Standard HTTP does not accept a browser profile") }
+    case "browser-profile":
+        profile:=policy.Transport.BrowserProfile
+        if profile==nil || profile.Browser!="chrome" || profile.Version!="133.0.0.0" || profile.Platform!="linux" {
+            return policy,failure("unsupported_profile","Only the pinned chrome 133.0.0.0 linux profile is supported; version/platform substitution is refused")
+        }
+        if browserProfileSend==nil { return policy,failure("unsupported_transport","Browser-profile transport requires the optional Go Mimic build; no fallback was attempted") }
+    default: return policy,failure("unsupported_transport","Unknown transport mode; no browser execution or automatic fallback is implemented")
+    }
+    checks:=policy.ResponseChecks
+    if len(checks.Statuses)>32 { return invalid("At most 32 accepted statuses are supported") }
+    seen:=map[int]bool{}
+    for _,status:=range checks.Statuses { if status<100 || status>599 || seen[status] { return invalid("statuses must contain distinct HTTP status integers") };seen[status]=true }
+    if checks.ContentType!=nil && (len(*checks.ContentType)>128 || !mediaType.MatchString(*checks.ContentType)) { return invalid("contentType must be a lowercase media type without parameters") }
+    if len(checks.JSONFields)>32 { return invalid("At most 32 JSON field checks are supported") }
+    for _,field:=range checks.JSONFields {
+        if len(field.Pointer)>1024 || field.Pointer!="" && !strings.HasPrefix(field.Pointer,"/") || pointerEscape.MatchString(field.Pointer) || len(strings.Split(field.Pointer,"/"))>33 {
+            return invalid("Each JSON field requires a bounded RFC 6901 pointer")
+        }
+        if field.Type!="null" && field.Type!="boolean" && field.Type!="number" && field.Type!="string" && field.Type!="object" && field.Type!="array" { return invalid("Each JSON field requires an explicit supported type") }
+        if field.Equals!=nil {
+            var value any
+            if err:=json.Unmarshal(field.Equals,&value);err!=nil { return invalid("Invalid equals value") }
+            valid:=false
+            switch value:=value.(type) {
+            case nil: valid=field.Type=="null"
+            case bool: valid=field.Type=="boolean"
+            case string: valid=field.Type=="string" && len(value)<=2048
+            case float64:
+                token:=strings.TrimSpace(string(field.Equals));integer,err:=strconv.ParseInt(token,10,64)
+                valid=field.Type=="number" && integerToken.MatchString(token) && err==nil && integer>=-9007199254740991 && integer<=9007199254740991 && value==float64(integer)
+            }
+            if !valid { return invalid("equals supports matching scalar types and safe integer numbers only") }
+        }
+    }
+    return policy,nil
+}
+func ValidateResponse(result *Result,policy Policy) error {
+    checks:=policy.ResponseChecks
+    result.Validation=&Validation{Configured:len(checks.Statuses)>0 || checks.ContentType!=nil || len(checks.JSONFields)>0}
+    if policy.RedirectPolicy=="error" && result.Status>=300 && result.Status<=399 { return failure("redirect_refused","Redirect response refused; no redirect was followed") }
+    if len(checks.Statuses)>0 {
+        matched:=false;for _,status:=range checks.Statuses { if status==result.Status { matched=true } }
+        if !matched { return failure("response_status","Response status does not match the configured accepted statuses") }
+    }
+    if checks.ContentType!=nil {
+        actual:="";count:=0;for _,header:=range result.Headers { if strings.EqualFold(header[0],"content-type") { count++;actual=strings.ToLower(strings.TrimSpace(strings.SplitN(header[1],";",2)[0])) } }
+        if count!=1 || actual!=*checks.ContentType { return failure("response_content_type","Response Content-Type does not match the configured media type") }
+    }
+    if result.Validation.Configured && result.BodyTruncated { return failure("response_truncated","A bounded or incomplete response cannot pass configured response checks") }
+    if len(checks.JSONFields)>0 {
+        decoder:=json.NewDecoder(strings.NewReader(result.Body));decoder.UseNumber()
+        if err:=unicodeJSON([]byte(result.Body));err!=nil { return failure("response_json","Response contains invalid Unicode escapes") }
+        if result.BodyInvalidUTF8 { return failure("response_json","Response is not valid UTF-8 JSON") }
+        if err:=uniqueJSON(decoder,0);err!=nil { return failure("response_json","Response is not complete valid JSON with unique keys") }
+        if _,err:=decoder.Token();err!=io.EOF { return failure("response_json","Response contains trailing JSON data") }
+        var body any
+        decoder=json.NewDecoder(strings.NewReader(result.Body));decoder.UseNumber()
+        if err:=decoder.Decode(&body);err!=nil { return failure("response_json","Response is malformed JSON") }
+        for _,field:=range checks.JSONFields {
+            value:=body
+            if field.Pointer!="" {
+                for _,part:=range strings.Split(field.Pointer[1:],"/") {
+                    part=strings.ReplaceAll(strings.ReplaceAll(part,"~1","/"),"~0","~")
+                    var found bool
+                    switch container:=value.(type) {
+                    case map[string]any: value,found=container[part]
+                    case []any:
+                        if arrayIndex.MatchString(part) { index,err:=strconv.Atoi(part);if err==nil && index<len(container) { value=container[index];found=true } }
+                    }
+                    if !found { return failure("response_field_missing","A configured JSON pointer is absent from the response") }
+                }
+            }
+            kind:="null"
+            switch value.(type) { case bool:kind="boolean";case string:kind="string";case json.Number:kind="number";case []any:kind="array";case map[string]any:kind="object" }
+            if number,ok:=value.(json.Number);ok { if _,err:=number.Float64();err!=nil { return failure("response_field_type","Response number is outside the supported finite range") } }
+            if kind!=field.Type { return failure("response_field_type","A configured JSON field has the wrong type") }
+            if field.Equals!=nil {
+                var expected any;if err:=json.Unmarshal(field.Equals,&expected);err!=nil { return failure("invalid_config","Invalid equals value") }
+                actual:=value
+                if number,ok:=value.(json.Number);ok {
+                    if !integerToken.MatchString(number.String()) { return failure("response_field_value","Numeric equals requires an exact safe integer JSON token without fractions or exponent notation") }
+                    converted,err:=number.Int64();if err!=nil || converted < -9007199254740991 || converted > 9007199254740991 { return failure("response_field_value","Response number cannot match a safe integer") };actual=float64(converted)
+                }
+                if actual!=expected { return failure("response_field_value","A configured JSON field has an unexpected value") }
+            }
+        }
+    }
+    result.Validation.Passed=result.Validation.Configured
+    return nil
+}
+
 type Provenance struct {
     Format string ${'`'}json:"format"${'`'}
     Mode string ${'`'}json:"mode"${'`'}
@@ -207,6 +576,9 @@ type Result struct {
     Headers [][]string ${'`'}json:"headers,omitempty"${'`'}
     Body string ${'`'}json:"body"${'`'}
     BodyTruncated bool ${'`'}json:"body_truncated"${'`'}
+    BodyInvalidUTF8 bool ${'`'}json:"body_invalid_utf8,omitempty"${'`'}
+    Validation *Validation ${'`'}json:"validation,omitempty"${'`'}
+    Policy *Policy ${'`'}json:"policy,omitempty"${'`'}
 }
 
 // Reject duplicate keys before decoding: Go's usual last-value/merge behavior
@@ -252,7 +624,8 @@ func (request *Request) UnmarshalJSON(data []byte) error {
     return nil
 }
 func (config *Config) UnmarshalJSON(data []byte) error {
-    if _,err:=exactFields(data,[]string{"allowedOrigin","request"},nil);err!=nil { return err }
+    fields,err:=exactFields(data,[]string{"configVersion","allowedOrigin","request","transport","timeoutMs","redirectPolicy","cookiePolicy","responseChecks"},nil);if err!=nil { return err }
+    if raw,ok:=fields["configVersion"];ok { var version string;if err:=json.Unmarshal(raw,&version);err!=nil || version!="reb-client-config-v1" { return errors.New("Unsupported configVersion") } }
     type plain Config
     var value plain
     if err:=json.Unmarshal(data,&value);err!=nil { return err }
@@ -267,15 +640,7 @@ func (provenance *Provenance) UnmarshalJSON(data []byte) error {
     return json.Unmarshal(fields["problems"],&provenance.Problems)
 }
 
-// ReadJSON bounds local inputs and rejects invalid Unicode instead of accepting
-// encoding/json's replacement characters. Unknown provenance fields are data.
-func ReadJSON(path string, target any) error {
-    file, err := os.Open(path)
-    if err != nil { return err }
-    defer file.Close()
-    data, err := io.ReadAll(io.LimitReader(file, 1048577))
-    if err != nil { return err }
-    if len(data) > 1048576 || !utf8.Valid(data) { return errors.New("JSON exceeds 1 MiB or contains invalid UTF-8") }
+func unicodeJSON(data []byte) error {
     // A JSON escape starts at an unescaped backslash. Surrogates must pair.
     for i := 0; i < len(data); i++ {
         if data[i] != '\\' { continue }
@@ -292,6 +657,19 @@ func ReadJSON(path string, target any) error {
         if _, err := fmt.Sscanf(string(data[i+3:i+7]), "%04x", &low); err != nil || low < 0xdc00 || low > 0xdfff { return errors.New("unpaired Unicode surrogate") }
         i += 6
     }
+    return nil
+}
+
+// ReadJSON bounds local inputs and rejects invalid Unicode instead of accepting
+// encoding/json's replacement characters. Unknown provenance fields are data.
+func ReadJSON(path string, target any) error {
+    file, err := os.Open(path)
+    if err != nil { return err }
+    defer file.Close()
+    data, err := io.ReadAll(io.LimitReader(file, 1048577))
+    if err != nil { return err }
+    if len(data) > 1048576 || !utf8.Valid(data) { return errors.New("JSON exceeds 1 MiB or contains invalid UTF-8") }
+    if err:=unicodeJSON(data);err!=nil { return err }
     decoder:=json.NewDecoder(strings.NewReader(string(data)));decoder.UseNumber()
     if err:=uniqueJSON(decoder,0);err!=nil { return err }
     if _,err:=decoder.Token();err!=io.EOF { return errors.New("Unexpected trailing JSON data") }
@@ -362,16 +740,20 @@ func Issues(input Request) []string {
 func Send(ctx context.Context, input Request, config Config, provenance Provenance, send bool) (Result,error) {
     if config.Request!=nil { input=*config.Request }
     problems:=Issues(input)
+    policy,configurationError:=configure(config,input)
+    if configurationError!=nil { problems=append(problems,configurationError.Error()) }
     if config.Request==nil && (provenance.Format!="reb-client-project-v1" || provenance.Mode!="raw" || len(provenance.Problems)>0) {
         problems=append(problems,"Provide a complete reviewed config.request for redacted, unknown or unsupported evidence")
     }
     zero,one:=0,1
-    result:=Result{DryRun:!send,NetworkRequests:&zero,Ready:len(problems)==0,Problems:problems,Instruction:"Review evidence/config.json, set allowedOrigin, then explicitly run with --send"}
+    result:=Result{DryRun:!send,NetworkRequests:&zero,Ready:len(problems)==0,Problems:problems,Policy:&policy,Instruction:"Review evidence/config.json, set allowedOrigin, then explicitly run with --send"}
     if !send { return result,nil }
-    if len(problems)>0 { return result,errors.New(strings.Join(problems,"; ")) }
+    if configurationError!=nil { return result,configurationError }
+    if len(problems)>0 { return result,failure("invalid_input",strings.Join(problems,"; ")) }
     parsed,_:=requestURL(input.URL)
-    if config.AllowedOrigin!=origin(parsed) { return result,errors.New("config.allowedOrigin must exactly match the reviewed request origin") }
-    if err:=ctx.Err();err!=nil { return result,err }
+    if config.AllowedOrigin!=origin(parsed) { return result,failure("wrong_origin","config.allowedOrigin must exactly match the reviewed request origin") }
+    if err:=ctx.Err();err!=nil { return result,failure("canceled",err.Error()) }
+    input.TimeoutMS=policy.TimeoutMS
     request,err:=http.NewRequestWithContext(ctx,input.Method,input.URL,strings.NewReader(*input.Body))
     if err!=nil { return result,err }
     for _,pair:=range input.Headers { request.Header.Set(pair[0],pair[1]) }
@@ -385,27 +767,41 @@ func Send(ctx context.Context, input Request, config Config, provenance Provenan
         CheckRedirect:func(*http.Request,[]*http.Request)error{return http.ErrUseLastResponse}}
     // Errors before receiving a response cannot prove whether the server saw it.
     result.NetworkAttempted=true
-    result.Instruction="The server may have processed this request; check its state before deciding whether another send is safe. No automatic retry occurred."
+    result.Instruction="The server may have processed this request; check its state before deciding whether another send is safe. No application retry or fallback was requested."
     result.NetworkRequests=nil
-    response,err:=client.Do(request)
-    if err!=nil { return result,err }
+    var response *http.Response
+    if policy.Transport.Mode=="browser-profile" {
+        var cleanup func()
+        response,cleanup,err=browserProfileSend(ctx,input,*policy.Transport.BrowserProfile)
+        if cleanup!=nil { defer cleanup() }
+    } else { response,err=client.Do(request) }
+    if err!=nil {
+        code:="network";var networkError net.Error
+        if errors.Is(err,context.Canceled) { code="canceled" } else if errors.As(err,&networkError) && networkError.Timeout() || errors.Is(err,context.DeadlineExceeded) { code="timeout" }
+        return result,failure(code,"Transport failed; the server outcome may be unknown")
+    }
     result.NetworkRequests=&one
     result.Status=response.StatusCode
     result.URL=response.Request.URL.String()
     defer response.Body.Close()
+    headers:=[][]string{};names:=make([]string,0,len(response.Header))
+    for name:=range response.Header { names=append(names,name) };sort.Strings(names)
+    for _,name:=range names { for _,value:=range response.Header[name] { headers=append(headers,[]string{name,value}) } }
+    result.Headers=headers
     body,err:=io.ReadAll(io.LimitReader(response.Body,65537))
     if err!=nil {
         if len(body)>65536 { body=body[:65536] }
         result.Body=strings.ToValidUTF8(string(body),"\ufffd")
         result.BodyTruncated=true
-        return result,err
+        code:="response_read";var networkError net.Error
+        if errors.Is(err,context.Canceled) { code="canceled" } else if errors.As(err,&networkError) && networkError.Timeout() { code="timeout" }
+        return result,failure(code,"Response body could not be read completely")
     }
     truncated:=len(body)>65536;if truncated { body=body[:65536] }
-    headers:=[][]string{};names:=make([]string,0,len(response.Header))
-    for name:=range response.Header { names=append(names,name) };sort.Strings(names)
-    for _,name:=range names { for _,value:=range response.Header[name] { headers=append(headers,[]string{name,value}) } }
-    return Result{Ready:true,NetworkAttempted:true,NetworkRequests:&one,Status:response.StatusCode,URL:response.Request.URL.String(),
-        Headers:headers,Body:strings.ToValidUTF8(string(body),"\ufffd"),BodyTruncated:truncated},nil
+    result=Result{Ready:true,NetworkAttempted:true,NetworkRequests:&one,Policy:&policy,Instruction:result.Instruction,Status:response.StatusCode,URL:response.Request.URL.String(),
+        Headers:headers,Body:strings.ToValidUTF8(string(body),"\ufffd"),BodyTruncated:truncated,BodyInvalidUTF8:!utf8.Valid(body)}
+    validationError:=ValidateResponse(&result,policy)
+    return result,validationError
 }
 `,
     "go/services/service001.go":String.raw`// Package services contains only the one observed operation; names imply no API schema.
@@ -457,6 +853,104 @@ func main() {
   };
 }
 
+function capturedClientReadme(mode) {
+  return String.raw`# One observed API operation
+
+This project contains one reviewed request representation, not a discovered API specification or SDK. Neutral service/operation names imply no business schema. Captured inputs and evidence are data, never executable source.
+
+## Start with Go
+
+Use Go 1.23+ for the dependency-free standard transport. From go/, run:
+
+    go run ./cmd/request-001
+
+This is a dry run and sends nothing. Review the shared root request, provenance and evidence. Copy config.example.json to config.json and set allowedOrigin to the exact authorized origin. Only an explicit send performs a request:
+
+    go run ./cmd/request-001 --send
+
+Run from go/ so shared JSON paths resolve to the parent folder. For redacted or unsupported exports, supply a complete reviewed config.request with method, url, headers (pairs), body and timeout_ms. Evidence files remain unchanged. Never paste credentials into this credential-omitting client. Mutating methods can change server state.
+
+## Shared configuration and response checks
+
+configVersion is reb-client-config-v1. An omitted version supports older local configs; a different version is rejected. Unknown keys and duplicate JSON keys are rejected. Request/config numeric tokens must be exact safe integers, without exponent or fractional notation.
+
+- transport: {"mode":"standard","browserProfile":null} works in both clients. Optional browser-profile is Go-only; see below.
+- timeoutMs: null inherits the request timeout; an integer 100–30000 overrides it for the entire send, including response reading.
+- redirectPolicy: manual returns the first response; error returns redirect_refused for 3xx. Neither follows any redirect.
+- cookiePolicy: omit is the only supported value. No browser cookies, cookie jar or saved login is acquired.
+- responseChecks: opt-in accepted statuses, media type and explicit JSON pointer checks. No schema is inferred from one capture.
+
+For an authored stock fixture, replace responseChecks with:
+
+    {
+      "statuses": [200],
+      "contentType": "application/json",
+      "jsonFields": [
+        {"pointer":"/availability","type":"string","equals":"in_stock"},
+        {"pointer":"/quantity","type":"number","equals":4}
+      ]
+    }
+
+A missing quantity never becomes zero. Null, missing, wrong type and wrong value stay distinct. Empty statuses/jsonFields and null contentType disable their respective checks. With no checks, validation.configured and validation.passed are both false: an HTTP 200 is not proof of a valid business result. Choose checks for your actual operation; the example intentionally accepts only in-stock quantity four.
+
+JSON pointers use RFC 6901: empty pointer selects the root, ~1 means slash and ~0 means tilde; array indexes are canonical nonnegative integers. Types are null, boolean, number, string, object and array. equals accepts matching string/boolean/null or safe-integer values only. Numeric response equality requires a bare integer JSON token, without fractions or exponents, to avoid rounded or underflowed matches. Duplicate keys, invalid UTF-8/Unicode, malformed JSON and nesting deeper than 64 fail JSON checks. At most 32 status values and 32 JSON fields are accepted. MIME checks compare one media type case-insensitively, ignoring parameters; repeated Content-Type fields fail.
+
+Errors have distinct codes: invalid_input, invalid_config, unsupported_transport, unsupported_profile, wrong_origin, network, timeout (and canceled in Go), response_read, redirect_refused, response_status, response_content_type, response_truncated, response_json, response_field_missing, response_field_type and response_field_value. Go returns *client.ClientError with the partial Result; JavaScript errors expose code and result. Input file parsing can also fail before Send. After a network error the server outcome can be unknown; inspect its state before another deliberate send. No tool automatically falls back or resends. A response body is limited to 64 KiB; configured checks never pass a truncated body. Partial-response failures preserve known status, URL, headers and bounded body.
+
+## Optional pinned Go browser-profile transport (experimental)
+
+The optional go/client/mimic.go adapter uses exactly github.com/saucesteals/mimic v1.0.2, source commit 946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e. It is excluded from ordinary builds. After reviewing third-party dependencies, with Go 1.24+ already installed, run from go/:
+
+    GOTOOLCHAIN=local go get github.com/saucesteals/mimic@946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e
+    GOTOOLCHAIN=local go build -tags mimic ./...
+    GOTOOLCHAIN=local go vet -tags mimic ./...
+
+Review and retain the resulting go.mod and go.sum. Do not use an unpinned/latest Mimic version: later API generations differ. The standard project contains no downloaded dependency or binary. Mimic is MIT; its pinned dependencies include fhttp v1.0.1 and uTLS v1.7.4-0.20250519154908-0557f61cb0b8. The pinned fhttp repository lacked a root license file during source review; resolve transitive license/notice completeness before distributing dependencies or binaries.
+
+Select exactly:
+
+    "transport": {
+      "mode": "browser-profile",
+      "browserProfile": {
+        "browser": "chrome",
+        "version": "133.0.0.0",
+        "platform": "linux"
+      }
+    }
+
+Then dry-run with go run -tags mimic ./cmd/request-001; append --send only after authorization/review. Other browser/version/platform combinations fail before I/O. The version is a named Chromium-133 compatibility target, not a claim that the capture used this build. This upstream pin maps versions >=133 to the same HelloChrome_133; REB refuses newer labels rather than implying corresponding newer handshakes. User-Agent and low-entropy Client Hints come from the same allowlisted profile, never copied credential-bearing/browser-controlled headers.
+
+The adapter configures direct HTTP/HTTP2/TLS, verified certificates, no proxy/jar, no decompression and stopped redirects. Each deliberate operation has a fresh single-use transport and permits one transport dial invocation, blocking retry connections; upstream's internal HTTP2 retry paths are not application-level permission to resend. The repository's explicit --mimic validation lane builds/tests/vets the tagged module and exercises authored HTTP and untrusted TLS. Successful owned HTTPS H1/H2 and REFUSED_STREAM/GOAWAY fault measurements are still required before claiming those runtime boundaries verified. This export does not contain a passing acceptance receipt.
+
+No perfect browser fingerprint is promised. Header order is upstream-generated, not recovered wire evidence; TLS randomness, session/resumption, HTTP2, Client Hints policy, JavaScript/browser state and route can differ. JA3 alone cannot establish equivalence. HTTP3/QUIC and standalone real-browser execution/fallback are unsupported. JavaScript rejects browser-profile selection without a silent downgrade.
+
+Source: https://github.com/saucesteals/mimic/tree/946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e
+
+## JavaScript
+
+Use Node.js 22+; no packages or installation are needed. Run node examples/request-001.mjs for dry-run, or append --send after the same review. The direct built-in Node HTTP(S) transport does not use Fetch dispatchers or ambient proxy variables, does not decompress responses, and explicitly keeps TLS certificate verification enabled. It sends one request with no redirects/cookies. It is not a browser or its TLS/HTTP2 profile.
+
+## Layout
+
+- go/go.mod: dependency-free default module; explicit optional setup records pinned dependencies here
+- go/client/client.go: standard HTTP/1.1 client, shared configuration and response validation
+- go/client/mimic.go: optional build-tag profile adapter
+- go/services/service001.go and go/cmd/request-001/main.go: one operation and dry-run/send CLI
+- src/client.mjs and src/services/service-001.mjs: standard Node transport and one operation
+- examples/request-001.mjs: explicit JavaScript dry-run/send CLI
+- requests/request-001.json: reviewed request data
+- config.example.json: shared policy/check placeholders; local config.json is ignored
+- provenance.json: exact source references, unresolved problems and limitations
+- evidence/: retained raw evidence or an explicitly labeled best-effort redacted copy
+
+## Fidelity and privacy
+
+Export mode: ${mode}. Raw capture/run evidence remains unchanged even when it cannot be replayed. Retained CDP strings/base64 are not original HTTP wire bytes. Duplicate wire headers, casing/order, framing, extra-info headers and state may be absent. Binary, multipart, encoded or truncated requests remain evidence-only until deliberately reconstructed. No automatic credential extraction occurs. Go's standard lane requires ASCII URLs/headers; Unicode originals remain evidence. TypeScript and Python generators are not included.
+
+Raw values stay raw in this explicit export and can include credentials/personal data. Redacted copies remove header values and bodies and strip URL credentials/query/fragment; names, paths, identifiers and arbitrary secrets can remain. This best-effort export never rewrites local evidence. Review before sharing. .gitignore excludes config, request data, evidence and provenance; it is not a security boundary.
+`;
+}
+
 function capturedClientProject(source, mode) {
   if (!['raw','redacted_copy'].includes(mode)) throw new TypeError('Choose raw or explicitly redacted project export.');
   const raw = mode === 'raw', input = raw ? source.input : capturedClientRedactInput(source.input);
@@ -468,8 +962,8 @@ function capturedClientProject(source, mode) {
     limitations:['One observed operation only; no endpoint discovery or generated service schema.',
       'Retained CDP representations are not original HTTP wire bytes; duplicate wire headers, original casing/order and extra-info headers may be absent.',
       'HTTP clients normalize URLs and headers. TLS, compression, CORS, storage and cookies differ from the original browser.',
-      'Go uses standard net/http HTTP/1.1, no browser TLS fingerprint emulation, ambient proxy, cookie jar or automatic decompression. It requires ASCII URLs/header values; other original values remain evidence.',
-      'This example omits credentials, blocks unsupported headers and uses manual redirects. Repeater follows redirects.',
+      'Default Go uses standard HTTP/1.1; an optional pinned Mimic build has one explicit Chrome133/Linux profile, with unverified browser equivalence. No ambient proxy, cookie jar, certificate bypass or automatic decompression.',
+      'Both clients omit credentials and stop redirects; optional response checks must be configured explicitly. Repeater follows redirects.',
       'Missing, binary, multipart or truncated request representations require explicit configuration; no prefix is claimed complete.',
       'Raw files can contain credentials or personal data. Redacted names, paths and provenance can still be sensitive. Review before sharing.']};
   const files = [], add = (path,text) => files.push({path:'reb-client-project/'+path,text}), json = value => JSON.stringify(value,null,2)+'\n';
@@ -489,14 +983,14 @@ function capturedClientProject(source, mode) {
     if (source.capture) add('evidence/capture.json',json(capturedClientCaptureCopy(source.capture.evidence,mode)));
   }
   add('requests/request-001.json',json(input));
-  add('config.example.json',json({allowedOrigin:'',request:null}));
+  add('config.example.json',json({configVersion:'reb-client-config-v1',allowedOrigin:'',request:null,transport:{mode:'standard',browserProfile:null},timeoutMs:null,redirectPolicy:'manual',cookiePolicy:'omit',responseChecks:{statuses:[],contentType:null,jsonFields:[]}}));
   for (const [path,text] of Object.entries(capturedClientGoFiles())) add(path,text);
   add('.gitignore','config.json\n.env*\nrequests/*.json\nevidence/\nprovenance.json\n');
   add('package.json',json({name:'reb-observed-client',private:true,type:'module',engines:{node:'>=22'},scripts:{example:'node examples/request-001.mjs',send:'node examples/request-001.mjs --send'}}));
-  add('src/client.mjs',`// Generated local client. Inputs are data, never evaluated code.\n${capturedClientIssues.toString()}\n${capturedClientSend.toString()}\nexport {capturedClientSend as sendRequest};\n`);
-  add('src/services/service-001.mjs',"import {readFile} from 'node:fs/promises';\nimport {sendRequest} from '../client.mjs';\nconst read = async path => JSON.parse(await readFile(new URL(path,import.meta.url),'utf8'));\nexport async function request001(options = {}) {\n  const [input,provenance] = await Promise.all([read('../../requests/request-001.json'),read('../../provenance.json')]);\n  return sendRequest(input,{...options,provenance});\n}\n");
-  add('examples/request-001.mjs',"import {readFile} from 'node:fs/promises';\nimport {request001} from '../src/services/service-001.mjs';\nconst args = process.argv.slice(2);\nif(args.some(arg=>arg!=='--send') || args.length>1) throw new Error('Usage: node examples/request-001.mjs [--send]');\nlet config = {};\ntry {config=JSON.parse(await readFile(new URL('../config.json',import.meta.url),'utf8'));} catch(error) {if(error.code!=='ENOENT')throw error;}\nconsole.log(JSON.stringify(await request001({config,send:args.includes('--send')}),null,2));\n");
-  add('README.md',`# One observed API operation\n\nThis project contains one reviewed request representation, not a discovered API specification or SDK. service-001 groups only the observed origin in provenance.json; the neutral filenames contain no captured paths or secrets.\n\n## Go first\n\nUse Go 1.23 or newer. No third-party modules or install step are needed. From the go/ folder, run \`go run ./cmd/request-001\` for a dry run. Review the shared root-level request, provenance and config.json as described below. Only \`go run ./cmd/request-001 --send\` sends. Run commands from go/ so the shared JSON files resolve to their parent folder.\n\n## JavaScript and shared review steps\n\n1. Use Node.js 22 or newer. No packages or install step are required.\n2. Run \`node examples/request-001.mjs\` for a dry run. It never sends a request.\n3. Review requests/request-001.json and evidence/. Copy config.example.json to config.json and set allowedOrigin to the exact authorized origin.\n4. For a redacted or unsupported export, supply a complete reviewed request object in config.request, using the request file's method/url/headers/body/timeout_ms shape. Headers are pairs, not an object. Never paste credentials into a request intended for this credential-omitting client.\n5. Only when authorized, run \`node examples/request-001.mjs --send\`. This can change server data for mutating methods. It sends once, without retries, and does not follow redirects.\n\n## Layout\n\n- go/go.mod: dependency-free Go module\n- go/client/client.go: bounded standard net/http client and validation\n- go/services/service001.go: one observed operation using shared JSON\n- go/cmd/request-001/main.go: dry-run/send example\n- src/client.mjs: bounded JavaScript HTTP client and input checks\n- src/services/service-001.mjs: the one observed operation\n- requests/request-001.json: data, never executable source\n- examples/request-001.mjs: explicit dry-run/send entry point\n- config.example.json: local configuration placeholders\n- provenance.json: capture/run identity, unresolved problems and limitations\n- evidence/: retained original evidence in raw mode, or its explicitly labeled redacted copy\n\n## Fidelity and privacy\n\nExport mode: ${mode}. Raw evidence is preserved even when the client cannot faithfully replay it. Unsupported headers, duplicate header names, multipart, binary and truncated bodies are never silently rewritten into a claimed complete request. Review provenance.json before use. HTTP client header order/casing, automatic headers, URL normalization, cookies, redirects, TLS, compression and CORS behavior can differ. Go uses standard net/http HTTP/1.1 with no ambient proxy, cookie jar or automatic decompression. ASCII URLs and header values only are supported in Go; non-ASCII originals remain evidence, never silently converted. Its TLS handshake is not a browser fingerprint. TypeScript and Python clients are not included in this version. A successful response is not proof that an API operation is equivalent or authorized. Response text is limited to 64 KiB and its truncation is reported.\n\nRaw values stay raw in this explicit export. Redacted copies remove header values and bodies and strip URL credentials/query/fragment; names, paths and identifiers can still be sensitive. Do not publish these files without review. The included .gitignore excludes local configuration, request data, evidence and provenance.\n`);
+  add('src/client.mjs',`// Generated local client. Inputs are data, never evaluated code.\n${capturedClientIssues.toString()}\n${capturedClientFailure.toString()}\n${capturedClientConfig.toString()}\n${capturedClientJSON.toString()}\n${capturedClientInputJSON.toString()}\n${capturedClientValidateResponse.toString()}\n${capturedClientSend.toString()}\nexport {capturedClientSend as sendRequest,capturedClientJSON as parseClientJSON,capturedClientInputJSON as parseInputJSON};\n`);
+  add('src/services/service-001.mjs',"import {readFile} from 'node:fs/promises';\nimport {sendRequest,parseClientJSON,parseInputJSON} from '../client.mjs';\nconst read = async (path,strict=false) => (strict?parseInputJSON:parseClientJSON)(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(await readFile(new URL(path,import.meta.url))));\nexport async function request001(options = {}) {\n  const [input,provenance] = await Promise.all([read('../../requests/request-001.json',true),read('../../provenance.json')]);\n  return sendRequest(input,{...options,provenance});\n}\n");
+  add('examples/request-001.mjs',"import {readFile} from 'node:fs/promises';\nimport {request001} from '../src/services/service-001.mjs';\nimport {parseInputJSON} from '../src/client.mjs';\nconst args = process.argv.slice(2);\nif(args.some(arg=>arg!=='--send') || args.length>1) throw new Error('Usage: node examples/request-001.mjs [--send]');\nlet config = {};\ntry {config=parseInputJSON(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(await readFile(new URL('../config.json',import.meta.url))));} catch(error) {if(error.code!=='ENOENT')throw error;}\ntry { console.log(JSON.stringify(await request001({config,send:args.includes('--send')}),null,2)); } catch(error) { console.error((error.code ?? 'client_error')+': '+error.message); if(error.result?.network_attempted) console.error(error.result.instruction); process.exitCode=1; }\n");
+  add('README.md',capturedClientReadme(mode));
   return {files,provenance,bytes:capturedClientZip(files)};
 }
 

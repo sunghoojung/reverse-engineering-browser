@@ -1364,6 +1364,194 @@ std::string_view JwtAlgorithmName(const JwtAlgorithm algorithm) noexcept {
   return "unsupported";
 }
 
+// The schema is unknown: preserve wire values and offsets, never infer field names,
+// signedness, floating-point types, packed fields, strings or nested messages.
+bool ReadWireVarint(const std::span<const std::uint8_t> input,
+                    std::size_t& position,
+                    std::uint64_t& value) {
+  value = 0;
+  for (unsigned index = 0; index < 10; ++index) {
+    if (position >= input.size())
+      return false;
+    const std::uint8_t byte = input[position++];
+    if (index == 9 && byte > 1U)
+      return false;
+    value |= static_cast<std::uint64_t>(byte & 0x7fU) << (index * 7U);
+    if ((byte & 0x80U) == 0)
+      return true;
+  }
+  return false;
+}
+
+DecoderResult InspectProtobuf(const std::span<const std::uint8_t> input,
+                              const std::size_t output_limit,
+                              std::size_t& field_budget) {
+  std::string output = "{\"format\":\"reb-protobuf-wire-v1\",\"schema_known\":false,\"fields\":[";
+  std::size_t position = 0;
+  bool first = true;
+  while (position < input.size()) {
+    if (field_budget == 0)
+      return Failure(DecoderStatus::kOutputLimit, "Protobuf field count exceeds 4096");
+    --field_budget;
+    const std::size_t offset = position;
+    std::uint64_t tag = 0;
+    if (!ReadWireVarint(input, position, tag) || (tag >> 3U) == 0 || (tag >> 3U) > 0x1fffffffU) {
+      return Failure(DecoderStatus::kInvalidInput, "Invalid or truncated protobuf field key");
+    }
+    const std::uint64_t wire = tag & 7U;
+    const std::size_t key_end = position;
+    std::string detail;
+    if (wire == 0 || wire == 1 || wire == 5) {
+      std::uint64_t value = 0;
+      if (wire == 0) {
+        if (!ReadWireVarint(input, position, value))
+          return Failure(DecoderStatus::kInvalidInput, "Invalid or truncated protobuf varint");
+      } else {
+        const std::size_t width = wire == 1 ? 8 : 4;
+        if (input.size() - position < width)
+          return Failure(DecoderStatus::kInvalidInput, "Truncated protobuf fixed-width value");
+        for (std::size_t index = 0; index < width; ++index)
+          value |= static_cast<std::uint64_t>(input[position++]) << (index * 8U);
+      }
+      detail = ",\"unsigned_decimal\":\"" + std::to_string(value) + "\"";
+    } else if (wire == 2) {
+      std::uint64_t length = 0;
+      if (!ReadWireVarint(input, position, length) || length > input.size() - position)
+        return Failure(DecoderStatus::kInvalidInput,
+                       "Invalid or truncated protobuf length-delimited field");
+      const std::size_t size = static_cast<std::size_t>(length);
+      if (size > output_limit / 4 * 3)
+        return Failure(DecoderStatus::kOutputLimit,
+                       "Protobuf byte projection exceeds the output limit");
+      const auto encoded = Base64Encode(input.subspan(position, size), false, true);
+      detail = ",\"payload_offset\":" + std::to_string(position) +
+               ",\"length\":" + std::to_string(length) + ",\"bytes_base64\":\"" +
+               std::string(encoded.begin(), encoded.end()) + "\"";
+      position += size;
+    } else {
+      return Failure(
+          wire == 3 || wire == 4 ? DecoderStatus::kUnsupported : DecoderStatus::kInvalidInput,
+          "Protobuf groups and unknown wire types are not supported");
+    }
+    const std::string field =
+        std::string(first ? "" : ",") + "{\"offset\":" + std::to_string(offset) +
+        ",\"key_end\":" + std::to_string(key_end) + ",\"end\":" + std::to_string(position) +
+        ",\"field_number\":" + std::to_string(tag >> 3U) +
+        ",\"wire_type\":" + std::to_string(wire) + detail + "}";
+    if (field.size() + 2 > output_limit || output.size() > output_limit - field.size() - 2)
+      return Failure(DecoderStatus::kOutputLimit, "Protobuf report exceeds the output limit");
+    output += field;
+    first = false;
+  }
+  output += "]}";
+  if (output.size() > output_limit)
+    return Failure(DecoderStatus::kOutputLimit, "Protobuf report exceeds the output limit");
+  return Success({output.begin(), output.end()});
+}
+
+DecoderResult InspectGrpcWeb(const std::span<const std::uint8_t> input,
+                             const std::size_t output_limit) {
+  std::string output = "{\"format\":\"reb-grpc-web-wire-v1\",\"frames\":[";
+  std::size_t position = 0;
+  std::size_t count = 0;
+  std::size_t field_budget = 4096;
+  bool trailers = false;
+  while (position < input.size()) {
+    if (trailers)
+      return Failure(DecoderStatus::kInvalidInput, "gRPC-web trailers must be the last frame");
+    if (++count > 256)
+      return Failure(DecoderStatus::kOutputLimit, "gRPC-web frame count exceeds 256");
+    const std::size_t offset = position;
+    if (input.size() - position < 5)
+      return Failure(DecoderStatus::kInvalidInput, "Truncated gRPC-web envelope header");
+    const std::uint8_t flags = input[position++];
+    if (flags != 0 && flags != 0x80U)
+      return Failure(DecoderStatus::kUnsupported,
+                     "Compressed or reserved gRPC-web flags are unsupported");
+    std::uint32_t length = 0;
+    for (unsigned index = 0; index < 4; ++index)
+      length = (length << 8U) | input[position++];
+    if (length > input.size() - position)
+      return Failure(DecoderStatus::kInvalidInput, "Truncated gRPC-web envelope payload");
+    const auto payload = input.subspan(position, length);
+    std::string body;
+    if (flags == 0) {
+      const auto decoded = InspectProtobuf(payload, output_limit, field_budget);
+      if (decoded.status != DecoderStatus::kOk)
+        return decoded;
+      body = "\"kind\":\"message\",\"protobuf\":" +
+             std::string(decoded.output.begin(), decoded.output.end());
+    } else {
+      trailers = true;
+      if (payload.size() > 16384)
+        return Failure(DecoderStatus::kOutputLimit, "gRPC-web trailers exceed 16 KiB");
+      for (const auto byte : payload)
+        if (byte != '\r' && byte != '\n' && (byte < 0x20U || byte > 0x7eU))
+          return Failure(DecoderStatus::kInvalidInput,
+                         "gRPC-web trailers must contain bounded ASCII metadata");
+      const std::string text(payload.begin(), payload.end());
+      std::size_t cursor = 0;
+      std::size_t headers = 0;
+      body = "\"kind\":\"trailers\",\"headers\":[";
+      while (cursor < text.size()) {
+        const auto end = text.find("\r\n", cursor);
+        if (end == std::string::npos || ++headers > 128)
+          return Failure(DecoderStatus::kInvalidInput,
+                         "Malformed or excessive gRPC-web trailer lines");
+        const auto line = std::string_view(text).substr(cursor, end - cursor);
+        const auto colon = line.find(':');
+        if (colon == std::string_view::npos || colon == 0)
+          return Failure(DecoderStatus::kInvalidInput,
+                         "gRPC-web trailer field has no name separator");
+        for (const char ch : line.substr(0, colon))
+          if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' ||
+                ch == '.'))
+            return Failure(DecoderStatus::kInvalidInput,
+                           "gRPC-web trailer names must be lowercase metadata keys");
+        const auto value = line.substr(colon + 1);
+        if (value.find_first_of("\r\n") != std::string_view::npos)
+          return Failure(DecoderStatus::kInvalidInput, "Malformed gRPC-web trailer value");
+        if (headers > 1)
+          body += ",";
+        body += "{\"name\":\"" + JsonEscape(line.substr(0, colon)) + "\",\"value\":\"" +
+                JsonEscape(value) + "\"}";
+        cursor = end + 2;
+      }
+      body += "]";
+    }
+    position += length;
+    const std::string frame = std::string(count == 1 ? "" : ",") +
+                              "{\"offset\":" + std::to_string(offset) +
+                              ",\"payload_offset\":" + std::to_string(offset + 5) +
+                              ",\"length\":" + std::to_string(length) +
+                              ",\"end\":" + std::to_string(position) + "," + body + "}";
+    if (frame.size() + 64 > output_limit || output.size() > output_limit - frame.size() - 64)
+      return Failure(DecoderStatus::kOutputLimit, "gRPC-web report exceeds the output limit");
+    output += frame;
+  }
+  output += std::string("],\"trailers_present\":") + (trailers ? "true" : "false") +
+            ",\"rpc_success_verified\":false}";
+  if (output.size() > output_limit)
+    return Failure(DecoderStatus::kOutputLimit, "gRPC-web report exceeds the output limit");
+  return Success({output.begin(), output.end()});
+}
+
+DecoderResult InspectGrpcWebText(const std::span<const std::uint8_t> input,
+                                 const std::size_t output_limit) {
+  if (input.size() % 4 != 0)
+    return Failure(DecoderStatus::kInvalidInput, "gRPC-web text requires complete base64 quartets");
+  std::vector<std::uint8_t> decoded;
+  decoded.reserve(input.size() / 4 * 3);
+  // Independently padded chunks may split envelopes at any byte boundary.
+  for (std::size_t position = 0; position < input.size(); position += 4) {
+    const auto chunk = Base64Decode(input.subspan(position, 4), false, 3);
+    if (chunk.status != DecoderStatus::kOk)
+      return chunk;
+    decoded.insert(decoded.end(), chunk.output.begin(), chunk.output.end());
+  }
+  return InspectGrpcWeb(decoded, output_limit);
+}
+
 JwtInspection JwtFailure(std::string message) {
   JwtInspection inspection;
   inspection.status = DecoderStatus::kInvalidInput;
@@ -1374,7 +1562,7 @@ JwtInspection JwtFailure(std::string message) {
 }  // namespace
 
 std::optional<DecoderOperation> DecoderOperationFromName(const std::string_view name) noexcept {
-  constexpr std::array<std::pair<std::string_view, DecoderOperation>, 18> kOperations = {{
+  constexpr std::array<std::pair<std::string_view, DecoderOperation>, 21> kOperations = {{
       {"base64-encode", DecoderOperation::kBase64Encode},
       {"base64-decode", DecoderOperation::kBase64Decode},
       {"base64url-encode", DecoderOperation::kBase64UrlEncode},
@@ -1393,6 +1581,9 @@ std::optional<DecoderOperation> DecoderOperationFromName(const std::string_view 
       {"deflate-decompress", DecoderOperation::kDeflateDecompress},
       {"json-pretty", DecoderOperation::kJsonPretty},
       {"json-minify", DecoderOperation::kJsonMinify},
+      {"protobuf-inspect", DecoderOperation::kProtobufInspect},
+      {"grpc-web-inspect", DecoderOperation::kGrpcWebInspect},
+      {"grpc-web-text-inspect", DecoderOperation::kGrpcWebTextInspect},
   }};
   const auto iterator = std::find_if(kOperations.begin(), kOperations.end(),
                                      [name](const auto& item) { return item.first == name; });
@@ -1438,6 +1629,12 @@ std::string_view DecoderOperationName(const DecoderOperation operation) noexcept
       return "json-pretty";
     case DecoderOperation::kJsonMinify:
       return "json-minify";
+    case DecoderOperation::kProtobufInspect:
+      return "protobuf-inspect";
+    case DecoderOperation::kGrpcWebInspect:
+      return "grpc-web-inspect";
+    case DecoderOperation::kGrpcWebTextInspect:
+      return "grpc-web-text-inspect";
   }
   return "unsupported";
 }
@@ -1458,6 +1655,14 @@ DecoderResult TransformBytes(const DecoderOperation operation,
       }
       return Success(Base64Encode(input, false, true));
     }
+    case DecoderOperation::kProtobufInspect: {
+      std::size_t fields = 4096;
+      return InspectProtobuf(input, output_limit, fields);
+    }
+    case DecoderOperation::kGrpcWebInspect:
+      return InspectGrpcWeb(input, output_limit);
+    case DecoderOperation::kGrpcWebTextInspect:
+      return InspectGrpcWebText(input, output_limit);
     case DecoderOperation::kBase64Decode:
       return Base64Decode(input, false, output_limit);
     case DecoderOperation::kBase64UrlEncode: {

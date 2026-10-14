@@ -115,3 +115,5 @@ long-message hash blocks, wrong secrets, unsigned and unsupported algorithms,
 duplicate algorithm headers, JSON limits, malformed compression, and output
 caps. Service, HTTP, browser-contract, desktop, narrow-layout, and packaged-app
 smoke checks cover the complete user path.
+
+Structured wire inspection adds explicit Protobuf, gRPC-web binary and gRPC-web text operations. See [wire inspection v1](protobuf-grpc-v1.md) for schema-unknown semantics, source offsets, framing and limits.

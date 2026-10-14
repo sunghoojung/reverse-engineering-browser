@@ -36,6 +36,9 @@ enum class DecoderOperation : std::uint8_t {
   kDeflateDecompress,
   kJsonPretty,
   kJsonMinify,
+  kProtobufInspect,
+  kGrpcWebInspect,
+  kGrpcWebTextInspect,
 };
 
 enum class DecoderStatus : std::uint8_t {

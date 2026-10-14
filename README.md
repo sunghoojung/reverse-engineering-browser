@@ -241,6 +241,17 @@ bodies are unavailable in native quiet mode.
 Usage, authorization, capture, and privacy boundaries are defined in
 [`SAFETY.md`](SAFETY.md).
 
+## Local coding-agent workflow
+
+Use the repository's shared skill with Codex or Claude Code to inspect an
+explicitly selected Origin Trace backend, correlate exact evidence, and author
+client code with offline synthetic tests. The CLI offers machine-readable
+operation discovery and an opt-in read-only effect guard. Local transport does
+not prevent capture data from entering an agent provider's context; agree on
+sharing scope before reading captures. See the
+[local coding-agent guide](docs/development/local-coding-agents.md) for setup,
+native-mode limits, and approval boundaries.
+
 ## Development and validation
 
 Repository CI covers source checks, native/Rust tests, the event path, rendered

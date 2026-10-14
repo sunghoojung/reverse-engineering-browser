@@ -24,6 +24,13 @@ Coding agents should also read the repository contract in
 [AGENTS.md](../AGENTS.md). It routes UI, Brave, and handoff work to the focused
 skills under `.agents/skills/`.
 
+## Development workflows
+
+- [Local Codex and Claude Code workflows](development/local-coding-agents.md):
+  explicit session selection, guarded CLI inspection, exact evidence correlation,
+  and offline client authoring with synthetic tests
+- [Fast local Brave builds](development/fast-browser-builds.md)
+
 ## Architecture and contracts
 
 - [Native proxy container architecture](./architecture/native-proxy-containers.md)

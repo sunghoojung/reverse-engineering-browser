@@ -99,6 +99,42 @@ five-second manifest or thirty-second verification deadline expires.
 This is not HTTP Range/206 pagination. Events and artifacts expose a bounded
 recent tail, not a cursor or stable exhaustive export.
 
+## Local coding-agent discovery and observational calls
+
+`reb-api list --json` is an offline, versioned discovery document. It returns
+`format: reb-api-discovery-v1`, the embedded `execution_policy`, and `operations`
+ordered by operation ID. Every entry has `operation_id`, `method`, `path`,
+`summary`, `execution` (the operation's complete advisory metadata), and a
+boolean `read_only_eligible`. The default tab-separated `list` remains unchanged.
+This describes the CLI build, not a live server's identity, version or abilities.
+`describe` remains the source of parameter, request, response and action schemas.
+
+`reb-api call OPERATION --read-only` rejects an ineligible operation before
+reading the endpoint file or request body, opening the output file, or dispatching
+HTTP. Eligibility requires the supported execution policy, metadata valid under
+`RebExecutionMetadata`, `kind: operation`, effects limited to `analysis` (or no
+effects), and empty `state_dependent_effects`, `uncertainties` and `confirmations`.
+Missing, malformed, unsupported and action-dependent metadata fails closed.
+The discovery flag uses this same predicate. There is no method-based shortcut:
+inert evidence comparison POSTs qualify, but VM cache GETs, source-helper GETs,
+native session retirement and live browser controls do not.
+
+The flag is opt-in; existing unguarded calls and raw-local responses are unchanged.
+It is an accident-prevention aid, not a sandbox, approval, capture redaction or
+proof of complete effect accounting. It does not stop independent background
+capture or incidental local transport, and explicit CLI `--output` file writes
+still work. The API remains unauthenticated and loopback-only. Guard rejection
+exits 2 without a request; other response handling and exit codes are unchanged.
+No operation is automatically retried.
+
+A local agent can transmit returned values to its model provider. Establish the
+user-approved provider, session and data categories before reading captures into
+agent context; even structural paths and identifiers can be sensitive. Use the
+[local coding-agent guide](../docs/development/local-coding-agents.md) and shared
+repo skill for exact session selection, capture-as-untrusted-data handling,
+offline client scaffolding and explicit approval before effects. Neither the
+skill nor the guard authorizes sharing or configures the user's agent account.
+
 ## Observed website API catalog
 
 `GET /api/network/catalog` (`reb-api call get_api_observation_catalog`) derives

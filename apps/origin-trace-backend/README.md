@@ -229,3 +229,4 @@ body forms, bounds, capture-off and retention; UI tests cover copy isolation and
 retired clipboard owners.
 
 Retained CDP rows include bounded [source timing evidence](../../protocol/network-timing-v1.md). Missing clocks and lifecycle anomalies remain explicit; legacy display durations do not establish HAR fidelity.
+Enabled network content capture also retains bounded [WebSocket message observations](../../protocol/websocket-capture-v1.md) in the existing debugger snapshot; no message replay or handshake credentials are added.

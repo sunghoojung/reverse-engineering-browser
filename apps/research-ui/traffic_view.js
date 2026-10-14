@@ -904,3 +904,84 @@ function installTrafficCaptureExport(host, getRequest) {
 
 // Reuse the explicit export-copy policy from the offline client-project command.
 if (typeof module === 'object' && module?.exports && typeof require === 'function') module.exports = {trafficCaptureDocument};
+
+// CDP message observations are distinct from HTTP rows and not reconstructed streams.
+function webSocketModel(network) {
+  const capture=network?.websockets;
+  const unavailable=reason=>({available:false,reason,connections:[],frames:[]});
+  if(network?.capture_enabled!==true)return unavailable('WebSocket content capture is disabled.');
+  if(capture?.format!=='reb-websocket-capture-v1')return unavailable('This backend snapshot has no WebSocket message capture.');
+  const integer=value=>Number.isSafeInteger(value)&&value>=0;
+  if(typeof network.instance_id!=='string'||!integer(network.capture_epoch)||typeof network.target_id!=='string')return unavailable('WebSocket capture ownership is unavailable.');
+  if(!Array.isArray(capture.connections)||capture.connections.length>64||!Array.isArray(capture.frames)||capture.frames.length>512||
+      !['dropped_connections','dropped_frames','orphan_events','malformed_events'].every(key=>integer(capture[key])))return unavailable('Malformed WebSocket capture; no messages displayed.');
+  const ids=new Set(),sequences=new Set();
+  for(const item of capture.connections) {
+    if(!item||!integer(item.id)||ids.has(item.id)||typeof item.url!=='string'||item.url.length>8192||item.target_id!==network.target_id||typeof item.protocol_request_id!=='string'||typeof item.state!=='string')return unavailable('Malformed WebSocket connection identity.');
+    ids.add(item.id);
+  }
+  for(const frame of capture.frames) {
+    if(!frame||!integer(frame.sequence)||sequences.has(frame.sequence)||!integer(frame.connection_id)||typeof frame.target_id!=='string'||
+        !['sent','received'].includes(frame.direction)||!integer(frame.opcode)||frame.opcode>15||typeof frame.monotonic_seconds!=='number'||!Number.isFinite(frame.monotonic_seconds)||frame.monotonic_seconds<0||
+        !['utf8','base64'].includes(frame.encoding)||typeof frame.payload!=='string'||frame.payload.length>5464||typeof frame.truncated!=='boolean'||!['available','oversized'].includes(frame.payload_state))return unavailable('Malformed WebSocket message; no messages displayed.');
+    sequences.add(frame.sequence);
+  }
+  return {available:true,...capture,scope:JSON.stringify([network.instance_id??null,network.capture_epoch??null,network.target_id??null])};
+}
+
+function renderWebSocketInspector(root,network,stale=false) {
+  if(!root)return;
+  const model=webSocketModel(network);
+  // HTTP-only captures keep their full workspace. An open panel retains explicit
+  // empty/disabled status, but a closed panel appears only with retained sockets.
+  const hide=!root.open&&model.connections.length===0;
+  if(hide&&root.contains(document.activeElement))document.querySelector?.('#request-filter')?.focus({preventScroll:true});
+  root.hidden=hide;
+  if(!root._rebWebsocket) {
+    const summary=document.createElement('summary'),status=trafficNode('p','',''),controls=trafficNode('div','websocket-controls'),select=document.createElement('select'),direction=document.createElement('select'),frames=trafficNode('div','websocket-frames');
+    select.setAttribute('aria-label','WebSocket connection');direction.setAttribute('aria-label','WebSocket direction');
+    for(const [value,label] of [['all','Both directions'],['sent','Sent'],['received','Received']]) {const option=document.createElement('option');option.value=value;option.textContent=label;direction.append(option);}
+    direction.value='all';
+    controls.append(select,direction);status.setAttribute('role','status');root.append(summary,status,controls,frames);
+    root._rebWebsocket={summary,status,select,direction,frames,scope:null,optionKey:null,frameKey:null,model:null,stale:false};
+    const refresh=()=>renderWebSocketInspector(root,root._rebWebsocket.network,root._rebWebsocket.stale);
+    select.addEventListener('change',refresh);direction.addEventListener('change',refresh);root.addEventListener('toggle',refresh);
+  }
+  const ui=root._rebWebsocket;ui.network=network;ui.stale=stale;ui.model=model;
+  ui.summary.textContent=`WebSockets · ${model.connections.length} retained connections · ${model.frames.length} retained messages`;
+  ui.select.disabled=ui.direction.disabled=!model.available;
+  if(!model.available){ui.status.textContent=model.reason;ui.frames.replaceChildren();ui.frameKey=null;return;}
+  const changedScope=ui.scope!==model.scope;ui.scope=model.scope;
+  if(changedScope){const focused=ui.frames.contains(document.activeElement);ui.frames.replaceChildren();ui.frameKey=null;if(focused)ui.select.focus({preventScroll:true});}
+  const optionKey=JSON.stringify(model.connections.map(item=>[item.id,item.url,item.state]));
+  if(changedScope||optionKey!==ui.optionKey) {
+    const previous=changedScope?'':ui.select.value;ui.optionKey=optionKey;
+    const options=model.connections.map(item=>{const option=document.createElement('option');option.value=String(item.id);option.textContent=`#${item.id} ${item.state} ${item.url}`;return option;});
+    ui.select.replaceChildren(...options);
+    if(options.some(option=>option.value===previous))ui.select.value=previous;
+    else if(options.length)ui.select.value=options[options.length-1].value;
+  }
+  const selected=model.connections.find(item=>String(item.id)===ui.select.value);
+  const orphaned=model.frames.filter(frame=>!model.connections.some(connection=>connection.id===frame.connection_id)).length;
+  ui.status.textContent=(stale?'Debugger refresh unavailable; last retained snapshot. ':'')+
+    'Raw captured content can be sensitive. Monotonic seconds; CDP messages are not wire frames or reassembled streams. '+
+    `Dropped: ${model.dropped_connections} connections, ${model.dropped_frames} messages. Unmatched events: ${model.orphan_events}; malformed: ${model.malformed_events}; messages whose connection was evicted: ${orphaned}.`+
+    (selected?` Selected #${selected.id}: ${selected.state}; handshake status ${selected.handshake_status??'unknown'}; errors ${selected.error_count??0}.`:' No retained connections.');
+  if(!root.open)return;
+  const matching=model.frames.filter(frame=>selected&&frame.connection_id===selected.id&&frame.target_id===selected.target_id&&(ui.direction.value==='all'||frame.direction===ui.direction.value));
+  const visible=matching.slice(-100),key=JSON.stringify([model.scope,selected?.id,ui.direction.value,visible]);
+  if(key===ui.frameKey)return;ui.frameKey=key;
+  const previousFrames=new Map((changedScope?[]:[...ui.frames.children]).filter(node=>node.dataset?.sequence).map(node=>[node.dataset.sequence,node]));
+  const active=document.activeElement,restore=ui.frames.contains(active);
+  const nodes=[trafficNode('p','',`${visible.length} of ${matching.length} matching retained messages shown, newest 100. Payload prefixes are at most 4 KiB.`)];
+  for(const frame of visible) {
+    const old=previousFrames.get(String(frame.sequence));
+    const article=old??document.createElement('details'),summary=old?.children[0]??document.createElement('summary'),payload=old?.children[1]??document.createElement('pre');
+    article.dataset.sequence=String(frame.sequence);
+    summary.textContent=`#${frame.sequence} ${frame.direction} · opcode ${frame.opcode} · ${frame.monotonic_seconds}s · ${frame.encoding}${frame.truncated?' · truncated':''}`;
+    payload.tabIndex=0;payload.textContent=frame.payload_state==='oversized'?'Binary payload exceeded its decode bound; bytes unavailable.':frame.payload;
+    if(!old)article.append(summary,payload);nodes.push(article);
+  }
+  ui.frames.replaceChildren(...nodes);
+  if(restore){if(ui.frames.contains(active))active.focus({preventScroll:true});else ui.select.focus({preventScroll:true});}
+}

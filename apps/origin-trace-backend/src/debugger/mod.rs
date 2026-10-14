@@ -14,6 +14,7 @@ mod objects;
 mod parse;
 mod repeater;
 mod requests;
+mod websocket;
 mod workers;
 use crate::{
     config::Options,
@@ -324,6 +325,7 @@ impl Debugger {
             );
             s["network"]["target_id"] = target["id"].clone();
             s["network"]["requests"] = json!([]);
+            s["network"]["websockets"] = websocket::empty();
             s["network"]["dropped"] = json!(0);
         });
         *self.connection.lock().await = Some(connection.clone());

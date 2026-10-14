@@ -5339,6 +5339,14 @@ async fn compare_package_http(server: &Server, bytes: &[u8], status: u16) -> Val
         .await
         .unwrap();
     assert!(response.headers().get("etag").is_none());
+    if response.status().as_u16() != status {
+        let actual = response.status();
+        let bytes = response.bytes().await.unwrap();
+        panic!(
+            "Evidence comparison expected {status}, got {actual}; bounded fixture response: {}",
+            String::from_utf8_lossy(&bytes[..bytes.len().min(4096)])
+        );
+    }
     serde_json::from_slice(
         &assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, status).await,
     )

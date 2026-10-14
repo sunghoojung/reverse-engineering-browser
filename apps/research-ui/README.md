@@ -1591,4 +1591,6 @@ worker admission, never a copied script ID or URL match. Original evidence remai
 separate and returnable; no field values are saved to the notebook. See the
 [identity, consent, bounds and research contract](../../docs/product/candidate-experiment-v1.md).
 
+Traffic includes a bounded read-only [WebSocket message inspector](../../protocol/websocket-capture-v1.md) for enabled CDP content captures. Text/base64 messages, exact connection lifetimes and drop counters stay separate from HTTP rows.
+
 The existing VM findings view now includes an explicit local [execution semantics workflow](../../protocol/vm-semantics-v1.md): bounded trace import, state changes, opcode candidates and hypothesis counterexamples. It preserves existing detection findings and does not claim native guest-opcode capture.

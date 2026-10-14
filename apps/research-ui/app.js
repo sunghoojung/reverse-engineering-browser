@@ -1579,6 +1579,7 @@
       }
 
       function renderRequests() {
+        renderWebSocketInspector(document.querySelector('#websocket-inspector'),state.debuggerSession?.network,Boolean(state.debuggerError));
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
         const includeContent = elements.requestSearchScope.value === 'content';
@@ -6415,7 +6416,7 @@
         'hex-encode', 'hex-decode', 'url-encode', 'url-decode', 'base36-encode',
         'base36-decode', 'gzip-compress', 'gzip-decompress', 'zlib-compress',
         'zlib-decompress', 'deflate-compress', 'deflate-decompress', 'json-pretty',
-        'json-minify'
+        'json-minify', 'protobuf-inspect', 'grpc-web-inspect', 'grpc-web-text-inspect'
       ]);
       const decoderAlgorithms = new Set(['HS256', 'HS384', 'HS512', 'none']);
 

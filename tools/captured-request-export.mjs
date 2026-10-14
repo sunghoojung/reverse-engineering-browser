@@ -117,8 +117,7 @@ export async function saveArchive(output, bytes) {
   return cleanupPending;
 }
 
-export async function readCapture(path) {
-  const {document,numbers} = await readInput(path);
+export function captureDocument(document,numbers) {
   const identity = selection(document,numbers);
   const evidence = traffic.trafficCaptureDocument({captureRecord:document.request},'raw');
   evidence.coverage.scope = 'One saved exact-request response; current retention and freshness were not rechecked.';
@@ -127,4 +126,9 @@ export async function readCapture(path) {
   evidence.coverage.saved_response = {format:document.format,source:document.source,debugger_generation:document.debugger_generation};
   const source = client.capturedClientSource(identity,evidence);
   return source;
+}
+
+export async function readCapture(path) {
+  const {document,numbers} = await readInput(path);
+  return captureDocument(document,numbers);
 }

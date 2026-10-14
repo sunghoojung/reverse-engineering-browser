@@ -19,6 +19,7 @@ final authority for current behavior.
 - [Feature roadmap](./product/feature-list.md)
 - [Feature catalog](./product/feature-catalog.md)
 - [Contributor guide](../CONTRIBUTING.md)
+- [Windows/Linux build guide and support status](development/windows-linux-build.md)
 
 Coding agents should also read the repository contract in
 [AGENTS.md](../AGENTS.md). It routes UI, Brave, and handoff work to the focused

@@ -225,4 +225,6 @@ pages and the local HTTP/CLI contract.
 
 - [Investigation notebook v1](investigation-notebook-v1.md): bounded local research notes and exact retained evidence pins in the existing Analyst library.
 
+[WebSocket capture v1](websocket-capture-v1.md) specifies bounded CDP message identities, raw payload encoding, loss counters and Traffic inspection.
+
 - [VM execution semantics v1](vm-semantics-v1.md): bounded supplied traces, exact step provenance, declarative hypotheses and differential validation; capture-backend-neutral, no automatic code execution.

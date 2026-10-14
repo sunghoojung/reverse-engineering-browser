@@ -156,7 +156,14 @@ async function checkRepeaterIntegration() {
 async function command(command,args,cwd,options={}) {
   return new Promise((done,reject)=>{
     const child=spawn(command,args,{cwd,env:options.env ?? process.env,stdio:['ignore','pipe','pipe']}),parts=[],errors=[];
-    const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Bounded test command timed out'));},options.timeout ?? 15000);
+    const timeout=options.timeout ?? 15000;
+    const timer=setTimeout(()=>{
+      child.kill('SIGKILL');
+      const tail=buffer=>Buffer.concat(buffer).toString().slice(-4000);
+      const output=[tail(parts),tail(errors)].filter(Boolean).join('\n');
+      const error=new Error(`Bounded test command timed out after ${timeout}ms: ${command} ${args.join(' ')}${output?'\n'+output:''}`);
+      error.code='ETIMEDOUT';reject(error);
+    },timeout);
     child.stdout.on('data',part=>parts.push(part));child.stderr.on('data',part=>errors.push(part));child.on('error',reject);
     child.on('close',code=>{clearTimeout(timer);done({code,stdout:Buffer.concat(parts).toString(),stderr:Buffer.concat(errors).toString()});});
   });
@@ -450,7 +457,8 @@ async function checkGeneratedMimicProject() {
     for(const item of project.files){const path=join(directory,item.path);await mkdir(dirname(path),{recursive:true});await writeFile(path,item.text);}
     const compiler=await command('go',['version'],cwd,{env:offline});assert.equal(compiler.code,0,compiler.stderr);assert.match(compiler.stdout,/go version go1\./);
     const pin='github.com/saucesteals/mimic@946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e';
-    const install=await command('go',['get',pin],cwd,{env:{...offline,GOPROXY:'https://proxy.golang.org',GOSUMDB:'sum.golang.org'},timeout:120000});assert.equal(install.code,0,install.stdout+install.stderr);
+    // Fresh CI runners have no Go module cache, so allow a slow proxy while keeping the fetch bounded.
+    const install=await command('go',['get',pin],cwd,{env:{...offline,GOPROXY:'https://proxy.golang.org',GOSUMDB:'sum.golang.org'},timeout:300000});assert.equal(install.code,0,install.stdout+install.stderr);
     await writeFile(join(cwd,'client/client_test.go'),await readFile(join(root,'tools/client-project-go_test.txt'),'utf8'));
     await writeFile(join(cwd,'client/mimic_test.go'),await readFile(join(root,'tools/client-project-mimic_test.txt'),'utf8'));
     await writeFile(join(cwd,'client/mimic_tls_test.go'),await readFile(join(root,'tools/client-project-mimic-tls_test.txt'),'utf8'));

@@ -290,3 +290,11 @@ existing project evidence/archive bounds still apply. See
 [offline export](../product/client-project-v1.md#offline-exact-response-export)
 for file safety, coverage and limitations. `reb-api` itself remains the API
 caller; this separate repository command adds no live operation.
+
+For an explicitly requested Python client, add `--python-client requests` or
+`--python-client httpx`. This produces a Python-only project with the same saved
+request/evidence and response checks. Its separate configuration version makes
+per-operation connect/read timeouts explicit; do not claim a whole-request
+deadline or browser-profile parity. Dependencies are listed, never installed by
+export, and the initial dry run needs only Python's standard library. See
+[Python project v1](../product/python-client-project-v1.md).

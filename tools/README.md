@@ -11,6 +11,9 @@ the existing Go/JavaScript client generator. Raw is the default;
 never contacts a target or replaces an output. See
 [client project export](../docs/product/client-project-v1.md#offline-exact-response-export)
 for identity, privacy, input bounds and file-safety requirements.
+`--python-client requests` or `--python-client httpx` selects a
+[Python-only project](../docs/product/python-client-project-v1.md); its explicitly
+versioned timeouts are per-operation, not the Go/JavaScript overall deadline.
 
 Run `python3 tools/validate-evidence-store.py path/to/events.jsonl` to validate
 normalized protocol v2 or v3 evidence, including runtime fingerprint operations

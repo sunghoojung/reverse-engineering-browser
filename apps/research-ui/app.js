@@ -10762,6 +10762,7 @@
         }
         if (screenName === 'memory') renderMemory();
         if (screenName === 'vm') {
+          if (trigger && typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.showWorkspace('findings');
           if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
           renderVmLab();
         }

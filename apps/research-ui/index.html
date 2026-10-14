@@ -415,10 +415,11 @@
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>VM findings</h1></div>
+              <div><h1>VM investigation</h1></div>
+              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button></nav>
             </header>
+            <div id="vm-findings-workspace" class="vm-findings-workspace">
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
-            <details id="vm-semantics-workflow" class="vm-semantics-workflow"><summary>Opcode and execution-state workflow</summary></details>
             <div class="vm-grid">
               <aside class="vm-list-pane" aria-label="VM findings">
                 <div class="vm-list-head">Findings <span id="vm-count">0</span></div>
@@ -426,6 +427,8 @@
               </aside>
               <div id="vm-detail" class="vm-detail" tabindex="0"></div>
             </div>
+            </div>
+            <section id="vm-semantics-workflow" class="vm-semantics-workflow" aria-label="VM execution workspace" hidden></section>
           </section>
 
           <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>

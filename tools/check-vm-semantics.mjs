@@ -44,6 +44,7 @@ const document={activeElement:null,querySelector:()=>null};
 class Element {
  constructor(tag){this.tagName=tag;this.children=[];this.attributes={};this.events={};this.style={};this.value='';this.files=[];this.text='';}
  set textContent(v){this.text=String(v);this.children=[];}get textContent(){return this.text+this.children.map(x=>x.textContent).join('');}
+ contains(element){return this===element||this.children.some(child=>child.contains?.(element));}
  append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}
  setAttribute(k,v){this.attributes[k]=v;}addEventListener(k,v){this.events[k]=v;}focus(){document.activeElement=this;}
 }
@@ -127,3 +128,65 @@ ui.input.files=[file(reg)];await ui.input.events.change();assert(ui.stateView.te
 ui.input.files=[file(dense)];await ui.input.events.change();ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:dense.identity.trace_id,mappings:[]})];await ui.hypothesis.events.change();assert.equal(descendants(ui.validationView).filter(e=>e.attributes['data-vm-step']).length,64);findButton(ui.validationView,'Next validation steps page').events.click();assert.equal(document.activeElement.textContent,'Next validation steps page');assert.equal(descendants(ui.validationView).filter(e=>e.attributes['data-vm-step'])[0].attributes['data-vm-step'],'64');
 findButton(ui.map,'Next support steps page').events.click();assert.equal(document.activeElement.textContent,'Next support steps page');assert(findButton(ui.map,'Support step 64'));
 console.log('PASS bounded visible VM pages: all706/1218 locations reachable exactly once,64-row DOM cap, focus-preserving boundaries, off-page support/counterexample targets, full raw audits and64-link validation/support pages');
+
+// Listing presentation consumes the same exact trace/report; it is not a decoder.
+ui.input.files=[file(dense)];await ui.input.events.change();
+const listingRows=()=>descendants(ui.listingBody).filter(e=>e.attributes['data-vm-sequence']!==undefined);
+const rowBySequence=sequence=>listingRows().find(e=>e.attributes['data-vm-sequence']===String(sequence));
+const press=(sequence,key,extra={})=>{let prevented=false;rowBySequence(sequence).events.keydown({key,preventDefault(){prevented=true;},...extra});return prevented;};
+assert.equal(listingRows().length,64);assert.equal(listingRows().filter(row=>row.tabIndex===0).length,1);
+assert.equal(rowBySequence(0).attributes['aria-selected'],'true');assert(rowBySequence(0).textContent.includes('Ambiguous:'));
+findButton(ui.listingPager,'Next retained steps page').events.click();assert.equal(ui.selector.value,'0');assert(ui.listingStatus.textContent.includes('off this page'));
+assert.equal(listingRows()[0].attributes['data-vm-sequence'],'64');ui.focusSelectedRow();assert.equal(document.activeElement,rowBySequence(0));
+assert(press(0,'PageDown'));assert.equal(ui.selector.value,'64');assert.equal(rowBySequence(64).attributes['aria-selected'],'true');
+assert(press(64,'ArrowUp'));assert.equal(ui.selector.value,'63');assert(press(63,'ArrowDown'));assert.equal(ui.selector.value,'64');
+assert(press(64,'End'));assert.equal(ui.selector.value,'255');assert(press(255,'ArrowDown'));assert.equal(ui.selector.value,'255');
+assert(press(255,'Home'));assert.equal(ui.selector.value,'0');assert(press(0,'ArrowUp'));assert.equal(ui.selector.value,'0');
+assert(press(0,'PageDown'));assert(press(64,'PageUp'));assert.equal(ui.selector.value,'0');
+assert(!press(0,'ArrowDown',{isComposing:true}));assert(!press(0,'ArrowDown',{altKey:true}));assert.equal(ui.selector.value,'0');
+assert(press(0,'Enter'));assert.equal(document.activeElement.textContent.includes('Step 0'),true);ui.focusSelectedRow();
+ui.filter.value='no retained row';ui.filter.events.input();assert.equal(listingRows().length,0);assert.equal(ui.selector.value,'0');assert(ui.listingBody.textContent.includes('selected step remains unchanged'));
+ui.focusSelectedRow();assert.equal(ui.filter.value,'');assert(rowBySequence(0));
+ui.go(200);assert(rowBySequence(200));assert.equal(ui.selector.value,'200');ui.go(9999);assert.equal(ui.selector.value,'200');assert(ui.notice.textContent.includes('selection unchanged'));
+let listed=[];ui.go(0);for(let page=0;page<4;page++){listed.push(...listingRows().map(row=>Number(row.attributes['data-vm-sequence'])));if(page<3)findButton(ui.listingPager,'Next retained steps page').events.click();}
+assert.deepEqual(listed,Array.from({length:256},(_,i)=>i));assert.equal(ui.selector.value,'0');
+for(let pass=0;pass<100;pass++){const next=findButton(ui.listingPager,'Next retained steps page'),previous=findButton(ui.listingPager,'Previous retained steps page');(next.disabled?previous:next).events.click();assert.equal(listingRows().length,64);assert.equal(ui.selector.value,'0');}
+const runtimeOnly=copy(sparse);runtimeOnly.steps=runtimeOnly.steps.slice(0,2);runtimeOnly.steps[0].before.pc=7;runtimeOnly.steps[0].after.pc=7;runtimeOnly.steps[0].instruction_size=5;runtimeOnly.steps[0].opcode='0011223344556677';runtimeOnly.steps[1].before.pc=7;runtimeOnly.steps[1].after.pc=7;runtimeOnly.steps[1].sequence=Number.MAX_SAFE_INTEGER;
+ui.input.files=[file(runtimeOnly)];await ui.input.events.change();assert.equal(listingRows().length,2);assert(ui.listingBody.textContent.includes('Gap before '+Number.MAX_SAFE_INTEGER));assert(rowBySequence(0).textContent.includes('0011223344556677'));assert(rowBySequence(0).textContent.includes('Unknown'));
+assert.equal(JSON.parse(ui.details.textContent).report.step.instruction_size,5);assert.equal(JSON.parse(ui.details.textContent).report.identity.trace_id,runtimeOnly.identity.trace_id);assert.deepEqual(JSON.parse(ui.details.textContent).report.coverage,runtimeOnly.coverage);
+ui.filter.value='0011223344556677';ui.filter.events.input();assert.equal(listingRows().length,1);assert.equal(ui.selector.value,'0');
+ui.go(Number.MAX_SAFE_INTEGER);assert.equal(ui.selector.value,String(Number.MAX_SAFE_INTEGER));assert.equal(ui.filter.value,'');assert(rowBySequence(Number.MAX_SAFE_INTEGER));
+ui.go(0);ui.changesOnly.checked=false;ui.changesOnly.events.change();
+ui.stateButtons.registers.events.click();assert(pageLocations(ui.stateView,'data-vm-location').every(location=>location.startsWith('registers:')));assert.equal(ui.selector.value,'0');
+findButton(ui.stateView,'registers:0').events.click();assert.equal(findButton(ui.stateView,'registers:0').attributes['aria-pressed'],'true');assert(ui.occurrences.textContent.includes('registers:0'));
+ui.stateButtons.stack.events.click();assert(pageLocations(ui.stateView,'data-vm-location').every(location=>location.startsWith('stack:')));assert(ui.stateView.textContent.includes('registers:0 is absent or hidden'));
+ui.stateButtons.memory.events.click();assert(pageLocations(ui.stateView,'data-vm-location').every(location=>location.startsWith('memory:')));assert(ui.stateView.textContent.includes('unknown (null)'));assert(ui.stateView.textContent.includes('absent (not recorded)'));
+ui.stateButtons.instruction.events.click();assert(pageLocations(ui.stateView,'data-vm-location').includes('registers:0'));assert.equal(ui.selector.value,'0');
+ui.changeLayout(1440);ui.changeLayout(900);ui.changeLayout(360);assert.equal(ui.selector.value,'0');assert.equal(findButton(ui.stateView,'registers:0').attributes['aria-pressed'],'true');
+ui.openContext('comparison');ui.closeContext();assert.equal(ui.selector.value,'0');
+console.log('PASS retained listing:256 exact rows/64-row pages, repeated PCs and large safe IDs, explicit inferred/ambiguous/unknown meanings, gaps versus filters, no-match preservation, all row keys/IME isolation, tab namespaces, selected location, complete raw report and100 bounded pager actions (not rendered QA)');
+// Regressions for off-page Enter and durable occurrence-close focus at phone width.
+ui.input.files=[file(dense)];await ui.input.events.change();ui.changeLayout(360);ui.setPanel('listing');
+findButton(ui.listingPager,'Next retained steps page').events.click();assert.equal(ui.selector.value,'0');assert(press(64,'Enter'));assert.equal(ui.selector.value,'64');assert(document.activeElement.textContent.includes('Step 64'));
+ui.changesOnly.checked=false;ui.changesOnly.events.change();findButton(ui.stateView,'registers:0').events.click();assert.equal(document.activeElement,ui.contextButtons.occurrences);ui.closeContext();assert.equal(document.activeElement,findButton(ui.stateView,'registers:0'));
+findButton(ui.stateView,'registers:0').events.click();findButton(ui.occurrences,'Step 0').events.click();assert.equal(ui.selector.value,'0');assert(document.activeElement.textContent.includes('Step 0'));assert.equal(findButton(ui.stateView,'registers:0').attributes['aria-pressed'],'true');
+findButton(ui.map,'Support step 1').events.click();assert.equal(ui.selector.value,'1');assert(document.activeElement.textContent.includes('Step 1'));
+console.log('PASS phone focus regression:off-page Enter selects focused sequence, cell→occurrences→Close restores current selected cell, support/occurrence links expose exact state');
+for(const width of [900,1440]){ui.changeLayout(360);ui.setPanel('listing');ui.panelButtons.listing.focus();ui.changeLayout(width);assert.equal(document.activeElement,ui.filter);ui.changeLayout(360);ui.setPanel('state');ui.panelButtons.state.focus();ui.changeLayout(width);assert.equal(document.activeElement,ui.stateButtons.instruction);ui.changeLayout(360);ui.panelButtons.evidence.events.click();ui.panelButtons.evidence.focus();ui.changeLayout(width);assert.equal(document.activeElement,ui.contextButtons.occurrences);}
+
+// The local mode switch changes visibility only; neither owner is reconstructed.
+const shellRoot=new Element('section'),findingsRoot=new Element('div'),findingsButton=new Element('button'),executionButton=new Element('button'),findingNode=new Element('article');
+findingsRoot.append(findingNode);findingsRoot.scrollTop=150;shellRoot.hidden=true;
+const shellNodes=new Map([['#vm-semantics-workflow',shellRoot],['#vm-findings-workspace',findingsRoot],['#vm-show-findings',findingsButton],['#vm-show-execution',executionButton]]);
+document.querySelector=selector=>shellNodes.get(selector)??null;
+const shell=runInNewContext(source+';vmExecutionWorkspace',{document,TextEncoder,TextDecoder,crypto:webcrypto,capturedClientJSON:client.capturedClientJSON});
+shell.execution.input.files=[file(dense)];await shell.execution.input.events.change();shell.execution.go(173);
+shell.execution.changeLayout(360);shell.execution.setPanel('listing');shell.execution.panelButtons.evidence.events.click();assert.equal(document.activeElement,shell.execution.contextButtons.occurrences);shell.execution.closeContext();assert.equal(document.activeElement,shell.execution.panelButtons.listing);assert.equal(shellRoot.attributes['data-panel'],'listing');
+shell.execution.changeLayout(900);findButton(shellRoot,'Trace navigation').focus();shell.execution.changeLayout(1440);assert.equal(document.activeElement,shell.execution.navigator);shell.execution.changeLayout(900);findButton(shellRoot,'Trace navigation').events.click();findButton(shellRoot,'Close navigation').focus();shell.execution.changeLayout(1440);assert.equal(document.activeElement,shell.execution.navigator);
+shell.execution.changeLayout(360);shell.execution.setPanel('listing');shell.execution.panelButtons.evidence.events.click();shell.execution.changeLayout(1440);shell.execution.closeContext();assert.equal(document.activeElement,shell.execution.filter);
+const hiddenLauncher=new Element('button');hiddenLauncher.getClientRects=()=>[];hiddenLauncher.focus();shell.execution.openContext('audit');shell.execution.changeLayout(360);shell.execution.closeContext();assert.equal(document.activeElement,shell.execution.panelButtons.listing);
+const listingIdentity=shell.execution.listingBody.children,findingsIdentity=findingsRoot.children;
+executionButton.events.click();assert.equal(shellRoot.hidden,false);assert.equal(findingsRoot.hidden,true);findingsButton.events.click();assert.equal(shellRoot.hidden,true);assert.equal(findingsRoot.hidden,false);assert.equal(findingsRoot.children,findingsIdentity);assert.equal(findingsRoot.children[0],findingNode);assert.equal(findingsRoot.scrollTop,150);assert.equal(shell.execution.selector.value,'173');executionButton.events.click();assert.equal(shell.execution.listingBody.children,listingIdentity);
+shell.showWorkspace('findings');assert.equal(shellRoot.hidden,true);assert.equal(findingsButton.attributes['aria-pressed'],'true');
+document.querySelector=()=>null;
+console.log('PASS VM-local Findings/Execution round trip preserves both DOM owners, selected sequence and finding scroll; finding entry restores Findings (DOM model, not rendered/source-link acceptance)');

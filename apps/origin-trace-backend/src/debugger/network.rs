@@ -1,4 +1,4 @@
-use super::Debugger;
+use super::{Debugger, network_timing};
 use crate::{
     error::{Error, Result},
     provenance, validation,
@@ -57,7 +57,7 @@ fn record<'a>(state: &'a mut Value, id: &str) -> Option<&'a mut Value> {
         .rev()
         .find(|r| r["protocol_request_id"] == id)
 }
-fn response(state: &mut Value, p: &Value) {
+fn response(state: &mut Value, p: &Value, redirected: bool) {
     let Some(id) = p["requestId"].as_str() else {
         return;
     };
@@ -68,6 +68,7 @@ fn response(state: &mut Value, p: &Value) {
     if !r.is_object() {
         return;
     }
+    network_timing::response(record, p, redirected);
     let (h, headers_truncated) = headers(&r["headers"]);
     let (m, _) = bounded(&r["mimeType"], 512);
     record["status"] = r["status"]
@@ -94,6 +95,7 @@ fn response(state: &mut Value, p: &Value) {
 fn finish(state: &mut Value, p: &Value, failed: bool, redirected: bool) -> Option<String> {
     let id = p["requestId"].as_str()?;
     let record = record(state, id)?;
+    network_timing::finish(record, p, failed, redirected);
     record["state"] = json!(if failed { "failed" } else { "complete" });
     if let Some(time) = p["timestamp"].as_f64() {
         let duration =
@@ -159,13 +161,13 @@ impl Debugger {
                     json!({"state":if request["hasPostData"]==true {"missing"} else {"empty"},"mime":mime,"text":"","base64":"","truncated":false,"reason":if request["hasPostData"]==true {"CDP reported request data but did not retain its bytes."} else {"This request has no body."}})
                 };
                 self.update(|s| {
-                    if p["redirectResponse"].is_object() {response(s,&json!({"requestId":id,"response":p["redirectResponse"]}));finish(s,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}
+                    if p["redirectResponse"].is_object() {response(s,&json!({"requestId":id,"response":p["redirectResponse"]}),true);finish(s,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}
                     let target=s["target"]["id"].as_str().unwrap_or("unknown").to_owned();let title=s["target"]["title"].clone();let initiator=provenance::project(&json!({"operation":"call_sites","initiator":p["initiator"],"target_id":target,"scripts":provenance::catalog(s)})).unwrap_or_else(|_|json!({"sites":[],"gaps":["initiator_unavailable"]}));let requests=s["network"]["requests"].as_array_mut().unwrap();let redirect=requests.iter().filter(|r|r["protocol_request_id"]==id).count();let suffix=if redirect>0 {format!(":redirect:{redirect}")} else {String::new()};
-                    let r=json!({"initiator":initiator,"id":format!("cdp:{target}:{id}{suffix}"),"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
+                    let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":format!("cdp:{target}:{id}{suffix}"),"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
                     if requests.len()>=1000 {requests.remove(0);let dropped=s["network"]["dropped"].as_u64().unwrap_or(0)+1;s["network"]["dropped"]=json!(dropped);}s["network"]["requests"].as_array_mut().unwrap().push(r);
                 });
             }
-            "Network.responseReceived" => self.update(|s| response(s, p)),
+            "Network.responseReceived" => self.update(|s| response(s, p, false)),
             "Network.loadingFinished" | "Network.loadingFailed" => self.update(|s| {
                 let epoch = s["network"]["capture_epoch"].clone();
                 retrieve =
@@ -416,6 +418,41 @@ mod tests {
         let original = debugger.snapshot()["network"]["requests"][0].clone();
         tokio::task::yield_now().await;
         assert_eq!(debugger.snapshot()["network"]["requests"][0], original);
+    }
+
+    #[tokio::test]
+    async fn timing_evidence_owns_each_redirect_hop_and_keeps_unrounded_clocks() {
+        let debugger = debugger(true);
+        let mut first = request("timed", "");
+        first["wallTime"] = json!(1792000000.123456);
+        debugger.network("Network.requestWillBeSent", &first).await;
+        let mut next = request("timed", "next");
+        next["timestamp"] = json!(2.125);
+        next["redirectResponse"] = json!({"status":302,"headers":{},
+            "timing":{"requestTime":1.0,"sendStart":0.25,"sendEnd":0.5}});
+        debugger.network("Network.requestWillBeSent", &next).await;
+        debugger.network("Network.responseReceived", &json!({"requestId":"timed",
+            "timestamp":2.25,"response":{"status":200,"headers":{},"timing":{"requestTime":2.125}}})).await;
+        debugger
+            .network(
+                "Network.loadingFailed",
+                &json!({"requestId":"timed","timestamp":2.5}),
+            )
+            .await;
+        let snapshot = debugger.snapshot();
+        let rows = snapshot["network"]["requests"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let old = &rows[0]["timing_evidence"];
+        assert_eq!(old["request_wall_seconds"]["value"], 1792000000.123456);
+        assert_eq!(old["response_source"], "redirectResponse");
+        assert_eq!(old["response_monotonic_seconds"]["state"], "missing");
+        assert_eq!(old["completion_monotonic_seconds"]["value"], 2.125);
+        assert_eq!(old["resource_timing"]["fields"]["sendStart"]["value"], 0.25);
+        let current = &rows[1]["timing_evidence"];
+        assert_eq!(current["request_wall_seconds"]["state"], "missing");
+        assert_eq!(current["response_monotonic_seconds"]["value"], 2.25);
+        assert_eq!(current["completion_source"], "loadingFailed");
+        assert_eq!(current["completion_monotonic_seconds"]["value"], 2.5);
     }
 
     #[test]

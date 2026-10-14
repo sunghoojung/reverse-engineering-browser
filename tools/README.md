@@ -67,3 +67,5 @@ binds the Page candidate, then uses the owned Worker button to create a new
 separate target. It verifies the Page binding survives that unrelated target's
 source discovery before explicit capture/arming and the genuine Page baseline.
 Target-relevant stale-source refusal remains a separate boundary.
+
+Use `node tools/export-captured-har.mjs --input request.json --output request.har` for bounded offline [HAR 1.2 export](../docs/product/har-export-v1.md). New source timing is required; unknown required phases are refused, never filled with zeros.

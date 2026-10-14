@@ -90,6 +90,8 @@ javascript-check:
 	node tools/check-captured-har.mjs
 	node tools/check-graphql-sdl.mjs
 	node tools/check-vm-semantics.mjs
+	node tools/check-vm-linked-model.mjs
+	node tools/check-vm-compare-cli.mjs
 	node tools/check-python-client-project.mjs
 	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only

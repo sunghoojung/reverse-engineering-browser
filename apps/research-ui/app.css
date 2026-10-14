@@ -3776,3 +3776,23 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm:not([hidden]) { grid-template-rows: 60px auto auto minmax(0, 1fr); }
 #screen-vm > .vm-semantics-workflow { grid-row: 3; min-width: 0; }
 #screen-vm > .vm-grid { grid-row: 4; }
+
+/* Supplied VM state stays legible without borrowing the Requests/Console layout. */
+.vm-semantics-workflow pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+.vm-semantics-workflow p, .vm-semantics-workflow strong { overflow-wrap: anywhere; }
+.vm-step-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vm-step-controls select { flex: 1 1 240px; min-width: 0; }
+.vm-inline-control { display: inline-flex; gap: 6px; align-items: center; }
+.vm-state-row { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(120px, 2fr) minmax(120px, 2fr) minmax(80px, 1fr); gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); align-items: center; }
+.vm-state-row > * { min-width: 0; overflow-wrap: anywhere; }
+.vm-semantics-workflow button { white-space: normal; max-width: 100%; margin: 3px; }
+.vm-occurrence { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.vm-audit { margin: 12px 0; }
+.vm-semantics-workflow :focus-visible { outline: 2px solid var(--accent, #6aafff); outline-offset: 2px; }
+.vm-mismatch { border-left: 3px solid var(--accent, #6aafff); padding-left: 8px; }
+@media (max-width: 640px) {
+  .vm-state-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .vm-state-row > button { justify-self: start; }
+  .vm-step-controls { align-items: stretch; }
+  .vm-step-controls > button { flex: 1 1 120px; }
+}

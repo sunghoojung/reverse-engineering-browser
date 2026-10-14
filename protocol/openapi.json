@@ -20372,6 +20372,9 @@
           "initiator": {
             "type": "object",
             "description": "Existing raw bounded call-site projection from provenance::call_sites, preserved without source fetching."
+          },
+          "timing_evidence": {
+            "$ref": "#/components/schemas/NetworkTimingEvidence"
           }
         },
         "x-schema-completeness": "partial",
@@ -20405,6 +20408,207 @@
           }
         },
         "description": "Exactly one source row and its ownership context copied under one lock. A pending body stays pending; no fetch, refresh, target control or fallback lookup is triggered. Complete JSON is at most 8388608 bytes."
+      },
+      "NetworkTimingMeasurement": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "value"
+            ],
+            "properties": {
+              "state": {
+                "const": "available"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 8640000000000
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "enum": [
+                  "missing",
+                  "invalid",
+                  "unavailable"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "NetworkTimingEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Bounded CDP source timing evidence; see protocol/network-timing-v1.md. Clock timestamps are seconds; resource offsets are milliseconds. This does not attest to valid chronology or a complete HAR waterfall.",
+        "required": [
+          "format",
+          "request_monotonic_seconds",
+          "request_wall_seconds",
+          "response_monotonic_seconds",
+          "completion_monotonic_seconds",
+          "resource_timing",
+          "response_observed",
+          "completion_observed",
+          "duplicate_response",
+          "duplicate_completion",
+          "response_after_completion",
+          "response_source",
+          "completion_source"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-network-timing-v1"
+          },
+          "request_monotonic_seconds": {
+            "$ref": "#/components/schemas/NetworkTimingMeasurement"
+          },
+          "request_wall_seconds": {
+            "$ref": "#/components/schemas/NetworkTimingMeasurement"
+          },
+          "response_monotonic_seconds": {
+            "$ref": "#/components/schemas/NetworkTimingMeasurement"
+          },
+          "completion_monotonic_seconds": {
+            "$ref": "#/components/schemas/NetworkTimingMeasurement"
+          },
+          "resource_timing": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "fields"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "available"
+                  },
+                  "fields": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "requestTime",
+                      "proxyStart",
+                      "proxyEnd",
+                      "dnsStart",
+                      "dnsEnd",
+                      "connectStart",
+                      "connectEnd",
+                      "sslStart",
+                      "sslEnd",
+                      "sendStart",
+                      "sendEnd",
+                      "receiveHeadersStart",
+                      "receiveHeadersEnd",
+                      "workerStart"
+                    ],
+                    "properties": {
+                      "requestTime": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "proxyStart": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "proxyEnd": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "dnsStart": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "dnsEnd": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "connectStart": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "connectEnd": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "sslStart": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "sslEnd": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "sendStart": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "sendEnd": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "receiveHeadersStart": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "receiveHeadersEnd": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      },
+                      "workerStart": {
+                        "$ref": "#/components/schemas/NetworkTimingMeasurement"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "missing",
+                      "invalid"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "response_observed": {
+            "type": "boolean"
+          },
+          "completion_observed": {
+            "type": "boolean"
+          },
+          "duplicate_response": {
+            "type": "boolean"
+          },
+          "duplicate_completion": {
+            "type": "boolean"
+          },
+          "response_after_completion": {
+            "type": "boolean"
+          },
+          "response_source": {
+            "enum": [
+              "none",
+              "redirectResponse",
+              "responseReceived"
+            ]
+          },
+          "completion_source": {
+            "enum": [
+              "none",
+              "redirectRequest",
+              "loadingFailed",
+              "loadingFinished"
+            ]
+          }
+        }
       }
     }
   },

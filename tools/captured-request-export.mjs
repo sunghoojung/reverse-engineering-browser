@@ -13,6 +13,23 @@ const count = value => Number.isSafeInteger(value) && value >= 0;
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const invalid = () => { throw new Error('Input must be one complete reb-network-request-v1 response with matching exact identity and valid retained fields.'); };
 
+
+function timingEvidence(value) {
+  const clocks = ['request_monotonic_seconds','request_wall_seconds','response_monotonic_seconds','completion_monotonic_seconds'];
+  const flags = ['response_observed','completion_observed','duplicate_response','duplicate_completion','response_after_completion'];
+  if (!exact(value,['format',...clocks,...flags,'resource_timing','response_source','completion_source']) || value.format !== 'reb-network-timing-v1' ||
+      !flags.every(key => typeof value[key] === 'boolean') || !['none','redirectResponse','responseReceived'].includes(value.response_source) ||
+      !['none','redirectRequest','loadingFailed','loadingFinished'].includes(value.completion_source)) invalid();
+  const measurement = (item,offset = false) => exact(item,['state','value']) && item.state === 'available' && finite(item.value) && item.value <= 8640000000000 ||
+    exact(item,['state']) && (offset ? ['missing','invalid','unavailable'] : ['missing','invalid']).includes(item.state);
+  if (!clocks.every(key => measurement(value[key]))) invalid();
+  const resource = value.resource_timing;
+  if (exact(resource,['state']) && ['missing','invalid'].includes(resource.state)) return;
+  const fields = ['requestTime','proxyStart','proxyEnd','dnsStart','dnsEnd','connectStart','connectEnd','sslStart','sslEnd','sendStart','sendEnd','receiveHeadersStart','receiveHeadersEnd','workerStart'];
+  if (!exact(resource,['state','fields']) || resource.state !== 'available' || !exact(resource.fields,fields) ||
+      !fields.every(key => measurement(resource.fields[key],key !== 'requestTime'))) invalid();
+}
+
 function selection(document, numbers) {
   if (!exact(document,['format','source','debugger_generation','request']) || document.format !== 'reb-network-request-v1' || !count(document.debugger_generation)) invalid();
   const source = document.source, record = document.request;
@@ -39,6 +56,7 @@ function selection(document, numbers) {
       !['pending','complete','failed'].includes(record.state) || !(record.status === null || Number.isSafeInteger(record.status)) ||
       !(record.duration_ms === null || finite(record.duration_ms)) || !object(record.initiator)) invalid();
   if (record.id !== source.request_id || record.target_id !== source.target_id || record.started_monotonic_ms !== source.started_monotonic_ms) invalid();
+  if (Object.hasOwn(record,'timing_evidence')) timingEvidence(record.timing_evidence);
   for (const side of [record.request,record.response]) {
     if (!exact(side,['headers','headers_truncated','body']) || typeof side.headers_truncated !== 'boolean' || !Array.isArray(side.headers) || side.headers.length > 128) invalid();
     let size = 0;

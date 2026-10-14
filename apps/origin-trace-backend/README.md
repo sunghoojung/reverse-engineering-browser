@@ -227,3 +227,5 @@ see [the copy contract](../../protocol/traffic-capture-copy-v1.md). This is not
 is uploaded or sent to an AI service. Synthetic-only tests cover credentials,
 body forms, bounds, capture-off and retention; UI tests cover copy isolation and
 retired clipboard owners.
+
+Retained CDP rows include bounded [source timing evidence](../../protocol/network-timing-v1.md). Missing clocks and lifecycle anomalies remain explicit; legacy display durations do not establish HAR fidelity.

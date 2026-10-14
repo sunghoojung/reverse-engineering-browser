@@ -165,20 +165,40 @@ Hints. It does not restore Accept-CH policy, browser state or credentials.
 The adapter passes its own direct fhttp transport, avoiding Mimic's ambient
 proxy default. Certificate verification remains enabled; jars, automatic
 decompression and redirect following remain disabled. It creates a fresh
-single-use connection transport and permits one transport dial invocation. fhttp's internal
-HTTP2 retries must not create a second request: the guard refuses another
-connection and the pinned single-use H2 pool refuses another stream. This
-source-level boundary still requires owned HTTPS/H2 retry-fault measurements
-before its runtime behavior is considered verified.
+single-use connection transport and permits one transport dial invocation.
+fhttp's internal HTTP2 retries must not create a second request: the guard
+refuses another connection and the pinned single-use H2 pool refuses another
+stream. Treat this runtime boundary as unverified until the tagged fixture lane
+passes at the exact revision under review; source and test assertions alone are
+not a passing acceptance result.
 
-The tagged fixture lane covers compilation, HTTP loopback headers, dry-run,
-profile coherence, origin/redirect/cookie boundaries and untrusted certificates.
-It is separate from standard `--go`. It does not establish successful HTTPS H1/H2,
-REFUSED_STREAM/GOAWAY wire-attempt counts, ClientHello/HTTP2 equivalence against a
-pinned browser, or complete transitive license notices. The pinned fhttp v1.0.1
-repository has no root LICENSE/COPYING/NOTICE file; resolve its notice chain
-before distributing dependency code or binaries. No third-party source or
-binary is bundled in the export.
+The explicit `node tools/check-captured-client-project.mjs --go --mimic` lane
+builds/tests/vets the tagged module separately from standard `--go`. Its authored
+fixtures assert HTTP header/profile coherence, dry-run/origin/redirect/cookie
+boundaries, and certificate rejection. Owned HTTPS fixtures additionally require
+successful ALPN HTTP/1.1 and HTTP/2 for GET, empty POST and text-body POST, with
+exactly one connection and request. An isolated test subprocess trusts only its
+ephemeral fixture CA through Go's certificate verifier; it never changes the OS
+trust store or disables verification. Wrong-hostname and unknown-issuer cases
+must still fail before an HTTP request reaches the server.
+
+The H2 fault fixtures inject REFUSED_STREAM or GOAWAY with last-stream ID zero
+only after receiving END_STREAM and the complete authored body. They count all
+accepted connections and decoded request streams, requiring one of each and an
+honest unknown-outcome error from the guarded client. Empty-POST negative controls
+remove the dial guard and must observe a second complete request before stopping,
+showing that the fixture reaches the underlying retry path. These cases do not
+cover every fault timing or GOAWAY variant.
+
+Only a successful exact-revision run establishes these bounded fixture results.
+The lane prints its verbose test output and writes `mimic-test.log` plus
+`mimic-validation.json` under `build/client-project-qa/`. Its offline module
+receipt enumerates tagged package/test dependencies, not the complete lazy module
+graph. ClientHello/HTTP2 equivalence against a pinned browser and complete
+transitive license notices remain separate unverified gates. The pinned fhttp
+v1.0.1 repository has no root LICENSE/COPYING/NOTICE file; resolve its notice chain
+before distributing dependency code or binaries. No third-party source or binary
+is bundled in the export.
 
 No perfect TLS/browser fingerprint is claimed; JA3 alone is insufficient.
 HTTP3/QUIC, browser execution fallback, automatic credential acquisition and

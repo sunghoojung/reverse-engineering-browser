@@ -1,0 +1,330 @@
+//go:build mimic
+
+// Authored loopback fixtures only. No browser fingerprint equivalence is claimed.
+package client
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	fhttp "github.com/saucesteals/fhttp"
+	h2 "github.com/saucesteals/fhttp/http2"
+	"github.com/saucesteals/fhttp/http2/hpack"
+	"github.com/saucesteals/mimic"
+)
+
+const ownedTLSChild = "REB_OWNED_TLS_FIXTURE_CHILD"
+
+func TestMimicOwnedTLS(t *testing.T) {
+	// SetFallbackRoots is process-global and callable only once. Use a fresh test
+	// process, an explicitly authored CA and Go's normal certificate verifier.
+	// The OS trust store and the generated adapter are never modified.
+	binary, err := os.Executable()
+	if err != nil { t.Fatal(err) }
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary, "-test.run=^TestMimicOwnedTLSChild$", "-test.v", "-test.timeout=55s")
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, ownedTLSChild+"=") && !strings.HasPrefix(value, "GODEBUG=") {
+			command.Env = append(command.Env, value)
+		}
+	}
+	command.Env = append(command.Env, ownedTLSChild+"=1", "GODEBUG=x509usefallbackroots=1")
+	output, err := command.CombinedOutput()
+	t.Logf("owned TLS fixture subprocess:\n%s", output)
+	if err != nil { t.Fatalf("owned TLS fixtures failed: %v", err) }
+	if !strings.Contains(string(output), "owned TLS matrix complete") {
+		t.Fatal("owned TLS child did not execute its complete matrix")
+	}
+}
+
+type ownedCA struct { certificate *x509.Certificate; key *ecdsa.PrivateKey }
+
+func newOwnedCA(t *testing.T) ownedCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil { t.Fatal(err) }
+	now := time.Now()
+	template := &x509.Certificate{SerialNumber:big.NewInt(1), Subject:pkix.Name{CommonName:"REB ephemeral fixture CA"},
+		NotBefore:now.Add(-time.Hour), NotAfter:now.Add(time.Hour), IsCA:true, BasicConstraintsValid:true,
+		KeyUsage:x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil { t.Fatal(err) }
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil { t.Fatal(err) }
+	return ownedCA{certificate, key}
+}
+
+func (ca ownedCA) serverCertificate(t *testing.T, validName bool) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil { t.Fatal(err) }
+	now := time.Now()
+	template := &x509.Certificate{SerialNumber:big.NewInt(2), Subject:pkix.Name{CommonName:"REB owned loopback fixture"},
+		NotBefore:now.Add(-time.Hour), NotAfter:now.Add(time.Hour), BasicConstraintsValid:true,
+		KeyUsage:x509.KeyUsageDigitalSignature, ExtKeyUsage:[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	if validName { template.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")} } else { template.DNSNames = []string{"wrong-name.invalid"} }
+	der, err := x509.CreateCertificate(rand.Reader, template, ca.certificate, &key.PublicKey, ca.key)
+	if err != nil { t.Fatal(err) }
+	return tls.Certificate{Certificate:[][]byte{der, ca.certificate.Raw}, PrivateKey:key}
+}
+
+func ownedProfileConfig(origin string) Config {
+	return Config{AllowedOrigin:origin, Transport:&TransportConfig{Mode:"browser-profile",
+		BrowserProfile:&BrowserProfile{Browser:"chrome", Version:"133.0.0.0", Platform:"linux"}}}
+}
+
+func ownedTLSRequest(origin, method, body string) Request {
+	return Request{Method:method, URL:origin+"/owned?fixture=1", Headers:HeaderPairs{{"X-Authored", "tls-fixture"}}, Body:&body, TimeoutMS:4000}
+}
+
+func TestMimicOwnedTLSChild(t *testing.T) {
+	if os.Getenv(ownedTLSChild) != "1" { t.Skip("run only in the isolated TestMimicOwnedTLS subprocess") }
+	if os.Getenv("GODEBUG") != "x509usefallbackroots=1" { t.Fatal("explicit fixture trust isolation is missing") }
+	ca := newOwnedCA(t)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.certificate)
+	x509.SetFallbackRoots(roots)
+	certificate := ca.serverCertificate(t, true)
+	provenance := Provenance{Format:"reb-client-project-v1", Mode:"raw"}
+	methods := []struct { name, method, body string }{{"get", "GET", ""}, {"empty-post", "POST", ""}, {"body-post", "POST", "authored POST\r\n雪"}}
+
+	for _, protocol := range []string{"http/1.1", "h2"} {
+		for _, request := range methods {
+			t.Run(protocol+"/"+request.name, func(t *testing.T) {
+				var seen, connections atomic.Int32
+				server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					seen.Add(1)
+					body, err := io.ReadAll(r.Body)
+					if err != nil || string(body) != request.body || r.Method != request.method || r.RequestURI != "/owned?fixture=1" { t.Errorf("request changed: method=%s path=%s body=%q err=%v", r.Method, r.RequestURI, body, err) }
+					if r.TLS == nil || r.TLS.NegotiatedProtocol != protocol || (protocol == "h2") != (r.ProtoMajor == 2) { t.Error("expected TLS/ALPN and HTTP protocol were not observed") }
+					if !strings.Contains(r.Header.Get("User-Agent"), "Chrome/133.0.0.0") || r.Header.Get("Sec-Ch-Ua-Platform") != `"Linux"` { t.Error("profile headers changed over TLS") }
+					if r.Header.Get("X-Authored") != "tls-fixture" || r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" { t.Error("authored header or credential boundary changed") }
+					w.Header().Set("Content-Type", "application/json")
+					io.WriteString(w, `{"owned":true}`)
+				}))
+				server.EnableHTTP2 = protocol == "h2"
+				server.TLS = &tls.Config{Certificates:[]tls.Certificate{certificate}, NextProtos:[]string{protocol}, MinVersion:tls.VersionTLS12}
+				server.Config.ConnState = func(_ net.Conn, state http.ConnState) { if state == http.StateNew { connections.Add(1) } }
+				server.Config.ErrorLog = log.New(io.Discard, "", 0)
+				server.StartTLS()
+				defer server.Close()
+				input := ownedTLSRequest(server.URL, request.method, request.body)
+				config := ownedProfileConfig(server.URL)
+				dry, err := Send(context.Background(), input, config, provenance, false)
+				if err != nil || !dry.Ready || connections.Load() != 0 || seen.Load() != 0 { t.Fatalf("TLS dry run touched the network: %+v %v", dry, err) }
+				result, err := Send(context.Background(), input, config, provenance, true)
+				if err != nil || result.Status != 200 || result.Body != `{"owned":true}` || !result.NetworkAttempted || result.NetworkRequests == nil || *result.NetworkRequests != 1 || seen.Load() != 1 || connections.Load() != 1 {
+					t.Fatalf("trusted %s send: result=%+v err=%v requests=%d connections=%d", protocol, result, err, seen.Load(), connections.Load())
+				}
+				t.Logf("trusted ALPN=%s method=%s requests=1 connections=1", protocol, request.method)
+			})
+		}
+	}
+
+	for _, rejection := range []struct { name string; certificate tls.Certificate }{
+		{"wrong-name", ca.serverCertificate(t, false)}, {"unknown-issuer", newOwnedCA(t).serverCertificate(t, true)},
+	} {
+		t.Run(rejection.name, func(t *testing.T) {
+			var seen atomic.Int32
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { seen.Add(1) }))
+			server.TLS = &tls.Config{Certificates:[]tls.Certificate{rejection.certificate}, MinVersion:tls.VersionTLS12}
+			server.Config.ErrorLog = log.New(io.Discard, "", 0)
+			server.StartTLS()
+			defer server.Close()
+			input := ownedTLSRequest(server.URL, "POST", "")
+			response, cleanup, err := sendMimic(context.Background(), input, *ownedProfileConfig(server.URL).Transport.BrowserProfile)
+			if cleanup != nil { defer cleanup() }
+			if response != nil { response.Body.Close() }
+			// uTLS uses its own wrapper, so inspect the common x509 cause.
+			var unknown x509.UnknownAuthorityError
+			var hostname x509.HostnameError
+			verified := rejection.name == "unknown-issuer" && errors.As(err, &unknown) || rejection.name == "wrong-name" && errors.As(err, &hostname)
+			if err == nil || seen.Load() != 0 || !verified { t.Fatalf("certificate verification did not reject %s: requests=%d err=%v", rejection.name, seen.Load(), err) }
+		})
+	}
+
+	for _, fault := range []string{"refused-stream", "goaway"} {
+		for _, request := range methods {
+			t.Run(fault+"/"+request.name, func(t *testing.T) {
+				fixture := newOwnedH2Fault(t, certificate, fault, request.method, request.body, nil)
+				defer fixture.close()
+				result, err := Send(context.Background(), ownedTLSRequest(fixture.origin(), request.method, request.body), ownedProfileConfig(fixture.origin()), provenance, true)
+				fixture.close()
+				fixture.assert(t, 1, 1)
+				var clientError *ClientError
+				if !errors.As(err, &clientError) || clientError.Code != "network" || !result.NetworkAttempted || result.NetworkRequests != nil || result.Status != 0 { t.Fatalf("fault must report an unknown outcome, not success/timeout: %+v %v", result, err) }
+			})
+		}
+		// Negative control: remove only the one-dial guard from the otherwise
+		// single-use pinned transport. This proves the fault fixture actually
+		// exercises fhttp's retransmission path for an empty POST.
+		t.Run(fault+"/unguarded-control", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			fixture := newOwnedH2Fault(t, certificate, fault, "POST", "", cancel)
+			defer fixture.close()
+			base := &fhttp.Transport{Proxy:nil, DisableKeepAlives:true, DisableCompression:true, ForceAttemptHTTP2:true,
+				MaxResponseHeaderBytes:65536, TLSHandshakeTimeout:4*time.Second, DialContext:(&net.Dialer{}).DialContext}
+			transport, err := mimic.NewTransport(mimic.TransportOptions{Version:"133.0.0.0", Brand:mimic.BrandChrome, Platform:mimic.PlatformLinux, Transport:base})
+			if err != nil { t.Fatal(err) }
+			defer transport.CloseIdleConnections()
+			request, err := fhttp.NewRequestWithContext(ctx, "POST", fixture.origin()+"/owned?fixture=1", strings.NewReader(""))
+			if err != nil { t.Fatal(err) }
+			request.GetBody = nil
+			client := &fhttp.Client{Transport:transport, Timeout:4*time.Second}
+			response, err := client.Do(request)
+			if response != nil { response.Body.Close() }
+			transport.CloseIdleConnections()
+			fixture.close()
+			fixture.assert(t, 2, 1)
+			if err == nil { t.Fatal("unguarded control unexpectedly succeeded") }
+		})
+	}
+	if !t.Failed() { t.Log("owned TLS matrix complete") }
+}
+
+// The H2 server decodes headers and counts unique request streams on every
+// accepted TCP connection. It sends each fault only after END_STREAM, proving
+// the complete authored body was received. There is no sleep-based race: the
+// client finishes, the accept loop is joined, then pending frames are drained
+// until EOF (or a bounded read deadline) before final counts are asserted.
+type ownedH2Fault struct {
+	listener net.Listener
+	certificate tls.Certificate
+	fault, method, body string
+	cancelControl context.CancelFunc
+	acceptDone chan struct{}
+	workers sync.WaitGroup
+	once sync.Once
+	mu sync.Mutex
+	connections map[net.Conn]bool
+	accepted, requests, completed, faults int
+	failure error
+}
+
+func newOwnedH2Fault(t *testing.T, certificate tls.Certificate, fault, method, body string, cancel context.CancelFunc) *ownedH2Fault {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil { t.Fatal(err) }
+	fixture := &ownedH2Fault{listener:listener, certificate:certificate, fault:fault, method:method, body:body,
+		cancelControl:cancel, acceptDone:make(chan struct{}), connections:make(map[net.Conn]bool)}
+	go func() {
+		defer close(fixture.acceptDone)
+		for {
+			connection, err := listener.Accept()
+			if err != nil { return }
+			fixture.mu.Lock()
+			fixture.accepted++
+			fixture.connections[connection] = true
+			fixture.mu.Unlock()
+			fixture.workers.Add(1)
+			go func() {
+				defer fixture.workers.Done()
+				defer connection.Close()
+				defer func() { fixture.mu.Lock(); delete(fixture.connections, connection); fixture.mu.Unlock() }()
+				if err := fixture.serve(connection); err != nil { fixture.mu.Lock(); if fixture.failure == nil { fixture.failure = err }; fixture.mu.Unlock() }
+			}()
+		}
+	}()
+	return fixture
+}
+
+func (f *ownedH2Fault) origin() string { return "https://"+f.listener.Addr().String() }
+
+func (f *ownedH2Fault) close() {
+	f.once.Do(func() {
+		f.listener.Close()
+		<-f.acceptDone
+		f.mu.Lock()
+		for connection := range f.connections { connection.SetReadDeadline(time.Now().Add(time.Second)) }
+		f.mu.Unlock()
+		f.workers.Wait()
+	})
+}
+
+func (f *ownedH2Fault) assert(t *testing.T, expected, expectedFaults int) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t.Logf("fault=%s method=%s body_bytes=%d connections=%d request_streams=%d completed=%d injected_faults=%d", f.fault, f.method, len(f.body), f.accepted, f.requests, f.completed, f.faults)
+	if f.failure != nil || f.accepted != expected || f.requests != expected || f.completed != expected || f.faults != expectedFaults {
+		t.Fatalf("expected %d observed attempt(s); connections=%d streams=%d completed=%d faults=%d fixture_error=%v", expected, f.accepted, f.requests, f.completed, f.faults, f.failure)
+	}
+}
+
+func (f *ownedH2Fault) serve(raw net.Conn) error {
+	raw.SetDeadline(time.Now().Add(8*time.Second))
+	connection := tls.Server(raw, &tls.Config{Certificates:[]tls.Certificate{f.certificate}, NextProtos:[]string{"h2"}, MinVersion:tls.VersionTLS12})
+	if err := connection.Handshake(); err != nil { return fmt.Errorf("fixture handshake: %w", err) }
+	if connection.ConnectionState().NegotiatedProtocol != "h2" { return errors.New("fixture did not negotiate h2") }
+	preface := make([]byte, len(h2.ClientPreface))
+	if _, err := io.ReadFull(connection, preface); err != nil { return err }
+	if string(preface) != h2.ClientPreface { return errors.New("invalid H2 client preface") }
+	framer := h2.NewFramer(connection, connection)
+	framer.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+	framer.MaxHeaderListSize = 65536
+	framer.SetMaxReadFrameSize(16384)
+	if err := framer.WriteSettings(); err != nil { return err }
+	bodies := make(map[uint32]string)
+	finished := make(map[uint32]bool)
+	injected := false
+	for {
+		frame, err := framer.ReadFrame()
+		if err != nil {
+			var networkError net.Error
+			if injected && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.As(err, &networkError)) { return nil } // EOF, reset or bounded drain after the fault.
+			return fmt.Errorf("fixture ended before fault injection: %w", err)
+		}
+		var stream uint32
+		var end bool
+		switch value := frame.(type) {
+		case *h2.SettingsFrame:
+			if !value.IsAck() { if err := framer.WriteSettingsAck(); err != nil { return err } }
+		case *h2.PingFrame:
+			if !value.IsAck() { if err := framer.WritePing(true, value.Data); err != nil { return err } }
+		case *h2.MetaHeadersFrame:
+			stream, end = value.StreamID, value.StreamEnded()
+			if _, exists := bodies[stream]; exists { return errors.New("unexpected duplicate headers/trailers") }
+			f.mu.Lock(); f.requests++; f.mu.Unlock()
+			if value.Truncated || value.PseudoValue("method") != f.method || value.PseudoValue("path") != "/owned?fixture=1" || value.PseudoValue("scheme") != "https" { return errors.New("unexpected H2 request headers") }
+			bodies[stream] = ""
+		case *h2.DataFrame:
+			stream, end = value.StreamID, value.StreamEnded()
+			if _, exists := bodies[stream]; !exists || finished[stream] { return errors.New("unexpected H2 DATA stream") }
+			bodies[stream] += string(value.Data())
+			if len(bodies[stream]) > 65536 { return errors.New("fixture body limit exceeded") }
+		}
+		if !end { continue }
+		if bodies[stream] != f.body { return errors.New("H2 body differs from the authored request") }
+		finished[stream] = true
+		f.mu.Lock(); f.completed++; count := f.completed; f.mu.Unlock()
+		// Stop the control as soon as the second full request is observed. Do not
+		// send it another retry-triggering fault, which could race a third dial.
+		if f.cancelControl != nil && count == 2 { f.cancelControl(); return nil }
+		if f.fault == "refused-stream" { err = framer.WriteRSTStream(stream, h2.ErrCodeRefusedStream) } else { err = framer.WriteGoAway(0, h2.ErrCodeNo, nil) }
+		if err != nil { return fmt.Errorf("inject H2 fault: %w", err) }
+		injected = true
+		f.mu.Lock(); f.faults++; f.mu.Unlock()
+	}
+}

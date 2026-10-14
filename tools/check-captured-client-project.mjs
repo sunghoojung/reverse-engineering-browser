@@ -453,14 +453,22 @@ async function checkGeneratedMimicProject() {
     const install=await command('go',['get',pin],cwd,{env:{...offline,GOPROXY:'https://proxy.golang.org',GOSUMDB:'sum.golang.org'},timeout:120000});assert.equal(install.code,0,install.stdout+install.stderr);
     await writeFile(join(cwd,'client/client_test.go'),await readFile(join(root,'tools/client-project-go_test.txt'),'utf8'));
     await writeFile(join(cwd,'client/mimic_test.go'),await readFile(join(root,'tools/client-project-mimic_test.txt'),'utf8'));
+    await writeFile(join(cwd,'client/mimic_tls_test.go'),await readFile(join(root,'tools/client-project-mimic-tls_test.txt'),'utf8'));
+    let testEvidence='';
     for(const stage of ['build','test','vet']){
-      const result=await command('go',[stage,'-tags','mimic','./...'],cwd,{env:offline,timeout:90000});assert.equal(result.code,0,result.stdout+result.stderr);
+      const result=await command('go',[stage,...(stage==='test'?['-v']:[]),'-tags','mimic','./...'],cwd,{env:offline,timeout:90000});assert.equal(result.code,0,result.stdout+result.stderr);
+      if(stage==='test'){testEvidence=result.stdout+result.stderr;process.stdout.write(testEvidence);}
     }
-    const modules=await command('go',['list','-m','all'],cwd,{env:offline});assert.equal(modules.code,0,modules.stderr);assert.match(modules.stdout,/github.com\/saucesteals\/mimic v1\.0\.2/);
+    // Enumerate the packages already built/tested, not the full lazy module
+    // graph: `go list -m all` can request unrelated metadata with GOPROXY=off.
+    const modules=await command('go',['list','-deps','-test','-tags','mimic','-f','{{with .Module}}{{.Path}} {{.Version}}{{end}}','./...'],cwd,{env:offline});assert.equal(modules.code,0,modules.stderr);
+    const moduleVersions=[...new Set(modules.stdout.split('\n').map(line=>line.trim()).filter(Boolean))].sort();
+    assert(moduleVersions.includes('github.com/saucesteals/mimic v1.0.2'));
     const output=join(root,'build/client-project-qa');await mkdir(output,{recursive:true});
-    await writeFile(join(output,'mimic-validation.json'),JSON.stringify({status:'passed',compiler:compiler.stdout.trim(),pin,modules:modules.stdout.trim().split('\n'),
-      checks:['tagged Go build/test/vet','owned HTTP loopback profile header coherence','dry-run/origin/profile gates','redirect/cookie boundaries','untrusted TLS rejection'],
-      unverified:['successful owned HTTPS H1/H2','REFUSED_STREAM/GOAWAY wire-attempt count','browser-reference TLS/HTTP2 equivalence','HTTP3 unsupported','transitive license completeness']},null,2)+'\n');
-    console.log('PASS optional pinned Mimic tagged build/test/vet and owned HTTP fixture; HTTPS/H2 compatibility and retry-fault measurements remain separate unverified gates');
+    await writeFile(join(output,'mimic-test.log'),testEvidence);
+    await writeFile(join(output,'mimic-validation.json'),JSON.stringify({status:'passed',compiler:compiler.stdout.trim(),pin,modules:moduleVersions,moduleScope:'tagged package and test dependencies',
+      checks:['tagged Go build/test/vet','owned HTTP loopback profile header coherence','dry-run/origin/profile gates','redirect/cookie boundaries','untrusted TLS rejection','owned trusted HTTPS H1/H2 with isolated explicit CA','hostname/issuer verification','REFUSED_STREAM/GOAWAY connection and request-stream counts including empty POST','unguarded negative controls demonstrate retransmission'],
+      unverified:['browser-reference TLS/HTTP2 equivalence','HTTP3 unsupported','transitive license completeness']},null,2)+'\n');
+    console.log('PASS optional pinned Mimic tagged build/test/vet, owned HTTPS H1/H2 and bounded H2 retry-fault fixtures; browser fingerprint equivalence remains unverified');
   } finally {await rm(directory,{recursive:true,force:true});}
 }

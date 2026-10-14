@@ -78,6 +78,7 @@ javascript-check:
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-traffic-capture.mjs
 	node tools/check-traffic-capture-qa.mjs
+	node tools/check-websocket-inspection.mjs
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs

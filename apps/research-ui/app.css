@@ -3753,3 +3753,18 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .api-catalog-comparison { padding: 8px; }
   .api-catalog-differences li { grid-template-columns: 1fr; }
 }
+
+/* Bounded inert WebSocket message inspection; no content-derived layout. */
+.websocket-inspector { margin: 8px 12px; padding: 10px; border: 1px solid var(--border, #444); border-radius: 8px; min-width: 0; }
+.websocket-inspector > summary { cursor: pointer; }
+.websocket-inspector p { overflow-wrap: anywhere; }
+.websocket-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.websocket-controls select { max-width: 100%; min-width: 0; }
+.websocket-controls select:first-child { flex: 1 1 220px; }
+.websocket-frames { max-height: 320px; overflow: auto; }
+.websocket-frames details { margin: 8px 0; }
+.websocket-frames pre { max-height: 180px; max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.websocket-inspector :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+#screen-traffic:not([hidden]) { display: flex; flex-direction: column; }
+#screen-traffic > .traffic-grid { flex: 1; height: auto; min-height: 112px; }
+#screen-traffic > .websocket-inspector { flex: 0 0 auto; max-height: 45%; overflow: auto; }

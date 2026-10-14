@@ -134,6 +134,10 @@ impl Debugger {
         if !self.options.capture_network_content {
             return;
         }
+        if method.starts_with("Network.webSocket") {
+            self.update(|state| super::websocket::event(state, method, p));
+            return;
+        }
         let mut retrieve = None;
         match method {
             "Network.requestWillBeSent" => {
@@ -453,6 +457,16 @@ mod tests {
         assert_eq!(current["response_monotonic_seconds"]["value"], 2.25);
         assert_eq!(current["completion_source"], "loadingFailed");
         assert_eq!(current["completion_monotonic_seconds"]["value"], 2.5);
+    }
+
+    #[tokio::test]
+    async fn websocket_capture_respects_content_opt_in() {
+        let disabled = debugger(false);
+        disabled.event(json!({"method":"Network.webSocketCreated","params":{"requestId":"ws","url":"ws://127.0.0.1/authored"}})).await;
+        assert!(disabled.snapshot()["network"]["websockets"]["connections"].as_array().unwrap().is_empty());
+        let enabled = debugger(true);
+        enabled.event(json!({"method":"Network.webSocketCreated","params":{"requestId":"ws","url":"ws://127.0.0.1/authored"}})).await;
+        assert_eq!(enabled.snapshot()["network"]["websockets"]["connections"].as_array().unwrap().len(),1);
     }
 
     #[test]

@@ -1579,6 +1579,7 @@
       }
 
       function renderRequests() {
+        renderWebSocketInspector(document.querySelector('#websocket-inspector'),state.debuggerSession?.network,Boolean(state.debuggerError));
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
         const includeContent = elements.requestSearchScope.value === 'content';

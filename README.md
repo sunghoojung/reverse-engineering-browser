@@ -175,6 +175,12 @@ Downloading the compiled Brave app does not require a 100+ GiB source checkout.
 Allow about 1 GiB to download and extract both apps, plus whatever space you
 want to retain for browser profiles and captured sessions.
 
+### Windows 11 and Linux
+
+See the [Windows/Linux build guide](docs/development/windows-linux-build.md) for
+the Linux development UI, an unverified WSL 2 route, and the current native
+Windows porting requirements. The complete packaged application remains macOS-only.
+
 ### Run a live capture with an existing custom Brave build
 
 From the repository root:

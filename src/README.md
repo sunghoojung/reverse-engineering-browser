@@ -9,7 +9,7 @@ are grouped by responsibility; executable entry points remain in `apps/` and
 | `capture/` | Event records, validation, JSON encoding, and VM finding payloads | VM findings use the event contract |
 | `evidence/` | Broker retention, artifact storage, origin correlation, and request signal profiles | Broker and correlation use event records; artifact storage is independent |
 | `transport/` | Authenticated local IPC and debugger WebSocket transport | Independent of evidence storage and analysis |
-| `analysis/` | Decoding and heap snapshot queries | Independent of capture and services; decoding uses zlib |
+| `analysis/` | Decoding, heap snapshot queries, and cooperative owned-VM fixture recording | Independent of capture and services; decoding uses zlib |
 
 The bounded SPSC queue is header-only in `include/reb/spsc_ring.hpp`. Browser
 probes and their shared-memory transport remain in the tracked
@@ -35,3 +35,6 @@ make e2e
 
 The native dependency check runs through `make native-build-test`. Run the
 complete [contribution gate](../CONTRIBUTING.md#quality-gate) before handoff.
+
+The [owned VM fixture](../apps/reb-native-vm-fixture/README.md) exercises a bounded
+local recorder; it is not integrated browser VM capture.

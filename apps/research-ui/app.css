@@ -3769,3 +3769,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-traffic > .websocket-inspector { grid-row: 2; max-height: min(320px, 45vh); overflow: auto; }
 #screen-traffic:has(> .websocket-inspector:not([hidden])) > .traffic-grid { grid-row: 3; }
 .websocket-inspector[hidden] { display: none; }
+
+/* The VM workflow stays within the existing secondary view. */
+.vm-semantics-workflow { margin: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; max-height: 48vh; overflow: auto; flex-shrink: 0; }
+.vm-semantics-workflow input, .vm-semantics-workflow select { max-width: 100%; margin: 6px 0; display: block; }
+#screen-vm:not([hidden]) { grid-template-rows: 60px auto auto minmax(0, 1fr); }
+#screen-vm > .vm-semantics-workflow { grid-row: 3; min-width: 0; }
+#screen-vm > .vm-grid { grid-row: 4; }

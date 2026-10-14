@@ -10,7 +10,7 @@ export function platformEditEvent(event, platform = process.platform) {
   return event;
 }
 
-export async function selectRenderedOption({evaluate, click, key, selector, index}) {
+export async function selectRenderedOption({evaluate, click, key, selector, index, keyboardFocus = false}) {
   const options = await evaluate(`Array.from(document.querySelector(${JSON.stringify(selector)}).options, o => ({value:o.value,label:o.textContent.trim(),disabled:o.disabled}))`);
   const option = options[index];
   assert(option && !option.disabled, 'Requested select option must be enabled');
@@ -18,7 +18,7 @@ export async function selectRenderedOption({evaluate, click, key, selector, inde
   if (await evaluate(`document.activeElement === document.querySelector(${JSON.stringify(selector)})`)) {
     await key('Tab', 'Tab', {windowsVirtualKeyCode:9});
   }
-  if (process.platform === 'darwin') {
+  if (process.platform === 'darwin' || keyboardFocus) {
     // Focus with Tab instead of opening an OS popup that CDP cannot close.
     let focused = false;
     for (let attempt = 0; attempt < 200; attempt++) {
@@ -26,6 +26,8 @@ export async function selectRenderedOption({evaluate, click, key, selector, inde
       await key('Tab', 'Tab', {windowsVirtualKeyCode:9});
     }
     assert(focused, 'Select must be reachable through native keyboard focus');
+  }
+  if (process.platform === 'darwin') {
     // Arrow keys open an OS popup on macOS. Renderer CDP input cannot operate
     // that popup. Native select type-ahead remains a real keyboard action.
     let prefix = '';
@@ -40,7 +42,7 @@ export async function selectRenderedOption({evaluate, click, key, selector, inde
       await key(character, code, {text:character, unmodifiedText:character, windowsVirtualKeyCode:character.toUpperCase().charCodeAt(0)});
     }
   } else {
-    await click(selector);
+    if (!keyboardFocus) await click(selector);
     await key('Home', 'Home', {windowsVirtualKeyCode:36});
     for (let i = 0; i < index; i++) await key('ArrowDown', 'ArrowDown', {windowsVirtualKeyCode:40});
     await key('Enter', 'Enter', {windowsVirtualKeyCode:13, text:'\r', unmodifiedText:'\r'});

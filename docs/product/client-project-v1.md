@@ -334,6 +334,12 @@ sensitive. This best-effort copy never changes retained local data. Review
 before sharing. The project `.gitignore` excludes request data, evidence,
 provenance and local configuration, but it is not a security boundary.
 
+The shared capture/JavaScript request validator consumes all Content-Type
+parameters. It rejects malformed, duplicate, extended/segmented or non-UTF-8
+charset declarations before send, while preserving the original capture as
+evidence. Quoted UTF-8 values and properly escaped unrelated parameters remain
+supported; no conflicting declaration is silently dropped.
+
 ## Validation
 
 - `node tools/check-captured-client-export.mjs`: full command path with authored

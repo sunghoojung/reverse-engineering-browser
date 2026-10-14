@@ -33,8 +33,22 @@ function capturedClientIssues(request) {
     if (lower === 'content-type') {
       const type = value.split(';')[0].trim().toLowerCase();
       if (!/^(?:text\/[a-z0-9.+-]+|application\/(?:json|[a-z0-9.-]+\+json|xml|[a-z0-9.-]+\+xml|x-www-form-urlencoded|graphql|x-ndjson|ndjson))$/.test(type)) problems.push('Multipart, binary and unrecognized media types are unsupported in this text-only client.');
-      const charset = value.match(/;\s*charset\s*=\s*"?([^;"\s]+)/i)?.[1];
-      if (charset && !/^utf-?8$/i.test(charset)) problems.push('Only UTF-8 request text is supported; the declared charset differs.');
+      // Consume every parameter; a first-match charset regex misses conflicts
+      // and treats malformed declarations as if no charset were supplied.
+      const parameter = /\s*;\s*([!#$%&'*+.^_`|~0-9A-Za-z-]+)\s*=\s*(?:([!#$%&'*+.^_`|~0-9A-Za-z-]+)|"((?:[^"\\]|\\.)*)")\s*(?=;|$)/y;
+      let position = value.split(';',1)[0].length, charsetSeen = false;
+      while (position < value.length) {
+        parameter.lastIndex = position;
+        const match = parameter.exec(value);
+        if (!match) { problems.push('Malformed Content-Type parameters are unsupported.'); break; }
+        position = parameter.lastIndex;
+        const name = match[1].toLowerCase();
+        if (name === 'charset') {
+          const charset = match[2] ?? match[3].replace(/\\(.)/g,'$1');
+          if (charsetSeen || !/^utf-?8$/i.test(charset)) problems.push('Exactly one UTF-8 charset declaration is supported.');
+          charsetSeen = true;
+        } else if (name.startsWith('charset*')) problems.push('Extended or segmented charset declarations are unsupported.');
+      }
     }
   }
   if (total > 16384) problems.push('Header text exceeds 16 KiB.');

@@ -1594,3 +1594,27 @@ separate and returnable; no field values are saved to the notebook. See the
 Traffic includes a bounded read-only [WebSocket message inspector](../../protocol/websocket-capture-v1.md) for enabled CDP content captures. Text/base64 messages, exact connection lifetimes and drop counters stay separate from HTTP rows.
 
 The existing VM findings view now includes an explicit local [execution semantics workflow](../../protocol/vm-semantics-v1.md): bounded trace import, state changes, opcode candidates and hypothesis counterexamples. It preserves existing detection findings and does not claim native guest-opcode capture.
+
+In the VM workflow, opcode support and hypothesis counterexamples link to an
+exact retained step. Inspect structured PC, register, stack and sparse-memory
+before/after cells; Changes only hides unchanged snapshots. Select a location
+to page through its retained occurrences (not inferred reads or writes).
+Previous/Next visits retained steps, including across explicitly incomplete gaps.
+Raw audits remain collapsed. Unknown null, absent cells and known zero remain
+distinct.
+
+An optional second local trace supports a deliberately selected two-step
+comparison. Choose each step and press Compare selected steps; there is no
+alignment by sequence, PC, opcode or hash. Both exact input-file SHA-256 digests
+are separate from supplied artifact-hash claims. A supplied native backend label
+does not authenticate capture. Equal snapshots never prove semantic equivalence.
+Native canonical fixture traces remain a separate format, with no lossy importer.
+
+Structured state and manual-comparison views show at most 64 location rows per
+page, with visible ranges, totals and Previous/Next controls. Opcode groups,
+support-step links, validation links and hypothesis mismatch rows also use 64-item pages; location
+occurrences use 16. Paging keeps the exact step and selected location; page
+controls restore keyboard focus after rerendering. A counterexample link reveals
+its first mismatching observed location even when it is on a later page, showing
+all locations for that explicit navigation. Raw audits and CLI reports retain
+all cells, including the maximum 706 state / 1,218 comparison locations.

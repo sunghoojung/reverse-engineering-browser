@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import {webcrypto} from 'node:crypto';
 import {mkdtemp,writeFile,readFile,rm,stat,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -48,7 +49,7 @@ class Element {
 }
 document.createElement=tag=>new Element(tag);
 const source=await readFile(new URL('../apps/research-ui/vm_semantics.js',import.meta.url),'utf8');
-const api=runInNewContext(source+';({mountVmSemantics})',{document,TextEncoder,TextDecoder,capturedClientJSON:client.capturedClientJSON});
+const api=runInNewContext(source+';({mountVmSemantics})',{document,TextEncoder,TextDecoder,crypto:webcrypto,capturedClientJSON:client.capturedClientJSON});
 const ui=api.mountVmSemantics(new Element('details'));
 const file=value=>{const bytes=Buffer.from(JSON.stringify(value));return {size:bytes.length,arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.length)};};
 assert(ui.selector.disabled);ui.input.files=[file(reg)];await ui.input.events.change();assert.equal(ui.selector.disabled,false);assert(ui.map.textContent.includes('toy:register'));assert(ui.details.textContent.includes('observed_changes'));
@@ -75,3 +76,54 @@ assert.deepEqual(vm.parse('{"positive":2147483647,"negative":-2147483648,"zero":
 
 const dense=fixture('register');dense.steps=Array.from({length:256},(_,i)=>({sequence:i,opcode:'03',operands:[0,0],instruction_size:1,before:{pc:i,halted:false,registers:[0],stack:[],memory:Array.from({length:200},(_,j)=>[j,0])},after:{pc:i+1,halted:false,registers:[0],stack:[],memory:Array.from({length:200},(_,j)=>[j,0])},evidence_refs:['dense:'+i]}));
 const denseJSON=JSON.stringify(dense);assert(Buffer.byteLength(denseJSON)<1048576);assert.equal(vm.trace(vm.parse(denseJSON)).steps.length,256);
+
+// Linked workspace controller checks do not replace rendered acceptance.
+const descendants=e=>[e,...e.children.flatMap(descendants)];
+ui.input.files=[file(reg)];await ui.input.events.change();
+assert(ui.stateView.textContent.includes('Before: 0'));assert(ui.stateView.textContent.includes('After: 7'));
+const support=descendants(ui.map).find(e=>e.textContent==='Support step 1');support.events.click();assert.equal(ui.selector.value,'1');
+const location=descendants(ui.stateView).find(e=>e.tagName==='button'&&e.textContent==='registers:1');location.events.click();assert(ui.occurrences.textContent.includes('Observed snapshots for registers:1'));
+assert(ui.occurrences.textContent.includes('not establish reads or writes'));
+ui.comparisonInput.files=[file(reg)];await ui.comparisonInput.events.change();ui.comparisonSelector.value='1';ui.compare.events.click();assert(ui.comparisonView.textContent.includes('Manual pair: primary step 1'));
+assert(ui.comparisonView.textContent.includes('observed_equal'));
+ui.comparisonInput.files=[file({bad:true})];await ui.comparisonInput.events.change();assert(ui.notice.textContent.includes('Both previous valid traces'));assert.equal(ui.selector.value,'1');assert.equal(ui.comparisonSelector.value,'1');
+ui.selector.value='0';ui.selector.events.change();assert(!ui.comparisonView.textContent.includes('Manual pair:'));
+ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:reg.identity.trace_id,mappings:[{opcode:'03',operation:'jump'}]})];await ui.hypothesis.events.change();assert(ui.validationView.textContent.includes('unsupported: step 0'));
+const wrong=copy(reg);wrong.steps=[wrong.steps[0]];wrong.steps[0].after.registers[0]=8;
+ui.input.files=[file(wrong)];await ui.input.events.change();ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:reg.identity.trace_id,mappings:[{opcode:'03',operation:'register_const'}]})];await ui.hypothesis.events.change();
+const contradiction=descendants(ui.validationView).find(e=>e.textContent==='contradicted: step 0');contradiction.events.click();assert(ui.stateView.textContent.includes('registers:0: expected 7; observed 8'));
+let finishFirst,finishSecond;
+ui.comparisonInput.files=[{size:20,arrayBuffer:()=>new Promise(resolve=>{finishFirst=resolve;})}];const firstImport=ui.comparisonInput.events.change();
+ui.comparisonInput.files=[{size:20,arrayBuffer:()=>new Promise(resolve=>{finishSecond=resolve;})}];const secondImport=ui.comparisonInput.events.change();
+const newer=copy(reg);newer.identity.trace_id='newer';finishSecond(await file(newer).arrayBuffer());await secondImport;finishFirst(await file(reg).arrayBuffer());await firstImport;
+ui.compare.events.click();assert(ui.comparisonView.textContent.includes('newer'));
+ui.clearComparison.events.click();assert.equal(document.activeElement,ui.comparisonInput);assert(ui.comparisonSelector.disabled);assert(!ui.selector.disabled);
+let finishHypothesis;ui.hypothesis.files=[{size:20,arrayBuffer:()=>new Promise(resolve=>{finishHypothesis=resolve;})}];const lateHypothesis=ui.hypothesis.events.change();ui.clear.events.click();finishHypothesis(await file({}).arrayBuffer());await lateHypothesis;assert.equal(ui.validation.textContent,'');assert.equal(document.activeElement,ui.input);
+console.log('PASS linked VM controller: support-step/cell navigation, explicit manual pair, invalid comparison retention, exact counterexample mismatch, newer import ownership, clear focus and late hypothesis cancellation');
+const sparse=copy(reg);sparse.coverage.complete=false;sparse.coverage.dropped_steps=3;sparse.steps=[sparse.steps[0],sparse.steps[1]];sparse.steps[1].sequence=4;
+sparse.steps[0].before.registers=[null,0];sparse.steps[0].after.registers=[null,0];sparse.steps[0].before.stack=[0];sparse.steps[0].after.stack=[];sparse.steps[0].before.memory=[[0,0],[9,null]];sparse.steps[0].after.memory=[[9,null],[20,0]];
+ui.input.files=[file(sparse)];await ui.input.events.change();assert(ui.stateView.textContent.includes('Gap after selected step: next retained sequence 4'));assert(ui.stateView.textContent.includes('Before: absent (not recorded)'));assert(ui.stateView.textContent.includes('After: absent (not recorded)'));ui.changesOnly.checked=false;ui.changesOnly.events.change();assert(ui.stateView.textContent.includes('unknown (null)'));ui.next.events.click();assert.equal(ui.selector.value,'4');assert(ui.stateView.textContent.includes('Gap before selected step: previous retained sequence 0'));ui.previous.events.click();assert.equal(ui.selector.value,'0');
+ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:sparse.identity.trace_id,mappings:[]})];await ui.hypothesis.events.change();const audit=JSON.parse(ui.validation.textContent);assert.match(audit.exact_trace_input_file_sha256,/^[a-f0-9]{64}$/);assert.match(audit.exact_hypothesis_input_file_sha256,/^[a-f0-9]{64}$/);
+let finishHash;const delayedCrypto={subtle:{digest:()=>new Promise(resolve=>{finishHash=resolve;})}};
+const delayedAPI=runInNewContext(source+';({mountVmSemantics})',{document,TextEncoder,TextDecoder,crypto:delayedCrypto,capturedClientJSON:client.capturedClientJSON});const delayedUI=delayedAPI.mountVmSemantics(new Element('details'));delayedUI.input.files=[file(reg)];const digestPending=delayedUI.input.events.change();while(!finishHash)await Promise.resolve();delayedUI.clear.events.click();finishHash(new Uint8Array(32).buffer);await digestPending;assert(delayedUI.selector.disabled);assert.equal(delayedUI.details.textContent,'');
+console.log('PASS VM UI provenance hashes, visible retained gaps, sparse memory additions/removals, stack pop, null/absent/zero labels and late digest cancellation');
+
+const maximalTrace=(offset=0)=>({format:'reb-vm-trace-v1',identity:{...reg.identity,trace_id:'maximal:'+offset},architecture:'register',coverage:{complete:true,dropped_steps:0,limitations:[]},steps:[{sequence:0,opcode:'03',operands:[63,7],instruction_size:1,before:{pc:0,halted:false,registers:Array(64).fill(0),stack:Array(128).fill(0),memory:Array.from({length:256},(_,i)=>[offset+i,0])},after:{pc:1,halted:false,registers:[...Array(63).fill(0),8],stack:Array(128).fill(0),memory:Array.from({length:256},(_,i)=>[offset+256+i,0])},evidence_refs:['maximal:0']}]});
+const findButton=(root,label)=>descendants(root).find(e=>e.tagName==='button'&&e.textContent===label);
+const pageLocations=(root,attribute)=>descendants(root).filter(e=>e.attributes[attribute]).map(e=>e.attributes[attribute]);
+ui.input.files=[file(maximalTrace())];await ui.input.events.change();ui.changesOnly.checked=false;ui.changesOnly.events.change();
+let stateLocations=[];
+while(true){const rows=pageLocations(ui.stateView,'data-vm-location');assert(rows.length<=64);stateLocations.push(...rows);const next=findButton(ui.stateView,'Next state locations page');if(next.disabled)break;next.events.click();assert(['Next state locations page','Previous state locations page'].includes(document.activeElement.textContent));assert.equal(ui.selector.value,'0');}
+assert.equal(stateLocations.length,706);assert.equal(new Set(stateLocations).size,706);assert(ui.stateView.textContent.includes('705–706 of 706; page 12 of 12'));
+findButton(ui.stateView,'memory:511').events.click();findButton(ui.map,'Support step 0').events.click();assert(pageLocations(ui.stateView,'data-vm-location').includes('memory:511'));assert(ui.occurrences.textContent.includes('Observed snapshots for memory:511'));findButton(ui.occurrences,'Step 0').events.click();assert(pageLocations(ui.stateView,'data-vm-location').includes('memory:511'));
+ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:'maximal:0',mappings:[{opcode:'03',operation:'register_const'}]})];await ui.hypothesis.events.change();findButton(ui.validationView,'contradicted: step 0').events.click();assert.equal(document.activeElement.textContent,'registers:63');assert(pageLocations(ui.stateView,'data-vm-location').includes('registers:63'));assert(ui.stateView.textContent.includes('page 2 of 12'));
+let mismatchCount=0;while(true){const rows=descendants(ui.stateView).filter(e=>e.className==='vm-mismatch');assert(rows.length<=64);mismatchCount+=rows.length;const next=findButton(ui.stateView,'Next hypothesis mismatches page');if(next.disabled)break;next.events.click();assert(['Next hypothesis mismatches page','Previous hypothesis mismatches page'].includes(document.activeElement.textContent));assert.equal(ui.selector.value,'0');}assert.equal(mismatchCount,513);assert.equal(JSON.parse(ui.validation.textContent).result.results[0].observed.memory.length,256);
+ui.comparisonInput.files=[file(maximalTrace(512))];await ui.comparisonInput.events.change();ui.compare.events.click();let comparedLocations=[];
+while(true){const rows=pageLocations(ui.comparisonView,'data-vm-comparison-location');assert(rows.length<=64);comparedLocations.push(...rows);const next=findButton(ui.comparisonView,'Next comparison locations page');if(next.disabled)break;next.events.click();assert(['Next comparison locations page','Previous comparison locations page'].includes(document.activeElement.textContent));assert.equal(ui.selector.value,'0');assert.equal(ui.comparisonSelector.value,'0');}
+assert.equal(comparedLocations.length,1218);assert.equal(new Set(comparedLocations).size,1218);assert(ui.comparisonView.textContent.includes('1217–1218 of 1218; page 20 of 20'));
+const fullComparison=descendants(ui.comparisonView).find(e=>e.tagName==='pre');assert.equal(JSON.parse(fullComparison.textContent).report.cells.length,1218);
+findButton(ui.comparisonView,'Previous comparison locations page').events.click();assert.equal(document.activeElement.textContent,'Previous comparison locations page');
+ui.input.files=[file(reg)];await ui.input.events.change();assert(ui.stateView.textContent.includes('page 1 of 1'));assert(!ui.comparisonView.textContent.includes('Manual pair:'));
+ui.input.files=[file(dense)];await ui.input.events.change();ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:dense.identity.trace_id,mappings:[]})];await ui.hypothesis.events.change();assert.equal(descendants(ui.validationView).filter(e=>e.attributes['data-vm-step']).length,64);findButton(ui.validationView,'Next validation steps page').events.click();assert.equal(document.activeElement.textContent,'Next validation steps page');assert.equal(descendants(ui.validationView).filter(e=>e.attributes['data-vm-step'])[0].attributes['data-vm-step'],'64');
+findButton(ui.map,'Next support steps page').events.click();assert.equal(document.activeElement.textContent,'Next support steps page');assert(findButton(ui.map,'Support step 64'));
+console.log('PASS bounded visible VM pages: all706/1218 locations reachable exactly once,64-row DOM cap, focus-preserving boundaries, off-page support/counterexample targets, full raw audits and64-link validation/support pages');

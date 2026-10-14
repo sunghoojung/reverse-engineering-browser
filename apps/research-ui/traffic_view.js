@@ -932,6 +932,11 @@ function webSocketModel(network) {
 function renderWebSocketInspector(root,network,stale=false) {
   if(!root)return;
   const model=webSocketModel(network);
+  // HTTP-only captures keep their full workspace. An open panel retains explicit
+  // empty/disabled status, but a closed panel appears only with retained sockets.
+  const hide=!root.open&&model.connections.length===0;
+  if(hide&&root.contains(document.activeElement))document.querySelector?.('#request-filter')?.focus({preventScroll:true});
+  root.hidden=hide;
   if(!root._rebWebsocket) {
     const summary=document.createElement('summary'),status=trafficNode('p','',''),controls=trafficNode('div','websocket-controls'),select=document.createElement('select'),direction=document.createElement('select'),frames=trafficNode('div','websocket-frames');
     select.setAttribute('aria-label','WebSocket connection');direction.setAttribute('aria-label','WebSocket direction');

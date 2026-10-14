@@ -81,3 +81,7 @@ screenshots in the existing Requests UI artifact. These are authored fixtures,
 not live third-party WebSocket probes or complete wire-capture attestation.
 
 Primary source: [CDP Network WebSocketFrame](https://chromedevtools.github.io/devtools-protocol/tot/Network/#type-WebSocketFrame).
+
+A closed WebSocket panel is absent when no retained connections exist, preserving
+the full HTTP workspace. An already open panel keeps empty/disabled status
+visible until closed. New retained connections expose the inspector automatically.

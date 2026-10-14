@@ -3765,6 +3765,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .websocket-frames details { margin: 8px 0; }
 .websocket-frames pre { max-height: 180px; max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .websocket-inspector :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
-#screen-traffic:not([hidden]) { display: flex; flex-direction: column; }
-#screen-traffic > .traffic-grid { flex: 1; height: auto; min-height: 112px; }
-#screen-traffic > .websocket-inspector { flex: 0 0 auto; max-height: 45%; overflow: auto; }
+#screen-traffic:not([hidden]):not([data-console-traffic="true"]):has(> .websocket-inspector:not([hidden])) { grid-template-rows: auto auto minmax(0, 1fr); }
+#screen-traffic > .websocket-inspector { grid-row: 2; max-height: min(320px, 45vh); overflow: auto; }
+#screen-traffic:has(> .websocket-inspector:not([hidden])) > .traffic-grid { grid-row: 3; }
+.websocket-inspector[hidden] { display: none; }

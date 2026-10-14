@@ -14,8 +14,8 @@ mod objects;
 mod parse;
 mod repeater;
 mod requests;
-mod workers;
 mod websocket;
+mod workers;
 use crate::{
     config::Options,
     durable,

@@ -463,10 +463,21 @@ mod tests {
     async fn websocket_capture_respects_content_opt_in() {
         let disabled = debugger(false);
         disabled.event(json!({"method":"Network.webSocketCreated","params":{"requestId":"ws","url":"ws://127.0.0.1/authored"}})).await;
-        assert!(disabled.snapshot()["network"]["websockets"]["connections"].as_array().unwrap().is_empty());
+        assert!(
+            disabled.snapshot()["network"]["websockets"]["connections"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         let enabled = debugger(true);
         enabled.event(json!({"method":"Network.webSocketCreated","params":{"requestId":"ws","url":"ws://127.0.0.1/authored"}})).await;
-        assert_eq!(enabled.snapshot()["network"]["websockets"]["connections"].as_array().unwrap().len(),1);
+        assert_eq!(
+            enabled.snapshot()["network"]["websockets"]["connections"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

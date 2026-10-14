@@ -38,3 +38,8 @@ const bounded=clone(net);bounded.websockets.frames=Array.from({length:200},(_,i)
 const html=await readFile(new URL('../apps/research-ui/index.html',import.meta.url),'utf8'),app=await readFile(new URL('../apps/research-ui/app.js',import.meta.url),'utf8');
 assert(html.includes('id="websocket-inspector"'));assert(app.includes("renderWebSocketInspector(document.querySelector('#websocket-inspector')"));
 console.log('PASS WebSocket model/controller: disabled/malformed/empty/stale states, inert text/base64, selection/direction, bounded rows, expanded state and focus across refresh, scope reset. Not rendered UI acceptance.');
+
+root.open=false;ui.renderWebSocketInspector(root,undefined);assert.equal(root.hidden,true,'Closed unavailable capture must not consume HTTP workspace');
+ui.renderWebSocketInspector(root,net);assert.equal(root.hidden,false,'Retained connections expose inspection');
+root.open=true;ui.renderWebSocketInspector(root,{capture_enabled:false});assert.equal(root.hidden,false,'Open disabled state remains explicit');
+root.open=false;ui.renderWebSocketInspector(root,{capture_enabled:false});assert.equal(root.hidden,true);

@@ -40,6 +40,11 @@ assert(!file(redacted,'evidence/capture.json').includes('response-secret'));
 assert.equal(raw.files.length,15);assert(raw.files.some(item=>item.path==='reb-client-project/go/services/service001.go'));
 assert(raw.files.every(item=>!item.path.includes('example.test')&&!item.path.includes('a%2F')));
 
+const invalidContentTypes = ['text/plain; charset=utf-8; charset=utf-16','text/plain; charset=" utf-16"','text/plain; charset=',
+  'text/plain; charset=""','text/plain; charset="utf-8','text/plain; charset=utf-8; CHARSET=UTF8','text/plain; charset*=utf-16',
+  'text/plain; charset=utf-8 junk','text/plain; note="ok"; charset="utf-16"','text/plain; note="unfinished'];
+const validContentTypes = ['text/plain; charset="UTF-8"','text/plain; note="a;b"; charset=utf8','text/plain; note="a;\\\"b"; charset="utf\\-8"'];
+
 const problems = [
   ['duplicate header',value=>value.requests[0].request.headers.push(['content-type','text/plain'])],
   ['Authorization',value=>value.requests[0].request.headers.push(['Authorization','synthetic-only'])],
@@ -55,6 +60,7 @@ const problems = [
   ['header whitespace',value=>value.requests[0].request.headers.push(['X-Space',' value '])],
   ['multipart',value=>value.requests[0].request.headers[0][1]='multipart/form-data; boundary=synthetic'],
   ['non-UTF8 charset',value=>value.requests[0].request.headers[0][1]='text/plain; charset=iso-8859-1'],
+  ...invalidContentTypes.map(type=>['ambiguous media parameters: '+type,value=>value.requests[0].request.headers[0][1]=type]),
   ['encoded body',value=>value.requests[0].request.headers.push(['Content-Encoding','gzip'])],
   ['unknown binary media',value=>value.requests[0].request.headers[0][1]='application/protobuf'],
   ['binary media',value=>value.requests[0].request.headers[0][1]='application/octet-stream'],
@@ -78,6 +84,10 @@ for (const [name,mutate] of problems) {
   const value = fixture();mutate(value);const selected=capture(value);
   assert(selected.problems.length>0,name);
   assert.deepEqual(JSON.parse(file(api.capturedClientProject(selected,'raw'),'evidence/capture.json')).record,value.requests[0],name+' evidence stays exact');
+}
+for (const type of validContentTypes) {
+  const value=fixture();value.requests[0].request.headers[0][1]=type;
+  assert.equal(capture(value).problems.length,0,type);
 }
 for (const text of ['{{variable}}','{{=escaped}}']) {
   const value=fixture();value.requests[0].request.body.text=text;const selected=capture(value);
@@ -215,6 +225,14 @@ async function checkGeneratedProject() {
     result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,headers:[['Authorization','synthetic-only']]}}));
     result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5,'Credential/transport refusal happens before fetch');
+    for(const type of invalidContentTypes) {
+      await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...copy(local.input),headers:[['Content-Type',type]]}}));
+      result=await execute('--send');assert.notEqual(result.code,0,type);assert.match(result.stderr,/invalid_input/);assert.equal(seen.length,5,'Malformed/ambiguous charset is refused before send');
+    }
+    for(const type of validContentTypes) {
+      await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...copy(local.input),headers:[['Content-Type',type]]}}));
+      result=await execute();assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).ready,true,type);assert.equal(seen.length,5);
+    }
     const redactedProject=api.capturedClientProject(local,'redacted_copy');
     for(const item of redactedProject.files)await writeFile(join(directory,item.path),item.text);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin}));

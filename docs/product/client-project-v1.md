@@ -37,6 +37,61 @@ content-process termination cancel it. Browser development uses a normal ZIP
 download. An older native shell without the bridge disables these controls
 with an explanation; it never pretends an unsupported download succeeded.
 
+## Offline exact-response export
+
+Coding agents can use the same project generator without opening the UI or
+sending a request. Save an authorized `get_network_request` response using the
+[local coding-agent guide](../development/local-coding-agents.md), review its
+raw contents locally, then run from the repository with Node.js 22+:
+
+```sh
+node tools/export-captured-client.mjs --input request.json --output project.zip
+```
+
+The default is `raw`, matching local capture export. Choose
+`--mode redacted_copy` only when requesting the explicit best-effort transformed
+copy. Neither mode changes the input. Raw values can contain credentials and
+personal data; redacted paths, identifiers and unknown producer fields can
+still be sensitive. Review before sharing. This command has no live endpoint,
+credential-loading, target-send, or automatic-retry option. It does not execute
+captured strings or install dependencies.
+
+The input must be one complete `reb-network-request-v1` JSON response, with all
+five source selectors and the matching retained row. It rejects malformed or
+inconsistent identities, duplicate JSON keys, invalid UTF-8/Unicode, unsafe
+integer values, excessive nesting and inputs above 1 MiB. The existing exporter
+also enforces its 768 KiB evidence and 2 MiB ZIP bounds. A valid response from
+the API can exceed these smaller export limits; rejection never truncates it.
+Missing, loading, binary, multipart, credential-bearing and truncated request
+representations preserve their evidence and explicit unsupported-input reasons.
+They require a complete reviewed `config.request` before a send. No unsupported
+input becomes a faithful replay claim.
+
+`provenance.json` retains the same exact identity as the UI. In
+`evidence/capture.json`, `coverage.saved_response` additionally records the
+original API format, five selectors and debugger generation. A saved file is
+not proof of current retention or freshness. The endpoint supplies neither
+window-drop counts nor configured capture limits, so these coverage fields are
+explicitly `null`, never invented zero counts or complete-coverage claims.
+Validation checks structure and internal consistency, not authenticity.
+The retained row is preserved as JSON data; original JSON whitespace and number
+spelling are not part of its CDP representation.
+
+On POSIX systems, input must be a regular non-symlink file. Output is a new ZIP
+in an existing directory. A private sibling temporary directory and an atomic
+hard link publish complete bytes with mode `0600`; existing files, symlinks and
+directories are never replaced. Filesystems without hard-link support fail
+explicitly. No partial archive is published on a write failure. The JSON result
+on stdout reports mode, archive size, zero target requests and unsupported-input
+reasons, without logging captured values. If temporary cleanup fails after publication,
+`temporary_cleanup_pending` flags the remaining private sibling directory; the
+complete output has still been published. The same saved response and mode
+produce the same archive bytes.
+
+The generated Go/JavaScript clients, dry-run default, explicit origin/send
+configuration, response checks and transport limitations below are unchanged.
+The command is a repository Node tool, not a new `reb-api` subcommand or HTTP API.
+
 ## Fixed project layout
 
 ```text
@@ -276,6 +331,12 @@ before sharing. The project `.gitignore` excludes request data, evidence,
 provenance and local configuration, but it is not a security boundary.
 
 ## Validation
+
+- `node tools/check-captured-client-export.mjs`: full command path with authored
+  exact-response fixtures, inert strings, raw/redacted deterministic archives,
+  saved provenance and unknown coverage, generated Node dry runs, unsupported
+  bodies/headers, malformed/bounded input, symlink refusal, atomic no-overwrite
+  output, private modes and zero loopback request receipts.
 
 - `node tools/check-captured-client-project.mjs`: exact data/provenance,
   unsupported matrix, immutable redaction, ZIP integrity through Python's

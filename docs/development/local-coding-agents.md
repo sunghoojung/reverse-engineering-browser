@@ -267,3 +267,26 @@ and the full gate in [AGENTS.md](../../AGENTS.md). Report exact selected evidenc
 references, useful findings, code and synthetic-test results, unsupported cases,
 and any action awaiting approval. Exclude raw captures and unrelated settings
 from shared deliverables.
+
+## Export one reviewed saved request offline
+
+After an authorized `get_network_request` call has saved its complete response
+locally with `--output request.json`, review the file within the approved data
+scope. From the repository, use Node.js 22+:
+
+```sh
+node tools/export-captured-client.mjs --input request.json --output project.zip
+```
+
+This reuses the native UI's configurable Go/JavaScript project generator.
+Default mode is raw; `--mode redacted_copy` explicitly requests the best-effort
+copy. Raw evidence may contain secrets, and redaction is not a sharing guarantee.
+No endpoint is contacted, target request sent, dependency installed or existing
+output overwritten. The saved five-field identity and debugger generation are
+retained; current capture freshness is not rechecked. Unsupported or incomplete
+request data remains evidence with warnings, requiring an explicit complete
+configuration before any client send. The input file is capped at 1 MiB and the
+existing project evidence/archive bounds still apply. See
+[offline export](../product/client-project-v1.md#offline-exact-response-export)
+for file safety, coverage and limitations. `reb-api` itself remains the API
+caller; this separate repository command adds no live operation.

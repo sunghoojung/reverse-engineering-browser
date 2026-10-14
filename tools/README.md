@@ -4,6 +4,14 @@ This directory is for offline artifact inspectors, trace converters, schema gene
 
 Tools must consume the shared protocol or stored evidence. They should not create a second instrumentation path that disagrees with the browser and broker.
 
+Use `node tools/export-captured-client.mjs --input request.json --output project.zip`
+with Node.js 22+ to export a reviewed saved `get_network_request` response through
+the existing Go/JavaScript client generator. Raw is the default;
+`--mode redacted_copy` requests an explicit best-effort copy. This offline tool
+never contacts a target or replaces an output. See
+[client project export](../docs/product/client-project-v1.md#offline-exact-response-export)
+for identity, privacy, input bounds and file-safety requirements.
+
 Run `python3 tools/validate-evidence-store.py path/to/events.jsonl` to validate
 normalized protocol v2 or v3 evidence, including runtime fingerprint operations
 and artifact capture success or failure records. Validation checks record shape,

@@ -132,6 +132,8 @@ point; both default to no network and require a reviewed origin plus `--send`.
 An experimental, separately enabled Go build-tag adapter pins Mimic v1.0.2 for
 one Chrome 133.0.0.0/Linux HTTP/HTTP2/TLS profile; it does not claim browser
 equivalence or implement automatic browser fallback.
+A separate offline repository command, `tools/export-captured-client.mjs`,
+reuses this generator for a reviewed saved exact-request API response.
 See [Client project v1](../../docs/product/client-project-v1.md) for limits,
 unsupported cases, layout, privacy and validation.
 

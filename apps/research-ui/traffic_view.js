@@ -901,3 +901,6 @@ function installTrafficCaptureExport(host, getRequest) {
   sync();
   return {sync};
 }
+
+// Reuse the explicit export-copy policy from the offline client-project command.
+if (typeof module === 'object' && module?.exports && typeof require === 'function') module.exports = {trafficCaptureDocument};

@@ -79,9 +79,17 @@ change client settings, or grant permissions. MCP remains out of scope.
   placeholders, dry-run defaults and synthetic request/response fixtures.
   Test locally without target access, ambient credentials or automatic sends.
   State unsupported bodies, protocols and browser/HTTP fidelity limits.
-- Native UI **Export project** is an existing separate workflow. `reb-api` has
-  no client-generation subcommand. Do not claim offline authored scaffolding is
-  a native export, a complete SDK or a verified replay.
+- After explicitly reviewing an authorized saved `get_network_request` response,
+  use `node tools/export-captured-client.mjs --input request.json --output project.zip`
+  from the repository to reuse the existing Go/JavaScript project generator.
+  Raw is the default; `--mode redacted_copy` requests the explicit best-effort
+  copy. Review before sharing. The command never fetches, sends, installs, or
+  overwrites an existing output. It preserves exact saved identity and generation,
+  with unknown drop/limit coverage; it cannot attest to current retention.
+  Unsupported/truncated inputs remain evidence with warnings. Honor the 1 MiB
+  input and existing export bounds; never trim a response to make it fit.
+- Native UI **Export project** remains available. The offline repository tool
+  is not a `reb-api` subcommand, a complete SDK or a verified replay.
 
 ## Stop before effects or broader sharing
 

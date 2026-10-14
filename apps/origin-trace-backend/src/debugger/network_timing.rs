@@ -2,9 +2,19 @@
 use serde_json::{Value, json};
 
 const OFFSETS: [&str; 13] = [
-    "proxyStart", "proxyEnd", "dnsStart", "dnsEnd", "connectStart", "connectEnd",
-    "sslStart", "sslEnd", "sendStart", "sendEnd", "receiveHeadersStart",
-    "receiveHeadersEnd", "workerStart",
+    "proxyStart",
+    "proxyEnd",
+    "dnsStart",
+    "dnsEnd",
+    "connectStart",
+    "connectEnd",
+    "sslStart",
+    "sslEnd",
+    "sendStart",
+    "sendEnd",
+    "receiveHeadersStart",
+    "receiveHeadersEnd",
+    "workerStart",
 ];
 
 fn number(parent: &Value, key: &str, offset: bool) -> Value {
@@ -61,7 +71,11 @@ pub(super) fn response(record: &mut Value, p: &Value, redirected: bool) {
     }
     timing["response_after_completion"] = timing["completion_observed"].clone();
     timing["response_observed"] = json!(true);
-    timing["response_source"] = json!(if redirected { "redirectResponse" } else { "responseReceived" });
+    timing["response_source"] = json!(if redirected {
+        "redirectResponse"
+    } else {
+        "responseReceived"
+    });
     // A redirect's next-hop timestamp is not the prior hop's response timestamp.
     if !redirected {
         timing["response_monotonic_seconds"] = number(p, "timestamp", false);
@@ -98,11 +112,20 @@ mod tests {
         let timing = begin(&json!({"timestamp":1.23456789,"wallTime":1792000000.123456}));
         assert_eq!(timing["request_monotonic_seconds"]["value"], 1.23456789);
         assert_eq!(timing["request_wall_seconds"]["value"], 1792000000.123456);
-        assert_eq!(begin(&json!({}))["request_wall_seconds"]["state"], "missing");
+        assert_eq!(
+            begin(&json!({}))["request_wall_seconds"]["state"],
+            "missing"
+        );
         for value in [json!(null), json!(-1), json!("123"), json!(1e30)] {
-            assert_eq!(begin(&json!({"wallTime":value}))["request_wall_seconds"]["state"], "invalid");
+            assert_eq!(
+                begin(&json!({"wallTime":value}))["request_wall_seconds"]["state"],
+                "invalid"
+            );
         }
-        assert_eq!(begin(&json!({"wallTime":0}))["request_wall_seconds"]["value"], 0.0);
+        assert_eq!(
+            begin(&json!({"wallTime":0}))["request_wall_seconds"]["value"],
+            0.0
+        );
     }
 
     #[test]

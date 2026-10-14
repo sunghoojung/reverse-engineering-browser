@@ -433,7 +433,12 @@ mod tests {
         debugger.network("Network.requestWillBeSent", &next).await;
         debugger.network("Network.responseReceived", &json!({"requestId":"timed",
             "timestamp":2.25,"response":{"status":200,"headers":{},"timing":{"requestTime":2.125}}})).await;
-        debugger.network("Network.loadingFailed", &json!({"requestId":"timed","timestamp":2.5})).await;
+        debugger
+            .network(
+                "Network.loadingFailed",
+                &json!({"requestId":"timed","timestamp":2.5}),
+            )
+            .await;
         let snapshot = debugger.snapshot();
         let rows = snapshot["network"]["requests"].as_array().unwrap();
         assert_eq!(rows.len(), 2);

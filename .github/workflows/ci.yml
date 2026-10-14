@@ -55,6 +55,17 @@ jobs:
         if: github.event_name == 'push'
         run: git show --check --oneline --no-renames HEAD
 
+  graphql-sdl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install explicit reference parser for authored fixtures
+        run: npm install --prefix /tmp/reb-graphql --ignore-scripts --no-audit --no-fund graphql@16.11.0
+      - name: Verify offline SDL with independent GraphQL parser
+        run: REB_GRAPHQL_REFERENCE=/tmp/reb-graphql/node_modules/graphql node tools/check-graphql-sdl.mjs
+
   python-client-export:
     runs-on: ubuntu-latest
     timeout-minutes: 10

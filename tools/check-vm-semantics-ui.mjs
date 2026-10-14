@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {selectRenderedOption} from './rendered-keyboard.mjs';
 export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,screenshot}) {
  const before={pc:0,halted:false,registers:[0],stack:[],memory:[]},after={...before,pc:1,registers:[7]},halted={...after,halted:true};
  const trace={format:'reb-vm-trace-v1',identity:{trace_id:'owned-ui',investigation_id:'1',finding_id:'2',artifact_id:'3',artifact_sha256:'a'.repeat(64),scope_id:'owned-ui',backend:'fixture'},architecture:'register',coverage:{complete:true,dropped_steps:0,limitations:['<img src=x onerror=alert(1)> inert fixture']},steps:[{sequence:0,opcode:'03',operands:[0,7],instruction_size:1,before,after,evidence_refs:['fixture:0']},{sequence:1,opcode:'09',operands:[],instruction_size:1,before:after,after:halted,evidence_refs:['fixture:1']}]};
@@ -7,7 +8,7 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  await importFile(trace,'Import VM execution trace');
  assert.equal(await evaluate("document.querySelector('#vm-semantics-workflow select').disabled"),false);
  assert.equal(await evaluate("document.querySelectorAll('#vm-semantics-workflow img').length"),0);
- await evaluate("document.querySelector('#vm-semantics-workflow select').focus()");await key('ArrowDown');await key('Enter');assert.equal(await evaluate("document.querySelectorAll('#vm-semantics-workflow pre')[1].textContent.includes('\"sequence\": 1')"),true);
+ await selectRenderedOption({evaluate,click,key,selector:'#vm-semantics-workflow select',index:1});assert.equal(await evaluate("document.querySelectorAll('#vm-semantics-workflow pre')[1].textContent.includes('\"sequence\": 1')"),true);
  await importFile({format:'reb-vm-hypothesis-v1',trace_id:'owned-ui',mappings:[{opcode:'03',operation:'register_const'},{opcode:'09',operation:'halt'}]},'Validate opcode hypothesis file');
  assert.equal(await evaluate("document.querySelectorAll('#vm-semantics-workflow pre')[2].textContent.includes('\"matched\"')"),true);
  for(const [width,height] of [[1440,900],[600,800],[360,740]]){await viewport(width,height);assert.equal(await evaluate("(()=>{const e=document.querySelector('#vm-semantics-workflow');return e.scrollWidth<=e.clientWidth+1&&document.querySelector('.vm-grid').getBoundingClientRect().bottom<=innerHeight+1})()"),true);await screenshot(`vm-semantics-${width}.png`);}

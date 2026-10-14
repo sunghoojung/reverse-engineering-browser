@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import os
 import select
 import subprocess
 import tempfile
@@ -282,7 +283,7 @@ def validate_writer_guards(broker: Path, receiver: Path, producer: Path) -> None
                 if alias_kind == "symlink":
                     alias.symlink_to(event)
                 else:
-                    alias.hardlink_to(event)
+                    os.link(event, alias)
                 failed = subprocess.run([str(broker.resolve()), "--store", str(alias)], input=b"", capture_output=True, timeout=10, check=False)
                 assert failed.returncode != 0
                 assert event.read_bytes() == b"original retained bytes\n"
@@ -299,7 +300,7 @@ def validate_writer_guards(broker: Path, receiver: Path, producer: Path) -> None
             if alias_kind == "symlink":
                 manifest.symlink_to(event)
             else:
-                manifest.hardlink_to(event)
+                os.link(event, manifest)
             failed = subprocess.run([str(receiver.resolve()), "--store", str(artifacts)], input=b"", capture_output=True, timeout=10, check=False)
             assert failed.returncode != 0
             assert event.read_bytes() == b"original retained bytes\n"

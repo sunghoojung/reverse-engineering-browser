@@ -899,13 +899,17 @@ Errors have distinct codes: invalid_input, invalid_config, unsupported_transport
 
 ## Optional pinned Go browser-profile transport (experimental)
 
-The optional go/client/mimic.go adapter uses exactly github.com/saucesteals/mimic v1.0.2, source commit 946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e. It is excluded from ordinary builds. After reviewing third-party dependencies, with Go 1.24+ already installed, run from go/:
+The optional go/client/mimic.go adapter uses exactly github.com/saucesteals/mimic v1.0.2, source commit 946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e. It is experimental, source-only and excluded from ordinary builds. Standard Go and JavaScript clients remain available without this dependency.
+
+Before setup: fhttp v1.0.1's applicable license grant and notice chain remain unresolved. Its pinned repository has no LICENSE/COPYING/NOTICE file; Go-derived headers do not establish permissions for all fork changes. See the [upstream license issue](https://github.com/useflyent/fhttp/issues/19). Resolve applicable permissions and notice obligations before enabling or distributing this optional dependency. The export contains no third-party source or binary.
+
+After resolving those requirements, with Go 1.24+ already installed, run from go/:
 
     GOTOOLCHAIN=local go get github.com/saucesteals/mimic@946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e
     GOTOOLCHAIN=local go build -tags mimic ./...
     GOTOOLCHAIN=local go vet -tags mimic ./...
 
-Review and retain the resulting go.mod and go.sum. Do not use an unpinned/latest Mimic version: later API generations differ. The standard project contains no downloaded dependency or binary. Mimic is MIT; its pinned dependencies include fhttp v1.0.1 and uTLS v1.7.4-0.20250519154908-0557f61cb0b8. The pinned fhttp repository lacked a root license file during source review; resolve transitive license/notice completeness before distributing dependencies or binaries.
+Review and retain the resulting go.mod and go.sum. Do not use an unpinned/latest Mimic version: later API generations differ. The standard project contains no downloaded dependency or binary. Mimic is MIT; its pinned dependencies include fhttp v1.0.1 and uTLS v1.7.4-0.20250519154908-0557f61cb0b8.
 
 Select exactly:
 

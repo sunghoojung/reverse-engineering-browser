@@ -143,8 +143,19 @@ did nothing; the CLI warns to check server state before another deliberate send.
 [the exact saucesteals/mimic v1.0.2 source](https://github.com/saucesteals/mimic/tree/946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e)
 (commit `946a948a9b5a4360847b7f7d4b1f2e63f64ddc9e`, MIT). This API uses
 `mimic.NewTransport(mimic.TransportOptions{...})` and the fhttp client, not the
-incompatible current-main standard-net/http API. Go 1.24+ is required for the
-optional dependency. The generated README gives explicit pinned `go get`,
+incompatible current-main standard-net/http API.
+
+This is an experimental source-only adapter; standard Go and JavaScript clients
+remain available without the optional dependency. Before setup, resolve its
+applicable permissions and notice obligations: fhttp v1.0.1's license grant and
+notice chain remain unresolved. Its pinned repository has no
+LICENSE/COPYING/NOTICE file, and Go-derived headers do not establish permissions
+for all fork changes. See the [upstream license issue](https://github.com/useflyent/fhttp/issues/19).
+Resolve these requirements before enabling or distributing the optional
+dependency. The export contains no third-party source or binary.
+
+Go 1.24+ is required for the optional dependency. After those requirements are
+resolved, the generated README gives explicit pinned `go get`,
 build and run steps. Ordinary builds remain dependency-free and never download
 it. Review and retain resulting module/sum files before use.
 

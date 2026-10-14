@@ -62,6 +62,12 @@ $(NATIVE_CONSOLE_BINARY): $(BUILD_DIR)/apps/native-console/main.o $(NATIVE_CONSO
 $(BUILD_DIR)/apps/native-console/main.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(DECODER_BINARY): LDLIBS += $(ZLIB_LIBS)
 
+# Authored sanitizer fixtures call the same parser through a test-only process.
+# Never package this driver or relax the production decoder's process limits.
+$(BUILD_DIR)/reb-decoder-test: $(BUILD_DIR)/tools/decoder-test-driver.o $(BUILD_DIR)/src/analysis/decoder.o mk/native.mk
+	@mkdir -p $(@D)
+	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) $(ZLIB_LIBS) -o $@
+
 $(NATIVE_PROXY_POLICY_TEST): $(BUILD_DIR)/tools/check-native-proxy-policy.o $(NATIVE_PROXY_POLICY_OBJECT)
 
 $(BUILD_DIR)/tools/check-native-proxy-policy.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
@@ -86,7 +92,7 @@ $(BUILD_DIR)/%.o: %.cc
 NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp)
 NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \
 	$(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT) \
-	$(NATIVE_PROXY_POLICY_OBJECT) $(BUILD_DIR)/tools/check-native-proxy-policy.o
+	$(NATIVE_PROXY_POLICY_OBJECT) $(BUILD_DIR)/tools/check-native-proxy-policy.o $(BUILD_DIR)/tools/decoder-test-driver.o
 
 $(NATIVE_OBJECTS): mk/config.mk mk/native.mk
 $(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST): mk/native.mk

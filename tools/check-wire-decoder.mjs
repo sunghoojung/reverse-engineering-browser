@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
 const executable=resolve(process.argv[2]??'build/reb-decoder');
-function run(operation,input) {const result=spawnSync(executable,['transform',operation],{input:Buffer.from(input),encoding:'utf8',timeout:5000,maxBuffer:2*1048576});assert.equal(result.error,undefined);assert.equal(result.signal,null);return result;}
+const strictStderr=process.argv.includes('--strict-stderr');
+function run(operation,input) {const result=spawnSync(executable,['transform',operation],{input:Buffer.from(input),encoding:'utf8',timeout:5000,maxBuffer:2*1048576});assert.equal(result.error,undefined);assert.equal(result.signal,null);assert.ok([0,2,3].includes(result.status),`Unexpected decoder exit ${result.status}: ${result.stderr}`);assert.doesNotMatch(result.stderr,/AddressSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer|runtime error:/i);if(strictStderr||result.status===0)assert.equal(result.stderr,'');return result;}
 function decode(operation,input) {const result=run(operation,input);assert.equal(result.status,0,result.stderr);return JSON.parse(result.stdout);}
-function refuse(operation,input,status=null) {const result=run(operation,input);assert.notEqual(result.status,0);assert.equal(result.stdout,'');if(status!==null)assert.equal(result.status,status);}
+function refuse(operation,input,status=2) {const result=run(operation,input);assert.notEqual(result.status,0);assert.equal(result.stdout,'');if(status!==null)assert.equal(result.status,status);}
 const varint=value=>{let n=BigInt(value),out=[];do{let byte=Number(n&127n);n>>=7n;if(n)byte|=128;out.push(byte);}while(n);return Buffer.from(out);};
 const bytes=(number,payload)=>Buffer.concat([varint((number<<3)|2),varint(payload.length),Buffer.from(payload)]);
 const envelope=(flags,payload)=>{const head=Buffer.alloc(5);head[0]=flags;head.writeUInt32BE(payload.length,1);return Buffer.concat([head,Buffer.from(payload)]);};

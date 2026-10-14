@@ -80,3 +80,9 @@ and HTTP capability lists and the versioned OpenAPI enum are updated together.
 
 References: [Protocol Buffers encoding](https://protobuf.dev/programming-guides/encoding/),
 [gRPC-web protocol](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md).
+
+Sanitizer builds run the same wire corpus against a test-only driver linked to
+the exact decoder implementation. The production CLI's Linux128MiB address-space
+limit is unchanged; it cannot accommodate ASan's virtual shadow map. Normal
+`make wire-decoder-check` still runs the real production CLI. The test driver is
+not packaged or exposed by the API; parser byte/output budgets remain enforced.

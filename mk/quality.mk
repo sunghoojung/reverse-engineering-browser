@@ -1,8 +1,9 @@
 native-build-test:
 	./scripts/check-native-build.sh
 
-wire-decoder-check: $(DECODER_BINARY)
-	node tools/check-wire-decoder.mjs $(DECODER_BINARY)
+WIRE_DECODER_EXECUTABLE ?= $(DECODER_BINARY)
+wire-decoder-check: $(WIRE_DECODER_EXECUTABLE)
+	node tools/check-wire-decoder.mjs $(WIRE_DECODER_EXECUTABLE) $(WIRE_DECODER_CHECK_FLAGS)
 
 check: all wire-decoder-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test workspace-check deob-benchmark
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
@@ -32,6 +33,8 @@ sanitize:
 	$(MAKE) BUILD_DIR=$(SANITIZE_BUILD_DIR) clean
 	$(MAKE) \
 		BUILD_DIR=$(SANITIZE_BUILD_DIR) \
+		WIRE_DECODER_EXECUTABLE=$(SANITIZE_BUILD_DIR)/reb-decoder-test \
+		WIRE_DECODER_CHECK_FLAGS=--strict-stderr \
 		OPT_CXXFLAGS="-O1 -g" \
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \

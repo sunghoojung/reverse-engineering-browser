@@ -1,5 +1,9 @@
 /* One observed operation, explicit local copies, no automatic target requests.
  * Capture evidence and runnable inputs remain separate representations. */
+// The offline command uses the same exporter, without loading the UI or a browser.
+const capturedClientTrafficDocument = typeof module === 'object' && module?.exports && typeof require === 'function'
+  ? require('./traffic_view.js').trafficCaptureDocument : (...args) => trafficCaptureDocument(...args);
+
 function capturedClientIssues(request) {
   const problems = [], bytes = value => typeof value === 'string' ? new TextEncoder().encode(value).length : Infinity;
   const wellFormed = value => typeof value === 'string' && !Array.from(value).some(character => {
@@ -43,7 +47,11 @@ function capturedClientIssues(request) {
 function capturedClientCapture(request) {
   const identity = apiCatalogRequestIdentity(request);
   if (!identity) throw new TypeError('Select an exact retained CDP capture.');
-  const evidence = trafficCaptureDocument(request, 'raw'), record = evidence.record;
+  return capturedClientSource(identity, capturedClientTrafficDocument(request, 'raw'));
+}
+
+function capturedClientSource(identity, evidence) {
+  const record = evidence.record;
   if (new TextEncoder().encode(JSON.stringify(evidence)).length > 786432) throw new TypeError('This capture exceeds the 768 KiB project evidence limit. Use the existing raw capture export.');
   const body = record.request.body;
   const input = {method:record.method,url:record.url,headers:record.request.headers.map(pair => [...pair]),
@@ -75,7 +83,10 @@ function capturedClientRedactInput(input) {
   return {...input,url:capturedClientRedactUrl(input.url),headers:input.headers.map(([name]) => [name,'<redacted>']),body:'<redacted>'};
 }
 function capturedClientCaptureCopy(document, mode) {
-  return trafficCaptureDocument({captureRecord:document.record,captureLimits:document.coverage.limits,captureDropped:document.coverage.dropped},mode);
+  const copy = capturedClientTrafficDocument({captureRecord:document.record},mode);
+  // Preserve explicitly unknown window coverage and saved-snapshot provenance.
+  copy.coverage = JSON.parse(JSON.stringify(document.coverage));
+  return copy;
 }
 
 // Stored ZIP records, CRC-32 and UTF-8 names; no compression/encryption/ZIP64.
@@ -1109,3 +1120,6 @@ function installCapturedClientWorkflow(options) {
   });
   sync(); return {sync,close};
 }
+
+// CommonJS entry point for the offline exporter; browser script behavior is unchanged.
+if (typeof module === 'object' && module?.exports && typeof require === 'function') module.exports = {capturedClientSource,capturedClientProject,capturedClientJSON};

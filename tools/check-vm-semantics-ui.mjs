@@ -8,7 +8,7 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  await importFile(trace,'Import VM execution trace');
  assert.equal(await evaluate("document.querySelector('#vm-semantics-workflow select').disabled"),false);
  assert.equal(await evaluate("document.querySelectorAll('#vm-semantics-workflow img').length"),0);
- await selectRenderedOption({evaluate,click,key,selector:'#vm-semantics-workflow select',index:1});assert.equal(await evaluate("document.querySelectorAll('#vm-semantics-workflow pre')[1].textContent.includes('\"sequence\": 1')"),true);
+ await selectRenderedOption({evaluate,click,key,selector:'#vm-semantics-workflow select',index:1,keyboardFocus:true});assert.equal(await evaluate("document.querySelectorAll('#vm-semantics-workflow pre')[1].textContent.includes('\"sequence\": 1')"),true);
  await importFile({format:'reb-vm-hypothesis-v1',trace_id:'owned-ui',mappings:[{opcode:'03',operation:'register_const'},{opcode:'09',operation:'halt'}]},'Validate opcode hypothesis file');
  assert.equal(await evaluate("document.querySelectorAll('#vm-semantics-workflow pre')[2].textContent.includes('\"matched\"')"),true);
  for(const [width,height] of [[1440,900],[600,800],[360,740]]){await viewport(width,height);assert.equal(await evaluate("(()=>{const e=document.querySelector('#vm-semantics-workflow');return e.scrollWidth<=e.clientWidth+1&&document.querySelector('.vm-grid').getBoundingClientRect().bottom<=innerHeight+1})()"),true);await screenshot(`vm-semantics-${width}.png`);}

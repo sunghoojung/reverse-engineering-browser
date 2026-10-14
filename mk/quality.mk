@@ -81,6 +81,7 @@ javascript-check:
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
+	node tools/check-graphql-sdl.mjs
 	node tools/check-python-client-project.mjs
 	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only

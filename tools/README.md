@@ -69,3 +69,4 @@ source discovery before explicit capture/arming and the genuine Page baseline.
 Target-relevant stale-source refusal remains a separate boundary.
 
 Use `node tools/export-captured-har.mjs --input request.json --output request.har` for bounded offline [HAR 1.2 export](../docs/product/har-export-v1.md). New source timing is required; unknown required phases are refused, never filled with zeros.
+Use `node tools/export-graphql-sdl.mjs --input introspection.json --output schema.graphql` for [offline GraphQL introspection to SDL](../docs/product/graphql-sdl-v1.md). It reads saved schema JSON only and never queries a target.

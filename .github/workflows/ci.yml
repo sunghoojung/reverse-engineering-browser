@@ -55,6 +55,25 @@ jobs:
         if: github.event_name == 'push'
         run: git show --check --oneline --no-renames HEAD
 
+  python-client-export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install explicit Python export test dependencies
+        run: |
+          python3 -m venv /tmp/reb-python-export
+          /tmp/reb-python-export/bin/python -m pip install --disable-pip-version-check \
+            requests==2.34.2 httpx==0.28.1
+          /tmp/reb-python-export/bin/python -m pip freeze
+
+      - name: Test Requests and HTTPX against authored loopback fixtures
+        run: |
+          REB_PYTHON=/tmp/reb-python-export/bin/python \
+            node tools/check-python-client-project.mjs --providers
+
   requests-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 15

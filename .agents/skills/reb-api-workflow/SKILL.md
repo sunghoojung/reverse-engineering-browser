@@ -88,6 +88,10 @@ change client settings, or grant permissions. MCP remains out of scope.
   with unknown drop/limit coverage; it cannot attest to current retention.
   Unsupported/truncated inputs remain evidence with warnings. Honor the 1 MiB
   input and existing export bounds; never trim a response to make it fit.
+- Add `--python-client requests` or `--python-client httpx` only when a Python
+  project is wanted. Its explicit Python configuration version uses per-operation
+  timeouts, not the Go/JavaScript whole-request deadline. Export never installs
+  dependencies. Preserve unsupported-input and transport limitations.
 - Native UI **Export project** remains available. The offline repository tool
   is not a `reb-api` subcommand, a complete SDK or a verified replay.
 

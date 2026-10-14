@@ -1122,4 +1122,4 @@ function installCapturedClientWorkflow(options) {
 }
 
 // CommonJS entry point for the offline exporter; browser script behavior is unchanged.
-if (typeof module === 'object' && module?.exports && typeof require === 'function') module.exports = {capturedClientSource,capturedClientProject,capturedClientJSON};
+if (typeof module === 'object' && module?.exports && typeof require === 'function') module.exports = {capturedClientSource,capturedClientProject,capturedClientJSON,capturedClientZip};

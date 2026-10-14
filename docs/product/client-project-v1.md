@@ -91,6 +91,9 @@ produce the same archive bytes.
 The generated Go/JavaScript clients, dry-run default, explicit origin/send
 configuration, response checks and transport limitations below are unchanged.
 The command is a repository Node tool, not a new `reb-api` subcommand or HTTP API.
+The explicit `--python-client requests|httpx` option generates a separate
+[Python-only project](python-client-project-v1.md), with a versioned per-operation
+timeout contract. The default and native exports remain Go/JavaScript.
 
 ## Fixed project layout
 
@@ -124,7 +127,8 @@ with CRC-32, no compression, encryption, symlinks or ZIP64. Limits: 16 files,
 Go is the first entry point: from `go/`, run `go run ./cmd/request-001`
 with Go 1.23+ for a dry run, or append `--send` after reviewing configuration.
 Both clients share the root request, provenance, evidence and config files.
-TypeScript and Python generators are not included in this version.
+TypeScript is not included. Python is an explicit offline-only choice described
+above; it is not added to native exports.
 
 Run `node examples/request-001.mjs` with Node.js 22+ for the JavaScript dry run. No package
 installation is needed. Copy `config.example.json` to `config.json`, review the

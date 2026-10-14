@@ -4075,6 +4075,196 @@
           "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
+    },
+    "/api/network/request": {
+      "get": {
+        "operationId": "get_network_request",
+        "summary": "Read one exact retained Traffic request",
+        "description": "Requires all five original identity fields from the observation catalog or selected retained Traffic record. No full debugger snapshot, target fetch, capture activation, reconnect, mutation or replay. Duplicate public IDs fail even if exactly one candidate matches target and start. Returns raw retained data only within the explicitly authorized sharing scope.",
+        "tags": [
+          "debugger"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkRequestResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal selected-record serialization or task failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing, duplicate, unknown, oversized or invalid identity/query encoding. code=invalid_request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Read admission unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No unique exact ID/target/start is retained after owner check. code=target_unavailable; details.selection_reason=request_not_retained.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Owner instance/epoch mismatch: state_conflict with selection_reason=stale_capture. Otherwise duplicate retained public ID: state_conflict with selection_reason=ambiguous_request. No candidate data returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Complete selected response exceeds 8388608 bytes, including JSON escaping. code=resource_limit; no partial data returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "exact-retained-traffic",
+              "condition": "All five original identity fields must match current retained Traffic. The public request ID must be unique across the retained window. Scope and sharing authorization are the researcher’s responsibility."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads only one exact retained Traffic row and ownership context under a single state lock. Does not consult stores, copy full state, fetch content, reconnect, launch helpers, send browser commands, write data or retry. Raw retained values can be sensitive; this is not a privacy filter.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/debugger/network_request.rs",
+              "symbol": "Debugger::network_request"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/debugger/network_request.rs",
+              "symbol": "NetworkRequestSelection::parse"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-max-utf8-bytes": 128
+            }
+          },
+          {
+            "name": "capture_epoch",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 16,
+              "description": "Canonical unsigned decimal; numeric value must be at most 9007199254740991."
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192,
+              "x-max-utf8-bytes": 8192
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "x-max-utf8-bytes": 4096
+            }
+          },
+          {
+            "name": "started_monotonic_ms",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Finite nonnegative JSON number spelling without whitespace. Pass the original unrounded binary64 value; exponent notation is allowed, NaN and Infinity are not."
+            }
+          }
+        ],
+        "x-max-response-bytes": 8388608,
+        "x-max-query-bytes": 40960
+      }
     }
   },
   "components": {
@@ -14823,7 +15013,7 @@
       "ErrorDetails": {
         "type": "object",
         "additionalProperties": false,
-        "maxProperties": 4,
+        "maxProperties": 5,
         "properties": {
           "phase": {
             "type": "string",
@@ -14847,6 +15037,15 @@
           },
           "current_generation": {
             "$ref": "#/components/schemas/SafeInteger"
+          },
+          "selection_reason": {
+            "type": "string",
+            "enum": [
+              "stale_capture",
+              "request_not_retained",
+              "ambiguous_request"
+            ],
+            "description": "Exact retained Traffic lookup only: stale instance/epoch, absent exact row, or duplicate public request ID. No alternative identifiers or raw diagnostics."
           }
         },
         "description": "Allowlisted bounded metadata only. Empty when no detail is known. No arbitrary strings, target URLs or IDs, submitted inputs, credentials, raw captures, diagnostics, or stacks. request_body timeout is before action dispatch; command_exchange uncertainty covers interrupted queued/partial writes and missing or malformed replies; it cannot establish whether an action happened. Worker termination does not undo prior effects."
@@ -19897,6 +20096,315 @@
           }
         },
         "description": "Bounded derived structural observations of the newest 64 retained CDP Traffic records. Not an API specification. No required fields, route templates, authentication, replay, or completeness is inferred. Raw local Traffic is unchanged."
+      },
+      "NetworkRequestIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "instance_id",
+          "capture_epoch",
+          "request_id",
+          "target_id",
+          "started_monotonic_ms"
+        ],
+        "properties": {
+          "instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "capture_epoch": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "x-max-utf8-bytes": 8192
+          },
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "started_monotonic_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Finite original binary64 monotonic timestamp; never round for selection."
+          }
+        }
+      },
+      "RetainedTrafficBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "mime",
+          "text",
+          "base64",
+          "truncated",
+          "reason"
+        ],
+        "properties": {
+          "state": {
+            "enum": [
+              "available",
+              "empty",
+              "missing",
+              "loading",
+              "error"
+            ]
+          },
+          "mime": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 131072,
+            "x-max-utf8-bytes": 131072
+          },
+          "base64": {
+            "type": "string",
+            "maxLength": 174764,
+            "x-max-utf8-bytes": 174764
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512
+          }
+        },
+        "description": "Raw bounded retained content. Available can still be a truncated prefix; empty, missing, loading and error are distinct. mime is retained as captured, including Content-Type parameters and potentially up to 8192 UTF-8 bytes."
+      },
+      "RetainedTrafficSide": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "headers",
+          "headers_truncated",
+          "body"
+        ],
+        "properties": {
+          "headers": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "string",
+                  "maxLength": 128,
+                  "x-max-utf8-bytes": 128
+                },
+                {
+                  "type": "string",
+                  "maxLength": 8192,
+                  "x-max-utf8-bytes": 8192
+                }
+              ],
+              "items": false,
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "description": "Raw ordered name/value pairs; aggregate producer limit 65536 UTF-8 bytes per side."
+          },
+          "headers_truncated": {
+            "type": "boolean"
+          },
+          "body": {
+            "$ref": "#/components/schemas/RetainedTrafficBody"
+          }
+        }
+      },
+      "RetainedTrafficRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "id",
+          "protocol_request_id",
+          "target_id",
+          "target_title",
+          "url",
+          "url_truncated",
+          "method",
+          "method_truncated",
+          "resource_type",
+          "document_url",
+          "document_url_truncated",
+          "started_monotonic_ms",
+          "wall_time_ms",
+          "state",
+          "status",
+          "status_text",
+          "protocol",
+          "mime_type",
+          "duration_ms",
+          "encoded_data_length",
+          "from_disk_cache",
+          "from_service_worker",
+          "error_text",
+          "request",
+          "response",
+          "initiator"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "x-max-utf8-bytes": 8192
+          },
+          "protocol_request_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "target_title": {
+            "type": "string",
+            "maxLength": 65536,
+            "x-max-utf8-bytes": 65536
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 65536,
+            "x-max-utf8-bytes": 65536
+          },
+          "url_truncated": {
+            "type": "boolean"
+          },
+          "method": {
+            "type": "string",
+            "maxLength": 32,
+            "x-max-utf8-bytes": 32
+          },
+          "method_truncated": {
+            "type": "boolean"
+          },
+          "resource_type": {
+            "type": "string",
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "document_url": {
+            "type": "string",
+            "maxLength": 65536,
+            "x-max-utf8-bytes": 65536
+          },
+          "document_url_truncated": {
+            "type": "boolean"
+          },
+          "started_monotonic_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "wall_time_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "complete",
+              "failed"
+            ]
+          },
+          "status": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status_text": {
+            "type": "string",
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512
+          },
+          "protocol": {
+            "type": "string",
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "mime_type": {
+            "type": "string",
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512
+          },
+          "duration_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "encoded_data_length": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "from_disk_cache": {
+            "type": "boolean"
+          },
+          "from_service_worker": {
+            "type": "boolean"
+          },
+          "error_text": {
+            "type": "string",
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512
+          },
+          "request": {
+            "$ref": "#/components/schemas/RetainedTrafficSide"
+          },
+          "response": {
+            "$ref": "#/components/schemas/RetainedTrafficSide"
+          },
+          "initiator": {
+            "type": "object",
+            "description": "Existing raw bounded call-site projection from provenance::call_sites, preserved without source fetching."
+          }
+        },
+        "x-schema-completeness": "partial",
+        "x-unmodeled-constraints": [
+          "Retains the complete existing Traffic record without rewriting it; initiator projection and future producer fields remain source-owned. The complete serialized envelope is capped at 8388608 bytes, including JSON escaping."
+        ],
+        "description": "One unchanged retained CDP Traffic row, including raw headers, URLs, bodies and original truncation/unavailability flags. May contain credentials or personal data. This is an ephemeral snapshot, not complete wire evidence or an export-sanitization promise."
+      },
+      "NetworkRequestResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "format",
+          "source",
+          "debugger_generation",
+          "request"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-network-request-v1"
+          },
+          "source": {
+            "$ref": "#/components/schemas/NetworkRequestIdentity"
+          },
+          "debugger_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "request": {
+            "$ref": "#/components/schemas/RetainedTrafficRequest"
+          }
+        },
+        "description": "Exactly one source row and its ownership context copied under one lock. A pending body stays pending; no fetch, refresh, target control or fallback lookup is triggered. Complete JSON is at most 8388608 bytes."
       }
     }
   },

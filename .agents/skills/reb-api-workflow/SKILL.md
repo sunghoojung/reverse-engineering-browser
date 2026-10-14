@@ -56,6 +56,16 @@ change client settings, or grant permissions. MCP remains out of scope.
 - Keep a CDP observation's `instance_id`, `capture_epoch`, `request_id`,
   `target_id` and `started_monotonic_ms` together. Match all five before using a
   retained Traffic record. A refresh, reconnect or eviction can invalidate it.
+- For an approved raw source, call `get_network_request --read-only` with all
+  five original values as `--param` selectors. Use the unrounded finite
+  `started_monotonic_ms`; never substitute a protocol ID or rounded time. The
+  response retains the raw row and its existing truncation/missing-body flags,
+  bounded to 8 MiB. It does not fetch or reconnect. Raw values need their own
+  provider-sharing authorization even when the structural catalog was approved.
+- Stop on `details.selection_reason` of `stale_capture`, `ambiguous_request` or
+  `request_not_retained`; never broaden to a full debugger snapshot or choose a
+  similar row. Duplicate public IDs are ambiguous even if one candidate matches
+  the other selectors. An oversized response fails entirely with `resource_limit`.
 - Native traces use a different identity. For a researcher-selected native
   request, pass `session_id`, native `request_id`, `root_process_id` and
   `root_sequence_number` to `get_origin_trace`. Preserve canonical uint64 strings.

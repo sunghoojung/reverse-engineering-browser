@@ -6,6 +6,7 @@ mod experiment;
 mod fields;
 mod heap;
 mod hooks;
+mod marker_fuzz;
 mod network;
 mod network_request;
 mod network_timing;
@@ -680,7 +681,7 @@ impl Debugger {
             }
             "configure_repeater_variables" => return self.repeater_variables(request),
             "run_repeater_request" => return self.run_repeater(request).await,
-            "cancel_repeater_request" => return self.cancel_repeater().await,
+            "cancel_repeater_request" => return self.cancel_repeater_expected(request).await,
             "compare_repeater_history" => return self.compare_repeater(request),
             "clear_repeater_history" => return self.clear_repeater(),
             "clear_console" => self.update(|s| s["console"] = json!([])),

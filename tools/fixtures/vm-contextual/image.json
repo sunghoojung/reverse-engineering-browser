@@ -1,0 +1,17 @@
+{
+  "format": "reb-vm-contextual-image-v1",
+  "build_id": "owned-jump",
+  "definition_id": "owned-jump-map",
+  "image_id": "owned-jump-bytes",
+  "bytes_hex": "aa01bb",
+  "entry_contexts": [
+    {
+      "offset": 0,
+      "decoder_state": "entry"
+    },
+    {
+      "offset": 2,
+      "decoder_state": "done"
+    }
+  ]
+}

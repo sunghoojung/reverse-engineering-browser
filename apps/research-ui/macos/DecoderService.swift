@@ -22,6 +22,10 @@ final class NativeDecoderService {
     "protobuf-inspect",
     "grpc-web-inspect",
     "grpc-web-text-inspect",
+    "magic-inspect",
+    "sha256",
+    "sha384",
+    "sha512",
   ]
   private static let algorithms = ["HS256", "HS384", "HS512", "none"]
 

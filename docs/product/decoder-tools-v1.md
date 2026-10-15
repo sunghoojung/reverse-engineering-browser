@@ -117,3 +117,5 @@ caps. Service, HTTP, browser-contract, desktop, narrow-layout, and packaged-app
 smoke checks cover the complete user path.
 
 Structured wire inspection adds explicit Protobuf, gRPC-web binary and gRPC-web text operations. See [wire inspection v1](protobuf-grpc-v1.md) for schema-unknown semantics, source offsets, framing and limits.
+
+The existing chain also supports [Magic suggestions and explicit SHA-2 digests](decoder-magic-hashes-v1.md). Magic identifies bounded syntax/signature candidates only; it never follows guessed transforms automatically.

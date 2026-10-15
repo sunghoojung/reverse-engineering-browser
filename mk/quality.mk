@@ -5,7 +5,11 @@ WIRE_DECODER_EXECUTABLE ?= $(DECODER_BINARY)
 wire-decoder-check: $(WIRE_DECODER_EXECUTABLE)
 	node tools/check-wire-decoder.mjs $(WIRE_DECODER_EXECUTABLE) $(WIRE_DECODER_CHECK_FLAGS)
 
-check: all wire-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test workspace-check deob-benchmark
+MAGIC_DECODER_EXECUTABLE ?= $(DECODER_BINARY)
+magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decoder-limits
+	node tools/check-magic-decoder.mjs $(MAGIC_DECODER_EXECUTABLE) $(MAGIC_DECODER_CHECK_FLAGS) --limits=$(BUILD_DIR)/check-magic-decoder-limits
+
+check: all wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test workspace-check deob-benchmark
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
@@ -44,10 +48,12 @@ sanitize:
 		BUILD_DIR=$(SANITIZE_BUILD_DIR) \
 		WIRE_DECODER_EXECUTABLE=$(SANITIZE_BUILD_DIR)/reb-decoder-test \
 		WIRE_DECODER_CHECK_FLAGS=--strict-stderr \
+		MAGIC_DECODER_EXECUTABLE=$(SANITIZE_BUILD_DIR)/reb-decoder-test \
+		MAGIC_DECODER_CHECK_FLAGS=--strict-stderr \
 		OPT_CXXFLAGS="-O1 -g" \
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
-		all wire-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check
+		all wire-decoder-check magic-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check
 
 format:
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \

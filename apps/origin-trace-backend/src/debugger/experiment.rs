@@ -557,12 +557,39 @@ impl Debugger {
         let _lifecycle = self.experiment.lifecycle.lock().await;
         self.isolated_target("request_interception", false)?;
         let rule = requests::rule(r)?;
+        if let Some(local) = rule.get("local_override") {
+            let snapshot = self.snapshot();
+            if local["target_id"] != snapshot["request_interception"]["target_id"]
+                || local["experiment_id"] != snapshot["request_interception"]["experiment_id"]
+                || snapshot["action_scope"]["mode"] != "target"
+                || snapshot["action_scope"]["target_id"] != local["target_id"]
+            {
+                return Err(Error::conflict(
+                    "Local overrides require the exact selected disposable target and experiment",
+                ));
+            }
+        }
         let old = self
             .experiment
             .rule
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        if let Some(expected) = r.get("expected_local_override") {
+            validation::fields(
+                expected,
+                &["metadata", "method_filter", "content_type"],
+                "Expected local override",
+            )?;
+            if r["mode"] != "continue"
+                || r.get("local_override").is_some()
+                || !requests::expected_local_override_matches(&old, expected)
+            {
+                return Err(Error::conflict(
+                    "The expected local override is no longer armed; no rule was changed",
+                ));
+            }
+        }
         let configured = *self
             .experiment
             .configured
@@ -784,7 +811,26 @@ if let Some(bytes)=bytes {s[group]["source_bytes"]=bytes;}
                 Ok(permit) => {
                     guard = Some(permit);
                     let method = request["method"].as_str().unwrap_or("UNKNOWN");
-                    if let Some(h) = preflight(request, &rule) {
+                    let current_rule = debugger
+                        .experiment
+                        .rule
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    if rule.get("local_override").is_some()
+                        && (current_rule != rule
+                            || !requests::local_override_matches(
+                                &rule,
+                                request,
+                                &id,
+                                &debugger.snapshot()["request_interception"]["experiment_id"],
+                                validation::now_ms(),
+                            ))
+                    {
+                        outcome = "bypassed";
+                        detail = "Local override is expired, replaced or outside its exact scope."
+                            .into();
+                    } else if let Some(h) = preflight(request, &rule) {
                         command = "Fetch.fulfillRequest";
                         params["responseCode"] = json!(204);
                         params["responseHeaders"] = h;
@@ -854,7 +900,44 @@ if let Some(bytes)=bytes {s[group]["source_bytes"]=bytes;}
                     }
                 }
             }
-            if let Err(e) = c.command(command, params, Duration::from_secs(3)).await {
+            let result =
+                if command == "Fetch.fulfillRequest" && rule.get("local_override").is_some() {
+                    c.command_guarded(command, params, Duration::from_secs(3), || {
+                        *debugger
+                            .experiment
+                            .rule
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            == rule
+                            && requests::local_override_matches(
+                                &rule,
+                                request,
+                                &id,
+                                &debugger.snapshot()["request_interception"]["experiment_id"],
+                                validation::now_ms(),
+                            )
+                    })
+                    .await
+                } else {
+                    c.command(command, params, Duration::from_secs(3))
+                        .await
+                        .map(Some)
+                };
+            let result = match result {
+                Ok(None) => {
+                    outcome = "bypassed";
+                    detail = "Local override expired or changed while queued; request continued unchanged.".into();
+                    c.command(
+                        "Fetch.continueRequest",
+                        json!({"requestId":request_id}),
+                        Duration::from_secs(3),
+                    )
+                    .await
+                }
+                Ok(Some(value)) => Ok(value),
+                Err(error) => Err(error),
+            };
+            if let Err(e) = result {
                 outcome = "error";
                 detail = e.message;
                 let _ = c

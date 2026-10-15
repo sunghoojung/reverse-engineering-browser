@@ -97,6 +97,7 @@ javascript-check:
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
+	node tools/check-local-overrides.mjs
 	node tools/check-graphql-sdl.mjs
 	node tools/check-owned-vm-integration.mjs
 	node tools/check-owned-vm-debugger-ui.mjs

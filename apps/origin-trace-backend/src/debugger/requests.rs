@@ -203,10 +203,136 @@ pub fn rule(v: &Value) -> Result<Value> {
             true
         )?);
     }
+    if let Some(local) = v.get("local_override") {
+        rule["local_override"] = local_override(local, &rule, validation::now_ms())?;
+    }
     Ok(rule)
 }
+
+// File access stays in the explicit local preparation tool, never in the API.
+fn local_override(value: &Value, rule: &Value, now: u64) -> Result<Value> {
+    validation::fields(
+        value,
+        &[
+            "version",
+            "exact_url",
+            "target_id",
+            "experiment_id",
+            "expires_at_ms",
+            "asset_sha256",
+        ],
+        "Local override",
+    )?;
+    if value["version"] != 1
+        || rule["mode"] != "fulfill"
+        || rule["url_pattern"] != "*"
+        || ![json!("GET"), json!("HEAD")].contains(&rule["method_filter"])
+        || rule["response_code"] != 200
+    {
+        return Err(Error::bad(
+            "Local overrides require version 1, GET or HEAD, status 200 and fulfill mode with * transport pattern",
+        ));
+    }
+    let address = text(&value["exact_url"], "Exact override URL", 2048, false)?;
+    let parsed = url(&address)?;
+    if parsed.as_str() != address {
+        return Err(Error::bad("Local override URL must already be canonical"));
+    }
+    validation::text(&value["target_id"], "Override target", 4096, false, false)?;
+    validation::integer(
+        &value["experiment_id"],
+        "Override experiment",
+        1,
+        validation::MAX_SAFE_INTEGER,
+    )?;
+    validation::integer(
+        &value["expires_at_ms"],
+        "Override expiry",
+        now + 1,
+        now + 300_000,
+    )?;
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(rule["response_body"].as_str().unwrap().as_bytes())
+    );
+    if value["asset_sha256"] != hash {
+        return Err(Error::bad(
+            "Local override content does not match its reviewed digest",
+        ));
+    }
+    // Fixed response metadata prevents cookies, redirects or arbitrary auth headers.
+    let headers = rule["response_headers"].as_array().unwrap();
+    if headers.len() != 2
+        || !headers.iter().all(|header| {
+            match header["name"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "content-type" => [
+                    "text/plain; charset=utf-8",
+                    "text/javascript; charset=utf-8",
+                    "application/json; charset=utf-8",
+                    "text/css; charset=utf-8",
+                ]
+                .contains(&header["value"].as_str().unwrap()),
+                "access-control-allow-origin" => header["value"] == "*",
+                _ => false,
+            }
+        })
+    {
+        return Err(Error::bad(
+            "Local override response headers must use a supported UTF-8 content type and credential-free CORS",
+        ));
+    }
+    Ok(value.clone())
+}
+
+pub(super) fn local_override_matches(
+    rule: &Value,
+    request: &Value,
+    target: &str,
+    session: &Value,
+    now: u64,
+) -> bool {
+    let Some(local) = rule.get("local_override") else {
+        return true;
+    };
+    local["target_id"] == target
+        && local["experiment_id"] == *session
+        && local["expires_at_ms"]
+            .as_u64()
+            .is_some_and(|expiry| now < expiry)
+        && local["exact_url"] == request["url"]
+        && rule["method_filter"] == request["method"]
+}
+
+pub(super) fn expected_local_override_matches(rule: &Value, expected: &Value) -> bool {
+    rule.get("local_override").is_some()
+        && expected["metadata"] == rule["local_override"]
+        && expected["method_filter"] == rule["method_filter"]
+        && rule["response_headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|header| {
+                header["name"]
+                    .as_str()
+                    .unwrap()
+                    .eq_ignore_ascii_case("content-type")
+                    && header["value"] == expected["content_type"]
+            })
+}
+
 pub fn public_rule(r: &Value) -> Value {
-    json!({"mode":r["mode"],"url_pattern":r["url_pattern"],"method_filter":r["method_filter"],"rewrite_url":redacted(r["rewrite_url"].as_str().unwrap()),"rewrite_method":r["rewrite_method"],"rewrite_header_count":r["rewrite_headers"].as_array().unwrap().len(),"rewrite_body_bytes":r["rewrite_body"].as_str().unwrap().len(),"response_code":r["response_code"],"response_header_count":r["response_headers"].as_array().unwrap().len(),"response_body_bytes":r["response_body"].as_str().unwrap().len()})
+    let mut result = json!({"mode":r["mode"],"url_pattern":r["url_pattern"],"method_filter":r["method_filter"],"rewrite_url":redacted(r["rewrite_url"].as_str().unwrap()),"rewrite_method":r["rewrite_method"],"rewrite_header_count":r["rewrite_headers"].as_array().unwrap().len(),"rewrite_body_bytes":r["rewrite_body"].as_str().unwrap().len(),"response_code":r["response_code"],"response_header_count":r["response_headers"].as_array().unwrap().len(),"response_body_bytes":r["response_body"].as_str().unwrap().len()});
+    if let Some(local) = r.get("local_override") {
+        let mut metadata = local.clone();
+        metadata["exact_url"] = json!(redacted(local["exact_url"].as_str().unwrap()));
+        result["local_override"] = metadata;
+    }
+    result
 }
 pub fn result(v: &Value, repeater: bool) -> Result<Value> {
     if v["protocolVersion"] != 1 || !v["ok"].is_boolean() {
@@ -411,4 +537,124 @@ pub fn compare(a: &Value, b: &Value) -> Value {
         ar["body_truncated"] == true || br["body_truncated"] == true,
     );
     json!({"body_diff":body_diff,"protocol_version":1,"baseline_id":a["id"],"current_id":b["id"],"baseline_status":ar["status"],"current_status":br["status"],"status_changed":ar["status"]!=br["status"],"duration_delta_ms":br["duration_ms"].as_i64().unwrap()-ar["duration_ms"].as_i64().unwrap(),"baseline_body_bytes":ab,"current_body_bytes":bb,"body_bytes_delta":bb as i64-ab as i64,"baseline_body_sha256":ar["body_sha256"],"current_body_sha256":br["body_sha256"],"body_changed":ar["body_sha256"]!=br["body_sha256"],"headers_added":bh.keys().filter(|k|!ah.contains_key(*k)).collect::<Vec<_>>(),"headers_removed":ah.keys().filter(|k|!bh.contains_key(*k)).collect::<Vec<_>>(),"headers_changed":bh.iter().filter(|(k,v)|ah.get(*k).is_some_and(|old|old!=*v)).map(|(k,_)|k).collect::<Vec<_>>(),"partial":body_diff.partial || ([&ar["headers_truncated"],&ar["body_truncated"],&br["headers_truncated"],&br["body_truncated"]].contains(&&json!(true)))})
+}
+
+#[cfg(test)]
+mod local_override_tests {
+    use super::*;
+
+    fn fixture(now: u64) -> Value {
+        let body = "globalThis.authoredFixture = true;";
+        json!({"mode":"fulfill","url_pattern":"*","method_filter":"GET","response_code":200,
+            "response_headers":{"content-type":"text/javascript; charset=utf-8"},"response_body":body,
+            "local_override":{"version":1,"exact_url":"http://127.0.0.1:17777/fixture.js?v=1","target_id":"owned","experiment_id":7,
+                "expires_at_ms":now+60_000,"asset_sha256":format!("{:x}",Sha256::digest(body.as_bytes()))}})
+    }
+
+    #[test]
+    fn exact_scope_expiry_and_no_preflight() {
+        let now = validation::now_ms();
+        let rule = rule(&fixture(now)).unwrap();
+        let request = json!({"url":"http://127.0.0.1:17777/fixture.js?v=1","method":"GET"});
+        assert!(local_override_matches(
+            &rule,
+            &request,
+            "owned",
+            &json!(7),
+            now
+        ));
+        assert!(!local_override_matches(
+            &rule,
+            &request,
+            "baseline",
+            &json!(7),
+            now
+        ));
+        assert!(!local_override_matches(
+            &rule,
+            &request,
+            "owned",
+            &json!(8),
+            now
+        ));
+        assert!(!local_override_matches(
+            &rule,
+            &request,
+            "owned",
+            &json!(7),
+            now + 60_000
+        ));
+        for changed in [
+            json!({"url":"http://127.0.0.1:17777/fixture.js?v=2","method":"GET"}),
+            json!({"url":"http://127.0.0.1:17778/fixture.js?v=1","method":"GET"}),
+            json!({"url":request["url"],"method":"POST"}),
+            json!({"url":request["url"],"method":"OPTIONS"}),
+        ] {
+            assert!(!local_override_matches(
+                &rule,
+                &changed,
+                "owned",
+                &json!(7),
+                now
+            ));
+        }
+        let public = public_rule(&rule);
+        assert_eq!(
+            public["local_override"]["exact_url"],
+            "http://127.0.0.1:17777/fixture.js"
+        );
+        assert!(public.get("response_body").is_none());
+    }
+
+    #[test]
+    fn disarm_compares_the_entire_supported_rule() {
+        let original = rule(&fixture(validation::now_ms())).unwrap();
+        let expected = json!({"metadata":original["local_override"],"method_filter":"GET",
+            "content_type":"text/javascript; charset=utf-8"});
+        assert!(expected_local_override_matches(&original, &expected));
+        let mut changed = original.clone();
+        changed["method_filter"] = json!("HEAD");
+        assert!(!expected_local_override_matches(&changed, &expected));
+        changed = original.clone();
+        changed["response_headers"][0]["value"] = json!("text/css; charset=utf-8");
+        assert!(!expected_local_override_matches(&changed, &expected));
+        changed = original.clone();
+        changed["local_override"]["expires_at_ms"] = json!(1);
+        assert!(!expected_local_override_matches(&changed, &expected));
+        assert!(!expected_local_override_matches(&default_rule(), &expected));
+    }
+
+    #[test]
+    fn invalid_local_override_never_becomes_rule() {
+        let now = validation::now_ms();
+        for (key, value) in [
+            ("mode", json!("continue")),
+            ("method_filter", json!("")),
+            ("method_filter", json!("POST")),
+            ("response_code", json!(302)),
+            ("response_body", json!("changed")),
+            ("response_headers", json!({"set-cookie":"synthetic=1"})),
+            ("response_headers", json!({"content-type":"text/html"})),
+        ] {
+            let mut input = fixture(now);
+            input[key] = value;
+            assert!(rule(&input).is_err(), "{key}");
+        }
+        for (key, value) in [
+            ("expires_at_ms", json!(now)),
+            ("expires_at_ms", json!(now + 400_000)),
+            ("asset_sha256", json!("wrong")),
+            ("target_id", json!("")),
+            ("experiment_id", json!(0)),
+            ("exact_url", json!("http://user:password@127.0.0.1/")),
+            ("version", json!(2)),
+        ] {
+            let mut input = fixture(now);
+            input["local_override"][key] = value;
+            assert!(rule(&input).is_err(), "{key}");
+        }
+        let mut input = fixture(now);
+        input["local_override"]["unexpected"] = json!(true);
+        assert!(rule(&input).is_err());
+    }
 }

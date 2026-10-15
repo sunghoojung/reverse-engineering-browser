@@ -1,9 +1,26 @@
 # Scoped local overrides v1
 
-This optional CLI workflow loads an explicitly selected local UTF-8 file into
+The optional CLI workflow loads an explicitly selected local UTF-8 file into
 one expiring fulfillment rule in the existing disposable Experiment. It is a
 response/JavaScript override, not a script evaluator, filesystem watcher or
 baseline browser modification. Nothing is armed by preview or preparation.
+
+## Browser-selected snapshot manager
+
+The Interceptor UI also accepts one explicitly selected browser File. It bounds
+its read to 64 KiB plus one detection byte, decodes exact UTF-8 and computes the
+SHA-256 before displaying an inert preview. It does not obtain or invent an OS
+path and cannot attest symlink or regular-file metadata. The filesystem checks
+below apply to the CLI loader, not the browser-selected byte snapshot.
+
+Reviewing and preparing sends nothing. Explicit Arm submits the same existing
+`configure_request_interception` contract. Context changes, form edits and expiry
+invalidate preparation; on-disk edits cannot alter the frozen snapshot. The UI
+retains the attempted exact identity for guarded Disarm, including after an
+unknown receipt. A public summary hides URL queries and is insufficient alone to
+confirm an ambiguous arm. No automatic retry, request, execution, watcher,
+persistence or provider upload occurs. Reload never rearms. Expiry is enforced
+by the backend even if the UI closes.
 
 ## Prepare and operate
 

@@ -2510,7 +2510,9 @@
       #screen-experiments:not([hidden]) { display: grid; grid-template-columns: auto minmax(240px, 1fr); grid-template-rows: 40px auto minmax(0, 1fr); overflow: hidden; }
       #screen-experiments > .screen-head { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); }
       #screen-experiments > .experiment-mode-tabs { grid-column: 1; grid-row: 1; gap: 0; min-width: 0; min-height: 40px; padding: 0 8px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--chrome); }
-      #screen-experiments .experiment-mode-tab { flex-shrink: 0; min-height: 40px; padding: 0 14px; border-radius: 0; font: 12px var(--sans); text-transform: none; }
+      /* The 40px tab strip includes its bottom border. Stretch within its
+         content box rather than forcing a 40px child into 39px of space. */
+      #screen-experiments .experiment-mode-tab { flex-shrink: 0; min-height: 0; padding: 0 14px; border-radius: 0; font: 12px var(--sans); text-transform: none; }
       #screen-experiments .experiment-mode-tab[aria-selected="true"] { background: transparent; }
       #screen-experiments .experiment-notice { grid-column: 2; grid-row: 1; justify-content: flex-end; min-width: 0; min-height: 40px; padding: 0 12px; overflow: hidden; border-left: 1px solid var(--line-soft); background: var(--chrome); text-overflow: ellipsis; white-space: nowrap; }
       .experiment-scope { grid-column: 1 / -1; grid-row: 2; max-height: 30%; overflow: auto; border-bottom: 1px solid var(--line); }

@@ -11,6 +11,23 @@ export function elementCaptureResponseMatches(params,url) {
   if(params.request?.url!==url || params.request?.method!=='POST' || !Number.isInteger(params.responseStatusCode)) return false;
   try {return JSON.parse(params.request.postData).action==='capture_element_screenshot';} catch {return false;}
 }
+// Keep every mode tab vertically inside the real scrollport, including when
+// a horizontal scrollbar consumes part of the fixed-height strip.
+export function assertElementModeTabGeometry({clip,tabs}) {
+  assert(Number.isFinite(clip.top)&&Number.isFinite(clip.bottom)&&clip.bottom>clip.top,'Mode strip needs a positive vertical scrollport');
+  assert(tabs.length>0,'Mode strip needs tabs');
+  for(const rect of tabs) assert(Number.isFinite(rect.top)&&Number.isFinite(rect.bottom)&&rect.bottom>rect.top&&rect.top>=clip.top&&rect.bottom<=clip.bottom,'Mode tab must fit entirely inside its vertical scrollport');
+}
+// Follow the same visible chooser path as a researcher. Never force open the
+// details node or relax the strict pointer reveal/hit-test helpers.
+export async function enterElementExperiments({evaluate,click,until}) {
+  if(!await evaluate("document.querySelector('#advanced-navigation').open")) {
+    await click('#advanced-navigation > summary');
+    await until("document.querySelector('#advanced-navigation').open",'Advanced chooser did not open');
+  }
+  await click('[data-screen="experiments"]');
+  await until("!document.querySelector('#screen-experiments').hidden && !document.querySelector('#advanced-navigation').open",'Experiments navigation did not complete and close its chooser');
+}
 export async function checkElementScreenshotUI({address,uiURL,fixtureURL,root,socketFactory}) {
   const output=process.env.REB_UI_SCREENSHOTS || join(root,'build/element-screenshot-ui-qa');await mkdir(output,{recursive:true});
   const socket=await socketFactory(address),pending=new Map(),requests=new Map(),reads=new Set(),captures=[],receipts=[],errors=[];
@@ -81,6 +98,10 @@ export async function checkElementScreenshotUI({address,uiURL,fixtureURL,root,so
     await command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});await command('Emulation.setVisibleSize',{width,height});await frame();
   };
   const screenshot=async name=>{await frame();const result=await command('Page.captureScreenshot',{format:'png'});await writeFile(join(output,name+'.png'),Buffer.from(result.data,'base64'));};
+  const modeTabGeometry=async()=>{
+    const geometry=await evaluate("(()=>{const p=document.querySelector('.experiment-mode-tabs'),r=p.getBoundingClientRect();return {clip:{top:r.top+p.clientTop,bottom:r.top+p.clientTop+p.clientHeight},tabs:[...p.querySelectorAll('.experiment-mode-tab')].map(n=>{const r=n.getBoundingClientRect();return {top:r.top,bottom:r.bottom};})};})()");
+    assertElementModeTabGeometry(geometry);receipts.push({phase,kind:'mode-tabs-vertical-fit',geometry});
+  };
   const inspect=async()=>{
     await click('[data-element-inspect]');await until("!document.querySelector('[data-element-confirm]').disabled",'Inspection did not complete');
     assert(await evaluate("!document.querySelector('[data-element-confirm]').checked && document.querySelector('[data-element-capture]').disabled"),'Inspection must not authorize pixels');
@@ -97,13 +118,13 @@ export async function checkElementScreenshotUI({address,uiURL,fixtureURL,root,so
     session=(await command('Target.attachToTarget',{targetId:target,flatten:true},null)).sessionId;
     await command('Page.enable');await command('Runtime.enable');await command('Network.enable',{maxPostDataSize:65536,maxTotalBufferSize:16000000,maxResourceBufferSize:8000000});await viewport(1440,900);
     await until("typeof state!=='undefined'&&state.debuggerSession?.state==='running'",'Product debugger did not load');
-    phase='owned-setup';await click('[data-screen="experiments"]');await click('[data-experiment-mode="object"]');await click('#object-create');
+    phase='owned-setup';await enterElementExperiments({evaluate,click,until});await modeTabGeometry();await click('[data-experiment-mode="object"]');await click('#object-create');
     await until("!document.querySelector('#object-navigate').disabled",'Disposable owner was not created');await click('#object-page-url');
     await key('a',process.platform==='darwin'?4:2);await command('Input.insertText',{text:fixtureURL+'/element-capture/plain'});await click('#object-navigate');
     await until("state.debuggerSession?.object_experiment?.state==='loaded'&&state.debuggerSession?.request_interception?.pending_requests===0",'Authored fixture did not load');
     await click('[data-experiment-mode="screenshot"]');
     for(const [width,height] of [[1440,900],[600,800],[360,740]]) {
-      phase='render-'+width;await viewport(width,height);const actual=await capture();
+      phase='render-'+width;await viewport(width,height);await modeTabGeometry();const actual=await capture();
       const workspace=await evaluate(`(()=>{const screen=document.querySelector('#screen-experiments'),panel=document.querySelector('#element-screenshot-workspace'),s=screen.getBoundingClientRect(),p=panel.getBoundingClientRect(),style=getComputedStyle(screen),grid=getComputedStyle(panel),pad=key=>parseFloat(style[key])||0,headerBottom=Math.max(...[...screen.children].filter(n=>n.matches('.experiment-mode-tabs,.experiment-notice,.experiment-scope')&&!n.hidden).map(n=>n.getBoundingClientRect().bottom));return {columnStart:grid.gridColumnStart,columnEnd:grid.gridColumnEnd,row:grid.gridRowStart,panel:{left:p.left,top:p.top,bottom:p.bottom,width:p.width},content:{left:s.left+screen.clientLeft+pad('paddingLeft'),width:screen.clientWidth-pad('paddingLeft')-pad('paddingRight'),bottom:s.top+screen.clientTop+screen.clientHeight-pad('paddingBottom')},headerBottom};})()`);
       assert.equal(workspace.columnStart,'1');assert.equal(workspace.columnEnd,'-1');assert.equal(workspace.row,width<=1000?'4':'3');
       assert(Math.abs(workspace.panel.left-workspace.content.left)<=1 && Math.abs(workspace.panel.width-workspace.content.width)<=1,'Screenshot workspace spans the complete content width');
@@ -147,7 +168,7 @@ export async function checkElementScreenshotUI({address,uiURL,fixtureURL,root,so
       await command('Emulation.setDeviceMetricsOverride',{width:980+(leave?1:0),height:700,deviceScaleFactor:1,mobile:false},disposable);
       await command('Target.detachFromTarget',{sessionId:disposable},null);
       await until(`state.debuggerSession.element_document_epoch>${current.element_document_epoch}`,'Real lifecycle event did not reach UI polling');assert(await evaluate(empty),'Late real response must not attach PNG');
-      if(leave){assert(await evaluate("document.querySelector('#element-screenshot-workspace').hidden && document.querySelector('#screen-experiments').hidden"),'Off-screen polling must not reactivate the screenshot workspace');await click('[data-screen="experiments"]');}
+      if(leave){assert(await evaluate("document.querySelector('#element-screenshot-workspace').hidden && document.querySelector('#screen-experiments').hidden"),'Off-screen polling must not reactivate the screenshot workspace');await enterElementExperiments({evaluate,click,until});}
     }
     phase='dispose';await click('[data-experiment-mode="object"]');await click('#object-dispose');
     await until("state.debuggerSession?.object_experiment?.state==='disposed'",'Disposable context was not erased');assert.equal(errors.length,0,JSON.stringify(errors));passed=true;

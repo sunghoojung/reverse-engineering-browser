@@ -227,7 +227,12 @@ function installPassiveSecurityReport({getRequest}) {
     finally {if(revision===token){busy=false;sync();}}
   });
   byId('passive-security-close').addEventListener('click',()=>dialog.close());
-  dialog.addEventListener('close',()=>{clear();button.disabled=!getRequest()?.captureRecord;(button.disabled?byId('request-rows'):button)?.focus();});
+  dialog.addEventListener('close',()=>{
+    // Native close events are queued. Ignore a previous lifetime's event if
+    // the user has already reopened the dialog and started a fresh report.
+    if(dialog.open)return;
+    clear();button.disabled=!getRequest()?.captureRecord;(button.disabled?byId('request-rows'):button)?.focus();
+  });
   dialog.addEventListener('keydown',event=>event.stopPropagation());
   sync();return {sync};
 }

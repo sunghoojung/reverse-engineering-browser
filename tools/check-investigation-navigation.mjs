@@ -92,14 +92,18 @@ export async function checkInvestigationCore(root) {
 export async function checkAdvancedNavigation(root) {
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const source=app.slice(app.indexOf('      function showScreen('),app.indexOf('      async function refresh()'));
-  const advanced=['backtrace','memory','experiments','analyst','tools'];
-  const names=['traffic','api-collection','sources','signals',...advanced,'evidence','vm','field-provenance'];
+  const html=await readFile(join(root,'apps/research-ui/index.html'),'utf8');
+  const vmEntry=html.match(/<button\b[^>]*id="nav-vm-workspace"[^>]*>/)?.[0];
+  assert(vmEntry,'VM workspace must have a real Advanced entry');
+  assert.match(vmEntry,/class="[^"]*\bnav-button\b[^"]*"/,'VM entry must use shared navigation focus semantics');
+  const advanced=['vm','backtrace','memory','experiments','analyst','tools'];
+  const names=['traffic','api-collection','sources','signals',...advanced,'evidence','field-provenance'];
   for(const narrow of [false,true]) {
     const focused=[],frames=[];let current='traffic';
     const document={activeElement:null};
     const summary={focus(){document.activeElement=this;focused.push('summary');}};
     const group={open:false,contains:node=>node===summary||buttons.some(button=>advanced.includes(button.dataset.screen)&&node===button),querySelector:()=>summary};
-    const buttons=names.filter(name=>!['evidence','vm','field-provenance'].includes(name)).map(name=>({
+    const buttons=names.filter(name=>!['evidence','field-provenance'].includes(name)).map(name=>({
       dataset:{screen:name},classList:{contains:value=>value==='nav-button'},
       closest:()=>advanced.includes(name)?group:null,
       setAttribute(key,value){this[key]=value;},removeAttribute(key){delete this[key];},
@@ -293,24 +297,32 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
   // never a test-only assignment to details.open or synthetic button.click().
   for(const size of [[1440,900],[760,560],[360,740]]) {
     await viewport(...size);
-    const choices=size[0]===1440?['backtrace','memory','experiments','analyst','tools']:['tools'];
+    const choices=size[0]===1440?['vm','backtrace','memory','experiments','analyst','tools']:['vm','tools'];
     for(const name of choices) {
       await click('#advanced-navigation > summary');
       await until("document.querySelector('#advanced-navigation').open",'Pointer did not open Advanced');
       await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
       assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),true,'The manual chooser must stay open until a choice');
       if(name==='tools')await screenshot(`investigation-manual-chooser-${size[0]}`);
-      await click(`#advanced-navigation .nav-button[data-screen="${name}"]`);
+      await click(`#advanced-navigation button[data-screen="${name}"]`);
       await arrived(name,`Pointer Advanced → ${name} at ${size[0]}`);
       assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true,'Choosing a hidden menu item must return focus to summary');
     }
     await enter();await until("document.querySelector('#advanced-navigation').open",'Enter did not reopen Advanced');
     await key('Tab','Tab',{windowsVirtualKeyCode:9});
-    assert.equal(await evaluate('document.activeElement.dataset.screen'),'backtrace','Tab must enter the chooser');
+    assert.equal(await evaluate('document.activeElement.dataset.screen'),'vm','Tab must enter the chooser at VM workspace');
+    await key('Tab','Tab',{windowsVirtualKeyCode:9});
+    assert.equal(await evaluate('document.activeElement.dataset.screen'),'backtrace','The next Tab must reach Backtraces');
     await key('Escape','Escape',{windowsVirtualKeyCode:27});await closed('Escape from chooser');
+    assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true);
+    await enter();await until("document.querySelector('#advanced-navigation').open",'Keyboard could not reopen Advanced for VM');
+    await key('Tab','Tab',{windowsVirtualKeyCode:9});await enter();
+    await arrived('vm',`Keyboard VM choice at ${size[0]}`);
     assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true);
     for(let repeat=0;repeat<2;repeat++) {
       await enter();await until("document.querySelector('#advanced-navigation').open",'Keyboard could not reopen Advanced');
+      await key('Tab','Tab',{windowsVirtualKeyCode:9});
+      assert.equal(await evaluate('document.activeElement.dataset.screen'),'vm');
       await key('Tab','Tab',{windowsVirtualKeyCode:9});await enter();
       await arrived('backtrace',`Keyboard choice ${repeat+1} at ${size[0]}`);
       assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true);

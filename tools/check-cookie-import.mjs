@@ -62,7 +62,7 @@ function fakeBrowser({mutate,failAt,empty=false,cleanup=true}={}) {
     if(method==='Browser.setDownloadBehavior'){assert.equal(params.behavior,'deny');return {};}
     if(method==='Storage.getCookies')return {cookies:structuredClone(jar.get('owned')??[])};
     if(method==='Storage.setCookies') {
-      const cookies=params.cookies.map(c=>({name:c.name,value:c.value,domain:c.domain??'account.example.test',path:c.path,secure:c.secure,httpOnly:c.httpOnly,
+      const cookies=params.cookies.map(c=>({name:c.name,value:c.value,domain:c.domain??'account.example.test',path:c.path,secure:c.secure||(c.url!==undefined&&new URL(c.url).protocol==='https:'),httpOnly:c.httpOnly,
         session:c.expires===undefined,expires:c.expires??-1,...(c.sameSite?{sameSite:c.sameSite}:{})}));
       if(mutate)mutate(cookies);jar.set('owned',empty?[]:cookies);return {};
     }
@@ -84,6 +84,32 @@ function fakeBrowser({mutate,failAt,empty=false,cleanup=true}={}) {
   const result=await b.context.dispose();assert.equal(result.state,'disposed');assert(result.cookies_cleared&&result.context_disposed);assert.equal(b.jar.size,0);
   assert.deepEqual(await b.context.dispose(),result);assert.equal(b.stopped(),1);
   await assert.rejects(b.context.openReviewedOrigin(),safe);
+}
+// Match Chromium's URL-derived Secure normalization, rather than echoing params.
+// Exercise both boolean values across host/domain scope and session/persistent state.
+for(const secure of [false,true]) for(const hostOnly of [false,true]) for(const session of [false,true]) {
+  const entry=row({secure,hostOnly,session,domain:hostOnly?'account.example.test':'.account.example.test',
+    ...(session?{}:{expirationDate:now+120})});
+  const b=fakeBrowser(),p=plan([entry]);
+  assert.equal(p.review().cookies[0].secure,secure);
+  assert.deepEqual(await b.context.import(p),{state:'verified',count:1});
+  const params=b.calls.find(c=>c.method==='Storage.setCookies').params.cookies[0];
+  assert.equal(params.domain,entry.domain);
+  assert.equal(Object.hasOwn(params,'url'),false);
+  assert.equal(params.secure,secure);
+  assert(!b.calls.some(c=>c.method==='Target.createTarget'));
+  await b.context.openReviewedOrigin();
+  assert.equal(b.calls.find(c=>c.method==='Target.createTarget').params.url,origin+'/');
+  const receipt=await b.context.dispose();
+  assert(receipt.cookies_cleared&&receipt.context_disposed&&receipt.process_stopped&&receipt.profile_removed);
+}
+{
+  const direct=fakeBrowser({mutate:c=>{c[0].secure=true;}});
+  await assert.rejects(plan([row({secure:false})]).applyAndVerify(direct.command,'owned'),error=>safe(error)&&error.code==='verification');
+  await direct.context.dispose();
+  const b=fakeBrowser({mutate:c=>{c[0].secure=true;}});
+  await assert.rejects(b.context.import(plan([row({secure:false})])),safe);
+  assert.equal(b.context.status().state,'disposed');assert.equal(b.jar.size,0);
 }
 for(const mutate of [c=>c.pop(),c=>c.push(c[0]),c=>{c[0].value='wrong';},c=>{c[0].domain='.account.example.test';},c=>{c[0].path='/changed';},
   c=>{c[0].httpOnly=false;},c=>{c[0].secure=false;},c=>{c[0].sameSite='Lax';},c=>{c[0].session=false;},c=>{c[0].partitionKey={topLevelSite:origin};},c=>{c[0].partitionKeyOpaque=true;}]) {
@@ -213,9 +239,13 @@ if(process.argv[2]==='--browser') {
   let browser;
   try {
     browser=await launchCookieBrowser(executable,cookieDestination(origin,30),{headless:true});
-    const entries=['strict','lax','no_restriction','unspecified'].map((sameSite,n)=>row({sameSite,name:'synthetic_'+n,httpOnly:n%2===0,hostOnly:n%2===0,secure:n%2===0,
-      domain:n%2===0?'account.example.test':'.account.example.test',session:n<2,...(n>=2?{expirationDate:Date.now()/1000+120}:{})}));
-    assert.equal((await browser.import(plan(entries))).count,4);
+    const entries=[];
+    for(const secure of [false,true]) for(const hostOnly of [false,true]) for(const session of [false,true]) {
+      entries.push(row({name:'synthetic_'+entries.length,secure,hostOnly,session,httpOnly:session,
+        domain:hostOnly?'account.example.test':'.account.example.test',sameSite:secure?(session?'strict':'no_restriction'):(session?'lax':'unspecified'),
+        ...(session?{}:{expirationDate:Date.now()/1000+120})}));
+    }
+    assert.deepEqual(await browser.import(plan(entries)),{state:'verified',count:8});
     const result=await browser.dispose();assert.equal(result.cookies_cleared,true);assert.equal(result.context_disposed,true);assert.equal(result.process_stopped,true);assert.equal(result.profile_removed,true);
     console.log('PASS installed Chromium: private off-record set/get semantic equality and clear/get/dispose; no target navigation');
   } finally {await browser?.dispose();}

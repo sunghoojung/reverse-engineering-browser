@@ -1,6 +1,6 @@
 # VM execution semantics v1
 
-Status: bounded offline supplied-evidence workflow, inside Traffic → VM findings.
+Status: bounded offline supplied-evidence workflow, inside the top-level VM → Execution workspace.
 This does not install a native guest-interpreter capture hook. Existing VM
 candidate detection remains unchanged. No captured code is executed.
 

@@ -418,7 +418,7 @@
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
               <div><h1>VM investigation</h1></div>
-              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live owned fixture</button></nav>
+              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live owned fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace">Static bytecode</button></nav>
             </header>
             <div id="vm-owned-controls" hidden></div>
             <div id="vm-findings-workspace" class="vm-findings-workspace">
@@ -432,6 +432,7 @@
             </div>
             </div>
             <section id="vm-owned-debugger" aria-label="Live owned native fixture" hidden></section>
+            <section id="vm-static-workspace" class="vm-static-workspace" aria-label="Static bytecode analysis" hidden></section>
             <section id="vm-semantics-workflow" class="vm-semantics-workflow" aria-label="VM execution workspace" hidden></section>
           </section>
 
@@ -1436,6 +1437,8 @@
     <script src="captured_client.js"></script>
     <script src="passive_security.js"></script>
     <script src="vm_debugger.js"></script>
+    <script src="vm_static.js"></script>
+    <script src="vm_static_view.js"></script>
     <script src="vm_semantics.js"></script>
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>

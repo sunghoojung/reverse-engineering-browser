@@ -4109,3 +4109,77 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
       .element-screenshot-row[aria-pressed="true"] { border-color: #f59e0b; box-shadow: inset 3px 0 #f59e0b; }
       [data-element-metadata], [data-element-notice] { overflow-wrap: anywhere; }
       @media (max-width: 700px) { .element-screenshot-layout { grid-template-columns: minmax(0, 1fr); } .element-screenshot-list { max-height: 240px; } }
+
+/* Static bytecode has its own scope and scroll owners. Live controls remain in
+   the shared row above it, with the existing lifecycle entirely unchanged. */
+#vm-static-workspace { grid-row: 3; }
+.vm-static-workspace[hidden], .vm-static-workspace [hidden] { display: none !important; }
+.vm-static-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; background: var(--panel); font-size: 11px; }
+.vm-static-workspace h2 { margin: 0; font-size: 13px; }
+.vm-static-workspace h3 { margin: 12px 0 6px; font-size: 12px; }
+.vm-static-workspace p { margin: 6px 0; overflow-wrap: anywhere; line-height: 1.5; }
+.vm-static-workspace button { max-width: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; font-size: 11px; }
+.vm-static-workspace :is(button,input,summary):focus, .vm-static-workspace .vm-static-file:focus-within, .vm-static-workspace .vm-static-detail:focus { outline: 2px solid var(--vm-focus); outline-offset: -2px; }
+.vm-static-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 7px 10px; background: var(--chrome); border-bottom: 1px solid var(--line); }
+.vm-static-toolbar > button, .vm-static-tabs > button, .vm-static-pager > button, .vm-static-panels > button { background: var(--vm-control-bg); color: var(--vm-control-fg); border-color: var(--vm-control-line); }
+.vm-static-file { position: relative; display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; max-width: 100%; min-width: 0; cursor: pointer; font-size: 11px; }
+.vm-static-file input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.vm-static-input-state { font-size: 10px; color: var(--muted); }
+.vm-static-toolbar [data-vm-static-action="analyze"]:not(:disabled) { background: var(--vm-action-bg); color: var(--vm-action-fg); border-color: var(--vm-action-bg); }
+.vm-static-summary { padding: 7px 12px; border-bottom: 1px solid var(--line); max-height: 112px; overflow: auto; }
+.vm-static-summary > p { margin: 3px 0; color: var(--muted); }
+.vm-static-summary > .vm-static-notice:empty { display: none; }
+.vm-static-body { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, 1fr); }
+.vm-static-listing { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.vm-static-listing-head { padding: 10px 12px 0; }
+.vm-static-filter { display: flex; gap: 6px; margin: 8px 0 4px; }
+.vm-static-filter input { flex: 1; width: 0; min-width: 0; max-width: 100%; padding: 6px; font-size: 11px; }
+.vm-static-muted { color: var(--muted); font-size: 10px; }
+.vm-static-columns, .vm-static-row { display: grid; grid-template-columns: 76px minmax(92px, .8fr) minmax(110px, 1.5fr) 62px; gap: 8px; }
+.vm-static-columns { color: var(--muted); font-size: 10px; border-top: 1px solid var(--line); padding: 7px 0; }
+.vm-static-rows { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 2px; }
+.vm-static-row { width: 100%; text-align: left; padding: 6px 10px; margin: 0; border: 0; border-bottom: 1px solid var(--line-soft); border-radius: 0; background: transparent; color: var(--text); font: 11px/1.4 var(--mono); }
+.vm-static-row > * { min-width: 0; overflow-wrap: anywhere; }
+.vm-static-row:hover, .vm-static-code-line:hover { background: var(--panel-2); }
+.vm-static-row[aria-selected="true"], .vm-static-code-line[aria-pressed="true"] { background: var(--vm-selected-bg); color: var(--vm-selected-fg); box-shadow: inset 4px 0 var(--vm-selected-line); }
+.vm-static-pager { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px; padding: 6px; border-top: 1px solid var(--line); }
+.vm-static-pager span { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.vm-static-inspector { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--panel-2); border-left: 1px solid var(--line); }
+.vm-static-detail-head { padding: 10px 10px 0; }
+.vm-static-detail-head h2 { overflow-wrap: anywhere; }
+.vm-static-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 9px 0 6px; }
+.vm-static-tabs > button { flex: 1 1 auto; padding: 6px; }
+.vm-static-tabs [aria-selected="true"], .vm-static-panels [aria-pressed="true"] { background: var(--vm-selected-bg); color: var(--vm-selected-fg); border-color: var(--vm-selected-line); }
+.vm-static-detail { min-height: 0; min-width: 0; overflow: auto; padding: 8px 10px; overscroll-behavior: contain; }
+.vm-static-inspector > button { margin: 6px 10px; }
+.vm-static-code-line { display: block; width: 100%; padding: 8px; margin: 2px 0; text-align: left; color: var(--text); background: transparent; border: 1px solid var(--line-soft); font: 11px/1.5 var(--mono); }
+.vm-static-field { margin: 0 0 10px; overflow-wrap: anywhere; }
+.vm-static-field dt { color: var(--muted); font-size: 10px; }
+.vm-static-field dd { margin: 4px 0 0; font: 11px/1.5 var(--mono); }
+.vm-static-cfg-node { margin: 8px 0; padding: 9px; border: 1px solid var(--line); border-left: 3px solid var(--vm-control-line); border-radius: 4px; background: var(--panel); }
+.vm-static-cfg-node[data-selected="true"] { border-left-color: var(--vm-selected-line); background: var(--vm-selected-bg); }
+.vm-static-cfg-node > .vm-static-muted { display: block; margin-top: 5px; }
+.vm-static-cfg-node[data-selected="true"] > .vm-static-muted { color: var(--vm-selected-fg); }
+.vm-static-edge { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding-left: 8px; border-left: 1px solid var(--line); }
+.vm-static-audit { margin: 12px 0; }
+.vm-static-audit summary { cursor: pointer; padding: 4px 0; overflow-wrap: anywhere; }
+.vm-static-audit pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.5 var(--mono); max-height: 24rem; overflow: auto; }
+.vm-static-empty { padding: 12px; }
+.vm-static-panels { display: none; gap: 5px; }
+.vm-static-workspace[data-layout="medium"] .vm-static-body { grid-template-columns: minmax(0, 1.1fr) minmax(270px, 1fr); }
+.vm-static-workspace:not([data-layout="wide"]) .vm-static-columns { display: none; }
+.vm-static-workspace:not([data-layout="wide"]) .vm-static-row { grid-template-columns: minmax(0, .7fr) minmax(0, 1.3fr); }
+.vm-static-workspace:not([data-layout="wide"]) .vm-static-row > span::before { display: block; content: attr(data-label); color: var(--muted); font: 9px var(--sans); }
+.vm-static-workspace:not([data-layout="wide"]) .vm-static-row[aria-selected="true"] > span::before { color: var(--vm-selected-fg); }
+.vm-static-workspace[data-layout="narrow"] .vm-static-body { display: block; }
+.vm-static-workspace[data-layout="narrow"] .vm-static-listing, .vm-static-workspace[data-layout="narrow"] .vm-static-inspector { height: 100%; display: none; }
+.vm-static-workspace[data-layout="narrow"][data-panel="listing"] .vm-static-listing, .vm-static-workspace[data-layout="narrow"][data-panel="details"] .vm-static-inspector { display: grid; }
+.vm-static-workspace[data-layout="narrow"] .vm-static-panels { display: flex; flex: 1; }
+.vm-static-workspace[data-layout="narrow"] .vm-static-panels > button { flex: 1; }
+/* Root width controls panes; short/narrow viewport flow gives both the live
+   safety controls and static scrollers usable height, including real zoom. */
+@media (max-width: 1099px), (max-height: 600px) {
+  #screen-vm:not([hidden]):has(> #vm-static-workspace:not([hidden])) { display: block; overflow-y: auto; overscroll-behavior: contain; }
+  #vm-static-workspace:not([hidden]) { height: auto; min-height: 0; grid-template-rows: auto auto 600px; }
+  .vm-static-listing { grid-template-rows: auto minmax(240px, 1fr) auto; overflow-y: auto; }
+}

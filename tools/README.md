@@ -4,6 +4,16 @@ This directory is for offline artifact inspectors, trace converters, schema gene
 
 Tools must consume the shared protocol or stored evidence. They should not create a second instrumentation path that disagrees with the browser and broker.
 
+`node tools/import-browser-cookies.mjs --browser /absolute/path/to/chromium` is
+the separate [private user-operated cookie import](../protocol/cookie-import-v1.md)
+tool. It accepts a strict Chrome/Firefox JSON export subset, privately applies
+and verifies it in a fresh short-lived off-record browser context, and requires
+a second local confirmation before browsing. It does not attach to capture or
+expose an agent/API import action. Real credentials require a user handoff.
+Use `node tools/check-cookie-import.mjs` for synthetic tests; add
+`--browser /absolute/path/to/chromium` for sandbox-preserving real-browser
+set/verify/clear/dispose acceptance with synthetic cookies and no navigation.
+
 Use `node tools/export-captured-client.mjs --input request.json --output project.zip`
 with Node.js 22+ to export a reviewed saved `get_network_request` response through
 the existing Go/JavaScript client generator. Raw is the default;

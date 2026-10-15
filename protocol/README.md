@@ -13,6 +13,10 @@ lexical binding/effect analysis, original-byte ranges and explicit unknown cover
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,
 its disposable browser ownership, wire layouts, and limits.
 
+[Private cookie import v1](cookie-import-v1.md) defines the user-operated explicit
+Chrome/Firefox export workflow, strict semantic refusals, separate off-record
+browser context and confirmation/clear/disposal boundaries.
+
 [Native Worker Source v1](native-worker-source-v1.md) describes the dormant
 dedicated-worker source queue, pinned hooks, and blockers to production activation.
 

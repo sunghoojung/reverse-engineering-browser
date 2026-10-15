@@ -9,7 +9,7 @@ import {join, resolve} from 'node:path';
 import {runInNewContext} from 'node:vm';
 import {network} from './traffic-capture-qa.mjs';
 import {checkPassiveSecurityInteractions} from './check-passive-security-ui.mjs';
-import {selectRenderedOption} from './rendered-keyboard.mjs';
+import {renderedCharacterKey,selectRenderedOption} from './rendered-keyboard.mjs';
 
 // Observe the completed viewport/layout boundary before the first action after
 // passive-report cleanup. ResizeObserver/pane-layout work runs before the next
@@ -56,6 +56,12 @@ function checkCatalogActivationReadiness() {
   })();
 }
 await checkCatalogActivationReadiness();
+assert.deepEqual(renderedCharacterKey('#'),{code:'Digit3',native:{text:'#',unmodifiedText:'3',windowsVirtualKeyCode:51,modifiers:8}},'Numbered observation prefix must not be dispatched as End (35)');
+assert.deepEqual(renderedCharacterKey('3'),{code:'Digit3',native:{text:'3',unmodifiedText:'3',windowsVirtualKeyCode:51}});
+assert.deepEqual(renderedCharacterKey('h'),{code:'KeyH',native:{text:'h',unmodifiedText:'h',windowsVirtualKeyCode:72}});
+for(const character of [' ','.','雪'])assert.equal(renderedCharacterKey(character).native.windowsVirtualKeyCode,0,'Unmapped characters must not invent virtual navigation keys');
+console.log('PASS numbered native select prefix maps #3 to Shift+Digit3 then Digit3; letters preserved and unmapped characters do not alias navigation keys (CDP shape, not rendered QA)');
+
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const traffic = await readFile(join(root, 'apps/research-ui/traffic_view.js'), 'utf8');

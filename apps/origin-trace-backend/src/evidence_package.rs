@@ -82,8 +82,11 @@ struct Budget {
 }
 impl Budget {
     fn new() -> Self {
+        Self::starting_at(Instant::now())
+    }
+    fn starting_at(now: Instant) -> Self {
         Self {
-            deadline: Instant::now() + Duration::from_secs(2),
+            deadline: now + Duration::from_secs(2),
         }
     }
     fn check(&self) -> std::result::Result<(), ParseError> {
@@ -247,6 +250,19 @@ static SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
     .expect("package schema JSON");
     jsonschema::validator_for(&schema).expect("local package schema")
 });
+fn initialized_validation_budget<F>(
+    schema: &LazyLock<jsonschema::Validator, F>,
+    now: impl FnOnce() -> Instant,
+) -> Budget
+where
+    F: FnOnce() -> jsonschema::Validator,
+{
+    // Compile the fixed trusted schema before timing any supplied package. A
+    // cold initializer (or a concurrent caller waiting for it) must not consume
+    // the input's budget. Comparison/export retain their whole-work deadlines.
+    LazyLock::force(schema);
+    Budget::starting_at(now())
+}
 struct Report {
     value: Value,
 }
@@ -1020,13 +1036,13 @@ fn validate(raw: &[u8], budget: &Budget) -> Result<Value> {
 }
 /// Validate supplied bytes inertly. Success is internal consistency, not authenticity.
 pub fn validate_bytes(raw: &[u8]) -> Result<Value> {
-    validate(raw, &Budget::new())
+    validate(raw, &initialized_validation_budget(&SCHEMA, Instant::now))
 }
 
 /// Internal comparison boundary: validate the original bytes before normalizing.
 /// Does not promote supplied provenance or omitted artifact-byte assertions.
 pub(crate) fn validated_normalized_bytes(raw: &[u8]) -> Result<Value> {
-    let budget = Budget::new();
+    let budget = initialized_validation_budget(&SCHEMA, Instant::now);
     let report = validate(raw, &budget)?;
     if report["status"] != "valid" {
         return Err(Error::bad(
@@ -1708,6 +1724,36 @@ fn push_gap(package: &mut Value, gap: Value, memory: &mut ExportMemory) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trusted_schema_initialization_precedes_the_unchanged_input_budget() {
+        use std::cell::Cell;
+        let start = Instant::now();
+        let initialized_at = start + Duration::from_secs(3);
+        let clock = Cell::new(start);
+        let schema = LazyLock::new(|| {
+            // Model an initializer longer than the entire input budget without
+            // sleeping or depending on scheduler load and test execution order.
+            clock.set(initialized_at);
+            jsonschema::validator_for(&json!({"type": "object"})).unwrap()
+        });
+        let cold = initialized_validation_budget(&schema, || clock.get());
+        assert_eq!(cold.deadline, initialized_at + Duration::from_secs(2));
+        assert!(schema.is_valid(&json!({})));
+        let warm = initialized_validation_budget(&schema, || clock.get());
+        assert_eq!(warm.deadline, cold.deadline);
+    }
+    #[test]
+    fn initialized_schema_does_not_rescue_an_expired_input_budget() {
+        let expired_at = Instant::now() - Duration::from_secs(3);
+        let budget = initialized_validation_budget(&SCHEMA, || expired_at);
+        let raw = include_bytes!("../assets/evidence-packages/golden-v1.json");
+        let result = validate(raw, &budget).unwrap();
+        assert_eq!(result["status"], "invalid");
+        assert!(issue(&result, "resource_limit"));
+        assert!(result["package_id"].is_null());
+        assert_eq!(result["checks"]["semantic_digest"], "not_run");
+        assert_eq!(parse(raw, &budget).unwrap_err(), ParseError::ResourceLimit);
+    }
     fn golden() -> Value {
         serde_json::from_str(include_str!("../assets/evidence-packages/golden-v1.json")).unwrap()
     }

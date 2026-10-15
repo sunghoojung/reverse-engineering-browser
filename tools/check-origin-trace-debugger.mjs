@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {checkWebSocketInteractions} from './check-websocket-ui.mjs';
 import {platformEditEvent, selectRenderedOption} from './rendered-keyboard.mjs';
 import {checkCandidateExperimentController} from './check-candidate-experiment-controller.mjs';
@@ -6664,6 +6665,55 @@ try {
     await action("close_experiment_page", { target_id: second });
     await action("set_action_scope", { mode: "global" });
     console.log(`PASS ${name} scope and page lifecycle`);
+    passed++;
+    // Real CDP fulfillment: explicit local snapshot, exact owner and expiry.
+    const localBody = "globalThis.ownedOverrideFixture = true;";
+    const localRule = {mode:"fulfill",url_pattern:"*",method_filter:"GET",response_code:200,
+      response_headers:{"content-type":"text/javascript; charset=utf-8"},response_body:localBody,
+      local_override:{version:1,exact_url:fixtureUrl+"/echo",target_id:primary,experiment_id:s.request_interception.experiment_id,
+        expires_at_ms:Date.now()+60000,asset_sha256:createHash('sha256').update(localBody).digest('hex')}};
+    const rejectedLocalRule = async (rule,status=409) => {
+      const response=await fetch(url+"/api/debugger/actions",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({action:"configure_request_interception",...rule})});
+      assert.equal(response.status,status,await response.text());
+    };
+    await rejectedLocalRule(localRule); // Global scope cannot arm a local override.
+    await action("set_action_scope", {mode:"target",target_id:primary});
+    await rejectedLocalRule({...localRule,local_override:{...localRule.local_override,target_id:"unrelated-target"}});
+    await rejectedLocalRule({...localRule,local_override:{...localRule.local_override,experiment_id:s.request_interception.experiment_id+1}});
+    await action("configure_request_interception",localRule);
+    result=await action("run_request_interception",{url:fixtureUrl+"/echo",method:"GET"});
+    assert.equal(result.experiment.result.body,localBody);
+    result=await action("run_request_interception",{url:fixtureUrl+"/echo?different=1",method:"GET"});
+    assert.notEqual(result.experiment.result.body,localBody,'Query mismatch must bypass a local override');
+    result=await action("run_request_interception",{url:fixtureUrl+"/echo",method:"POST",body:"owned fixture"});
+    assert.notEqual(result.experiment.result.body,localBody,'Method mismatch must bypass a local override');
+    const overrideSecond=await action("create_experiment_page",{url:"about:blank"});
+    await until(state=>state.action_scope.targets.some(target=>target.id===overrideSecond.target_id && target.connected));
+    await action("set_action_scope",{mode:"global"});
+    result=await action("run_request_interception",{url:fixtureUrl+"/echo",method:"GET",target_id:overrideSecond.target_id});
+    assert.equal(result.experiment.result.body,"fixture response",'Global scope cannot broaden a local override to another disposable page');
+    await action("close_experiment_page",{target_id:overrideSecond.target_id});
+    await action("set_action_scope",{mode:"target",target_id:primary});
+    const expectedOverride={metadata:localRule.local_override,method_filter:localRule.method_filter,content_type:localRule.response_headers["content-type"]};
+    for(const changed of [{metadata:{...localRule.local_override,expires_at_ms:localRule.local_override.expires_at_ms+1}},
+      {metadata:{...localRule.local_override,exact_url:fixtureUrl+"/echo?other=1"}},
+      {method_filter:"HEAD"},{content_type:"text/css; charset=utf-8"}]) {
+      await rejectedLocalRule({mode:"continue",url_pattern:"*",expected_local_override:{...expectedOverride,...changed}});
+      result=await action("run_request_interception",{url:fixtureUrl+"/echo",method:"GET"});
+      assert.equal(result.experiment.result.body,localBody,'Mismatched guarded disarm leaves the original rule intact');
+    }
+    await action("configure_request_interception",{mode:"continue",url_pattern:"*",expected_local_override:expectedOverride});
+    result=await action("run_request_interception",{url:fixtureUrl+"/echo",method:"GET"});
+    assert.equal(result.experiment.result.body,"fixture response",'Disarm restores the owned fixture response');
+    localRule.local_override.expires_at_ms=Date.now()+1000;
+    await action("configure_request_interception",localRule);
+    await new Promise(resolve=>setTimeout(resolve,1100));
+    result=await action("run_request_interception",{url:fixtureUrl+"/echo",method:"GET"});
+    assert.equal(result.experiment.result.body,"fixture response",'Expired local override must bypass fulfillment');
+    await action("configure_request_interception",{mode:"continue",url_pattern:"*",expected_local_override:{...expectedOverride,metadata:localRule.local_override}});
+    await action("set_action_scope",{mode:"global"});
+    console.log(`PASS ${name} exact local override, scope isolation, method/query bypass, guarded conflict/disarm and expiry`);
     passed++;
     await action("configure_request_interception", {
       mode: "continue",

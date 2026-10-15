@@ -245,3 +245,11 @@ check` gate also runs the ignored real-helper actor acceptance test with the
 compiled helper path. Running it directly requires `REB_OWNED_VM_TEST_HELPER` and
 `cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 owned_vm_real_helper -- --ignored`.
+
+## Scoped local response overrides
+
+For explicit local response/JavaScript snapshots, use the
+[scoped local override manager](../../protocol/local-overrides-v1.md).
+Preview and prepare are offline; `--arm` applies one reviewed, expiring rule to
+an exact primary disposable target, while guarded `--disarm` cannot clear a
+replacement rule accidentally. The API never reads an arbitrary filesystem path.

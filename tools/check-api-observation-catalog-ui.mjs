@@ -8,6 +8,60 @@ import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {runInNewContext} from 'node:vm';
 import {network} from './traffic-capture-qa.mjs';
+import {checkPassiveSecurityInteractions} from './check-passive-security-ui.mjs';
+import {renderedCharacterKey,selectRenderedOption} from './rendered-keyboard.mjs';
+
+// Observe the completed viewport/layout boundary before the first action after
+// passive-report cleanup. ResizeObserver/pane-layout work runs before the next
+// frame; the second frame observes its result. This neither retries activation
+// nor waits for a catalog fetch to hide a missed click.
+export async function catalogActivationPoint() {
+  const trigger=document.querySelector('#open-api-catalog');
+  trigger.scrollIntoView({block:'nearest'});
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  const r=trigger.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+  const hit=document.elementFromPoint(x,y);
+  const receipt={x,y,left:r.left,right:r.right,top:r.top,bottom:r.bottom,
+    viewport:{width:innerWidth,height:innerHeight},hit:hit?.id ?? null,
+    passiveOpen:document.querySelector('#passive-security').open};
+  if(trigger.disabled || receipt.passiveOpen || r.width<=0 || r.height<=0 ||
+      r.left<0 || r.right>innerWidth || r.top<0 || r.bottom>innerHeight || !hit || !trigger.contains(hit)) {
+    throw Error('Catalog activation target is not ready: '+JSON.stringify(receipt));
+  }
+  return receipt;
+}
+
+function checkCatalogActivationReadiness() {
+  const frames=[],rect=(y)=>({x:100,y,left:100,right:180,top:y,bottom:y+24,width:80,height:24});
+  let painted=0,box=rect(700),overlay=false,passiveOpen=false,disabled=false;
+  const trigger={id:'open-api-catalog',get disabled(){return disabled;},scrollIntoView(){},getBoundingClientRect:()=>box,contains:n=>n===trigger};
+  const document={querySelector:s=>s==='#open-api-catalog'?trigger:{get open(){return passiveOpen;}},elementFromPoint:()=>overlay?{id:'foreign-overlay'}:trigger};
+  const activation=runInNewContext('('+catalogActivationPoint.toString()+')',{document,innerWidth:1440,innerHeight:900,requestAnimationFrame:fn=>frames.push(fn)});
+  const frame=()=>{const pending=frames.splice(0);painted++;for(const callback of pending)callback();};
+  return (async()=>{
+    // Counterexample: the old immediate click records the narrow-layout footer,
+    // then scheduled responsive layout moves it before pointer release.
+    const stale=box.y+box.height/2;
+    frames.push(()=>{box=rect(850);});
+    let settled=false;const pending=activation().then(value=>{settled=true;return value;});
+    assert.equal(settled,false);frame();await Promise.resolve();assert.equal(settled,false);
+    frame();const ready=await pending;
+    assert.equal(painted,2);assert.notEqual(stale,ready.y);assert.equal(ready.y,862);
+    assert.equal(ready.hit,'open-api-catalog');
+    for(const blocked of ['overlay','passive','disabled','offscreen']) {
+      overlay=blocked==='overlay';passiveOpen=blocked==='passive';disabled=blocked==='disabled';box=rect(blocked==='offscreen'?920:850);
+      const rejected=assert.rejects(activation(),/Catalog activation target is not ready/);frame();frame();await rejected;
+    }
+    console.log('PASS catalog activation native-frame ordering, stale-coordinate counterexample and persistent overlay/modal/disabled/offscreen refusal (geometry model; not rendered QA)');
+  })();
+}
+await checkCatalogActivationReadiness();
+assert.deepEqual(renderedCharacterKey('#'),{code:'Digit3',native:{text:'#',unmodifiedText:'3',windowsVirtualKeyCode:51,modifiers:8}},'Numbered observation prefix must not be dispatched as End (35)');
+assert.deepEqual(renderedCharacterKey('3'),{code:'Digit3',native:{text:'3',unmodifiedText:'3',windowsVirtualKeyCode:51}});
+assert.deepEqual(renderedCharacterKey('h'),{code:'KeyH',native:{text:'h',unmodifiedText:'h',windowsVirtualKeyCode:72}});
+for(const character of [' ','.','雪'])assert.equal(renderedCharacterKey(character).native.windowsVirtualKeyCode,0,'Unmapped characters must not invent virtual navigation keys');
+console.log('PASS numbered native select prefix maps #3 to Shift+Digit3 then Digit3; letters preserved and unmapped characters do not alias navigation keys (CDP shape, not rendered QA)');
+
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const traffic = await readFile(join(root, 'apps/research-ui/traffic_view.js'), 'utf8');
@@ -184,19 +238,21 @@ async function checkBrowser() {
   await mkdir(output,{recursive:true});
   await rm(join(output,'validation.json'),{force:true});
   await rm(join(output,'failure.png'),{force:true});
-  let browser, socket, sequence=0, diagnostics='', phase='fixture startup', firstFailure=null, browserClosed=false; const commands=new Map();
+  let browser, socket, sequence=0, diagnostics='', phase='fixture startup', firstFailure=null, browserClosed=false, catalogActivation=null; const commands=new Map();
   const grouped=process.platform!=='win32';
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   async function until(check,description) {phase=description;for(let i=0;i<200;i++){const value=await check();if(value)return value;await delay(50);}throw new Error(`Timed out: ${description}`);}
   const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{commands.delete(id);reject(new Error(`CDP timeout: ${method}`));},10000);commands.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params}));});
   const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.text+' '+JSON.stringify(result.exceptionDetails.exception));return result.result.value;};
-  const key=async (key,code)=>{
+  const key=async (key,code,options={})=>{
     const windowsVirtualKeyCode={Tab:9,Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowUp:38}[key];
-    // Match the repository's native CDP input shape. Enter needs its character
-    // event for native summary/button activation, not only a keydown event.
-    await send('Input.dispatchKeyEvent',{type:key==='Enter'?'keyDown':'rawKeyDown',key,code,windowsVirtualKeyCode,
-      ...(key==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
-    await send('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode});
+    // Text-producing native input is required for Enter activation and macOS
+    // select type-ahead; navigation keys retain rawKeyDown semantics.
+    const event={key,code,windowsVirtualKeyCode,
+      ...(key==='Enter'?{text:'\r',unmodifiedText:'\r'}:{}),...options};
+    await send('Input.dispatchKeyEvent',{type:event.text?'keyDown':'rawKeyDown',...event});
+    const {text,unmodifiedText,...release}=event;
+    await send('Input.dispatchKeyEvent',{type:'keyUp',...release});
   };
   const click=async selector=>{const point=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});n.scrollIntoView({block:'nearest'});const r=n.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});};
   const shot=async name=>{const result=await send('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(result.data,'base64'));};
@@ -225,8 +281,15 @@ async function checkBrowser() {
     await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});
     await until(()=>evaluate("typeof state !== 'undefined' && state.requests.length===1"),'loaded real Traffic UI');
     assert.equal(catalogReads,0,'Boot and debugger polling must not read catalog');
+    const passiveSecurity=await checkPassiveSecurityInteractions({evaluate,send,click,key,shot,until});
     const raw=await evaluate('JSON.stringify(state.requests[0].captureRecord)');
-    await click('#open-api-catalog');
+    phase='catalog activation after passive cleanup';
+    catalogActivation=await evaluate(`(${catalogActivationPoint.toString()})()`);
+    const {x,y}=catalogActivation;
+    await send('Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',clickCount:1});
+    await send('Input.dispatchMouseEvent',{type:'mouseReleased',x,y,button:'left',clickCount:1});
+    catalogActivation.after=await evaluate("(()=>{const n=document.querySelector('#open-api-catalog'),r=n.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,open:document.querySelector('#api-catalog').open,focus:document.activeElement.id};})()");
+    assert.equal(catalogActivation.after.open,true,'Single hit-tested catalog activation opens its dialog');
     await until(()=>evaluate("document.querySelector('#api-catalog-status').textContent.includes('Snapshot loaded')"),'catalog loaded');
     assert.equal(catalogReads,1);assert.equal(await evaluate('document.activeElement.id'),'api-catalog-close');
     for (const shortcut of [{key:'p',code:'KeyP',modifiers:2},{key:'ArrowLeft',code:'ArrowLeft',modifiers:1},{key:'j',code:'KeyJ',modifiers:2},{key:'F8',code:'F8'}]) {
@@ -318,18 +381,14 @@ async function checkBrowser() {
     }
     await scrollCatalogTo('.api-catalog-differences li');
     await shot('catalog-comparison-differences-360');
-    await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').focus()");
-    await key('End','End');
+    await selectRenderedOption({evaluate,click,key,selector:'.api-catalog-compare-controls label:nth-child(2) select',index:2,keyboardFocus:true});
     assert.equal(await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').value"),'2');
     assert.equal(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),'','Changing a comparison choice clears stale results');
     await click('.api-catalog-compare-controls button');
     assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/body_truncated/);
     await scrollCatalogTo('.api-catalog-comparison-result p:last-child');
     await shot('catalog-comparison-unavailable-360');
-    // Programmatic focus avoids opening a platform select popup; the selection
-    // itself still uses keyboard input, including the same-source refusal.
-    await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').focus()");
-    await key('Home','Home');
+    await selectRenderedOption({evaluate,click,key,selector:'.api-catalog-compare-controls label:nth-child(2) select',index:0,keyboardFocus:true});
     assert.equal(await evaluate("document.querySelector('.api-catalog-compare-controls button').disabled"),true);
     assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/two different captured source identities/);
     await click('#api-catalog-search');await send('Input.insertText',{text:'cursor'});
@@ -338,7 +397,7 @@ async function checkBrowser() {
     assert.equal(await evaluate("document.querySelectorAll('.api-catalog-observation').length"),1,'Expanded endpoint stays open after filtering');
     assert.match(await evaluate("document.querySelector('.api-catalog-observation').textContent"),/synthetic-variant/);
     await click('#api-catalog-clear');
-    await evaluate("document.querySelector('#api-catalog-response').focus()");await key('End','End');
+    await selectRenderedOption({evaluate,click,key,selector:'#api-catalog-response',index:3,keyboardFocus:true});
     assert.match(await evaluate("document.querySelector('#api-catalog-filter-status').textContent"),/1 of 3 observations/);
     assert.match(await evaluate("document.querySelector('.api-catalog-observation').textContent"),/503/);
     await click('#api-catalog-clear');
@@ -432,13 +491,13 @@ async function checkBrowser() {
     const downloaded=await until(async()=>{try{return await readFile(join(output,'reb-client-project.raw.zip'));}catch{return null;}},'explicit client ZIP download');
     assert.equal(downloaded.readUInt32LE(0),0x04034b50);
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);
-    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download'],keyboard:['Tab filter focus','Enter clear filters','Home/End comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
+    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',catalog_activation:catalogActivation,passive_security:passiveSecurity,product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download'],keyboard:['Tab filter focus','Enter clear filters','native keyboard comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
     console.log(`PASS rendered catalog: keyboard and pointer, three viewports, scrolling, inert markup, raw header preservation, explicit read-only lifecycle, source invalidation. Evidence: ${output}`);
   } catch (error) {
     firstFailure=error;
     // Persist the first failure before browser teardown. Only the authored local
     // fixture is ever loaded; bound text diagnostics independently of screenshots.
-    const failure={status:'failed',phase,error:String(error.stack ?? error).slice(0,8192),browser_stderr:diagnostics.slice(-8192),
+    const failure={status:'failed',phase,catalog_activation:catalogActivation,error:String(error.stack ?? error).slice(0,8192),browser_stderr:diagnostics.slice(-8192),
       browser_exit:browser?.exitCode ?? null,browser_signal:browser?.signalCode ?? null,catalog_reads:catalogReads,
       requests:logs.slice(-256),mutations:mutations.slice(-64),runtime_errors:JSON.stringify(errors).slice(0,16384),rendered:false};
     if(socket?.readyState===WebSocket.OPEN) {

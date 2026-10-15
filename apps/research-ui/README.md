@@ -56,6 +56,18 @@ host-and-time correlations likewise cannot become exact captured trace links.
 See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
 for the identity boundary, retained limits and integration points.
 
+## Local passive security report
+
+In Traffic, select a retained CDP request, open **Export capture**, then choose
+**Local passive security report**. It analyzes the already-retained selection
+without fetching, sending target requests or changing evidence. The dialog
+shows versioned header observations and secret-looking category/location/counts,
+plus source hashes and explicit partial/unknown coverage. It never shows matched
+values, validates credentials or declares the site secure. Closing or changing
+the selected evidence discards its report. A private offline CLI accepts one
+saved exact-request API response; see [Passive security report v1](../../docs/product/passive-security-report-v1.md)
+for the schema, rules, bounds and commands. Active probes remain separate work.
+
 ## Observed API catalog
 
 Choose **API catalog** in the Traffic footer to read a bounded structural
@@ -820,7 +832,11 @@ current readbacks. Canvas owns a separate maximum of 24 previews and 8 MiB of
 UTF-16 text reservations/retained text; each descriptor reserves twice its
 encoded byte size before admission (at most 2 MiB encoded bytes per preview).
 Newest previews have priority, and budget omissions remain labeled without
-refetching on every refresh. At most two unfinished preview reads are allowed,
+refetching on every refresh. Unchanged polling retains the same cards, native
+disclosure controls and admitted image nodes, including across pointer press
+and release. Changed render inputs or exact source ownership invalidate that
+reuse; updated disclosures preserve their expanded state and focus.
+At most two unfinished preview reads are allowed,
 including retired reads whose fetch or response-body/reader cancellation has
 not settled. Header/body errors remain visible immediately; explicit retries
 do not bypass cancellation credits. Their bounded streaming

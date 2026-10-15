@@ -120,26 +120,26 @@ impl Debugger {
             });
             return Err(e);
         }
-        if let Some(guard) = &marker {
-            if let Err(error) = marker_fuzz::scope(&self.snapshot(), guard, validation::now_ms()) {
-                let cleanup = format!("globalThis[{key}]?.delete({identifier})");
-                let expected = json!({"instance_id":guard["instance_id"],"target_id":guard["target_id"],"experiment_id":guard["experiment_id"],"session_id":guard["session_id"],"execution_id":execution,"plan_sha256":guard["plan_sha256"],"case_index":guard["case_index"]});
-                let _ = connection
-                    .command_guarded(
-                        "Runtime.evaluate",
-                        json!({"expression":cleanup,"returnByValue":true}),
-                        Duration::from_secs(1),
-                        || marker_fuzz::cancellation(&self.snapshot(), &expected).is_ok(),
-                    )
-                    .await;
-                self.update(|s| {
-                    if s["repeater"]["active_execution"]["execution_id"] == execution {
-                        s["repeater"]["active_execution"] = Value::Null;
-                        s["repeater"]["state"] = json!("error");
-                    }
-                });
-                return Err(error);
-            }
+        if let Some(guard) = &marker
+            && let Err(error) = marker_fuzz::scope(&self.snapshot(), guard, validation::now_ms())
+        {
+            let cleanup = format!("globalThis[{key}]?.delete({identifier})");
+            let expected = json!({"instance_id":guard["instance_id"],"target_id":guard["target_id"],"experiment_id":guard["experiment_id"],"session_id":guard["session_id"],"execution_id":execution,"plan_sha256":guard["plan_sha256"],"case_index":guard["case_index"]});
+            let _ = connection
+                .command_guarded(
+                    "Runtime.evaluate",
+                    json!({"expression":cleanup,"returnByValue":true}),
+                    Duration::from_secs(1),
+                    || marker_fuzz::cancellation(&self.snapshot(), &expected).is_ok(),
+                )
+                .await;
+            self.update(|s| {
+                if s["repeater"]["active_execution"]["execution_id"] == execution {
+                    s["repeater"]["active_execution"] = Value::Null;
+                    s["repeater"]["state"] = json!("error");
+                }
+            });
+            return Err(error);
         }
         let mut configuration = json!({"url":resolved["url"],"method":resolved["method"],"headers":requests::header_map(&resolved["headers"]),"body":resolved["body"],"timeoutMs":resolved["timeout_ms"],"headerLimit":64,"headerValueLimit":2048,"headerTotalLimit":16384,"responseByteLimit":65536,"controllerRegistryKey":self.repeater.key,"executionId":execution.to_string()});
         if let Some(guard) = &marker {

@@ -169,7 +169,7 @@ fn snapshot_document(snapshot: &Value, view: &Value) -> Result<(u64, Vec<Value>,
             .as_array()
             .filter(|v| v.len() % 2 == 0 && v.len() <= 256)
             .ok_or_else(malformed)?;
-        for pair in attrs.chunks_exact(2) {
+        for pair in attrs.as_chunks::<2>().0 {
             let name = string(&pair[0])?.to_ascii_lowercase();
             // Validate every string index, but never return names, values or text.
             let _ = string(&pair[1])?;

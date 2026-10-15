@@ -6591,7 +6591,11 @@
                   "json-minify",
                   "protobuf-inspect",
                   "grpc-web-inspect",
-                  "grpc-web-text-inspect"
+                  "grpc-web-text-inspect",
+                  "magic-inspect",
+                  "sha256",
+                  "sha384",
+                  "sha512"
                 ]
               },
               "input_base64": {

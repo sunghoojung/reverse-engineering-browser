@@ -1552,6 +1552,65 @@ DecoderResult InspectGrpcWebText(const std::span<const std::uint8_t> input,
   return InspectGrpcWeb(decoded, output_limit);
 }
 
+DecoderResult InspectMagic(std::span<const std::uint8_t> input, const std::size_t output_limit) {
+  std::string report =
+      "{\"format\":\"reb-decoder-magic-v1\",\"input_bytes\":" + std::to_string(input.size()) +
+      ",\"automatic_transforms\":0,\"meaning_verified\":false,\"candidates\":[";
+  bool first = true;
+  const auto candidate = [&](std::string_view operation, std::string_view evidence,
+                             std::string_view confidence) {
+    if (!first)
+      report += ',';
+    first = false;
+    report += "{\"operation\":\"";
+    report += operation;
+    report += "\",\"evidence\":\"";
+    report += evidence;
+    report += "\",\"confidence\":\"";
+    report += confidence;
+    report += "\"}";
+  };
+  const bool hex =
+      !input.empty() && input.size() % 2 == 0 &&
+      std::all_of(input.begin(), input.end(), [](std::uint8_t c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+      });
+  if (hex)
+    candidate("hex-decode", "even-length ASCII hex digits; meaning unknown", "syntax-only");
+  if (!input.empty() &&
+      Base64Decode(input, false, kDecoderMaxOutputBytes).status == DecoderStatus::kOk)
+    candidate("base64-decode", "canonical base64 alphabet, length and pad bits", "syntax-only");
+  if (!input.empty() &&
+      Base64Decode(input, true, kDecoderMaxOutputBytes).status == DecoderStatus::kOk)
+    candidate("base64url-decode", "base64url alphabet, length and pad bits", "syntax-only");
+  if (input.size() >= 10 && input[0] == 0x1f && input[1] == 0x8b && input[2] == 8 &&
+      (input[3] & 0xe0U) == 0)
+    candidate("gzip-decompress", "gzip fixed header only; body and checksum unverified",
+              "signature-only");
+  if (input.size() >= 2 && (input[0] & 0x0fU) == 8 && (input[0] >> 4U) <= 7 &&
+      (static_cast<unsigned int>(input[0]) * 256U + input[1]) % 31U == 0)
+    candidate("zlib-decompress", "zlib CMF/FLG only; dictionary, body and checksum unverified",
+              "signature-only");
+  if (!input.empty() &&
+      FormatJson(input, false, kDecoderMaxOutputBytes).status == DecoderStatus::kOk)
+    candidate("json-pretty", "bounded JSON syntax; application semantics unverified",
+              "syntax-only");
+  report += "],\"utf8_valid\":";
+  report += IsValidUtf8(input) ? "true" : "false";
+  report += ",\"digest_shape\":";
+  if (hex && (input.size() == 32 || input.size() == 40 || input.size() == 64 ||
+              input.size() == 96 || input.size() == 128)) {
+    report += "{\"hex_characters\":" + std::to_string(input.size()) +
+              ",\"algorithm\":\"unknown\",\"evidence\":\"length only; may not be a digest\"}";
+  } else {
+    report += "null";
+  }
+  report += '}';
+  if (report.size() > output_limit)
+    return Failure(DecoderStatus::kOutputLimit, "Magic report exceeds the configured byte limit");
+  return Success(std::vector<std::uint8_t>(report.begin(), report.end()));
+}
+
 JwtInspection JwtFailure(std::string message) {
   JwtInspection inspection;
   inspection.status = DecoderStatus::kInvalidInput;
@@ -1562,7 +1621,7 @@ JwtInspection JwtFailure(std::string message) {
 }  // namespace
 
 std::optional<DecoderOperation> DecoderOperationFromName(const std::string_view name) noexcept {
-  constexpr std::array<std::pair<std::string_view, DecoderOperation>, 21> kOperations = {{
+  constexpr std::array<std::pair<std::string_view, DecoderOperation>, 25> kOperations = {{
       {"base64-encode", DecoderOperation::kBase64Encode},
       {"base64-decode", DecoderOperation::kBase64Decode},
       {"base64url-encode", DecoderOperation::kBase64UrlEncode},
@@ -1584,6 +1643,10 @@ std::optional<DecoderOperation> DecoderOperationFromName(const std::string_view 
       {"protobuf-inspect", DecoderOperation::kProtobufInspect},
       {"grpc-web-inspect", DecoderOperation::kGrpcWebInspect},
       {"grpc-web-text-inspect", DecoderOperation::kGrpcWebTextInspect},
+      {"magic-inspect", DecoderOperation::kMagicInspect},
+      {"sha256", DecoderOperation::kSha256},
+      {"sha384", DecoderOperation::kSha384},
+      {"sha512", DecoderOperation::kSha512},
   }};
   const auto iterator = std::find_if(kOperations.begin(), kOperations.end(),
                                      [name](const auto& item) { return item.first == name; });
@@ -1635,6 +1698,14 @@ std::string_view DecoderOperationName(const DecoderOperation operation) noexcept
       return "grpc-web-inspect";
     case DecoderOperation::kGrpcWebTextInspect:
       return "grpc-web-text-inspect";
+    case DecoderOperation::kMagicInspect:
+      return "magic-inspect";
+    case DecoderOperation::kSha256:
+      return "sha256";
+    case DecoderOperation::kSha384:
+      return "sha384";
+    case DecoderOperation::kSha512:
+      return "sha512";
   }
   return "unsupported";
 }
@@ -1663,6 +1734,17 @@ DecoderResult TransformBytes(const DecoderOperation operation,
       return InspectGrpcWeb(input, output_limit);
     case DecoderOperation::kGrpcWebTextInspect:
       return InspectGrpcWebText(input, output_limit);
+    case DecoderOperation::kMagicInspect:
+      return InspectMagic(input, output_limit);
+    case DecoderOperation::kSha256:
+      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs256, input),
+                            output_limit);
+    case DecoderOperation::kSha384:
+      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs384, input),
+                            output_limit);
+    case DecoderOperation::kSha512:
+      return TransformBytes(DecoderOperation::kHexEncode, Sha2Digest(JwtAlgorithm::kHs512, input),
+                            output_limit);
     case DecoderOperation::kBase64Decode:
       return Base64Decode(input, false, output_limit);
     case DecoderOperation::kBase64UrlEncode: {

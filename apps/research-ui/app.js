@@ -6423,7 +6423,8 @@
         'hex-encode', 'hex-decode', 'url-encode', 'url-decode', 'base36-encode',
         'base36-decode', 'gzip-compress', 'gzip-decompress', 'zlib-compress',
         'zlib-decompress', 'deflate-compress', 'deflate-decompress', 'json-pretty',
-        'json-minify', 'protobuf-inspect', 'grpc-web-inspect', 'grpc-web-text-inspect'
+        'json-minify', 'protobuf-inspect', 'grpc-web-inspect', 'grpc-web-text-inspect',
+        'magic-inspect', 'sha256', 'sha384', 'sha512'
       ]);
       const decoderAlgorithms = new Set(['HS256', 'HS384', 'HS512', 'none']);
 

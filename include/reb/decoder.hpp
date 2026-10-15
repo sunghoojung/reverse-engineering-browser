@@ -39,6 +39,10 @@ enum class DecoderOperation : std::uint8_t {
   kProtobufInspect,
   kGrpcWebInspect,
   kGrpcWebTextInspect,
+  kMagicInspect,
+  kSha256,
+  kSha384,
+  kSha512,
 };
 
 enum class DecoderStatus : std::uint8_t {

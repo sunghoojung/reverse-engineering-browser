@@ -94,11 +94,12 @@ try {
 } finally {await rm(directory,{recursive:true,force:true});}
 await controller();
 async function controller() {
+  const closeEvents=[];let queueClose=false;
   class Node {
     constructor(){this.children=[];this.events={};this.open=false;this.disabled=false;this.value='';}
     set textContent(value){this.text=String(value);this.children=[];}get textContent(){return (this.text??'')+this.children.map(child=>child.textContent).join('');}
     addEventListener(type,handler){this.events[type]=handler;}append(...nodes){this.children.push(...nodes);}replaceChildren(){this.children=[];this.text='';}
-    showModal(){this.open=true;}close(){this.open=false;this.events.close?.();}focus(){document.activeElement=this;}
+    showModal(){this.open=true;}close(){this.open=false;if(queueClose)closeEvents.push(()=>this.events.close?.());else this.events.close?.();}focus(){document.activeElement=this;}
     click(){if(!this.disabled)return this.events.click?.();}
   }
   const ids=new Map(['passive-security-open','passive-security','passive-security-status','passive-security-content','passive-security-close','request-rows'].map(id=>[id,new Node()]));
@@ -115,6 +116,25 @@ async function controller() {
   release=undefined;const late=get('open').click();current={captureRecord:{...sensitive,response:{...sensitive.response,headers:[['X','changed']]}}};ui.sync();release();await late;
   assert(get('status').textContent.includes('changed'));assert.equal(get('content').textContent,'');
   hold=false;get('close').click();await get('open').click();assert(get('status').textContent.includes('ready'));
+  // Native dialog.close() queues its close event. A reopened report must not
+  // inherit cleanup or focus restoration from the previous modal lifetime.
+  queueClose=true;get('close').click();
+  hold=true;release=undefined;const reopened=get('open').click();
+  const modalFocus={};document.activeElement=modalFocus;
+  closeEvents.shift()();
+  assert.equal(document.activeElement,modalFocus,'Old close must not steal reopened modal focus');
+  assert(get('open').disabled,'Old close must not clear the new analysis busy state');
+  release();await reopened;hold=false;
+  assert(get('status').textContent.includes('ready'));
+  current.captureRecord.response.body.text+=' authored revision';ui.sync();
+  assert.equal(get('content').textContent,'');
+  assert(get('status').textContent.includes('changed'),'Reopened ready report retains source revision tracking');
+  get('close').click();await get('open').click();
+  closeEvents.shift()();
+  assert(get('status').textContent.includes('ready'),'Queued close must also preserve an already ready report');
+  current.captureRecord.response.body.text+=' second authored revision';ui.sync();
+  assert.equal(get('content').textContent,'');assert(get('status').textContent.includes('changed'));
+  queueClose=false;
   current=null;ui.sync();assert(get('open').disabled);assert.equal(get('content').textContent,'');get('close').click();assert.equal(document.activeElement,ids.get('request-rows'));
   console.log('PASS explicit-only UI, zero network dependencies, close/reopen, double-click guard, delayed-result cancellation and same-identity content-change invalidation');
 }

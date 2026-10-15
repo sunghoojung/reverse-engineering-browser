@@ -161,7 +161,7 @@ The **Console** bottom dock starts a separate disposable custom Brave session fo
 explicit main-world JavaScript commands. Set `REB_BRAVE_BINARY` to a rebuilt
 custom browser and use the live backend. Open the connection menu to connect a
 disposable browser, then select a document before entering commands.
-Workspace tabs sit across the top, with Console beside Sources. Commands are
+Workspace tabs sit across the top, with VM between Sources and Console. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
 for their value types. Coloring uses inert text spans and a bounded tokenizer.
 Console keeps a persistent command composer below its independently scrolling
@@ -1677,7 +1677,7 @@ and inspect the packaged macOS app, including desktop 200% zoom.
 
 ### Live owned fixture controls
 
-Open **Advanced → VM workspace** without a captured finding. The workspace also offers **Live owned fixture** when the Rust backend has the
+Open **VM tab** without a captured finding. The workspace also offers **Live owned fixture** when the Rust backend has the
 bundled `OriginTraceOwnedVmFixture` helper (development binary:
 `build/reb-native-vm-fixture`). Create explicitly chooses the fixed register or
 stack program and starts paused before instruction one. Run, Pause, Step, Stop,

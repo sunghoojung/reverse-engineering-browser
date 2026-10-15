@@ -2836,6 +2836,8 @@
       }
 
       @media (max-width: 800px) {
+        .primary-nav { flex-wrap: wrap; }
+        .app { grid-template-rows: 32px auto minmax(0, 1fr) 24px; }
         .nav-button { padding-inline: 10px; }
         .request-inspector:has(.trace-dock:not([hidden])) { display: block; }
         .request-inspector > .trace-dock { padding: 12px 0; border-left: 0; }
@@ -3967,7 +3969,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .owned-vm-debugger-navigation { grid-column: 1; }
 }
 
-#advanced-navigation #nav-vm-workspace { width: 100%; text-align: left; }
 
 /* Coexisting live controls and imported analysis use normal document flow on
    narrow screens. Neither an auto grid row nor retained-row intrinsic height

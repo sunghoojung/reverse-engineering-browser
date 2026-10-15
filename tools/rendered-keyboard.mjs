@@ -10,6 +10,18 @@ export function platformEditEvent(event, platform = process.platform) {
   return event;
 }
 
+// CDP expects Windows virtual key codes, not Unicode character values. In
+// particular '#' is Shift+Digit3 (51); its Unicode value 35 means End and can
+// prevent macOS native select type-ahead from receiving the character.
+export function renderedCharacterKey(character) {
+  assert.equal([...character].length,1,'Native type-ahead requires one character');
+  if(character==='#')return {code:'Digit3',native:{text:'#',unmodifiedText:'3',windowsVirtualKeyCode:51,modifiers:8}};
+  const letter=/^[a-z]$/i.test(character),digit=/^[0-9]$/.test(character);
+  return {code:letter?'Key'+character.toUpperCase():digit?'Digit'+character:'Unidentified',
+    native:{text:character,unmodifiedText:character,
+      windowsVirtualKeyCode:letter||digit?character.toUpperCase().charCodeAt(0):0}};
+}
+
 export async function selectRenderedOption({evaluate, click, key, selector, index, keyboardFocus = false}) {
   const options = await evaluate(`Array.from(document.querySelector(${JSON.stringify(selector)}).options, o => ({value:o.value,label:o.textContent.trim(),disabled:o.disabled}))`);
   const option = options[index];
@@ -38,8 +50,8 @@ export async function selectRenderedOption({evaluate, click, key, selector, inde
     assert(prefix && prefix.length <= 256, 'Select label must have a bounded unique prefix');
     assert.equal(options.filter(o => !o.disabled && o.label.toLowerCase().startsWith(prefix.toLowerCase())).length, 1, 'Ambiguous select label');
     for (const character of prefix) {
-      const code = /^[a-z]$/i.test(character) ? 'Key' + character.toUpperCase() : 'Unidentified';
-      await key(character, code, {text:character, unmodifiedText:character, windowsVirtualKeyCode:character.toUpperCase().charCodeAt(0)});
+      const {code,native}=renderedCharacterKey(character);
+      await key(character,code,native);
     }
   } else {
     if (!keyboardFocus) await click(selector);

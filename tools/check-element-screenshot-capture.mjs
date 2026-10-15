@@ -19,7 +19,9 @@ export function elementScreenshotFixtureRoute(request,response) {
   };
   if (!Object.hasOwn(extras,kind)) { response.writeHead(404);response.end('Unknown synthetic fixture');return true; }
   response.setHeader('Content-Type','text/html');response.setHeader('Cache-Control','no-store');
-  response.end(`<!doctype html><html><head><title>Authored element capture fixture</title><link rel="icon" href="data:,"><style>html,body{margin:0;background:#fff;color:#111}#box{position:absolute;left:20px;top:30px;width:160px;height:80px;background:#5b8;border:0}#fixed{position:fixed;left:8px;bottom:8px;width:40px;height:20px;background:#857}</style></head><body><div id="box">Authored local pixels</div><div id="fixed"></div>${extras[kind]}</body></html>`);
+  // The ordinary empty value exercises Blink's -1 string sentinel on the
+  // successful path as well as the bare editable/private refusal fixtures.
+  response.end(`<!doctype html><html><head><title>Authored element capture fixture</title><link rel="icon" href="data:,"><style>html,body{margin:0;background:#fff;color:#111}#box{position:absolute;left:20px;top:30px;width:160px;height:80px;background:#5b8;border:0}#fixed{position:fixed;left:8px;bottom:8px;width:40px;height:20px;background:#857}</style></head><body><div id="box">Authored local pixels</div><div id="fixed" data-note=""></div>${extras[kind]}</body></html>`);
   return true;
 }
 export async function checkElementScreenshotCapture({action,get,until,baseURL,fixtureURL}) {

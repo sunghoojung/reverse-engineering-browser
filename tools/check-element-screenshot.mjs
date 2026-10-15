@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
 import {createHash} from 'node:crypto';
-import {elementCaptureResponseMatches} from './check-element-screenshot-ui.mjs';
+import {elementCaptureResponseMatches,enterElementExperiments,assertElementModeTabGeometry} from './check-element-screenshot-ui.mjs';
 const source = await readFile(new URL('../apps/research-ui/element_screenshot.js',import.meta.url),'utf8');
 const sandbox = {TextEncoder,AbortController,setTimeout,clearTimeout};
 runInNewContext(source,sandbox);
@@ -221,3 +221,30 @@ console.log('PASS element screenshot strict geometry/image contracts, ownership,
   assert(requests.at(-1).options.signal.aborted);assert(requests.every(r=>r.url==='/api/debugger/actions'));
   console.log('PASS production screenshot DOM fixture: numbered pointer/list selection, Home/End focus, CSS scaling, local blob revocation, decode failure refusal, close and late reply retirement (not rendered/native QA)');
 }
+
+// Navigation must open the real chooser on entry and after returning from
+// Traffic. A strict mock refuses the original hidden Experiments click.
+for(const initiallyOpen of [false,true]) {
+  let open=initiallyOpen,visible=false;const clicks=[];
+  const evaluate=async()=>open;
+  const click=async selector=>{
+    clicks.push(selector);
+    if(selector==='#advanced-navigation > summary') {assert(!open);open=true;}
+    else {assert.equal(selector,'[data-screen="experiments"]');assert(open,'Experiments is hidden until Advanced opens');open=false;visible=true;}
+  };
+  const until=async expression=>{assert(expression.includes("#advanced-navigation"));assert(expression.includes('#screen-experiments') ? visible&&!open : open);};
+  await enterElementExperiments({evaluate,click,until});
+  assert.deepEqual(clicks,initiallyOpen?['[data-screen="experiments"]']:['#advanced-navigation > summary','[data-screen="experiments"]']);
+  visible=false;clicks.length=0;
+  await enterElementExperiments({evaluate,click,until});
+  assert.deepEqual(clicks,['#advanced-navigation > summary','[data-screen="experiments"]']);
+}
+console.log('PASS element screenshot chooser entry and return use visible pointer navigation');
+
+// The strip's border consumes one pixel of its fixed 40px grid row. The old
+// child min-height:40px cannot fit a 39px client box, even at a valid center hit.
+assert.throws(()=>assertElementModeTabGeometry({clip:{top:99,bottom:138},tabs:[{top:99,bottom:139}]}),/entirely/);
+for(const bottom of [138,123]) assert.doesNotThrow(()=>assertElementModeTabGeometry({clip:{top:99,bottom},tabs:[{top:99,bottom},{top:99,bottom}]}));
+assert.throws(()=>assertElementModeTabGeometry({clip:{top:99,bottom:138},tabs:[{top:98,bottom:137}]}),/entirely/);
+assert.match(css,/#screen-experiments \.experiment-mode-tab \{[^}]*min-height: 0;/,'Tabs must stretch within the bordered strip rather than force its outer height');
+console.log('PASS mode tabs preserve strict full-height clipping checks and fit the bordered scrollport');

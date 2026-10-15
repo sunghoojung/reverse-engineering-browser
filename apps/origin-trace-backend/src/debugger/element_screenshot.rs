@@ -172,7 +172,12 @@ fn snapshot_document(snapshot: &Value, view: &Value) -> Result<(u64, Vec<Value>,
         for pair in attrs.as_chunks::<2>().0 {
             let name = string(&pair[0])?.to_ascii_lowercase();
             // Validate every string index, but never return names, values or text.
-            let _ = string(&pair[1])?;
+            // Blink AddString encodes an empty attribute value as -1 (for
+            // example bare contenteditable). Names and other indices remain
+            // strict; only this value slot accepts the empty-string sentinel.
+            if pair[1].as_i64() != Some(-1) {
+                let _ = string(&pair[1])?;
+            }
             if [
                 "contenteditable",
                 "data-reb-private",
@@ -544,6 +549,46 @@ mod tests {
         let second = s["documents"][0].clone();
         s["documents"].as_array_mut().unwrap().push(second);
         assert!(snapshot_document(&s, &view()).is_err());
+    }
+    #[test]
+    fn native_empty_attribute_values_preserve_privacy_refusal() {
+        for value in [json!(-1), json!(4)] {
+            for attr in [
+                "contenteditable",
+                "data-reb-private",
+                "data-private",
+                "data-sensitive",
+            ] {
+                let mut s = fixture();
+                s["strings"][3] = json!(attr);
+                s["strings"][4] = json!("");
+                s["documents"][0]["nodes"]["attributes"][1] = json!([3, value]);
+                let error = snapshot_document(&s, &view()).unwrap_err();
+                assert_eq!(error.status, 409, "{attr}: {value}");
+                assert_eq!(error.reason.code, crate::error::Code::StateConflict);
+            }
+            let mut s = fixture();
+            s["strings"][4] = json!("");
+            s["documents"][0]["nodes"]["attributes"][1] = json!([3, value]);
+            assert!(snapshot_document(&s, &view()).is_ok());
+        }
+    }
+    #[test]
+    fn empty_attribute_sentinel_does_not_relax_other_indices() {
+        for value in [json!(-2), json!(5), json!(null), json!("-1"), json!(-1.5)] {
+            let mut s = fixture();
+            s["documents"][0]["nodes"]["attributes"][1] = json!([3, value]);
+            assert_eq!(snapshot_document(&s, &view()).unwrap_err().status, 422);
+        }
+        for key in ["attributes", "nodeName"] {
+            let mut s = fixture();
+            s["documents"][0]["nodes"][key][1] = if key == "attributes" {
+                json!([-1, 4])
+            } else {
+                json!(-1)
+            };
+            assert_eq!(snapshot_document(&s, &view()).unwrap_err().status, 422);
+        }
     }
     #[test]
     fn malformed_or_oversized_geometry_never_becomes_partial_success() {

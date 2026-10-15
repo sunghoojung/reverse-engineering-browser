@@ -23,14 +23,18 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  assert.equal(await evaluate("document.querySelector('#vm-owned-debugger').hidden"),true);
  await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.id'),'vm-show-owned');
  await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Import VM execution trace');
+ // Intermediate pane controls can be outside the intentionally scrollable
+ // workspace viewport. Scroll them into view before the real pointer action;
+ // click() still performs its unchanged clipping and hit-target assertions.
+ const scrollClick=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`);await click(selector);};
  const ensureVisible=async selector=>{
   const owner=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('Missing VM control');const p=e.closest('.vm-context-panel');return {layout:document.querySelector('${root}').dataset.layout,context:p?.id.replace('vm-context-panel-',''),state:!!e.closest('.vm-step-inspector'),listing:!!e.closest('.vm-execution-listing'),navigation:!!e.closest('.vm-execution-navigation'),navigationOpen:document.querySelector('${root}').dataset.navigationOpen==='true'};})()`);
-  if(owner.navigation&&owner.layout!=='wide'&&!owner.navigationOpen)await click(root+' .vm-navigation-toggle');
+  if(owner.navigation&&owner.layout!=='wide'&&!owner.navigationOpen)await scrollClick(root+' .vm-navigation-toggle');
   if(owner.context){
-   if(owner.layout==='narrow')await click(root+' [data-vm-panel="evidence"]');
-   else if(await evaluate(`document.querySelector('${root} .vm-execution-context').hidden`))await click(root+' .vm-context-launchers button:nth-child('+({occurrences:1,validation:2,comparison:3,audit:4}[owner.context])+')');
-   await click('#vm-context-tab-'+owner.context);
-  }else if(owner.layout==='narrow'&&(owner.state||owner.listing))await click(root+' [data-vm-panel="'+(owner.state?'state':'listing')+'"]');
+   if(owner.layout==='narrow')await scrollClick(root+' [data-vm-panel="evidence"]');
+   else if(await evaluate(`document.querySelector('${root} .vm-execution-context').hidden`))await scrollClick(root+' .vm-context-launchers button:nth-child('+({occurrences:1,validation:2,comparison:3,audit:4}[owner.context])+')');
+   await scrollClick('#vm-context-tab-'+owner.context);
+  }else if(owner.layout==='narrow'&&(owner.state||owner.listing))await scrollClick(root+' [data-vm-panel="'+(owner.state?'state':'listing')+'"]');
  };
  const importFile=async(value,label)=>{const selector='[aria-label="'+label+'"]';await ensureVisible(selector);await evaluate(`(async()=>{const input=document.querySelector(${JSON.stringify(selector)});const data=new DataTransfer();data.items.add(new File([${JSON.stringify(JSON.stringify(value))}],'owned.json',{type:'application/json'}));input.files=data.files;input.dispatchEvent(new Event('change',{bubbles:true}));const deadline=performance.now()+5000;while(input.value){if(performance.now()>deadline)throw Error('Import did not settle');await new Promise(r=>setTimeout(r,10));}})()`);};
  const visibleClick=async selector=>{await ensureVisible(selector);await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`);await click(selector);};
@@ -187,6 +191,47 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  await ensureVisible('[aria-label="Execution step"]');await selectRenderedOption({evaluate,click,key,selector:'[aria-label="Execution step"]',index:13,keyboardFocus:true});
  await visibleClick('#vm-state-tab-instruction');assert.match(await text(),/halted/);
  await screenshot('vm-compatibility-demo-halted-desktop.png');
+ // A retained occurrence path uses the same ordinary import, selection and State.
+ const pathTrace=structuredClone(trace);pathTrace.identity.trace_id='owned-path-ui';pathTrace.coverage={complete:false,dropped_steps:2,limitations:['Owned repeated-PC/gap fixture']};
+ pathTrace.steps=Array.from({length:70},(_,i)=>({sequence:i<35?i:i+2,opcode:['aa','bb','cc'][i%3],operands:[0],instruction_size:1,before:{...before,pc:7},after:{...before,pc:7},evidence_refs:['path:'+i]}));
+ await importFile(pathTrace,'Import VM execution trace');await visibleClick('#vm-execution-view-path');
+ assert.equal(await evaluate(`document.querySelectorAll('${root} .vm-path-node').length`),64);
+ assert.equal(await evaluate(`document.querySelectorAll('${root} [data-vm-path-edge]').length`),62);
+ assert.equal(await evaluate(`document.querySelector('${root} [data-vm-path-edge="34:37"]')`),null);
+ assert.match(await text(),/Trace owned-path-ui · Supplied evidence/);assert.match(await text(),/Gap before 37/);
+ await visibleClick(root+' .vm-path-node[data-vm-sequence="0"]');await key('PageDown','PageDown',{windowsVirtualKeyCode:34});
+ assert.equal(await evaluate(`document.querySelector('[aria-label="Execution step"]').value`),'66');assert(await focusedVisible());
+ assert.equal(await evaluate(`document.querySelectorAll('${root} .vm-path-node').length`),6);
+ assert.equal(await evaluate(`document.querySelectorAll('${root} [data-vm-path-edge]').length`),5);
+ await key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});assert.match(await evaluate(`document.querySelector('${root} .vm-step-inspector h3').textContent`),/Step 66/);
+ await byText('Back to selected row');assert.equal(await evaluate('document.activeElement.dataset.vmSequence'),'66');
+ await visibleClick('#vm-execution-view-listing');assert.equal(await evaluate(`document.querySelector('${root} .vm-listing-row[aria-selected="true"]').dataset.vmSequence`),'66');
+ await key('ArrowRight','ArrowRight',{windowsVirtualKeyCode:39});assert.equal(await evaluate('document.activeElement.id'),'vm-execution-view-path');
+ await visibleClick('[aria-label="Filter retained execution rows"]');await key('a','KeyA',{text:'a'});await key('a','KeyA',{text:'a'});
+ assert.equal(await evaluate(`document.querySelectorAll('${root} [data-vm-path-edge]').length`),0,'Filtered nonconsecutive occurrences must not become edges');
+ assert.equal(await evaluate(`document.querySelector('[aria-label="Execution step"]').value`),'66');
+ await byText('Reveal selected step');assert.equal(await evaluate('document.activeElement.dataset.vmSequence'),'66');
+ await importFile({bad:true},'Import VM execution trace');assert.equal(await evaluate(`document.querySelector('[aria-label="Execution step"]').value`),'66');assert.match(await text(),/Previous valid trace remains visible/);
+ for(const [width,height] of [[1440,900],[1024,768],[760,560],[600,800],[360,740],[720,450]]){
+  await viewport(width,height);await visibleClick('#vm-execution-view-path');await byText('Reveal selected step');
+  assert(await focusedVisible(),'Path selection retains visible focus');
+  const pathGeometry=await evaluate(`(()=>{const node=document.querySelector('${root} .vm-path-node[aria-selected="true"]'),body=document.querySelector('${root} .vm-listing-body'),r=node.getBoundingClientRect();let top=0,bottom=innerHeight,left=0,right=innerWidth;for(let parent=node.parentElement;parent;parent=parent.parentElement){const style=getComputedStyle(parent),p=parent.getBoundingClientRect();if(/auto|scroll|hidden|clip/.test(style.overflowY)){top=Math.max(top,p.top);bottom=Math.min(bottom,p.bottom);}if(/auto|scroll|hidden|clip/.test(style.overflowX)){left=Math.max(left,p.left);right=Math.min(right,p.right);}}const hit=document.elementFromPoint((r.left+r.right)/2,(r.top+r.bottom)/2);return{bodyHeight:body.clientHeight,complete:r.top>=top-1&&r.bottom<=bottom+1&&r.left>=left-1&&r.right<=right+1,pointer:hit===node||node.contains(hit)};})()`);
+  if(width<1100||height<=600)assert(pathGeometry.bodyHeight>=240,'Responsive Path retains a usable scroll body');
+  assert(pathGeometry.complete,'Selected Path node is fully inside every clipping ancestor');
+  assert(pathGeometry.pointer,'Selected Path node center is pointer-reachable');
+  assert.equal(await evaluate(`document.documentElement.scrollWidth<=innerWidth&&document.querySelector('${root}').scrollWidth<=document.querySelector('${root}').clientWidth+1`),true);
+  assert.equal(await evaluate(`document.querySelector('[aria-label="Execution step"]').value`),'66');
+  await screenshot(`vm-observed-path-${width}.png`);
+  await key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});assert.match(await evaluate(`document.querySelector('${root} .vm-step-inspector h3').textContent`),/Step 66/);
+  assert(await focusedVisible());
+  if(width===360){
+   await evaluate(`document.querySelector('#screen-vm').scrollTop=document.querySelector('#screen-vm').scrollHeight;document.querySelector('${root} [data-vm-panel="listing"]').focus()`);
+   assert(await focusedVisible(),'Keyboard focus restores the mobile Listing control after outer scrolling');
+   assert.equal(await evaluate(`(()=>{const e=document.activeElement,r=e.getBoundingClientRect(),hit=document.elementFromPoint((r.left+r.right)/2,(r.top+r.bottom)/2);return e.dataset.vmPanel==='listing'&&r.top>=0&&r.bottom<=innerHeight&&(hit===e||e.contains(hit));})()`),true,'Restored Listing control is pointer-reachable');
+   await key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});assert.equal(await evaluate(`document.querySelector('${root}').dataset.panel`),'listing');
+  }
+ }
+ await viewport(1440,900);await visibleClick('#vm-execution-view-listing');
  await byText('Clear imported traces');assert.equal(await evaluate("document.querySelector('[aria-label=\"Execution step\"]').disabled"),true);assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Import VM execution trace');
- return {status:'passed',checks:['real file digest import','opcode support → exact step → cell','manually paired comparison','invalid comparison retains both traces','counterexample → exact step → mismatch','inert payload','clear and focus','readable cells and visible keyboard focus at three viewports','full-height retained listing and64-row keyboard paging','exact Instruction/Registers/Stack/Memory tabs','360px cell/occurrence/support focus restoration','Findings DOM/source/scroll round trip','1440/1024/760/600/360 layouts and Console geometry','720×450 short-height vertical scroll and keyboard inspection']};
+ return {status:'passed',checks:['real file digest import','opcode support → exact step → cell','manually paired comparison','invalid comparison retains both traces','counterexample → exact step → mismatch','inert payload','clear and focus','readable cells and visible keyboard focus at three viewports','full-height retained listing and64-row keyboard paging','exact Instruction/Registers/Stack/Memory tabs','360px cell/occurrence/support focus restoration','Findings DOM/source/scroll round trip','1440/1024/760/600/360 layouts and Console geometry','720×450 short-height vertical scroll and keyboard inspection','observed path exact nodes, no gap/filter/page shortcut edges, tab/row/State keyboard synchronization and five responsive viewports']};
 }

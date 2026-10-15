@@ -197,7 +197,40 @@ const vmSemantics = (() => {
     }
     return {format:'reb-vm-inspection-v1',identity:v.identity,architecture:v.architecture,coverage:v.coverage,trust:'supplied trace; origin not authenticated',reads:'unknown; snapshots establish differences only',opcodes,steps:v.steps.map(s=>({sequence:s.sequence,opcode:s.opcode,operands:s.operands,from:s.before.pc,to:s.after.pc,changes:effects(s),evidence_refs:s.evidence_refs})),equivalence_proven:false};
   }
-  return {parse,trace,inspect,validate,predict,effects,operations,step,compareSteps,occurrences};
+  // This is an occurrence graph, not a static control-flow graph. Repeated PCs
+  // remain distinct sequence-owned nodes, and a retained gap never gets an edge.
+  function observedPath(input) {
+    const v=trace(input),edges=[],gaps=[];
+    const nodes=v.steps.map((retained,index)=>{
+      const previous=v.steps[index-1];
+      if(previous) {
+        if(retained.sequence===previous.sequence+1)edges.push({
+          from_sequence:previous.sequence,to_sequence:retained.sequence,
+          observed_pc:previous.after.pc,kind:'recorded_transition',
+          evidence_refs:[...new Set([...previous.evidence_refs,...retained.evidence_refs])]
+        });
+        else gaps.push({before_sequence:previous.sequence,after_sequence:retained.sequence,
+          missing_steps:retained.sequence-previous.sequence-1,kind:'sequence_gap'});
+      }
+      const suppliedAdvance=retained.before.pc+retained.instruction_size;
+      return {sequence:retained.sequence,pc_before:retained.before.pc,pc_after:retained.after.pc,
+        opcode:retained.opcode,operands:retained.operands,instruction_size:retained.instruction_size,
+        evidence_refs:retained.evidence_refs,halted_after:retained.after.halted,
+        supplied_advance_pc:suppliedAdvance<=65535?suppliedAdvance:null,
+        pc_movement:retained.after.halted?'halted_snapshot':
+          retained.after.pc===suppliedAdvance?'matches_supplied_advance':'differs_from_supplied_advance',
+        branch_alternatives:'unknown'};
+    });
+    return {format:'reb-vm-observed-path-v1',identity:v.identity,architecture:v.architecture,
+      coverage:v.coverage,nodes,edges,gaps,trust:'supplied trace; origin not authenticated',
+      static_cfg_complete:false,equivalence_proven:false,
+      warnings:[...reportWarnings(v),
+        'Nodes are exact retained occurrences, not static instructions or basic blocks.',
+        'Edges join consecutive supplied sequence IDs only; filters and pages do not create edges.',
+        'PC movement does not establish branch semantics; unrecorded branch alternatives are unknown.',
+        'The final retained after-PC does not establish a recorded successor or program termination.']};
+  }
+  return {parse,trace,inspect,validate,predict,effects,operations,step,compareSteps,occurrences,observedPath};
 })();
 if(typeof module==='object'&&module?.exports)module.exports=vmSemantics;
 
@@ -221,7 +254,7 @@ function mountVmSemantics(root) {
   const changesOnly=node('input');changesOnly.type='checkbox';changesOnly.checked=true;changesOnly.setAttribute('aria-label','Show changed locations only');
   const changesLabel=node('label');changesLabel.className='vm-inline-control';changesLabel.append(changesOnly,node('span','Changes only'));
   // Presentation state is trace-owned. No PC, opcode or supplied identity aligns rows.
-  let inspection=null,selectedReport=null,listingPage=0,opcodeFilter=null,stateTab='instruction';
+  let inspection=null,pathReport=null,selectedReport=null,listingPage=0,opcodeFilter=null,stateTab='instruction',executionView='listing';
   let panel='listing',contextTab='occurrences',contextOpen=false,navigationOpen=false,layout='wide',contextOpener=null,lastPanel='listing';
   const listing=node('section'),listingBody=node('div'),listingPager=node('div'),listingStatus=node('p'),filter=node('input');
   listing.className='vm-execution-listing';listing.setAttribute('aria-label','Retained execution listing');
@@ -234,7 +267,7 @@ function mountVmSemantics(root) {
   const breadcrumb=node('p','No retained step selected'),contextSummary=node('p','No supplied trace loaded'),traceSummary=node('div'),filterStatus=node('p'),instructionStatus=node('p');
   breadcrumb.className='vm-sequence-breadcrumb';contextSummary.className='vm-context-summary';filterStatus.className='vm-filter-status';
   const contextPanels=Object.fromEntries(['occurrences','validation','comparison','audit'].map(key=>[key,node('div')]));
-  const panelButtons={},stateButtons={},contextButtons={};
+  const panelButtons={},stateButtons={},contextButtons={},viewButtons={};
   const setPanel=(value,focus=false)=>{panel=value;if(value!=='evidence')lastPanel=value;root.setAttribute('data-panel',value);for(const [key,b] of Object.entries(panelButtons))b.setAttribute('aria-pressed',String(key===value));if(focus)panelButtons[value]?.focus();};
   const updateContext=()=>{root.setAttribute('data-context-open',String(contextOpen));context.hidden=!contextOpen;for(const [key,p] of Object.entries(contextPanels)){p.hidden=key!==contextTab;contextButtons[key].setAttribute('aria-selected',String(key===contextTab));contextButtons[key].tabIndex=key===contextTab?0:-1;}};
   const openContext=(value,focus=false,returnTo=null)=>{contextOpener=returnTo??document.activeElement;contextTab=value;contextOpen=true;setPanel('evidence');updateContext();if(focus)contextButtons[value].focus();};
@@ -251,6 +284,15 @@ function mountVmSemantics(root) {
       b.addEventListener('keydown',event=>{if(event.isComposing||event.altKey||event.ctrlKey||event.metaKey)return;const index=labels.findIndex(([value])=>value===key);let next=index;if(event.key==='ArrowRight')next=(index+1)%labels.length;else if(event.key==='ArrowLeft')next=(index+labels.length-1)%labels.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=labels.length-1;else return;event.preventDefault();choose(labels[next][0]);buttons[labels[next][0]].focus();});list.append(b);
     }target.append(list);return list;
   };
+  const setExecutionView=value=>{
+    if(!['listing','path'].includes(value))return;
+    executionView=value;setPanel('listing');root.setAttribute('data-execution-view',value);
+    for(const [key,b] of Object.entries(viewButtons)){b.setAttribute('aria-selected',String(key===value));b.tabIndex=key===value?0:-1;}
+    title.textContent=value==='path'?'Observed execution path':'Retained execution listing';
+    listingBody.setAttribute('aria-label',value==='path'?'Observed retained execution path':'Retained execution steps');
+    listing.setAttribute('aria-labelledby',viewButtons[value].id);
+    columns.hidden=value==='path';renderListing();
+  };
   const setStateTab=(value)=>{stateTab=value;statePage=0;for(const [key,b] of Object.entries(stateButtons)){b.setAttribute('aria-selected',String(key===value));b.tabIndex=key===value?0:-1;}instruction.hidden=value!=='instruction';stateView.setAttribute('aria-labelledby',stateButtons[value].id);display();};
   const candidateText=opcode=>{const candidates=inspection?.opcodes.find(row=>row.opcode===opcode)?.candidates??[];return candidates.length===1?'Inferred: '+candidates[0]:candidates.length?'Ambiguous: '+candidates.join(' / '):'Unknown';};
   const matchingSteps=()=>current?current.steps.filter(s=>(opcodeFilter===null||s.opcode===opcodeFilter)&&(!filter.value.trim()||[s.sequence,s.before.pc,s.after.pc,s.opcode,...s.operands].join(' ').toLowerCase().includes(filter.value.trim().toLowerCase()))):[];
@@ -266,16 +308,35 @@ function mountVmSemantics(root) {
     const shown=rows.slice(listingPage*pageSize,(listingPage+1)*pageSize),selectedVisible=shown.some(s=>s.sequence===selected);
     filterStatus.textContent=`${rows.length} matching / ${current.steps.length} retained rows. ${current.steps.length-rows.length} retained rows hidden by filter.${opcodeFilter!==null?' Supplied opcode filter: '+opcodeFilter+'.':''}`;
     listingStatus.textContent=`Selected ${selected}${selectedVisible?'':' · off this page or filtered'} · PC units adapter-defined · Full instruction bytes unavailable.`;
+    if(executionView==='path'){
+      const summary=node('p',`Trace ${current.identity.trace_id} · Supplied evidence · arrows join consecutive recorded sequences only. ${pathReport.gaps.length} retained sequence gaps; ${current.coverage.dropped_steps} reported drops. Branch alternatives unknown; this is not a static CFG.`);summary.className='vm-path-summary';listingBody.append(summary);
+      if(shown.length){const firstIndex=current.steps.findIndex(s=>s.sequence===shown[0].sequence);if(firstIndex>0)listingBody.append(node('p',`Earlier retained observations are off this page or filtered. No incoming edge is drawn from an unseen node.`));}
+    }
     let previousIndex=null;
     for(const s of shown){const index=current.steps.findIndex(item=>item.sequence===s.sequence),previous=current.steps[index-1];
-      if(previous&&previous.sequence+1!==s.sequence){const gap=node('p',`⚠ Gap before ${s.sequence}: previous retained sequence ${previous.sequence}; missing execution is unknown.`);gap.className='vm-listing-gap';listingBody.append(gap);}
-      if(previousIndex!==null&&index>previousIndex+1){const hidden=node('p',`${index-previousIndex-1} retained rows hidden by filter`);hidden.className='vm-listing-filter-gap';listingBody.append(hidden);}previousIndex=index;
-      const row=button('',()=>chooseRow(s.sequence,true));row.className='vm-listing-row';row.setAttribute('role','option');row.setAttribute('aria-selected',String(s.sequence===selected));row.setAttribute('data-vm-sequence',String(s.sequence));row.tabIndex=s.sequence===selected||(!selectedVisible&&s===shown[0])?0:-1;
+      let incomingPathText=previous?'Earlier retained observations are off this page or filtered; no incoming edge is drawn.':'First retained observation; earlier execution is unknown.';
+      if(previous&&previous.sequence+1!==s.sequence){const gap=node('p',`⚠ Gap before ${s.sequence}: previous retained sequence ${previous.sequence}; missing execution is unknown.`);gap.className='vm-listing-gap';listingBody.append(gap);incomingPathText=gap.textContent;}
+      if(previousIndex!==null&&index>previousIndex+1){const hidden=node('p',`${index-previousIndex-1} retained rows hidden by filter`);hidden.className='vm-listing-filter-gap';listingBody.append(hidden);}if(executionView==='path'&&previousIndex!==null&&index===previousIndex+1&&previous.sequence+1===s.sequence){
+        const edge=pathReport.edges.find(edge=>edge.from_sequence===previous.sequence&&edge.to_sequence===s.sequence);
+        const connector=node('div',`↓ Recorded ${edge.from_sequence} → ${edge.to_sequence} · PC ${edge.observed_pc}`);
+        incomingPathText=connector.textContent;connector.className='vm-path-edge';connector.setAttribute('data-vm-path-edge',`${edge.from_sequence}:${edge.to_sequence}`);listingBody.append(connector);
+      }
+      previousIndex=index;
+      const row=button('',()=>chooseRow(s.sequence,true));row.className=executionView==='path'?'vm-path-node':'vm-listing-row';row.setAttribute('role','option');row.setAttribute('aria-selected',String(s.sequence===selected));row.setAttribute('data-vm-sequence',String(s.sequence));row.tabIndex=s.sequence===selected||(!selectedVisible&&s===shown[0])?0:-1;
       const outcome=validationReport?.results.find(result=>result.sequence===s.sequence),meaning=candidateText(s.opcode),candidates=inspection.opcodes.find(item=>item.opcode===s.opcode)?.candidates??[],compactMeaning=candidates.length>1?`Ambiguous: ${candidates.length} candidates`:meaning;
       row.setAttribute('aria-label',`Sequence ${s.sequence}; PC ${s.before.pc} to ${s.after.pc}; supplied opcode ${s.opcode}; ${meaning}${outcome?'; '+outcome.status:''}`);
-      for(const [label,value] of [['Sequence',(s.sequence===selected?'▸ ':'')+s.sequence],['PC',`${s.before.pc} → ${s.after.pc}`],['Supplied opcode hex',s.opcode],['Supplied operands',s.operands.join(', ')||'none'],['Candidate meaning',compactMeaning+(outcome?' · '+(outcome.status==='unknown'?'no mapping':outcome.status):'')]]){const cell=node('span',value);cell.setAttribute('data-label',label);row.append(cell);}
+      if(executionView==='path'){
+        const observed=pathReport.nodes[index];
+        const movement=observed.halted_after?'Halted after snapshot':observed.pc_movement==='matches_supplied_advance'?'PC matches supplied advance':'PC differs from supplied advance';
+        row.append(node('strong',`Sequence ${s.sequence} · PC ${s.before.pc} → ${s.after.pc}`),
+          node('span',`Supplied opcode ${s.opcode} · operands ${s.operands.join(', ')||'none'}`),
+          node('span',`${movement} · Branch alternatives unknown`),node('span',meaning+(outcome?' · '+(outcome.status==='unknown'?'no mapping':outcome.status):'')),
+          node('span',`Evidence (unresolved): ${s.evidence_refs.join(', ')}`));
+        row.setAttribute('aria-label',`Sequence ${s.sequence}; PC ${s.before.pc} to ${s.after.pc}; supplied opcode ${s.opcode}; supplied operands ${s.operands.join(', ')||'none'}; ${movement}; branch alternatives unknown; ${meaning}${outcome?'; '+(outcome.status==='unknown'?'no mapping':outcome.status):''}; evidence references, unresolved: ${s.evidence_refs.join(', ')}; ${incomingPathText}`);
+      }else for(const [label,value] of [['Sequence',(s.sequence===selected?'▸ ':'')+s.sequence],['PC',`${s.before.pc} → ${s.after.pc}`],['Supplied opcode hex',s.opcode],['Supplied operands',s.operands.join(', ')||'none'],['Candidate meaning',compactMeaning+(outcome?' · '+(outcome.status==='unknown'?'no mapping':outcome.status):'')]]){const cell=node('span',value);cell.setAttribute('data-label',label);row.append(cell);}
       row.addEventListener('keydown',event=>{if(event.isComposing||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;const index=rows.findIndex(item=>item.sequence===s.sequence);let target=index;if(event.key==='ArrowDown')target=Math.min(rows.length-1,index+1);else if(event.key==='ArrowUp')target=Math.max(0,index-1);else if(event.key==='Home')target=0;else if(event.key==='End')target=rows.length-1;else if(event.key==='PageDown')target=Math.min(rows.length-1,index+pageSize);else if(event.key==='PageUp')target=Math.max(0,index-pageSize);else if(event.key==='Enter'){event.preventDefault();go(s.sequence);showSelectedState();return;}else return;event.preventDefault();chooseRow(rows[target].sequence,true);});listingBody.append(row);
     }
+    if(executionView==='path'&&shown.length){const lastIndex=current.steps.findIndex(s=>s.sequence===shown.at(-1).sequence);listingBody.append(node('p',lastIndex<current.steps.length-1?'Later retained observations are off this page or filtered. No outgoing edge is drawn to an unseen node.':'End of retained observations. No unrecorded successor is drawn.'));}
     if(!rows.length)listingBody.append(node('p','No retained rows match. The selected step remains unchanged. Clear the filter or reveal the selected step.'));
     restore();
   };
@@ -357,7 +418,7 @@ function mountVmSemantics(root) {
     restorePageFocus();
   };
   const renderValidation=(focusDirection=null)=>{validationView.replaceChildren();if(!validationReport){validationView.textContent='No hypothesis validation has been requested.';return;}validationPage=Math.min(validationPage,Math.max(0,Math.ceil(validationReport.results.length/pageSize)-1));const restorePageFocus=pager(validationView,'Validation steps',validationReport.results.length,validationPage,(page,direction)=>{validationPage=page;renderValidation(direction);},focusDirection);for(const result of validationReport.results.slice(validationPage*pageSize,(validationPage+1)*pageSize)){const row=node('div');row.className='vm-occurrence';row.append(stepLink(result.sequence,`${result.status}: step ${result.sequence}`,result.status==='contradicted'?vmSemantics.effects({before:result.expected,after:result.observed})[0]?.location:null),node('span',`opcode ${result.opcode} · ${result.operation??'no mapping'}`));validationView.append(row);}validation.textContent=JSON.stringify({exact_trace_input_file_sha256:sourceHash,exact_hypothesis_input_file_sha256:hypothesisHash,result:validationReport},null,2);restorePageFocus();};
-  input.addEventListener('change',async()=>{const owner=++serial;try{const loaded=await read(input.files[0]),parsed=vmSemantics.trace(loaded.parsed);if(owner!==serial)return;current=parsed;sourceHash=loaded.hash;inspection=vmSemantics.inspect(current);selectedReport=null;listingPage=0;opcodeFilter=null;filter.value='';hypothesisSerial++;validationReport=null;hypothesisHash=null;validation.textContent='';selectedLocation=null;occurrencePage=0;statePage=0;validationPage=0;opcodePage=0;mismatchPage=0;alignSelectedLocation=false;fillSelector(selector,current);hypothesis.disabled=false;renderIdentity(identity,current,sourceHash);contextSummary.textContent=`${current.identity.trace_id} · ${current.architecture} · Supplied evidence · ${current.steps.length} retained steps · ${current.coverage.complete?'complete supplied sequence continuity':'⚠ Incomplete coverage'} · ${current.coverage.dropped_steps} reported drops`;traceSummary.textContent=`Primary: ${current.identity.trace_id}. Comparison: ${comparison?.identity.trace_id??'none loaded'}. Supplied IDs do not bind these traces to findings.`;renderMap();renderValidation();invalidatePair();notice.textContent='';display();}catch(error){if(owner===serial)notice.textContent=`Import refused: ${error.message}. ${current?'Previous valid trace remains visible.':'No trace loaded.'}`;}finally{if(owner===serial)input.value='';}});
+  input.addEventListener('change',async()=>{const owner=++serial;try{const loaded=await read(input.files[0]),parsed=vmSemantics.trace(loaded.parsed);if(owner!==serial)return;current=parsed;sourceHash=loaded.hash;inspection=vmSemantics.inspect(current);pathReport=vmSemantics.observedPath(current);selectedReport=null;listingPage=0;opcodeFilter=null;filter.value='';hypothesisSerial++;validationReport=null;hypothesisHash=null;validation.textContent='';selectedLocation=null;occurrencePage=0;statePage=0;validationPage=0;opcodePage=0;mismatchPage=0;alignSelectedLocation=false;fillSelector(selector,current);hypothesis.disabled=false;renderIdentity(identity,current,sourceHash);contextSummary.textContent=`${current.identity.trace_id} · ${current.architecture} · Supplied evidence · ${current.steps.length} retained steps · ${current.coverage.complete?'complete supplied sequence continuity':'⚠ Incomplete coverage'} · ${current.coverage.dropped_steps} reported drops`;traceSummary.textContent=`Primary: ${current.identity.trace_id}. Comparison: ${comparison?.identity.trace_id??'none loaded'}. Supplied IDs do not bind these traces to findings.`;renderMap();renderValidation();invalidatePair();notice.textContent='';display();}catch(error){if(owner===serial)notice.textContent=`Import refused: ${error.message}. ${current?'Previous valid trace remains visible.':'No trace loaded.'}`;}finally{if(owner===serial)input.value='';}});
   comparisonInput.addEventListener('change',async()=>{const owner=++comparisonSerial;try{const loaded=await read(comparisonInput.files[0]),parsed=vmSemantics.trace(loaded.parsed);if(owner!==comparisonSerial)return;comparison=parsed;comparisonHash=loaded.hash;fillSelector(comparisonSelector,comparison);renderIdentity(comparisonIdentity,comparison,comparisonHash);traceSummary.textContent=`Primary: ${current?.identity.trace_id??'none loaded'}. Comparison: ${comparison.identity.trace_id}.`;invalidatePair();notice.textContent='Comparison trace loaded. Pair two exact retained steps explicitly; matching IDs, PCs or hashes do not align them.';}catch(error){if(owner===comparisonSerial)notice.textContent=`Comparison import refused: ${error.message}. Both previous valid traces remain visible.`;}finally{if(owner===comparisonSerial)comparisonInput.value='';}});
   hypothesis.addEventListener('change',async()=>{const owner=serial,request=++hypothesisSerial,trace=current;try{const loaded=await read(hypothesis.files[0]);if(owner!==serial||request!==hypothesisSerial||trace!==current)return;validationReport=vmSemantics.validate(current,loaded.parsed);hypothesisHash=loaded.hash;validationPage=0;mismatchPage=0;renderValidation();display();}catch(error){if(owner===serial&&request===hypothesisSerial)notice.textContent=`Validation refused: ${error.message}. Previous validation remains visible.`;}finally{if(owner===serial&&request===hypothesisSerial)hypothesis.value='';}});
   selector.addEventListener('change',()=>{statePage=0;alignSelectedLocation=true;invalidatePair();revealSelection();display();});comparisonSelector.addEventListener('change',invalidatePair);changesOnly.addEventListener('change',()=>{statePage=0;display();});
@@ -377,12 +438,16 @@ function mountVmSemantics(root) {
   };
   const compare=button('Compare selected steps',()=>{if(!current||!comparison){notice.textContent='Import a primary and an optional comparison trace first.';return;}pairedReport=vmSemantics.compareSteps(current,Number(selector.value),comparison,Number(comparisonSelector.value));comparisonPage=0;renderComparison();openContext('comparison');});
   const clearComparison=button('Clear comparison trace',()=>{comparisonSerial++;comparison=null;comparisonHash=null;comparisonInput.value='';comparisonSelector.replaceChildren();comparisonSelector.disabled=true;comparisonIdentity.replaceChildren();traceSummary.textContent=`Primary: ${current?.identity.trace_id??'none loaded'}. Comparison: none loaded.`;invalidatePair();comparisonInput.focus();});
-  const clear=button('Clear imported traces',()=>{serial++;comparisonSerial++;hypothesisSerial++;current=comparison=inspection=selectedReport=null;listingPage=0;opcodeFilter=null;filter.value='';contextSummary.textContent='No supplied trace loaded';traceSummary.textContent='No imported traces';breadcrumb.textContent='No retained step selected';instruction.replaceChildren();instructionStatus.textContent='';contextOpen=false;setPanel('listing');updateContext();renderListing();sourceHash=comparisonHash=hypothesisHash=null;validationReport=pairedReport=null;selectedLocation=null;occurrencePage=0;statePage=comparisonPage=validationPage=opcodePage=mismatchPage=0;alignSelectedLocation=false;selectedCellButton=null;for(const e of [selector,comparisonSelector]){e.replaceChildren();e.disabled=true;}hypothesis.disabled=true;previous.disabled=next.disabled=true;for(const e of [input,comparisonInput,hypothesis])e.value='';for(const e of [details,map,validation,identity,comparisonIdentity,stateView,stepHeading,occurrences,validationView,comparisonView])e.textContent='';notice.textContent='Imported traces cleared. Existing findings are unchanged.';input.focus();});
+  const clear=button('Clear imported traces',()=>{serial++;comparisonSerial++;hypothesisSerial++;current=comparison=inspection=pathReport=selectedReport=null;listingPage=0;opcodeFilter=null;filter.value='';contextSummary.textContent='No supplied trace loaded';traceSummary.textContent='No imported traces';breadcrumb.textContent='No retained step selected';instruction.replaceChildren();instructionStatus.textContent='';contextOpen=false;setPanel('listing');updateContext();renderListing();sourceHash=comparisonHash=hypothesisHash=null;validationReport=pairedReport=null;selectedLocation=null;occurrencePage=0;statePage=comparisonPage=validationPage=opcodePage=mismatchPage=0;alignSelectedLocation=false;selectedCellButton=null;for(const e of [selector,comparisonSelector]){e.replaceChildren();e.disabled=true;}hypothesis.disabled=true;previous.disabled=next.disabled=true;for(const e of [input,comparisonInput,hypothesis])e.value='';for(const e of [details,map,validation,identity,comparisonIdentity,stateView,stepHeading,occurrences,validationView,comparisonView])e.textContent='';notice.textContent='Imported traces cleared. Existing findings are unchanged.';input.focus();});
   clear.className+=' vm-clear-traces';
   const toolbar=node('div');toolbar.className='vm-execution-toolbar';
   const importControl=node('label','Import trace');importControl.className='vm-file-control secondary-button';importControl.append(input);
-  const shortcuts=node('details');shortcuts.className='vm-shortcuts';shortcuts.append(node('summary','Shortcuts'),node('p','With a retained row focused: ↑/↓ previous/next matching row; Home/End first/last; Page Up/Down 64 rows; Enter inspect selected state. Tab visits panes and controls. Navigation never executes code.'));
+  const shortcuts=node('details');shortcuts.className='vm-shortcuts';shortcuts.append(node('summary','Shortcuts'),node('p','With a retained row or path node focused: ↑/↓ previous/next matching row; Home/End first/last; Page Up/Down 64 rows; Enter inspect selected state. Tab visits panes and controls. Navigation never executes code.'));
   toolbar.append(importControl,clear,shortcuts,navigationToggle,panelControls);
+  const viewTabs=makeTabs(toolbar,[['listing','Listing'],['path','Path']],viewButtons,'listing',setExecutionView,'execution-view');
+  viewTabs.className+=' vm-execution-view-tabs';
+  for(const b of Object.values(viewButtons))b.setAttribute('aria-controls','vm-execution-observations');
+  listing.id='vm-execution-observations';listing.setAttribute('role','tabpanel');listing.setAttribute('aria-labelledby',viewButtons.listing.id);
   const contextStrip=node('div');contextStrip.className='vm-workspace-notice';
   const provenance=node('details');provenance.append(node('summary','Full provenance and limits'),identity,comparisonIdentity,node('p','Supplied identities and origin are not authenticated. Snapshot changes do not prove reads, intermediate writes or causal dependency. Matching absence or unknown values never establish equality. Exact input-file hashes do not establish alignment or native capture.'));
   const provenanceOpen=button('Provenance and limits',()=>{if(navigationOpen)setNavigation(false);provenance.open=true;openContext('audit',true,()=>{if(layout!=='wide'){setNavigation(true);provenanceOpen.focus();}else{provenanceOpen.focus();}});});
@@ -407,7 +472,7 @@ function mountVmSemantics(root) {
   const contextLaunchers=node('nav');contextLaunchers.className='vm-context-launchers';contextLaunchers.setAttribute('aria-label','Open execution evidence');
   for(const [key,label] of [['occurrences','Occurrences'],['validation','Validation'],['comparison','Manual comparison'],['audit','Raw audit']])contextLaunchers.append(button(label,()=>openContext(key,true)));
   body.append(navigator,listing,inspector,context);root.append(toolbar,contextStrip,body,contextLaunchers);
-  root.setAttribute('data-layout',layout);root.setAttribute('data-navigation-open','false');setPanel('listing');updateContext();renderListing();
+  root.setAttribute('data-execution-view',executionView);root.setAttribute('data-layout',layout);root.setAttribute('data-navigation-open','false');setPanel('listing');updateContext();renderListing();
   const changeLayout=width=>{
     const next=width>=1100?'wide':width>=760?'medium':'narrow';if(next===layout)return;
     const focused=document.activeElement,inside=element=>element.contains?.(focused);layout=next;root.setAttribute('data-layout',layout);
@@ -419,7 +484,7 @@ function mountVmSemantics(root) {
   if(typeof ResizeObserver!=='undefined'){const observer=new ResizeObserver(entries=>{const width=entries[0]?.contentRect.width;if(width)changeLayout(width);});observer.observe(root);}
   root.addEventListener('keydown',event=>{if(event.key==='Escape'&&navigationOpen){event.preventDefault();setNavigation(false,true);}});
   invalidatePair();
-  return {clear,selector,input,hypothesis,notice,details,map,validation,comparisonInput,comparisonSelector,comparisonView,compare,clearComparison,changesOnly,stateView,occurrences,previous,next,validationView,listingBody,listingStatus,listingPager,filter,clearFilter,stateButtons,contextButtons,panelButtons,go,changeLayout,openContext,closeContext,setPanel,focusSelectedRow,context,inspector,navigator};
+  return {clear,selector,input,hypothesis,notice,details,map,validation,comparisonInput,comparisonSelector,comparisonView,compare,clearComparison,changesOnly,stateView,occurrences,previous,next,validationView,listingBody,listingStatus,listingPager,filter,clearFilter,stateButtons,contextButtons,panelButtons,go,changeLayout,openContext,closeContext,setPanel,focusSelectedRow,setExecutionView,viewButtons,context,inspector,navigator};
 }
 // Keep both workspaces mounted: switching modes never rebuilds a finding or a trace.
 const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{

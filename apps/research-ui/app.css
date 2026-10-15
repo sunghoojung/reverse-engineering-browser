@@ -3988,6 +3988,32 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #screen-vm:not([hidden]):has(> #vm-owned-controls:not([hidden])) > #vm-semantics-workflow:not([hidden]) .vm-execution-body { min-height: 0; }
 }
 
+/* Imported-only evidence needs the same bounded pane at normal phone/tablet
+   height. Keep the established short-height inner scroll and live-control
+   layout above: both are covered by their existing independent regressions. */
+@media (max-width: 1099px) and (min-height: 601px) {
+  #screen-vm:not([hidden]):has(> #vm-semantics-workflow:not([hidden])):not(:has(> #vm-owned-controls:not([hidden]))) {
+    display: block;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  #screen-vm:not([hidden]):not(:has(> #vm-owned-controls:not([hidden]))) > #vm-semantics-workflow:not([hidden]) {
+    height: auto;
+    min-height: 0;
+    overflow: hidden;
+    grid-template-rows: auto auto 600px auto;
+  }
+}
+/* Wrapping headings may grow, but cannot consume the entire Listing/Path
+   scroll row. The listing itself scrolls if its header and footer need room. */
+@media (max-width: 1099px), (max-height: 600px) {
+  .vm-execution-listing {
+    grid-template-rows: auto minmax(240px, 1fr) auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+
 /* VM semantic color roles: labels, selected rails and change text remain the
    non-color cues. These tokens do not change workspace geometry. */
 #screen-vm {
@@ -4049,3 +4075,18 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-file-control:focus-within { outline-color: var(--vm-action-fg); }
 
 #screen-vm .vm-listing-row[aria-selected="true"] > span::before { color: var(--vm-selected-fg); }
+
+/* Optional observed path shares the retained listing's exact selection and
+   scrolling region. It never draws across missing or hidden observations. */
+.vm-execution-view-tabs { padding: 0; border: 0; margin-left: auto; flex-wrap: nowrap; }
+.vm-execution-view-tabs > button { padding: 5px 8px; }
+.vm-path-summary { padding: 5px 8px; color: var(--muted); font-size: 10px; }
+.vm-path-node { display: flex; flex-direction: column; gap: 4px; width: calc(100% - 24px); margin: 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); color: var(--text); text-align: left; font: 11px/1.5 var(--mono); }
+.vm-path-node > * { min-width: 0; overflow-wrap: anywhere; }
+.vm-path-node > span { font-size: 10px; }
+.vm-path-node:hover { border-color: var(--accent); }
+#screen-vm .vm-path-node[aria-selected="true"] { background: var(--vm-selected-bg); color: var(--vm-selected-fg); border-color: var(--vm-focus); box-shadow: inset 4px 0 var(--vm-action-bg); }
+.vm-path-edge { position: relative; margin: 0 24px; padding: 8px 12px; border-left: 2px solid var(--accent); font: 10px/1.5 var(--mono); overflow-wrap: anywhere; color: var(--text); }
+.vm-semantics-workflow[data-execution-view="path"] .vm-listing-body > p:not(.vm-path-summary) { margin: 8px 12px; }
+.vm-semantics-workflow[data-execution-view="path"] .vm-listing-gap,
+.vm-semantics-workflow[data-execution-view="path"] .vm-listing-filter-gap { border-left-style: dashed; }

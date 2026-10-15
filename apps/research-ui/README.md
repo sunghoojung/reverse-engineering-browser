@@ -1725,6 +1725,53 @@ The UI adds no capture adapter or new production asset. Imported traces from
 any admitted backend retain their supplied-provenance limits; owned fixtures
 are acceptance data, not a requirement on the investigated VM.
 
+### Static bytecode analysis
+
+In the top-level **VM** tab, **Static bytecode** accepts an independent local
+`reb-vm-definition-v1` definition and `reb-vm-bytecode-v1` image. Choose both JSON
+files, then **Analyze**. The separate **Owned example** loads authored loop/branch
+inputs for an explicit analysis; it is not a capture and does not execute a VM.
+Findings, supplied Execution workspace traces/observed Path, and Live owned
+fixture keep their existing independent inputs and controls. Active live Stop
+and Pause controls remain reachable while static bytecode is visible.
+
+The definition declares literal one- or two-byte opcodes, operand widths,
+endianness, register/stack architecture, supported fixed semantic operations and
+control-flow targets. The image declares entry byte offsets and up to 64 KiB of
+hex bytes. Each JSON file is bounded to 1 MiB. Linear decoding stops explicitly
+at an unknown opcode, truncated/invalid instruction or the 4,096-instruction
+budget. Undecoded bytes have no synthesized instruction or pseudocode. This is
+bounded declared-ISA analysis, not arbitrary-VM recovery or general decompilation.
+See [Static VM analysis v1](../../protocol/vm-definition-v1.md) for the exact schema,
+supported operations, static-CFG assumptions and offline commands.
+
+The main address listing pages at 64 instructions and retains exact byte ranges.
+Select a row to synchronize **Instruction**, instruction-linked **Pseudocode**,
+and **Static CFG**. CFG cards show instruction-level nodes, declared directed
+edges and explicit unresolved targets; they do not claim recovered basic blocks
+or observed execution. Unknown semantics stay unavailable. Declared reachability,
+full byte decoding and equal hashes cannot prove runtime behavior, completeness
+or equivalence. **Inputs and limits** distinguishes exact JSON-file SHA-256,
+canonical definition SHA-256 and decoded-image-byte SHA-256, exposes diagnostics,
+and keeps complete raw audit text available in bounded pages.
+
+Literal filtering does not change selection. **Reveal selected** returns to its
+exact address; CFG and pseudocode links do the same. With a listing row focused,
+Up/Down, Home/End and Page Up/Down navigate matching instructions; Enter opens
+details. Detail tabs use Left/Right/Home/End. At less than 760 px of actual
+workspace width, **Addresses / Details** switches panes and Escape restores the
+selected address. Short and narrow layouts scroll the workspace and preserve
+live safety controls. Valid replacement inputs invalidate prior analysis;
+rejected imports preserve it, and Clear invalidates pending reads and hashes.
+Nothing is fetched, uploaded, run, or bound to findings by a supplied ID.
+
+`node tools/check-vm-static-ui.mjs` runs authored controller/DOM checks. Its
+exported rendered flow is part of the integrated browser gate, covering the
+16-instruction example, at least 12 visible desktop rows, mode round trips,
+responsive focus/scroll and authored live-control coexistence without native
+commands. DOM checks are not rendered or packaged-app acceptance; run the browser
+gate and inspect the macOS app, including actual desktop 200% zoom.
+
 ### Live owned fixture controls
 
 Open **VM tab** without a captured finding. The workspace also offers **Live owned fixture** when the Rust backend has the

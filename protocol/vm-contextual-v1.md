@@ -19,7 +19,10 @@ Duplicate JSON keys, noncanonical integer tokens (including negative zero,
 exponents and fractions), unknown fields, accessors, custom prototypes, sparse
 arrays, symbols, non-JSON values and cycles are rejected. Numbers must be safe
 integers. Each entry point returns independent data, never input references.
-The validators in the versioned model are the normative contract.
+Object inputs are charged incrementally for their exact JSON UTF-8 size, including
+keys, escaping and punctuation, before any whole-document serialization. Shared
+string references count on every occurrence. The validators in the versioned
+model are the normative contract.
 
 An identifier is 1–128 ASCII letters/digits/underscore/dot/colon/hyphen. A name
 is 1–32 ASCII letters/digits/underscore, beginning with a letter or underscore.

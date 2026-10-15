@@ -128,4 +128,33 @@ const sparse=clone(a.definition);delete sparse.mappings[0];assert.throws(()=>mod
 const empty=clone(a);empty.image.bytes_hex='';empty.definition.image_sha256=sha('');
 assert.equal((await model.analyze(empty.definition,empty.image)).cfg.entries[0].status,'out_of_range');
 assert.equal(variantReport.coverage.decoded_bytes,6); // overlapping contexts counted once
+// Aggregate object input must reject before serializing or UTF-8 allocating a
+// complete document. Shared 1 MiB strings keep this adversarial fixture cheap.
+const repeated='x'.repeat(model.limits.input_bytes);
+const oversizedInputs=[
+  {values:Array(4096).fill(repeated)},
+  {first:'x'.repeat(600000),second:'y'.repeat(600000)},
+  {escaped:'\n'.repeat(600000)},
+  {controls:'\u0000'.repeat(200000)},
+  {unicode:'😀'.repeat(300000)},
+  {['漢'.repeat(400000)]:0},
+];
+// Exact UTF-8 boundary includes keys, JSON escapes, commas, brackets, colons,
+// numbers, booleans, surrogate pairs and independently unpaired surrogates.
+const boundary={nested:[null,true,false,0,-9007199254740991,'\u0000\b\t\n\f\r"é漢😀\ud800\udc00\ud800','\udc00'],['key\n漢']:'value',pad:''};
+boundary.nested.push(String.fromCharCode(92));
+const boundaryOverhead=Buffer.byteLength(JSON.stringify(boundary),'utf8');
+boundary.pad='x'.repeat(model.limits.input_bytes-boundaryOverhead);
+assert.equal(Buffer.byteLength(JSON.stringify(boundary),'utf8'),model.limits.input_bytes);
+const aboveBoundary={...boundary,pad:boundary.pad+'x'};
+const nativeStringify=JSON.stringify,NativeEncoder=globalThis.TextEncoder;
+try {
+  JSON.stringify=()=>{throw Error('Unexpected whole-document serialization');};
+  globalThis.TextEncoder=class {constructor(){throw Error('Unexpected full UTF-8 allocation');}};
+  for(const value of oversizedInputs) assert.throws(()=>model.parseDefinition(value),/exceeds 1 MiB/);
+  assert.throws(()=>model.parseDefinition(boundary),/Invalid contextual definition/);
+  assert.throws(()=>model.parseDefinition(aboveBoundary),/exceeds 1 MiB/);
+} finally {JSON.stringify=nativeStringify;globalThis.TextEncoder=NativeEncoder;}
+assert.deepEqual(model.parseDefinition(a.definition),a.definition);
+assert.deepEqual(model.parseImage(a.image),a.image);
 console.log('Contextual VM checks passed: build identity, PC/state mappings, macros, branches, unknowns and bounds.');

@@ -28,30 +28,58 @@ const vmContextual = (() => {
       for (const token of numbers.values()) if (!/^(0|-?[1-9][0-9]*)$/.test(token) || !Number.isSafeInteger(Number(token))) fail('Contextual VM numbers require canonical safe integer tokens.');
       return document(value);
     }
-    let nodes = 0;
+    let nodes = 0, remainingBytes = limits.input_bytes;
+    const charge = bytes => {
+      remainingBytes -= bytes;
+      if (remainingBytes < 0) fail('Contextual VM JSON exceeds 1 MiB.');
+    };
+    // Count JSON's exact UTF-8 representation without materializing an escaped
+    // string or the document. Repeated references consume the budget each time.
+    function chargeString(value) {
+      charge(2); // quotes
+      for (let index = 0; index < value.length; index++) {
+        const code = value.charCodeAt(index);
+        if (code === 34 || code === 92) charge(2);
+        else if (code < 32) charge([8,9,10,12,13].includes(code) ? 2 : 6);
+        else if (code < 128) charge(1);
+        else if (code < 2048) charge(2);
+        else if (code >= 0xd800 && code <= 0xdbff) {
+          const next = value.charCodeAt(index+1);
+          if (next >= 0xdc00 && next <= 0xdfff) { charge(4); index++; }
+          else charge(6); // JSON.stringify escapes unpaired surrogates.
+        } else charge(code >= 0xdc00 && code <= 0xdfff ? 6 : 3);
+      }
+    }
     const active = new Set();
     function copy(value, depth) {
       if (++nodes > 50000 || depth > 16) fail('Contextual VM JSON structure exceeds bounds.');
-      if (value === null || typeof value === 'boolean') return value;
-      if (typeof value === 'number') { if (!Number.isSafeInteger(value) || Object.is(value,-0)) fail('Contextual VM numbers require exact safe integers.'); return value; }
-      if (typeof value === 'string') { if (value.length > limits.input_bytes) fail('Contextual VM string exceeds bounds.'); return value; }
+      if (value === null || typeof value === 'boolean') { charge(value === false ? 5 : 4); return value; }
+      if (typeof value === 'number') { if (!Number.isSafeInteger(value) || Object.is(value,-0)) fail('Contextual VM numbers require exact safe integers.'); charge(String(value).length); return value; }
+      if (typeof value === 'string') { chargeString(value); return value; }
       if (typeof value !== 'object' || active.has(value)) fail('Contextual VM input must contain JSON data only.');
       const prototype = Object.getPrototypeOf(value), array = Array.isArray(value);
       if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) fail('Contextual VM input must contain plain JSON data.');
-      const descriptors = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(descriptors);
+      const keys = Reflect.ownKeys(value);
+      if (keys.length > 50001) fail('Contextual VM JSON structure exceeds bounds.');
+      const descriptors = Object.getOwnPropertyDescriptors(value);
       if (keys.some(key => typeof key !== 'string' || key !== 'length' && (!descriptors[key].enumerable || !Object.hasOwn(descriptors[key],'value')))) fail('Contextual VM input cannot contain accessors or hidden properties.');
       active.add(value);
       let result;
       if (array) {
         if (value.length > 50000 || keys.length !== value.length + 1 || !keys.every(key => key === 'length' || /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length)) fail('Contextual VM arrays must be dense JSON arrays.');
+        charge(2+Math.max(0,value.length-1));
         result = Array.from({length:value.length},(_,i) => copy(descriptors[String(i)].value,depth+1));
-      } else result = Object.fromEntries(keys.map(key => [key,copy(descriptors[key].value,depth+1)]));
+      } else {
+        charge(2+Math.max(0,keys.length-1));
+        result = Object.fromEntries(keys.map(key => {
+          chargeString(key); charge(1); // property colon
+          return [key,copy(descriptors[key].value,depth+1)];
+        }));
+      }
       active.delete(value);
       return result;
     }
-    const result = copy(input,0);
-    if (new TextEncoder().encode(JSON.stringify(result)).length > limits.input_bytes) fail('Contextual VM JSON exceeds 1 MiB.');
-    return result;
+    return copy(input,0);
   }
 
   const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$(?![\s\S])/.test(value);

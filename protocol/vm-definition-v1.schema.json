@@ -1,0 +1,1156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://origin-trace.local/protocol/vm-definition-v1.schema.json",
+  "title": "Declarative VM definition v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "definition_id",
+    "architecture",
+    "opcode_bytes",
+    "operand_endianness",
+    "register_count",
+    "opcodes"
+  ],
+  "properties": {
+    "format": {
+      "const": "reb-vm-definition-v1"
+    },
+    "definition_id": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$(?![\\s\\S])"
+    },
+    "architecture": {
+      "enum": [
+        "stack",
+        "register"
+      ]
+    },
+    "opcode_bytes": {
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "operand_endianness": {
+      "enum": [
+        "little",
+        "big"
+      ]
+    },
+    "register_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 64
+    },
+    "opcodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/opcode"
+      },
+      "minItems": 1,
+      "maxItems": 256
+    }
+  },
+  "$defs": {
+    "operand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "width",
+        "signed",
+        "kind"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+        },
+        "width": {
+          "enum": [
+            1,
+            2,
+            4
+          ]
+        },
+        "signed": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "immediate",
+            "register",
+            "address",
+            "offset"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "register",
+                  "address"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "signed": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "offset"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "signed": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "semantics": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "unknown"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "nop"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "stack_const"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 1,
+              "maxItems": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "stack_add"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "stack_drop"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "stack_dup"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "register_const"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "register_move"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "register_add"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 3,
+              "maxItems": 3
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "load"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "store"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "jump"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "branch_zero"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 1,
+              "maxItems": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "stack_branch_zero"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "call"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "return"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "args"
+          ],
+          "properties": {
+            "operation": {
+              "const": "halt"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            }
+          }
+        }
+      ]
+    },
+    "flow": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "next",
+                "return",
+                "halt",
+                "unknown"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "jump",
+                "branch",
+                "call"
+              ]
+            },
+            "target": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operand",
+                "base"
+              ],
+              "properties": {
+                "operand": {
+                  "type": "string",
+                  "maxLength": 32,
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+                },
+                "base": {
+                  "enum": [
+                    "absolute",
+                    "next"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "opcode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "mnemonic",
+        "operands",
+        "semantics",
+        "flow"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 4,
+          "pattern": "^(?:[a-f0-9]{2}){1,2}$(?![\\s\\S])"
+        },
+        "mnemonic": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,31}$(?![\\s\\S])"
+        },
+        "operands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/operand"
+          },
+          "minItems": 0,
+          "maxItems": 8
+        },
+        "semantics": {
+          "$ref": "#/$defs/semantics"
+        },
+        "flow": {
+          "$ref": "#/$defs/flow"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "nop"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "stack_const"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "stack_add"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "stack_drop"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "stack_dup"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "register_const"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "register_move"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "register_add"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "load"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "store"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "next"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "jump"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "jump"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "branch_zero"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "branch"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "stack_branch_zero"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "branch"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "call"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "call"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "return"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "return"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantics": {
+                "properties": {
+                  "operation": {
+                    "const": "halt"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flow": {
+                "properties": {
+                  "kind": {
+                    "const": "halt"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "opcode_bytes": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "opcodes": {
+            "items": {
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "maxLength": 2,
+                  "pattern": "^[a-f0-9]{2}$(?![\\s\\S])"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "opcode_bytes": {
+            "const": 2
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "opcodes": {
+            "items": {
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "maxLength": 4,
+                  "pattern": "^[a-f0-9]{4}$(?![\\s\\S])"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "architecture": {
+            "const": "stack"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "register_count": {
+            "const": 0
+          },
+          "opcodes": {
+            "items": {
+              "properties": {
+                "semantics": {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "unknown",
+                        "nop",
+                        "stack_const",
+                        "stack_add",
+                        "stack_drop",
+                        "stack_dup",
+                        "jump",
+                        "stack_branch_zero",
+                        "call",
+                        "return",
+                        "halt"
+                      ]
+                    }
+                  }
+                },
+                "operands": {
+                  "items": {
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "immediate",
+                          "address",
+                          "offset"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "architecture": {
+            "const": "register"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "register_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "opcodes": {
+            "items": {
+              "properties": {
+                "semantics": {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "unknown",
+                        "nop",
+                        "register_const",
+                        "register_move",
+                        "register_add",
+                        "load",
+                        "store",
+                        "jump",
+                        "branch_zero",
+                        "call",
+                        "return",
+                        "halt"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

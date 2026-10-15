@@ -1,0 +1,125 @@
+{
+  "format": "reb-vm-definition-v1",
+  "definition_id": "owned-static-stack-v1",
+  "architecture": "stack",
+  "opcode_bytes": 1,
+  "operand_endianness": "little",
+  "register_count": 0,
+  "opcodes": [
+    {
+      "code": "00",
+      "mnemonic": "NOP",
+      "operands": [],
+      "semantics": {
+        "operation": "nop",
+        "args": []
+      },
+      "flow": {
+        "kind": "next"
+      }
+    },
+    {
+      "code": "01",
+      "mnemonic": "PUSH",
+      "operands": [
+        {
+          "name": "value",
+          "width": 1,
+          "signed": true,
+          "kind": "immediate"
+        }
+      ],
+      "semantics": {
+        "operation": "stack_const",
+        "args": [
+          "value"
+        ]
+      },
+      "flow": {
+        "kind": "next"
+      }
+    },
+    {
+      "code": "02",
+      "mnemonic": "ADD",
+      "operands": [],
+      "semantics": {
+        "operation": "stack_add",
+        "args": []
+      },
+      "flow": {
+        "kind": "next"
+      }
+    },
+    {
+      "code": "03",
+      "mnemonic": "BRANCH_ZERO",
+      "operands": [
+        {
+          "name": "target",
+          "width": 2,
+          "signed": false,
+          "kind": "address"
+        }
+      ],
+      "semantics": {
+        "operation": "stack_branch_zero",
+        "args": []
+      },
+      "flow": {
+        "kind": "branch",
+        "target": {
+          "operand": "target",
+          "base": "absolute"
+        }
+      }
+    },
+    {
+      "code": "04",
+      "mnemonic": "CALL",
+      "operands": [
+        {
+          "name": "target",
+          "width": 2,
+          "signed": false,
+          "kind": "address"
+        }
+      ],
+      "semantics": {
+        "operation": "call",
+        "args": []
+      },
+      "flow": {
+        "kind": "call",
+        "target": {
+          "operand": "target",
+          "base": "absolute"
+        }
+      }
+    },
+    {
+      "code": "05",
+      "mnemonic": "RETURN",
+      "operands": [],
+      "semantics": {
+        "operation": "return",
+        "args": []
+      },
+      "flow": {
+        "kind": "return"
+      }
+    },
+    {
+      "code": "ff",
+      "mnemonic": "HALT",
+      "operands": [],
+      "semantics": {
+        "operation": "halt",
+        "args": []
+      },
+      "flow": {
+        "kind": "halt"
+      }
+    }
+  ]
+}

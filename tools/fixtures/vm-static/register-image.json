@@ -1,0 +1,9 @@
+{
+  "format": "reb-vm-bytecode-v1",
+  "image_id": "owned-static-register-image-v1",
+  "definition_id": "owned-static-register-v1",
+  "entry_offsets": [
+    0
+  ],
+  "bytes_hex": "10000700100108001102000112021500131600ff00001003010014"
+}

@@ -211,6 +211,30 @@ impl Connection {
         deadline: Duration,
         session: Option<&str>,
     ) -> Result<Value> {
+        self.command_session_guarded(method, params, deadline, session, || true)
+            .await
+            .map(|result| result.expect("Unconditional debugger command is admitted"))
+    }
+    // Recheck expiring mutation authority after the command writer queue, before
+    // sending any bytes. A rejected guard leaves a known, unsent outcome.
+    pub async fn command_guarded(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+        before_send: impl FnOnce() -> bool,
+    ) -> Result<Option<Value>> {
+        self.command_session_guarded(method, params, deadline, None, before_send)
+            .await
+    }
+    async fn command_session_guarded(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+        session: Option<&str>,
+        before_send: impl FnOnce() -> bool,
+    ) -> Result<Option<Value>> {
         if self.is_closed() {
             return Err(Error::conflict("Debugger WebSocket is closed"));
         }
@@ -244,13 +268,20 @@ impl Connection {
         };
         let sent = tokio::time::timeout(Duration::from_secs(5), async {
             let mut stdin = self.stdin.lock().await;
+            if !before_send() {
+                return Ok(false);
+            }
             stdin.write_all(b"REB\x01").await?;
             stdin.write_all(&(body.len() as u32).to_be_bytes()).await?;
             stdin.write_all(&body).await?;
-            stdin.flush().await
+            stdin.flush().await?;
+            Ok::<bool, std::io::Error>(true)
         })
         .await;
-        if !matches!(sent, Ok(Ok(()))) {
+        if matches!(sent, Ok(Ok(false))) {
+            return Ok(None);
+        }
+        if !matches!(sent, Ok(Ok(true))) {
             self.pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -301,7 +332,7 @@ impl Connection {
                 ))
                 .with_reason(Reason::uncertain(Cause::InvalidReply))
             })?;
-        Ok(result.clone())
+        Ok(Some(result.clone()))
     }
     pub async fn close(&self) {
         let _ = self.closed.send(true);
@@ -486,6 +517,51 @@ mod tests {
             assert!(!value["details"].to_string().contains("synthetic_secret"));
             connection.close().await;
         }
+    }
+    #[tokio::test]
+    async fn queued_guard_rechecks_before_any_command_bytes_are_sent() {
+        use std::sync::atomic::AtomicBool;
+
+        let (directory, connection, _events) = fixture(None, false).await;
+        let writer = connection.stdin.lock().await;
+        let permitted = Arc::new(AtomicBool::new(true));
+        let observed = Arc::new(AtomicBool::new(false));
+        let queued = connection.clone();
+        let check = permitted.clone();
+        let checked = observed.clone();
+        let command = tokio::spawn(async move {
+            queued
+                .command_guarded(
+                    "Runtime.evaluate",
+                    json!({"expression":"synthetic_secret"}),
+                    Duration::from_secs(2),
+                    || {
+                        checked.store(true, Ordering::Release);
+                        check.load(Ordering::Acquire)
+                    },
+                )
+                .await
+        });
+        // Wait until the command has reached the blocked writer, rather than
+        // relying on a timing delay to model a queued, subsequently retired rule.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !connection.pending.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!observed.load(Ordering::Acquire));
+        permitted.store(false, Ordering::Release);
+        drop(writer);
+        assert!(command.await.unwrap().unwrap().is_none());
+        assert!(observed.load(Ordering::Acquire));
+        assert!(connection.pending.lock().unwrap().is_empty());
+        assert!(!directory.path().join("received").exists());
+        connection.close().await;
     }
     #[tokio::test]
     async fn explicit_reply_and_pre_send_capacity_remain_distinct() {

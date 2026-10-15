@@ -232,3 +232,9 @@ pages and the local HTTP/CLI contract.
 [WebSocket capture v1](websocket-capture-v1.md) specifies bounded CDP message identities, raw payload encoding, loss counters and Traffic inspection.
 
 - [VM execution semantics v1](vm-semantics-v1.md): bounded supplied traces, exact step provenance, declarative hypotheses and differential validation; capture-backend-neutral, no automatic code execution.
+
+## Scoped local response overrides
+
+[Local overrides v1](local-overrides-v1.md) defines the optional exact URL,
+method, target, experiment, digest and expiry guard on existing fulfillment,
+with explicit offline preparation and local CLI arming/disarming.

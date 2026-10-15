@@ -8,7 +8,9 @@ use crate::{
     error::{Code, Error, Phase, Reason, Result},
     evidence, evidence_comparison, evidence_package, float32,
     native_console::NativeConsole,
-    origin_trace, source_facts, validation, vm, wasm,
+    origin_trace,
+    owned_vm_debugger::OwnedVmDebugger,
+    source_facts, validation, vm, wasm,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -30,7 +32,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 22] = [
+const UI_ASSETS: [&str; 23] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -46,6 +48,7 @@ const UI_ASSETS: [&str; 22] = [
     "api_catalog.js",
     "captured_client.js",
     "vm_semantics.js",
+    "vm_debugger.js",
     "traffic_comparison.js",
     "request_value_test.js",
     "field_provenance.js",
@@ -71,6 +74,7 @@ pub struct App {
     deobfuscator: Deobfuscator,
     pub debugger: Arc<Debugger>,
     native_console: NativeConsole,
+    owned_vm_debugger: OwnedVmDebugger,
     capture_stopped: AtomicBool,
     capture: Mutex<()>,
     io: Arc<Semaphore>,
@@ -82,6 +86,9 @@ impl App {
         self.analyst.stop();
         self.debugger.stop().await;
         self.native_console.stop().await;
+        if self.owned_vm_debugger.stop().await.is_err() {
+            eprintln!("Owned VM helper shutdown could not be confirmed");
+        }
     }
     pub async fn new(options: Options, port: u16) -> Arc<Self> {
         let app = Arc::new(Self {
@@ -102,6 +109,11 @@ impl App {
             )),
             debugger: Debugger::new(&options),
             native_console: NativeConsole::new(&options),
+            owned_vm_debugger: OwnedVmDebugger::new(options.worker(
+                &options.owned_vm_fixture,
+                "OriginTraceOwnedVmFixture",
+                "build/reb-native-vm-fixture",
+            )),
             options,
             capture_stopped: AtomicBool::new(false),
             capture: Mutex::new(()),
@@ -215,6 +227,13 @@ impl App {
                 .await?;
             return Ok(([("content-type", "application/json")], bytes).into_response());
         }
+        if path == "/api/vm-debugger/trace" {
+            return self
+                .owned_vm_debugger
+                .trace(raw_query)
+                .await
+                .map(|value| axum::Json(value).into_response());
+        }
         let q = Query::new(raw_query);
         let mut etag = None;
         let value = match path {
@@ -231,6 +250,7 @@ impl App {
             }
             "/api/decoder" => self.decoder.state(),
             "/api/native-console" => self.native_console.state().await,
+            "/api/vm-debugger" => self.owned_vm_debugger.state().await?,
             "/api/wasm" => {
                 let id = q.required("artifact_id")?.to_owned();
                 let root = self.options.artifacts.clone();
@@ -816,6 +836,34 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .float32_operation(bytes.to_vec())
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
+            }
+            if path == "/api/vm-debugger/actions" {
+                let content_type = parts
+                    .headers
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("");
+                let mut fields = content_type.split(';').map(str::trim);
+                let media = fields.next().unwrap_or("");
+                let charset = fields.next();
+                if parts.headers.get_all("content-type").iter().count() != 1
+                    || !media.eq_ignore_ascii_case("application/json")
+                    || fields.next().is_some()
+                    || charset.is_some_and(|value| {
+                        !value.eq_ignore_ascii_case("charset=utf-8")
+                            && !value.eq_ignore_ascii_case("charset=\"utf-8\"")
+                    })
+                {
+                    return Err(Error::new(
+                        415,
+                        "Owned VM controls require application/json with optional UTF-8 charset",
+                    ));
+                }
+                return app
+                    .owned_vm_debugger
+                    .action_bytes(&bytes)
+                    .await
+                    .map(|value| axum::Json(value).into_response());
             }
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| Error::bad("The request body is malformed JSON"))?;

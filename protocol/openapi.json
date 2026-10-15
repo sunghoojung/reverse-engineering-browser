@@ -4265,6 +4265,354 @@
         "x-max-response-bytes": 8388608,
         "x-max-query-bytes": 40960
       }
+    },
+    "/api/vm-debugger": {
+      "get": {
+        "operationId": "get_vm_debugger",
+        "summary": "Read current owned-fixture capabilities and cached state",
+        "tags": [
+          "owned-vm-debugger"
+        ],
+        "responses": {
+          "200": {
+            "description": "Typed bounded owned-fixture state, including pending and unknown outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnedVmDebuggerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or stale contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Exact run or revision conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Helper or bounded admission unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "owned-fixture-only",
+              "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads cached state/evidence only. Does not start a helper, execute an instruction, renew expiry or issue a control; the independent owner may progress an already-enabled run.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+              "symbol": "OwnedVmDebugger::state"
+            }
+          ]
+        }
+      }
+    },
+    "/api/vm-debugger/actions": {
+      "post": {
+        "operationId": "vm_debugger_action",
+        "summary": "Explicit owned-fixture execution control",
+        "tags": [
+          "owned-vm-debugger"
+        ],
+        "responses": {
+          "200": {
+            "description": "Typed bounded owned-fixture state, including pending and unknown outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnedVmDebuggerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or stale contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Exact run or revision conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Helper or bounded admission unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Controls require application/json with optional UTF-8 charset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired before control admission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-max-body-bytes": 2048,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnedVmDebuggerAction"
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            },
+            {
+              "id": "owned-fixture-only",
+              "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact action; all controls require explicit admission. This metadata does not authorize execution or automatic retry.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+              "symbol": "OwnedVmDebugger::action_bytes"
+            }
+          ]
+        }
+      }
+    },
+    "/api/vm-debugger/trace": {
+      "get": {
+        "operationId": "get_vm_debugger_trace",
+        "summary": "Read exact owned-run native-compatible retained evidence",
+        "tags": [
+          "owned-vm-debugger"
+        ],
+        "responses": {
+          "200": {
+            "description": "Typed bounded owned-fixture state, including pending and unknown outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnedVmDebuggerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or stale contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Exact run or revision conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Helper or bounded admission unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "owned-fixture-only",
+              "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads cached state/evidence only. Does not start a helper, execute an instruction, renew expiry or issue a control; the independent owner may progress an already-enabled run.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+              "symbol": "OwnedVmDebugger::trace"
+            }
+          ]
+        },
+        "parameters": [
+          {
+            "name": "backend_instance_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          {
+            "name": "run_generation",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,19})$",
+              "maxLength": 20,
+              "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+            }
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -20612,6 +20960,1234 @@
             ]
           }
         }
+      },
+      "OwnedVmValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "bits": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "evidence": {
+            "enum": [
+              "observed",
+              "inferred",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "bits",
+          "evidence"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "evidence": {
+                  "const": "unknown"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "bits": {
+                  "const": "0"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "OwnedVmSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pc": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "pc_evidence": {
+            "enum": [
+              "observed",
+              "inferred",
+              "unknown"
+            ]
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "halted": {
+            "type": "boolean"
+          },
+          "registers": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/OwnedVmValue"
+            }
+          },
+          "stack": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/OwnedVmValue"
+            }
+          },
+          "memory": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "guest_address": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$",
+                  "maxLength": 20,
+                  "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+                },
+                "value": {
+                  "$ref": "#/components/schemas/OwnedVmValue"
+                }
+              },
+              "required": [
+                "guest_address",
+                "value"
+              ]
+            }
+          }
+        },
+        "required": [
+          "pc",
+          "pc_evidence",
+          "partial",
+          "halted",
+          "registers",
+          "stack",
+          "memory"
+        ]
+      },
+      "OwnedVmRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sequence": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "tick": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "opcode": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "opcode_evidence": {
+            "enum": [
+              "observed",
+              "inferred",
+              "unknown"
+            ]
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "operands": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "location": {
+                  "enum": [
+                    "immediate",
+                    "register",
+                    "stack",
+                    "memory"
+                  ]
+                },
+                "index": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$",
+                  "maxLength": 20,
+                  "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+                },
+                "value": {
+                  "$ref": "#/components/schemas/OwnedVmValue"
+                }
+              },
+              "required": [
+                "location",
+                "index",
+                "value"
+              ]
+            }
+          },
+          "effects": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "location": {
+                  "enum": [
+                    "register",
+                    "stack",
+                    "memory"
+                  ]
+                },
+                "index": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$",
+                  "maxLength": 20,
+                  "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+                },
+                "value": {
+                  "$ref": "#/components/schemas/OwnedVmValue"
+                },
+                "access": {
+                  "enum": [
+                    "read",
+                    "write"
+                  ]
+                }
+              },
+              "required": [
+                "location",
+                "index",
+                "value",
+                "access"
+              ]
+            }
+          },
+          "before": {
+            "$ref": "#/components/schemas/OwnedVmSnapshot"
+          },
+          "after": {
+            "$ref": "#/components/schemas/OwnedVmSnapshot"
+          }
+        },
+        "required": [
+          "sequence",
+          "tick",
+          "opcode",
+          "opcode_evidence",
+          "partial",
+          "operands",
+          "effects",
+          "before",
+          "after"
+        ]
+      },
+      "OwnedVmRecorderStats": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "attempted": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "recorded": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "full": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "malformed": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "wrong_document": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "stale_generation": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "exhausted": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "expired": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "partial": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          }
+        },
+        "required": [
+          "attempted",
+          "recorded",
+          "full",
+          "malformed",
+          "wrong_document",
+          "stale_generation",
+          "exhausted",
+          "expired",
+          "partial"
+        ]
+      },
+      "OwnedVmSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "backend_instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "run_generation": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "control_revision": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "snapshot_revision": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "executed_count": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "retained_count": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "maxLength": 20,
+            "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+          },
+          "provider": {
+            "const": "live-owned-native-fixture"
+          },
+          "target_kind": {
+            "const": "owned_fixture"
+          },
+          "fixture": {
+            "enum": [
+              "register",
+              "stack"
+            ]
+          },
+          "program_id": {
+            "enum": [
+              "owned-register-v1",
+              "owned-stack-v1"
+            ]
+          },
+          "fixture_revision": {
+            "const": 1
+          },
+          "program_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "program_manifest_scope": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "build_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "build_id_scope": {
+            "const": "configured-helper-file-sha256"
+          },
+          "pc_units": {
+            "const": "instruction-index"
+          },
+          "value_semantics": {
+            "const": "unsigned-64-bit-bits"
+          },
+          "tick_units": {
+            "const": "monotonic-nanoseconds"
+          },
+          "state": {
+            "enum": [
+              "starting",
+              "paused",
+              "running",
+              "pausing",
+              "stepping",
+              "stopping",
+              "halted",
+              "stopped",
+              "expired",
+              "failed"
+            ]
+          },
+          "execution_state_known": {
+            "type": "boolean"
+          },
+          "termination_reason": {
+            "oneOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "initial_snapshot": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OwnedVmSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_snapshot": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OwnedVmSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "records": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/OwnedVmRecord"
+            }
+          },
+          "recorder": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              },
+              "document_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              },
+              "invocation_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              },
+              "generation": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              },
+              "stats": {
+                "$ref": "#/components/schemas/OwnedVmRecorderStats"
+              }
+            },
+            "required": [
+              "session_id",
+              "document_id",
+              "invocation_id",
+              "generation",
+              "stats"
+            ]
+          },
+          "last_command": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$"
+                  },
+                  "action": {
+                    "enum": [
+                      "create",
+                      "run",
+                      "pause",
+                      "step",
+                      "stop",
+                      "reset",
+                      "close"
+                    ]
+                  },
+                  "ack": {
+                    "enum": [
+                      "pending",
+                      "completed",
+                      "rejected",
+                      "outcome_unknown"
+                    ]
+                  }
+                },
+                "required": [
+                  "command_id",
+                  "action",
+                  "ack"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diagnostics": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "stderr_bytes": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              },
+              "stderr_truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "stderr_bytes",
+              "stderr_truncated"
+            ]
+          },
+          "disposal_failed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "backend_instance_id",
+          "session_id",
+          "run_id",
+          "run_generation",
+          "control_revision",
+          "snapshot_revision",
+          "executed_count",
+          "retained_count",
+          "provider",
+          "target_kind",
+          "fixture",
+          "program_id",
+          "fixture_revision",
+          "program_sha256",
+          "program_manifest_scope",
+          "build_id",
+          "build_id_scope",
+          "pc_units",
+          "value_semantics",
+          "tick_units",
+          "state",
+          "execution_state_known",
+          "termination_reason",
+          "initial_snapshot",
+          "current_snapshot",
+          "records",
+          "recorder",
+          "last_command",
+          "diagnostics",
+          "disposal_failed"
+        ]
+      },
+      "OwnedVmDebuggerState": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "const": "reb-owned-vm-debug-session-v1"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "unavailable_reason": {
+            "oneOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "backend_instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "session": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OwnedVmSession"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "command_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "ack": {
+            "enum": [
+              "pending",
+              "completed",
+              "rejected",
+              "outcome_unknown"
+            ]
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails"
+          }
+        },
+        "required": [
+          "schema",
+          "available",
+          "unavailable_reason",
+          "backend_instance_id",
+          "session"
+        ]
+      },
+      "OwnedVmDebuggerAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "create",
+                "type": "string"
+              },
+              "command_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "fixture": {
+                "enum": [
+                  "register",
+                  "stack"
+                ]
+              }
+            },
+            "required": [
+              "action",
+              "command_id",
+              "fixture"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "process-launch",
+                "code-execution"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "process-stop"
+                  ],
+                  "when": "Failure, expiry or uncertain helper exchange retires the exact owned run; last confirmed evidence is retained."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "owned-fixture-only",
+                  "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Explicit owned-fixture control. A lost response is not rollback or permission to retry. Run schedules bounded future instruction dispatches; Pause acknowledges only instruction-boundary quiescence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+                  "symbol": "OwnedVmDebugger::action_bytes"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "run",
+                "type": "string"
+              },
+              "command_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "backend_instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_generation": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              },
+              "expected_control_revision": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              }
+            },
+            "required": [
+              "action",
+              "command_id",
+              "backend_instance_id",
+              "session_id",
+              "run_id",
+              "run_generation",
+              "expected_control_revision"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "code-execution"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "process-stop"
+                  ],
+                  "when": "Failure, expiry or uncertain helper exchange retires the exact owned run; last confirmed evidence is retained."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "owned-fixture-only",
+                  "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Explicit owned-fixture control. A lost response is not rollback or permission to retry. Run schedules bounded future instruction dispatches; Pause acknowledges only instruction-boundary quiescence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+                  "symbol": "OwnedVmDebugger::action_bytes"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "pause",
+                "type": "string"
+              },
+              "command_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "backend_instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_generation": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              }
+            },
+            "required": [
+              "action",
+              "command_id",
+              "backend_instance_id",
+              "session_id",
+              "run_id",
+              "run_generation"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "process-stop"
+                  ],
+                  "when": "Failure, expiry or uncertain helper exchange retires the exact owned run; last confirmed evidence is retained."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "owned-fixture-only",
+                  "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Explicit owned-fixture control. A lost response is not rollback or permission to retry. Run schedules bounded future instruction dispatches; Pause acknowledges only instruction-boundary quiescence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+                  "symbol": "OwnedVmDebugger::action_bytes"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "step",
+                "type": "string"
+              },
+              "command_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "backend_instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_generation": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              },
+              "expected_control_revision": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              },
+              "expected_executed_count": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              }
+            },
+            "required": [
+              "action",
+              "command_id",
+              "backend_instance_id",
+              "session_id",
+              "run_id",
+              "run_generation",
+              "expected_control_revision",
+              "expected_executed_count"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "code-execution"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "process-stop"
+                  ],
+                  "when": "Failure, expiry or uncertain helper exchange retires the exact owned run; last confirmed evidence is retained."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "owned-fixture-only",
+                  "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Explicit owned-fixture control. A lost response is not rollback or permission to retry. Run schedules bounded future instruction dispatches; Pause acknowledges only instruction-boundary quiescence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+                  "symbol": "OwnedVmDebugger::action_bytes"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "stop",
+                "type": "string"
+              },
+              "command_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "backend_instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_generation": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              }
+            },
+            "required": [
+              "action",
+              "command_id",
+              "backend_instance_id",
+              "session_id",
+              "run_id",
+              "run_generation"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "process-stop"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "process-stop"
+                  ],
+                  "when": "Failure, expiry or uncertain helper exchange retires the exact owned run; last confirmed evidence is retained."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "owned-fixture-only",
+                  "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Explicit owned-fixture control. A lost response is not rollback or permission to retry. Run schedules bounded future instruction dispatches; Pause acknowledges only instruction-boundary quiescence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+                  "symbol": "OwnedVmDebugger::action_bytes"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "reset",
+                "type": "string"
+              },
+              "command_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "backend_instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_generation": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              }
+            },
+            "required": [
+              "action",
+              "command_id",
+              "backend_instance_id",
+              "session_id",
+              "run_id",
+              "run_generation"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "process-launch",
+                "code-execution",
+                "process-stop",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "process-stop"
+                  ],
+                  "when": "Failure, expiry or uncertain helper exchange retires the exact owned run; last confirmed evidence is retained."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "owned-fixture-only",
+                  "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Explicit owned-fixture control. A lost response is not rollback or permission to retry. Run schedules bounded future instruction dispatches; Pause acknowledges only instruction-boundary quiescence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+                  "symbol": "OwnedVmDebugger::action_bytes"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "close",
+                "type": "string"
+              },
+              "command_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "backend_instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "run_generation": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20,
+                "description": "Canonical uint64 decimal string, additionally range-checked through 18446744073709551615 by the implementation."
+              }
+            },
+            "required": [
+              "action",
+              "command_id",
+              "backend_instance_id",
+              "session_id",
+              "run_id",
+              "run_generation"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "process-stop",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "process-stop"
+                  ],
+                  "when": "Failure, expiry or uncertain helper exchange retires the exact owned run; last confirmed evidence is retained."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "owned-fixture-only",
+                  "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Explicit owned-fixture control. A lost response is not rollback or permission to retry. Run schedules bounded future instruction dispatches; Pause acknowledges only instruction-boundary quiescence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/owned_vm_debugger.rs",
+                  "symbol": "OwnedVmDebugger::action_bytes"
+                }
+              ]
+            }
+          }
+        ]
       }
     }
   },

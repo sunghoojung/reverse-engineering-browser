@@ -1,8 +1,17 @@
+#include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string_view>
 
+#include <unistd.h>
+
+#include "owned_vm_helper_protocol.hpp"
+
 #include "reb/native_vm_recorder.hpp"
+#include "reb/owned_vm_fixture.hpp"
 
 namespace {
 using namespace reb;
@@ -16,104 +25,20 @@ void Require(bool condition, const char* name) {
     std::exit(1);
   }
 }
-void Effect(VmStep& step,
-            VmAccess access,
-            VmLocation location,
-            std::uint64_t index,
-            VmValue value) {
-  step.effects[step.effect_count++] = {access, location, index, value};
-}
-void Operand(VmStep& step, VmLocation location, std::uint64_t index, VmValue value) {
-  step.operands[step.operand_count++] = {location, index, value};
-}
-
-// These two tiny interpreters own their state and explicitly report completed
-// instructions. Recording never supplies values back into interpreter execution.
+// The legacy batch path still uses deterministic recorder ticks 1 through 9.
 VmSnapshot RunFixture(bool stack, NativeVmRecorder* recorder) {
   const auto generation = recorder != nullptr ? recorder->generation() : 0;
-  VmSnapshot state{};
-  state.pc_evidence = VmEvidence::kObserved;
-  state.register_count = stack ? 0 : 3;
-  for (std::uint32_t tick = 1; !state.halted && tick <= 16; ++tick) {
-    const auto pc = state.pc;
-    auto next_pc = pc + 1;
-    VmStep step{};
-    step.opcode = static_cast<std::uint32_t>(pc < 2 ? 1 : pc);
-    step.opcode_evidence = VmEvidence::kObserved;
-    step.before = state;
-    const auto location = stack ? VmLocation::kStack : VmLocation::kRegister;
-    auto& slots = stack ? state.stack : state.registers;
-    if (pc < 2) {
-      const auto value = Observed(pc == 0 ? 7 : 5);
-      Operand(step, VmLocation::kImmediate, 0, value);
-      slots[pc] = value;
-      if (stack)
-        ++state.stack_count;
-      Effect(step, VmAccess::kWrite, location, pc, value);
-    } else if (pc == 2) {
-      for (std::size_t i = 0; i < 2; ++i) {
-        Operand(step, location, i, slots[i]);
-        Effect(step, VmAccess::kRead, location, i, slots[i]);
-      }
-      slots[0] = Observed(slots[0].bits + slots[1].bits);
-      Effect(step, VmAccess::kWrite, location, 0, slots[0]);
-      if (stack) {
-        slots[1] = {};
-        state.stack_count = 1;
-        Effect(step, VmAccess::kWrite, location, 1, {});
-      }
-    } else if (pc == 3) {
-      Operand(step, location, 0, slots[0]);
-      Effect(step, VmAccess::kRead, location, 0, slots[0]);
-      state.memory_count = 1;
-      state.memory[0] = {16, slots[0]};
-      Effect(step, VmAccess::kWrite, VmLocation::kMemory, 16, slots[0]);
-      if (stack) {
-        slots[0] = {};
-        state.stack_count = 0;
-        Effect(step, VmAccess::kWrite, location, 0, {});
-      }
-    } else if (pc == 4) {
-      Operand(step, VmLocation::kMemory, 16, state.memory[0].value);
-      Effect(step, VmAccess::kRead, VmLocation::kMemory, 16, state.memory[0].value);
-      const std::size_t destination = stack ? 0 : 2;
-      slots[destination] = state.memory[0].value;
-      if (stack)
-        state.stack_count = 1;
-      Effect(step, VmAccess::kWrite, location, destination, slots[destination]);
-    } else if (pc == 5 || pc == 8) {
-      step.opcode = pc == 5 ? 5 : 7;
-      const std::size_t condition_slot = stack ? 0 : 2;
-      Operand(step, location, condition_slot, slots[condition_slot]);
-      Effect(step, VmAccess::kRead, location, condition_slot, slots[condition_slot]);
-      const std::uint64_t target = 10;
-      Operand(step, VmLocation::kImmediate, 0, Observed(target));
-      const bool taken =
-          pc == 5 ? slots[condition_slot].bits == 0 : slots[condition_slot].bits != 0;
-      if (taken)
-        next_pc = target;
-    } else if (pc == 6) {
-      step.opcode = 6;
-      Operand(step, VmLocation::kImmediate, 0, Observed(8));
-      next_pc = 8;
-    } else if (pc == 10) {
-      step.opcode = 8;
-      state.halted = true;
-      next_pc = pc;
-    } else {
-      Require(false, "unreachable owned fixture instruction");
-    }
-    state.pc = next_pc;
-    step.after = state;
-    if (recorder != nullptr) {
-      const auto result = recorder->Record(kScope.document_id, generation, tick, step);
-      (void)result;  // Loss cannot affect execution; inspect recorder.stats().
-    }
+  OwnedVmFixture fixture(stack ? OwnedVmArchitecture::kStack : OwnedVmArchitecture::kRegister);
+  for (std::uint64_t tick = 1; !fixture.snapshot().halted && tick <= kOwnedVmDispatchBudget;
+       ++tick) {
+    const auto result = fixture.ExecuteOne(recorder, kScope.document_id, generation, tick);
+    Require(result.status == OwnedVmExecuteStatus::kCommitted, "owned fixture instruction");
   }
-  Require(state.halted, "bounded fixture halt");
-  return state;
+  Require(fixture.snapshot().halted, "bounded fixture halt");
+  return fixture.snapshot();
 }
 
+void SerializerSelfTest();
 void SelfTest() {
   NativeVmRecorder recorder;
   const auto baseline = RunFixture(false, nullptr);
@@ -255,6 +180,7 @@ void SelfTest() {
     Require(result == (i < kNativeVmRecords ? VmRecordResult::kRecorded : VmRecordResult::kFull),
             "hard capacity");
   }
+  SerializerSelfTest();
   std::cout << "Native VM recorder fixture checks passed\n";
 }
 
@@ -282,33 +208,104 @@ const char* Location(VmLocation location) {
   }
   return "unknown";
 }
-void Value(const VmValue& value) {
+void Value(std::ostream& out, const VmValue& value) {
   // Strings preserve the full unsigned 64-bit range in JSON consumers.
-  std::cout << "{\"bits\":\"" << value.bits << "\",\"evidence\":\"" << Evidence(value.evidence)
-            << "\"}";
+  out << "{\"bits\":\"" << value.bits << "\",\"evidence\":\"" << Evidence(value.evidence) << "\"}";
 }
-void Snapshot(const VmSnapshot& state) {
-  std::cout << "{\"pc\":\"" << state.pc << "\",\"pc_evidence\":\"" << Evidence(state.pc_evidence)
-            << "\",\"partial\":" << state.partial << ",\"halted\":" << state.halted;
+void Snapshot(std::ostream& out, const VmSnapshot& state) {
+  out << "{\"pc\":\"" << state.pc << "\",\"pc_evidence\":\"" << Evidence(state.pc_evidence)
+      << "\",\"partial\":" << state.partial << ",\"halted\":" << state.halted;
   for (const bool stack : {false, true}) {
-    std::cout << (stack ? ",\"stack\":[" : ",\"registers\":[");
+    out << (stack ? ",\"stack\":[" : ",\"registers\":[");
     const auto count = stack ? state.stack_count : state.register_count;
     for (std::size_t i = 0; i < count; ++i) {
       if (i != 0)
-        std::cout << ',';
-      Value(stack ? state.stack[i] : state.registers[i]);
+        out << ',';
+      Value(out, stack ? state.stack[i] : state.registers[i]);
     }
-    std::cout << ']';
+    out << ']';
   }
-  std::cout << ",\"memory\":[";
+  out << ",\"memory\":[";
   for (std::size_t i = 0; i < state.memory_count; ++i) {
     if (i != 0)
-      std::cout << ',';
-    std::cout << "{\"guest_address\":\"" << state.memory[i].guest_address << "\",\"value\":";
-    Value(state.memory[i].value);
-    std::cout << '}';
+      out << ',';
+    out << "{\"guest_address\":\"" << state.memory[i].guest_address << "\",\"value\":";
+    Value(out, state.memory[i].value);
+    out << '}';
   }
-  std::cout << "]}";
+  out << "]}";
+}
+void Record(std::ostream& out, const VmRecordedStep& record) {
+  const auto& step = record.step;
+  out << "{\"sequence\":\"" << record.sequence << "\",\"tick\":\"" << record.tick
+      << "\",\"opcode\":" << step.opcode << ",\"opcode_evidence\":\""
+      << Evidence(step.opcode_evidence) << "\",\"partial\":" << step.partial << ",\"operands\":[";
+  for (std::size_t i = 0; i < step.operand_count; ++i) {
+    if (i != 0)
+      out << ',';
+    const auto& operand = step.operands[i];
+    out << "{\"location\":\"" << Location(operand.location) << "\",\"index\":\"" << operand.index
+        << "\",\"value\":";
+    Value(out, operand.value);
+    out << '}';
+  }
+  out << "],\"effects\":[";
+  for (std::size_t i = 0; i < step.effect_count; ++i) {
+    if (i != 0)
+      out << ',';
+    const auto& effect = step.effects[i];
+    out << "{\"access\":\"" << (effect.access == VmAccess::kRead ? "read" : "write")
+        << "\",\"location\":\"" << Location(effect.location) << "\",\"index\":\"" << effect.index
+        << "\",\"value\":";
+    Value(out, effect.value);
+    out << '}';
+  }
+  out << "],\"before\":";
+  Snapshot(out, step.before);
+  out << ",\"after\":";
+  Snapshot(out, step.after);
+  out << '}';
+}
+// Test the serializer's full native schema bounds, independently of the much
+// smaller fixed programs. This is reachable only from the existing self-test.
+void SerializerSelfTest() {
+  const auto maximum = std::numeric_limits<std::uint64_t>::max();
+  VmSnapshot snapshot{};
+  snapshot.pc = maximum;
+  snapshot.pc_evidence = VmEvidence::kObserved;
+  snapshot.register_count = kNativeVmSlots;
+  snapshot.stack_count = kNativeVmSlots;
+  snapshot.memory_count = kNativeVmSlots;
+  for (std::size_t i = 0; i < kNativeVmSlots; ++i) {
+    snapshot.registers[i] = Observed(maximum);
+    snapshot.stack[i] = Observed(maximum);
+    snapshot.memory[i] = {maximum - i, Observed(maximum)};
+  }
+  reb::owned_vm_helper::PayloadBuffer state_buffer;
+  std::ostream state_out(&state_buffer);
+  state_out << std::boolalpha;
+  Snapshot(state_out, snapshot);
+  Require(state_out.good() && state_buffer.view().size() == 1808,
+          "maximum native snapshot JSON bound");
+  VmRecordedStep record{};
+  record.sequence = maximum;
+  record.tick = maximum;
+  record.step.opcode = std::numeric_limits<std::uint32_t>::max();
+  record.step.opcode_evidence = VmEvidence::kObserved;
+  record.step.operand_count = record.step.operands.size();
+  record.step.effect_count = record.step.effects.size();
+  record.step.before = snapshot;
+  record.step.after = snapshot;
+  for (auto& operand : record.step.operands)
+    operand = {VmLocation::kMemory, maximum, Observed(maximum)};
+  for (auto& effect : record.step.effects)
+    effect = {VmAccess::kWrite, VmLocation::kMemory, maximum, Observed(maximum)};
+  reb::owned_vm_helper::PayloadBuffer record_buffer;
+  std::ostream record_out(&record_buffer);
+  record_out << std::boolalpha;
+  Record(record_out, record);
+  Require(record_out.good() && record_buffer.view().size() == 5306,
+          "maximum native record JSON bound");
 }
 void Export(const NativeVmRecorder& recorder, bool stack) {
   std::cout << std::boolalpha << "{\"schema\":\"reb-owned-vm-fixture-v1\",\"fixture\":\""
@@ -328,36 +325,7 @@ void Export(const NativeVmRecorder& recorder, bool stack) {
     if (!first)
       std::cout << ',';
     first = false;
-    const auto& step = record.step;
-    std::cout << "{\"sequence\":\"" << record.sequence << "\",\"tick\":\"" << record.tick
-              << "\",\"opcode\":" << step.opcode << ",\"opcode_evidence\":\""
-              << Evidence(step.opcode_evidence) << "\",\"partial\":" << step.partial
-              << ",\"operands\":[";
-    for (std::size_t i = 0; i < step.operand_count; ++i) {
-      if (i != 0)
-        std::cout << ',';
-      const auto& operand = step.operands[i];
-      std::cout << "{\"location\":\"" << Location(operand.location) << "\",\"index\":\""
-                << operand.index << "\",\"value\":";
-      Value(operand.value);
-      std::cout << '}';
-    }
-    std::cout << "],\"effects\":[";
-    for (std::size_t i = 0; i < step.effect_count; ++i) {
-      if (i != 0)
-        std::cout << ',';
-      const auto& effect = step.effects[i];
-      std::cout << "{\"access\":\"" << (effect.access == VmAccess::kRead ? "read" : "write")
-                << "\",\"location\":\"" << Location(effect.location) << "\",\"index\":\""
-                << effect.index << "\",\"value\":";
-      Value(effect.value);
-      std::cout << '}';
-    }
-    std::cout << "],\"before\":";
-    Snapshot(step.before);
-    std::cout << ",\"after\":";
-    Snapshot(step.after);
-    std::cout << '}';
+    Record(std::cout, record);
   }
   const auto& stats = recorder.stats();
   std::cout << "],\"loss\":{\"full\":" << stats.full << ",\"malformed\":" << stats.malformed
@@ -366,9 +334,268 @@ void Export(const NativeVmRecorder& recorder, bool stack) {
             << ",\"exhausted\":" << stats.exhausted << ",\"partial\":" << stats.partial
             << "},\"attempted\":" << stats.attempted << ",\"recorded\":" << stats.recorded << "}\n";
 }
+namespace helper = reb::owned_vm_helper;
+struct ControlOptions final {
+  OwnedVmArchitecture architecture = OwnedVmArchitecture::kRegister;
+  VmScope scope{};
+  std::uint64_t run_generation = 0;
+  std::uint64_t lifetime_ms = 0;
+};
+bool ControlArguments(int argc, char** argv, ControlOptions& options) {
+  if (argc != 14)
+    return false;
+  unsigned fields = 0;
+  for (int i = 2; i < argc; i += 2) {
+    const std::string_view key(argv[i]);
+    const std::string_view value(argv[i + 1]);
+    unsigned field = 0;
+    std::uint64_t* number = nullptr;
+    if (key == "--fixture") {
+      field = 1;
+      if (value == "register")
+        options.architecture = OwnedVmArchitecture::kRegister;
+      else if (value == "stack")
+        options.architecture = OwnedVmArchitecture::kStack;
+      else
+        return false;
+    } else if (key == "--session-id") {
+      field = 2;
+      number = &options.scope.session_id;
+    } else if (key == "--document-id") {
+      field = 4;
+      number = &options.scope.document_id;
+    } else if (key == "--invocation-id") {
+      field = 8;
+      number = &options.scope.invocation_id;
+    } else if (key == "--run-generation") {
+      field = 16;
+      number = &options.run_generation;
+    } else if (key == "--lifetime-ms") {
+      field = 32;
+      number = &options.lifetime_ms;
+    } else {
+      return false;
+    }
+    if ((fields & field) != 0 ||
+        (number != nullptr && (!helper::CanonicalU64(value, *number) || *number == 0)))
+      return false;
+    fields |= field;
+  }
+  return fields == 63 && options.lifetime_ms <= helper::kMaxLifetimeMs;
+}
+std::uint64_t MonotonicNow() {
+  const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                       .count();
+  return now > 0 ? static_cast<std::uint64_t>(now) : 0;
+}
+const char* RecorderResult(VmRecordResult result) {
+  switch (result) {
+    case VmRecordResult::kRecorded:
+      return "recorded";
+    case VmRecordResult::kStaleGeneration:
+      return "stale_generation";
+    case VmRecordResult::kExhausted:
+      return "exhausted";
+    case VmRecordResult::kDisabled:
+      return "disabled";
+    case VmRecordResult::kExpired:
+      return "expired";
+    case VmRecordResult::kWrongDocument:
+      return "wrong_document";
+    case VmRecordResult::kMalformed:
+      return "malformed";
+    case VmRecordResult::kFull:
+      return "full";
+  }
+  return "malformed";
+}
+void ControlPayload(std::ostream& out,
+                    const ControlOptions& options,
+                    const OwnedVmFixture& fixture,
+                    const NativeVmRecorder& recorder,
+                    const char* state,
+                    const VmRecordResult* result) {
+  const bool stack = options.architecture == OwnedVmArchitecture::kStack;
+  out << std::boolalpha << "{\"schema\":\"reb-owned-vm-helper-v1\",\"fixture\":\""
+      << (stack ? "stack" : "register") << "\",\"program_id\":\""
+      << (stack ? "owned-stack-v1" : "owned-register-v1")
+      << "\",\"fixture_revision\":1,\"session_id\":\"" << options.scope.session_id
+      << "\",\"document_id\":\"" << options.scope.document_id << "\",\"invocation_id\":\""
+      << options.scope.invocation_id << "\",\"run_generation\":\"" << options.run_generation
+      << "\",\"state\":\"" << state << "\",\"executed_count\":\"" << fixture.executed_count()
+      << "\",\"retained_count\":\"" << recorder.stats().recorded << "\",\"snapshot\":";
+  Snapshot(out, fixture.snapshot());
+  out << ",\"transition\":";
+  if (result != nullptr && *result == VmRecordResult::kRecorded)
+    Record(out, recorder.records().back());
+  else
+    out << "null";
+  out << ",\"recorder_result\":";
+  if (result != nullptr)
+    out << '"' << RecorderResult(*result) << '"';
+  else
+    out << "null";
+  const auto& stats = recorder.stats();
+  out << ",\"stats\":{\"attempted\":\"" << stats.attempted << "\",\"recorded\":\"" << stats.recorded
+      << "\",\"full\":\"" << stats.full << "\",\"malformed\":\"" << stats.malformed
+      << "\",\"wrong_document\":\"" << stats.wrong_document << "\",\"stale_generation\":\""
+      << stats.stale_generation << "\",\"exhausted\":\"" << stats.exhausted << "\",\"expired\":\""
+      << stats.expired << "\",\"partial\":\"" << stats.partial
+      << "\"},\"tick_units\":\"monotonic-nanoseconds\"}";
+}
+bool WriteAll(std::span<const std::uint8_t> bytes) {
+  while (!bytes.empty()) {
+    const auto written = ::write(STDOUT_FILENO, bytes.data(), bytes.size());
+    if (written < 0 && errno == EINTR)
+      continue;
+    if (written <= 0)
+      return false;
+    bytes = bytes.subspan(static_cast<std::size_t>(written));
+  }
+  return true;
+}
+bool Respond(helper::Status status,
+             std::uint64_t request_id,
+             const ControlOptions& options,
+             const OwnedVmFixture& fixture,
+             const NativeVmRecorder& recorder,
+             const char* state,
+             const VmRecordResult* result = nullptr) {
+  helper::PayloadBuffer buffer;
+  std::ostream out(&buffer);
+  ControlPayload(out, options, fixture, recorder, state, result);
+  if (!out || buffer.view().size() > helper::kMaxPayloadBytes)
+    return false;
+  const auto payload = buffer.view();
+  const auto header =
+      helper::ResponseHeader(status, request_id, static_cast<std::uint32_t>(payload.size()));
+  return WriteAll(header) &&
+         WriteAll({reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size()});
+}
+enum class ReadResult { kComplete, kEof, kShort, kError };
+ReadResult ReadRequest(std::array<std::uint8_t, helper::kRequestBytes>& bytes) {
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    const auto count = ::read(STDIN_FILENO, bytes.data() + offset, bytes.size() - offset);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count < 0)
+      return ReadResult::kError;
+    if (count == 0)
+      return offset == 0 ? ReadResult::kEof : ReadResult::kShort;
+    offset += static_cast<std::size_t>(count);
+  }
+  return ReadResult::kComplete;
+}
+int ControlMain(int argc, char** argv) {
+  ControlOptions options;
+  if (!ControlArguments(argc, argv, options)) {
+    std::cerr << "Invalid owned fixture control arguments\n";
+    return 2;
+  }
+  // The pipe peer owns process lifetime. No diagnostics contain input values,
+  // and a closed output pipe fails the exchange instead of terminating mid-write
+  // via SIGPIPE. This does not change the legacy batch CLI's signal handling.
+  std::signal(SIGPIPE, SIG_IGN);
+  auto last_now = MonotonicNow();
+  const auto lifetime_ns = options.lifetime_ms * 1000000;
+  if (last_now == 0 || last_now > std::numeric_limits<std::uint64_t>::max() - lifetime_ns)
+    return 1;
+  options.scope.expires_at = last_now + lifetime_ns;
+  OwnedVmFixture fixture(options.architecture);
+  NativeVmRecorder recorder;
+  if (!recorder.Enable(options.scope, last_now))
+    return 1;
+  const auto recorder_generation = recorder.generation();
+  std::uint64_t last_request_id = 0;
+  if (!Respond(helper::Status::kOk, 0, options, fixture, recorder, "paused"))
+    return 1;
+  for (;;) {
+    std::array<std::uint8_t, helper::kRequestBytes> bytes{};
+    const auto read = ReadRequest(bytes);
+    if (read == ReadResult::kEof)
+      return 0;
+    if (read != ReadResult::kComplete) {
+      std::cerr << "Incomplete owned fixture request frame\n";
+      return 2;
+    }
+    helper::Request request;
+    auto status = helper::Status::kOk;
+    const char* state = fixture.snapshot().halted ? "halted" : "paused";
+    bool terminal = false;
+    OwnedVmExecuteResult execution;
+    const VmRecordResult* recorded = nullptr;
+    if (!helper::DecodeRequest(bytes, request)) {
+      status = helper::Status::kMalformed;
+      state = "failed";
+      terminal = true;
+    } else if (request.request_id == 0 || request.request_id <= last_request_id) {
+      status = helper::Status::kRequestId;
+    } else {
+      // Even a well-framed guard rejection consumes its request ID. Reusing it
+      // with corrected fields is never a retry grant or a second dispatch.
+      last_request_id = request.request_id;
+      if (request.generation != options.run_generation) {
+        status = helper::Status::kStaleGeneration;
+      } else if (request.executed_count != fixture.executed_count()) {
+        status = helper::Status::kCountMismatch;
+      } else if (request.request_id == std::numeric_limits<std::uint64_t>::max()) {
+        status = helper::Status::kResourceLimit;
+        state = "failed";
+        terminal = true;
+      } else {
+        // Do not inspect the replacement run's deadline for stale identity or
+        // count. Real monotonic expiry is checked immediately before dispatch.
+        const auto now = MonotonicNow();
+        if (helper::Expired(now, last_now, options.scope.expires_at)) {
+          status = helper::Status::kExpired;
+          state = "expired";
+          terminal = true;
+        } else {
+          last_now = now;
+          if (request.operation == helper::Operation::kClose) {
+            status = helper::Status::kClosed;
+            state = "stopped";
+            terminal = true;
+          } else if (request.operation == helper::Operation::kExecuteOne) {
+            execution =
+                fixture.ExecuteOne(&recorder, options.scope.document_id, recorder_generation, now);
+            switch (execution.status) {
+              case OwnedVmExecuteStatus::kCommitted:
+                recorded = &execution.recorder_result;
+                state = fixture.snapshot().halted ? "halted" : "paused";
+                break;
+              case OwnedVmExecuteStatus::kHalted:
+                status = helper::Status::kHalted;
+                break;
+              case OwnedVmExecuteStatus::kBudget:
+                status = helper::Status::kResourceLimit;
+                state = "failed";
+                terminal = true;
+                break;
+              case OwnedVmExecuteStatus::kInvalidState:
+                status = helper::Status::kFixtureError;
+                state = "failed";
+                terminal = true;
+                break;
+            }
+          }
+        }
+      }
+    }
+    if (!Respond(status, request.request_id, options, fixture, recorder, state, recorded))
+      return 1;
+    if (terminal)
+      return status == helper::Status::kMalformed || status == helper::Status::kFixtureError ? 2
+                                                                                             : 0;
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc > 1 && std::string_view(argv[1]) == "--control-owned-fixture-v1")
+    return ControlMain(argc, argv);
   bool enabled = false;
   bool stack = false;
   for (int i = 1; i < argc; ++i) {

@@ -1,0 +1,1428 @@
+{
+  "schema": "reb-owned-fixture-independent-goldens-v1",
+  "program_revision": 1,
+  "pc_units": "instruction-index",
+  "value_semantics": "unsigned-64-bit-bits",
+  "register": {
+    "initial": {
+      "pc": "0",
+      "pc_evidence": "observed",
+      "partial": false,
+      "halted": false,
+      "registers": [
+        {
+          "bits": "0",
+          "evidence": "unknown"
+        },
+        {
+          "bits": "0",
+          "evidence": "unknown"
+        },
+        {
+          "bits": "0",
+          "evidence": "unknown"
+        }
+      ],
+      "stack": [],
+      "memory": []
+    },
+    "transitions": [
+      {
+        "sequence": "1",
+        "opcode": 1,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "write",
+            "location": "register",
+            "index": "0",
+            "value": {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "0",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": []
+        },
+        "after": {
+          "pc": "1",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "7",
+              "evidence": "observed"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": []
+        }
+      },
+      {
+        "sequence": "2",
+        "opcode": 1,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "write",
+            "location": "register",
+            "index": "1",
+            "value": {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "1",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "7",
+              "evidence": "observed"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": []
+        },
+        "after": {
+          "pc": "2",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "7",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": []
+        }
+      },
+      {
+        "sequence": "3",
+        "opcode": 2,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "register",
+            "index": "0",
+            "value": {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          },
+          {
+            "location": "register",
+            "index": "1",
+            "value": {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "register",
+            "index": "0",
+            "value": {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "read",
+            "location": "register",
+            "index": "1",
+            "value": {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "write",
+            "location": "register",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "2",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "7",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": []
+        },
+        "after": {
+          "pc": "3",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": []
+        }
+      },
+      {
+        "sequence": "4",
+        "opcode": 3,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "register",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "register",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "write",
+            "location": "memory",
+            "index": "16",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "3",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": []
+        },
+        "after": {
+          "pc": "4",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "5",
+        "opcode": 4,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "memory",
+            "index": "16",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "memory",
+            "index": "16",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "write",
+            "location": "register",
+            "index": "2",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "4",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "5",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "6",
+        "opcode": 5,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "register",
+            "index": "2",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "10",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "register",
+            "index": "2",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "5",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "6",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "7",
+        "opcode": 6,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "8",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [],
+        "before": {
+          "pc": "6",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "8",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "8",
+        "opcode": 7,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "register",
+            "index": "2",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "10",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "register",
+            "index": "2",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "8",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "10",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "9",
+        "opcode": 8,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [],
+        "effects": [],
+        "before": {
+          "pc": "10",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "10",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": true,
+          "registers": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            },
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "stack": {
+    "initial": {
+      "pc": "0",
+      "pc_evidence": "observed",
+      "partial": false,
+      "halted": false,
+      "registers": [],
+      "stack": [],
+      "memory": []
+    },
+    "transitions": [
+      {
+        "sequence": "1",
+        "opcode": 1,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "write",
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "0",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [],
+          "memory": []
+        },
+        "after": {
+          "pc": "1",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          ],
+          "memory": []
+        }
+      },
+      {
+        "sequence": "2",
+        "opcode": 1,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "write",
+            "location": "stack",
+            "index": "1",
+            "value": {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "1",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          ],
+          "memory": []
+        },
+        "after": {
+          "pc": "2",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "7",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          ],
+          "memory": []
+        }
+      },
+      {
+        "sequence": "3",
+        "opcode": 2,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          },
+          {
+            "location": "stack",
+            "index": "1",
+            "value": {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "7",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "read",
+            "location": "stack",
+            "index": "1",
+            "value": {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "write",
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "write",
+            "location": "stack",
+            "index": "1",
+            "value": {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          }
+        ],
+        "before": {
+          "pc": "2",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "7",
+              "evidence": "observed"
+            },
+            {
+              "bits": "5",
+              "evidence": "observed"
+            }
+          ],
+          "memory": []
+        },
+        "after": {
+          "pc": "3",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": []
+        }
+      },
+      {
+        "sequence": "4",
+        "opcode": 3,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "write",
+            "location": "memory",
+            "index": "16",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "write",
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "0",
+              "evidence": "unknown"
+            }
+          }
+        ],
+        "before": {
+          "pc": "3",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": []
+        },
+        "after": {
+          "pc": "4",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "5",
+        "opcode": 4,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "memory",
+            "index": "16",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "memory",
+            "index": "16",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "access": "write",
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "4",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "5",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "6",
+        "opcode": 5,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "10",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "5",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "6",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "7",
+        "opcode": 6,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "8",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [],
+        "before": {
+          "pc": "6",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "8",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "8",
+        "opcode": 7,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [
+          {
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          },
+          {
+            "location": "immediate",
+            "index": "0",
+            "value": {
+              "bits": "10",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "effects": [
+          {
+            "access": "read",
+            "location": "stack",
+            "index": "0",
+            "value": {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          }
+        ],
+        "before": {
+          "pc": "8",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "10",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sequence": "9",
+        "opcode": 8,
+        "opcode_evidence": "observed",
+        "partial": false,
+        "operands": [],
+        "effects": [],
+        "before": {
+          "pc": "10",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": false,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        },
+        "after": {
+          "pc": "10",
+          "pc_evidence": "observed",
+          "partial": false,
+          "halted": true,
+          "registers": [],
+          "stack": [
+            {
+              "bits": "12",
+              "evidence": "observed"
+            }
+          ],
+          "memory": [
+            {
+              "guest_address": "16",
+              "value": {
+                "bits": "12",
+                "evidence": "observed"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

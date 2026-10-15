@@ -425,7 +425,29 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
   const root=document.querySelector('#vm-semantics-workflow');if(!root)return null;
   const execution=mountVmSemantics(root),findings=document.querySelector('#vm-findings-workspace');
   const findingsButton=document.querySelector('#vm-show-findings'),executionButton=document.querySelector('#vm-show-execution');
-  const showWorkspace=mode=>{const active=mode==='execution';root.hidden=!active;if(findings)findings.hidden=active;findingsButton?.setAttribute('aria-pressed',String(!active));executionButton?.setAttribute('aria-pressed',String(active));};
-  findingsButton?.addEventListener('click',()=>showWorkspace('findings'));executionButton?.addEventListener('click',()=>showWorkspace('execution'));
-  return {execution,showWorkspace};
+  const ownedButton=document.querySelector('#vm-show-owned'),ownedRoot=document.querySelector('#vm-owned-debugger'),controls=document.querySelector('#vm-owned-controls');
+  const navigationEntry=document.querySelector('#nav-vm-workspace');
+  let mode='findings',screenVisible=false,hasSession=false,owned=null;
+  const sync=()=>{
+    root.hidden=mode!=='execution';if(findings)findings.hidden=mode!=='findings';
+    if(ownedRoot)ownedRoot.hidden=mode!=='owned';
+    if(controls){
+      const hide=mode!=='owned'&&!hasSession;
+      if(hide&&controls.contains(document.activeElement))(mode==='execution'?executionButton:findingsButton)?.focus({preventScroll:true});
+      controls.hidden=hide;
+    }
+    findingsButton?.setAttribute('aria-pressed',String(mode==='findings'));
+    executionButton?.setAttribute('aria-pressed',String(mode==='execution'));
+    ownedButton?.setAttribute('aria-pressed',String(mode==='owned'));
+    owned?.setVisible(screenVisible&&(mode==='owned'||hasSession));
+    if(owned)owned.panes.hidden=mode!=='owned';
+  };
+  if(ownedRoot&&typeof mountOwnedVmDebugger==='function'){
+    owned=mountOwnedVmDebugger(ownedRoot,{onState:view=>{hasSession=!!view.session;if(navigationEntry)navigationEntry.textContent=view.session?'VM workspace · '+view.session.state:'VM workspace';sync();}});
+    if(controls)controls.append(owned.toolbar);
+  }
+  const showWorkspace=next=>{mode=['findings','execution','owned'].includes(next)?next:'findings';sync();};
+  findingsButton?.addEventListener('click',()=>showWorkspace('findings'));executionButton?.addEventListener('click',()=>showWorkspace('execution'));ownedButton?.addEventListener('click',()=>showWorkspace('owned'));
+  sync();
+  return {execution,owned,showWorkspace,setVisible:visible=>{screenVisible=!!visible;sync();}};
 })();

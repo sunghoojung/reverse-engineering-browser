@@ -5,11 +5,17 @@ WIRE_DECODER_EXECUTABLE ?= $(DECODER_BINARY)
 wire-decoder-check: $(WIRE_DECODER_EXECUTABLE)
 	node tools/check-wire-decoder.mjs $(WIRE_DECODER_EXECUTABLE) $(WIRE_DECODER_CHECK_FLAGS)
 
-check: all wire-decoder-check native-vm-recorder-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test workspace-check deob-benchmark
+check: all wire-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test workspace-check deob-benchmark
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
+	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
+		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml owned_vm_real_helper -- --ignored
 	REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker" \
 		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml source_facts_real_worker_http_and_cli -- --ignored
+
+owned-vm-helper-check: $(NATIVE_VM_FIXTURE_BINARY) $(OWNED_VM_FIXTURE_TEST)
+	$(OWNED_VM_FIXTURE_TEST)
+	python3 tools/check-owned-vm-helper.py --binary $(NATIVE_VM_FIXTURE_BINARY)
 
 native-vm-recorder-check: $(NATIVE_VM_FIXTURE_BINARY)
 	python3 tools/check-native-vm-recorder.py --binary $(NATIVE_VM_FIXTURE_BINARY)
@@ -41,7 +47,7 @@ sanitize:
 		OPT_CXXFLAGS="-O1 -g" \
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
-		all wire-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check
+		all wire-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check
 
 format:
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
@@ -92,6 +98,8 @@ javascript-check:
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
 	node tools/check-graphql-sdl.mjs
+	node tools/check-owned-vm-integration.mjs
+	node tools/check-owned-vm-debugger-ui.mjs
 	node tools/check-vm-semantics.mjs
 	node tools/check-vm-linked-model.mjs
 	node tools/check-vm-compare-cli.mjs

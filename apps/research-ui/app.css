@@ -3921,3 +3921,68 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .vm-semantics-workflow { min-height: 320px; overflow-y: auto; overscroll-behavior: contain; grid-template-rows: auto auto minmax(480px, 1fr) auto; }
   .vm-execution-body { min-height: 480px; }
 }
+
+/* Owned fixture controls stay reachable while inspecting imported evidence. */
+#screen-vm:not([hidden]) { grid-template-rows: auto auto minmax(0, 1fr); }
+#vm-owned-controls { grid-row: 2; min-width: 0; max-height: 35vh; overflow: auto; }
+#vm-findings-workspace, #vm-semantics-workflow, #vm-owned-debugger { grid-row: 3; }
+#vm-owned-controls[hidden], #vm-owned-debugger[hidden], #vm-owned-debugger [hidden] { display: none !important; }
+#vm-owned-debugger { min-height: 0; min-width: 0; overflow: auto; }
+.owned-vm-debugger-toolbar { border: 1px solid var(--line); padding: 8px; background: var(--panel-2); }
+.owned-vm-debugger-toolbar h2, .owned-vm-debugger-panes h3 { margin: 4px 0; }
+.owned-vm-debugger-toolbar p { margin: 4px 0; }
+.owned-vm-debugger-notice:empty { margin: 0; min-height: 0; }
+.owned-vm-debugger-recovery:empty { display: none; }
+/* State remains visible in the status line; this duplicate live-region receipt
+   stays available to assistive technology without consuming a toolbar row. */
+.owned-vm-debugger-announcement { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@media (min-width: 1100px) {
+  .owned-vm-debugger-toolbar { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 2px 12px; }
+  .owned-vm-debugger-toolbar > p { grid-column: 1 / -1; margin: 2px 0; }
+  .owned-vm-debugger-toolbar > label { display: flex; align-items: center; gap: 6px; }
+  .owned-vm-debugger-toolbar > .owned-vm-debugger-actions { justify-content: flex-end; }
+}
+
+.owned-vm-debugger-actions, .owned-vm-debugger-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
+.owned-vm-debugger-toolbar button, .owned-vm-debugger-panes button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.owned-vm-debugger-panes { display: grid; grid-template-columns: minmax(140px, .7fr) minmax(240px, 1.4fr) minmax(290px, 1.5fr); gap: 8px; height: 100%; min-height: 0; }
+.owned-vm-debugger-navigation, .owned-vm-debugger-listing, .owned-vm-debugger-inspector { min-width: 0; min-height: 0; padding: 10px; border: 1px solid var(--line); overflow: auto; overflow-wrap: anywhere; }
+.owned-vm-debugger-navigation p, .owned-vm-debugger-listing p, .owned-vm-debugger-inspector p { font-size: 12px; }
+.owned-vm-debugger-history { list-style: none; padding: 0; }
+.owned-vm-debugger-history button { width: 100%; text-align: left; margin: 2px 0; }
+.owned-vm-debugger-history [aria-pressed="true"], .owned-vm-debugger-tabs [aria-selected="true"], .owned-vm-debugger-opcodes [aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.owned-vm-debugger-table-scroll { max-width: 100%; overflow: auto; }
+.owned-vm-debugger-table-scroll table { width: 100%; border-collapse: collapse; font: 11px ui-monospace, monospace; }
+.owned-vm-debugger-table-scroll td, .owned-vm-debugger-table-scroll th { text-align: left; padding: 5px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.owned-vm-debugger-table-scroll [data-changed="true"] { background: var(--accent-soft); }
+.owned-vm-debugger-inspector pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+#vm-owned-controls :focus-visible, #vm-owned-debugger :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (max-width: 1050px) {
+  .owned-vm-debugger-panes { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); height: auto; }
+  .owned-vm-debugger-navigation { grid-column: 1 / -1; max-height: 180px; }
+  .owned-vm-debugger-listing, .owned-vm-debugger-inspector { max-height: 65vh; }
+}
+@media (max-width: 650px) {
+  .owned-vm-debugger-panes { grid-template-columns: minmax(0, 1fr); }
+  .owned-vm-debugger-navigation { grid-column: 1; }
+}
+
+#advanced-navigation #nav-vm-workspace { width: 100%; text-align: left; }
+
+/* Coexisting live controls and imported analysis use normal document flow on
+   narrow screens. Neither an auto grid row nor retained-row intrinsic height
+   may steal the controls' space. The analysis pane has its own bounded scroll. */
+@media (max-width: 1099px), (max-height: 600px) {
+  #screen-vm:not([hidden]):has(> #vm-owned-controls:not([hidden])):has(> #vm-semantics-workflow:not([hidden])) {
+    display: block;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  #screen-vm:not([hidden]):has(> #vm-owned-controls:not([hidden])) > #vm-semantics-workflow:not([hidden]) {
+    height: auto;
+    min-height: 0;
+    overflow: hidden;
+    grid-template-rows: auto auto 600px auto;
+  }
+  #screen-vm:not([hidden]):has(> #vm-owned-controls:not([hidden])) > #vm-semantics-workflow:not([hidden]) .vm-execution-body { min-height: 0; }
+}

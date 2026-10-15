@@ -3,8 +3,9 @@
 This command runs two tiny, repository-owned C++ interpreters. They cooperate by
 passing each completed guest instruction to the recorder. It does **not** capture
 arbitrary JavaScript/Wasm guest VMs, attach to a browser, bypass detection, extract
-keys, or infer opcode semantics. Browser activation and UI ingestion are not
-implemented. Existing browser and VM import contracts are unchanged.
+keys, or infer opcode semantics. Browser activation is not implemented. The
+private cooperative control mode supports the owned-fixture debugger; existing
+browser and VM import contracts are unchanged.
 
 ~~~sh
 make native-vm-fixture
@@ -12,6 +13,7 @@ build/reb-native-vm-fixture                          # no retained instructions
 build/reb-native-vm-fixture --enable-owned-fixture    # register fixture JSON
 build/reb-native-vm-fixture --enable-owned-fixture --stack
 make native-vm-recorder-check
+make owned-vm-helper-check
 ~~~
 
 The two fixtures compute 7 + 5, store 12 at guest memory address 16, then load it. They then execute an untaken zero branch, an unconditional
@@ -57,3 +59,36 @@ Each enable advances an internal nonwrapping generation. Producers retain that
 generation for the invocation and pass it on every record; stale work cannot
 record into or expire a newly enabled invocation, even on the same document.
 The fixture document ID is local, not a truncated Chromium document token.
+
+## Paused, single-instruction control mode
+
+The backend launches this executable with explicit
+`--control-owned-fixture-v1` and exact fixture, scope, run generation, and lifetime
+arguments. Its initial framed response is paused at PC 0 with zero executed
+instructions and empty history. An inspect request is inert; each guarded
+execute_one request commits one real instruction and reports the complete
+snapshot and retained transition. Halt is the ninth real instruction. There is
+no arbitrary program, path, expression, browser adapter, or mutable state input.
+
+`include/reb/owned_vm_fixture.hpp` and `src/analysis/owned_vm_fixture.cpp` own the
+resumable single-owner interpreter. The legacy batch path now repeatedly calls
+that same ExecuteOne operation without changing its output or deterministic
+clock. Control mode uses actual steady-clock nanoseconds and rejects expiry
+before an instruction can start. Scope, request-ID and exact count guards
+prevent stale or repeated requests from executing. An instruction's validated
+next-state copy is committed atomically before recording; recorder loss cannot
+change its semantics.
+
+The [private framing contract](../../protocol/owned-vm-helper-v1.md) defines
+fixed 40-byte requests, 24-byte response headers, 32 KiB JSON bound, strict CLI
+arguments, lifecycle, statuses, and tests. Do not call this mode from page
+JavaScript or expose its pipe as a network service. The backend owns Run pacing,
+Pause/quiescence, request timeouts, an independent 60-second lifetime timer,
+stderr draining, and killing/reaping its exact child. Closing input exits the
+helper; a crash or missing execution reply must never trigger an automatic retry.
+
+The native-focused check compares all 18 transitions with independently authored
+goldens, tests real framing and expiry, and verifies inert initialization,
+inspect, repeated/stale controls, short reads, EOF, max uint64 fields, and
+bounded serialization. Direct tests also exercise invalid internal state and
+capacity loss without introducing an arbitrary-input production interface.

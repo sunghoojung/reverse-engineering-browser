@@ -4,7 +4,24 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  const before={pc:0,halted:false,registers:[0],stack:[],memory:[]},after={...before,pc:1,registers:[7]},halted={...after,halted:true};
  const trace={format:'reb-vm-trace-v1',identity:{trace_id:'owned-ui',investigation_id:'1',finding_id:'2',artifact_id:'3',artifact_sha256:'a'.repeat(64),scope_id:'owned-ui',backend:'native'},architecture:'register',coverage:{complete:true,dropped_steps:0,limitations:['<img src=x onerror=alert(1)> inert fixture']},steps:[{sequence:0,opcode:'03',operands:[0,7],instruction_size:1,before,after,evidence_refs:['fixture:0']},{sequence:1,opcode:'09',operands:[],instruction_size:1,before:after,after:halted,evidence_refs:['fixture:1']}]};
  const root='#vm-semantics-workflow';
- await viewport(1440,900);await evaluate("showScreen('vm');");await click('#vm-show-execution');await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Import VM execution trace');
+ await viewport(1440,900);await evaluate("showScreen('vm');");await click('#vm-show-execution');
+ // All providers remain in native tab order. Opening Live is deliberate and
+ // returning to Imported must still reach its original file input by keyboard.
+ await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.id'),'vm-show-owned');
+ assert.equal(await evaluate(`(()=>{const e=document.activeElement,r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&getComputedStyle(e).outlineStyle!=='none'})()`),true,'Live provider keyboard focus must be visible');
+ await key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});
+ assert.equal(await evaluate("document.querySelector('#vm-show-owned').getAttribute('aria-pressed')"),'true');
+ assert.equal(await evaluate("document.querySelector('#vm-owned-debugger').hidden"),false);
+ assert.equal(await evaluate(`document.querySelector('${root}').hidden`),true);
+ assert.deepEqual(await evaluate(`(()=>{const model=vmExecutionWorkspace.owned.controller.model();return {session:model.view?.session??null,pending:model.pending.map(command=>command.action)}})()`),{session:null,pending:[]},'Provider activation must not create or request a live fixture');
+ await key('Tab','Tab',{windowsVirtualKeyCode:9,modifiers:8});assert.equal(await evaluate('document.activeElement.id'),'vm-show-execution');
+ await key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});
+ assert.equal(await evaluate("document.querySelector('#vm-show-execution').getAttribute('aria-pressed')"),'true');
+ assert.equal(await evaluate("document.querySelector('#vm-show-owned').getAttribute('aria-pressed')"),'false');
+ assert.equal(await evaluate(`document.querySelector('${root}').hidden`),false);
+ assert.equal(await evaluate("document.querySelector('#vm-owned-debugger').hidden"),true);
+ await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.id'),'vm-show-owned');
+ await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Import VM execution trace');
  const ensureVisible=async selector=>{
   const owner=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('Missing VM control');const p=e.closest('.vm-context-panel');return {layout:document.querySelector('${root}').dataset.layout,context:p?.id.replace('vm-context-panel-',''),state:!!e.closest('.vm-step-inspector'),listing:!!e.closest('.vm-execution-listing'),navigation:!!e.closest('.vm-execution-navigation'),navigationOpen:document.querySelector('${root}').dataset.navigationOpen==='true'};})()`);
   if(owner.navigation&&owner.layout!=='wide'&&!owner.navigationOpen)await click(root+' .vm-navigation-toggle');

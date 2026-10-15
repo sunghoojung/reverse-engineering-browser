@@ -10727,6 +10727,7 @@
         if (typeof retireCandidateExperimentPending === 'function') retireCandidateExperimentPending();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
+        if (typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.setVisible(screenName === 'vm');
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && ['vm', 'field-provenance'].includes(screenName));
           if (active) button.setAttribute('aria-current', 'page');
@@ -10762,7 +10763,7 @@
         }
         if (screenName === 'memory') renderMemory();
         if (screenName === 'vm') {
-          if (trigger && typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.showWorkspace('findings');
+          if (trigger === elements.requestVmCandidates && typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.showWorkspace('findings');
           if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
           renderVmLab();
         }

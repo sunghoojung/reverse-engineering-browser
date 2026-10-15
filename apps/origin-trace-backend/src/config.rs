@@ -30,6 +30,8 @@ pub struct Options {
     pub debugger_transport: Option<PathBuf>,
     #[arg(long)]
     pub native_console: Option<PathBuf>,
+    #[arg(long)]
+    pub owned_vm_fixture: Option<PathBuf>,
     #[arg(long, env = "REB_BRAVE_BINARY")]
     pub brave_binary: Option<PathBuf>,
     #[arg(long)]
@@ -87,6 +89,7 @@ impl Options {
             &mut self.decoder,
             &mut self.debugger_transport,
             &mut self.native_console,
+            &mut self.owned_vm_fixture,
             &mut self.brave_binary,
             &mut self.heap_snapshot,
             &mut self.deobfuscator,

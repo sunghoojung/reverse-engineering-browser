@@ -59,7 +59,10 @@ impl Debugger {
         let template = requests::template(r)?;
         let marker = r.get("marker_fuzz").cloned();
         let (resolved, names) = if marker.is_some() {
-            (marker_fuzz::literal(r, &self.snapshot(), validation::now_ms())?, Vec::new())
+            (
+                marker_fuzz::literal(r, &self.snapshot(), validation::now_ms())?,
+                Vec::new(),
+            )
         } else {
             requests::resolve(&template, &self.snapshot()["repeater"]["variables"])?
         };
@@ -86,11 +89,18 @@ impl Debugger {
         );
         let params = json!({"expression":expression,"returnByValue":true,"awaitPromise":false,"silent":true,"userGesture":false});
         let installation = if let Some(guard) = &marker {
-            connection.command_guarded("Runtime.evaluate", params, Duration::from_secs(3), || {
-                marker_fuzz::admit(&self.snapshot(), guard, execution, validation::now_ms())
-            }).await.and_then(|v| v.ok_or_else(|| Error::conflict("Marker scope retired before controller setup")))
+            connection
+                .command_guarded("Runtime.evaluate", params, Duration::from_secs(3), || {
+                    marker_fuzz::admit(&self.snapshot(), guard, execution, validation::now_ms())
+                })
+                .await
+                .and_then(|v| {
+                    v.ok_or_else(|| Error::conflict("Marker scope retired before controller setup"))
+                })
         } else {
-            connection.command("Runtime.evaluate", params, Duration::from_secs(3)).await
+            connection
+                .command("Runtime.evaluate", params, Duration::from_secs(3))
+                .await
         };
         if !installation
             .as_ref()
@@ -101,7 +111,8 @@ impl Debugger {
             });
             self.update(|s| {
                 if s["repeater"]["session_id"] == session
-                    && s["repeater"]["active_execution"]["execution_id"] == execution {
+                    && s["repeater"]["active_execution"]["execution_id"] == execution
+                {
                     s["repeater"]["active_execution"] = Value::Null;
                     s["repeater"]["state"] = json!("error");
                     s["repeater"]["message"] = json!(e.message);
@@ -113,9 +124,14 @@ impl Debugger {
             if let Err(error) = marker_fuzz::scope(&self.snapshot(), guard, validation::now_ms()) {
                 let cleanup = format!("globalThis[{key}]?.delete({identifier})");
                 let expected = json!({"instance_id":guard["instance_id"],"target_id":guard["target_id"],"experiment_id":guard["experiment_id"],"session_id":guard["session_id"],"execution_id":execution,"plan_sha256":guard["plan_sha256"],"case_index":guard["case_index"]});
-                let _ = connection.command_guarded("Runtime.evaluate", json!({"expression":cleanup,"returnByValue":true}), Duration::from_secs(1), || {
-                    marker_fuzz::cancellation(&self.snapshot(), &expected).is_ok()
-                }).await;
+                let _ = connection
+                    .command_guarded(
+                        "Runtime.evaluate",
+                        json!({"expression":cleanup,"returnByValue":true}),
+                        Duration::from_secs(1),
+                        || marker_fuzz::cancellation(&self.snapshot(), &expected).is_ok(),
+                    )
+                    .await;
                 self.update(|s| {
                     if s["repeater"]["active_execution"]["execution_id"] == execution {
                         s["repeater"]["active_execution"] = Value::Null;
@@ -139,9 +155,23 @@ impl Debugger {
             let clock = Instant::now();
             let params = json!({"expression":format!("({})({configuration})",include_str!("../../assets/request-interception-function.js")),"returnByValue":true,"awaitPromise":true,"silent":true,"userGesture":false,"timeout":timeout});
             let evaluated = if let Some(guard) = &marker {
-                let admission = connection.command_guarded("Runtime.evaluate", params, Duration::from_millis(timeout+2000), || {
-                    weak.upgrade().is_some_and(|debugger| marker_fuzz::admit(&debugger.snapshot(), guard, execution, validation::now_ms()))
-                }).await;
+                let admission = connection
+                    .command_guarded(
+                        "Runtime.evaluate",
+                        params,
+                        Duration::from_millis(timeout + 2000),
+                        || {
+                            weak.upgrade().is_some_and(|debugger| {
+                                marker_fuzz::admit(
+                                    &debugger.snapshot(),
+                                    guard,
+                                    execution,
+                                    validation::now_ms(),
+                                )
+                            })
+                        },
+                    )
+                    .await;
                 if matches!(&admission, Ok(None)) {
                     // A known-unsent case has no request-function finally block.
                     // Release only its exact still-owned controller; never remove
@@ -151,9 +181,21 @@ impl Debugger {
                         weak.upgrade().is_some_and(|debugger| marker_fuzz::cancellation(&debugger.snapshot(), &expected).is_ok())
                     }).await;
                 }
-                admission.and_then(|v| v.ok_or_else(|| Error::conflict("Marker scope retired before request dispatch; request was not sent")))
+                admission.and_then(|v| {
+                    v.ok_or_else(|| {
+                        Error::conflict(
+                            "Marker scope retired before request dispatch; request was not sent",
+                        )
+                    })
+                })
             } else {
-                connection.command("Runtime.evaluate", params, Duration::from_millis(timeout+2000)).await
+                connection
+                    .command(
+                        "Runtime.evaluate",
+                        params,
+                        Duration::from_millis(timeout + 2000),
+                    )
+                    .await
             };
             let result = evaluated.and_then(|value| {
                 if value["exceptionDetails"].is_object() {
@@ -183,7 +225,9 @@ impl Debugger {
                 "error"
             };
             let mut entry = json!({"id":execution,"started_at_ms":started,"completed_at_ms":validation::now_ms().max(started),"state":state,"collection_request_id":template["collection_request_id"],"variable_names":names,"request":template,"resolved_request":resolved,"response":response});
-            if let Some(guard) = marker { entry["marker_fuzz"] = guard; }
+            if let Some(guard) = marker {
+                entry["marker_fuzz"] = guard;
+            }
             let bytes = serde_json::to_vec(&entry).unwrap().len();
             entry["stored_bytes"] = json!(bytes);
             // Alignment reads immutable snapshots outside the shared state lock.
@@ -263,20 +307,34 @@ impl Debugger {
         let id = self.snapshot()["repeater"]["active_execution"]["execution_id"]
             .as_u64()
             .ok_or_else(|| Error::conflict("No Repeater request is running"))?;
-        let connection = self.connection.lock().await.clone().ok_or_else(|| Error::conflict("Isolated page is disconnected"))?;
+        let connection = self
+            .connection
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| Error::conflict("Isolated page is disconnected"))?;
         if let Some(expected) = request.get("expected_execution") {
             marker_fuzz::cancellation(&self.snapshot(), expected)?;
         }
         let mut matched = false;
         self.update(|s| {
             if s["repeater"]["active_execution"]["execution_id"] != id
-                || request.get("expected_execution").is_some_and(|expected| marker_fuzz::cancellation(s, expected).is_err()) { return; }
+                || request
+                    .get("expected_execution")
+                    .is_some_and(|expected| marker_fuzz::cancellation(s, expected).is_err())
+            {
+                return;
+            }
             matched = true;
             s["repeater"]["active_execution"]["cancel_requested"] = json!(true);
             s["repeater"]["state"] = json!("cancelling");
             s["repeater"]["message"] = json!("Cancelling the active Repeater request.");
         });
-        if !matched { return Err(Error::conflict("Expected Repeater execution is no longer active")); }
+        if !matched {
+            return Err(Error::conflict(
+                "Expected Repeater execution is no longer active",
+            ));
+        }
         let key = json!(self.repeater.key).to_string();
         let identifier = json!(id.to_string()).to_string();
         let expression = format!(
@@ -284,13 +342,28 @@ impl Debugger {
         );
         let params = json!({"expression":expression,"returnByValue":true,"awaitPromise":false,"silent":true,"userGesture":false});
         let command = if let Some(expected) = request.get("expected_execution") {
-            connection.command_guarded("Runtime.evaluate", params, Duration::from_secs(3), || {
-                marker_fuzz::cancellation(&self.snapshot(), expected).is_ok()
-            }).await.and_then(|v| v.ok_or_else(|| Error::conflict("Expected marker execution retired before cancellation dispatch")))
+            connection
+                .command_guarded("Runtime.evaluate", params, Duration::from_secs(3), || {
+                    marker_fuzz::cancellation(&self.snapshot(), expected).is_ok()
+                })
+                .await
+                .and_then(|v| {
+                    v.ok_or_else(|| {
+                        Error::conflict(
+                            "Expected marker execution retired before cancellation dispatch",
+                        )
+                    })
+                })
         } else {
-            connection.command("Runtime.evaluate", params, Duration::from_secs(3)).await
+            connection
+                .command("Runtime.evaluate", params, Duration::from_secs(3))
+                .await
         };
-        let result=command.and_then(|v|v["result"]["value"].as_bool().ok_or_else(||Error::protocol("Malformed cancellation result")));
+        let result = command.and_then(|v| {
+            v["result"]["value"]
+                .as_bool()
+                .ok_or_else(|| Error::protocol("Malformed cancellation result"))
+        });
         if !result.as_ref().is_ok_and(|v| *v) {
             self.update(|s| {
                 if s["repeater"]["active_execution"]["execution_id"] == id {

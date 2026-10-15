@@ -27,11 +27,14 @@ async function(config) {
       headers: config.headers,
       credentials: "omit",
       cache: "no-store",
-      redirect: "follow",
+      redirect: config.redirect === "error" ? "error" : "follow",
       referrerPolicy: "no-referrer",
       signal: controller.signal
     };
     if (config.body !== "") options.body = config.body;
+    if (config.expiresAtMs !== undefined && Date.now() >= config.expiresAtMs) {
+      throw new Error("Marker execution deadline expired before dispatch");
+    }
     const response = await fetch(config.url, options);
     const decoder = new TextDecoder();
     const bodyParts = [];
@@ -65,6 +68,20 @@ async function(config) {
       }
       bodyParts.push(decoder.decode());
     }
+    let body = bodyParts.join("");
+    // Marker mode bounds both raw stream bytes and retained UTF-8 text. Invalid
+    // input may expand to replacement characters, so a raw prefix cap alone is
+    // insufficient. Cut only at a complete UTF-8 code point; ordinary Repeater
+    // has no responseTextByteLimit and retains its existing behavior.
+    if (config.responseTextByteLimit !== undefined) {
+      const encoded = new TextEncoder().encode(body);
+      if (encoded.byteLength > config.responseTextByteLimit) {
+        let end = config.responseTextByteLimit;
+        while (end > 0 && (encoded[end] & 0xc0) === 0x80) end--;
+        body = new TextDecoder('utf-8', {ignoreBOM: true}).decode(encoded.subarray(0, end));
+        bodyTruncated = true;
+      }
+    }
     const headers = [];
     const headerEncoder = new TextEncoder();
     let headerBytes = 0;
@@ -96,7 +113,7 @@ async function(config) {
       url: response.url,
       headers,
       headersTruncated,
-      body: bodyParts.join(""),
+      body,
       bodyTruncated,
       durationMs: Math.max(0, Math.round(performance.now() - started)),
       cancelled: false,

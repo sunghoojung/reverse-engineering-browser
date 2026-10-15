@@ -106,6 +106,7 @@ javascript-check:
 	node tools/check-local-overrides.mjs
 	node tools/check-graphql-sdl.mjs
 	node tools/check-passive-security.mjs
+	node tools/check-marker-fuzz.mjs
 	node tools/check-owned-vm-integration.mjs
 	node tools/check-owned-vm-debugger-ui.mjs
 	node tools/check-vm-semantics.mjs

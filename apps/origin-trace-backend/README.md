@@ -253,3 +253,15 @@ For explicit local response/JavaScript snapshots, use the
 Preview and prepare are offline; `--arm` applies one reviewed, expiring rule to
 an exact primary disposable target, while guarded `--disarm` cannot clear a
 replacement rule accidentally. The API never reads an arbitrary filesystem path.
+
+## Literal marker fuzz CLI
+
+Use `node tools/prepare-marker-fuzz.mjs --input authored.json` from the repository
+root to preview a bounded, explicitly authored body/query marker plan. Save the
+reviewed plan with `--output`, then execute only with `tools/run-marker-fuzz.mjs`
+and its matching `--arm` digest against an exact disposable Repeater session.
+The CLI owns sequential/count/rate/aggregate-byte/deadline budgets; the backend
+adds strict per-case literal scope/digest checks and exact guarded cancellation.
+Ordinary Repeater behavior is unchanged. See
+[the versioned workflow](../../protocol/marker-fuzz-v1.md) for input, commands,
+privacy boundaries, per-case evidence and stop-on-unknown behavior.

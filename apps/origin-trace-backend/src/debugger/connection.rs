@@ -564,6 +564,39 @@ mod tests {
         connection.close().await;
     }
     #[tokio::test]
+    async fn queued_marker_scope_or_execution_retirement_sends_no_bytes() {
+        for retirement in ["target", "execution", "instance"] {
+            let (directory, connection, _events) = fixture(None, false).await;
+            let writer = connection.stdin.lock().await;
+            let guard = json!({"instance_id":"backend-one", "target_id":"owned", "experiment_id":1, "session_id":1, "expires_at_ms":2000});
+            let state = Arc::new(StdMutex::new(json!({"network":{"instance_id":"backend-one"}, "state":"running", "target":{"id":"owned"},
+                "request_interception":{"target_id":"owned", "experiment_id":1, "state":"ready", "rule":{"mode":"continue"}},
+                "repeater":{"session_id":1, "active_execution":{"execution_id":7, "marker_fuzz":guard, "cancel_requested":false}}})));
+            assert!(super::super::marker_fuzz::admit(&state.lock().unwrap(), &guard, 7, 1000));
+            let checked = state.clone();
+            let queued = connection.clone();
+            let command = tokio::spawn(async move {
+                queued.command_guarded("Runtime.evaluate", json!({"expression":"synthetic_secret"}), Duration::from_secs(2), || {
+                    super::super::marker_fuzz::admit(&checked.lock().unwrap(), &guard, 7, 1000)
+                }).await
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if !connection.pending.lock().unwrap().is_empty() { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            if retirement == "execution" { state.lock().unwrap()["repeater"]["active_execution"]["execution_id"] = json!(8); }
+            else if retirement == "instance" { state.lock().unwrap()["network"]["instance_id"] = json!("backend-two"); }
+            else { state.lock().unwrap()["target"]["id"] = json!("retired"); }
+            drop(writer);
+            assert!(command.await.unwrap().unwrap().is_none());
+            assert!(connection.pending.lock().unwrap().is_empty());
+            assert!(!directory.path().join("received").exists());
+            connection.close().await;
+        }
+    }
+    #[tokio::test]
     async fn explicit_reply_and_pre_send_capacity_remain_distinct() {
         let (directory, connection, mut events) = fixture(
             Some(json!({"id":1,"error":{"code":-32000,"message":"Synthetic application failure"}})),

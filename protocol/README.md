@@ -28,6 +28,9 @@ and UI activation remain unavailable pending the documented browser gates.
 local recorder and deterministic fixture export. Browser capture and VM-view
 ingestion are not implemented by that contract.
 
+[Literal marker fuzz workflow v1](marker-fuzz-v1.md) defines offline reviewed
+plans and explicitly armed, bounded disposable Repeater execution.
+
 ## Two representations
 
 1. Native hot paths use the fixed 320-byte C++ `EventRecord` in

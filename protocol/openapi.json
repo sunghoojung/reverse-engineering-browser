@@ -8551,6 +8551,9 @@
               "action": {
                 "const": "cancel_repeater_request",
                 "type": "string"
+              },
+              "expected_execution": {
+                "$ref": "#/components/schemas/MarkerFuzzExpectedExecution"
               }
             },
             "required": [
@@ -8559,7 +8562,7 @@
             "x-source": [
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
-            "description": "No action-specific request fields. Session/state prerequisites still apply.",
+            "description": "Optional expected_execution cancels only the exact still-active marker execution tuple. Without it, existing Repeater cancellation is unchanged.",
             "x-result-schema": "#/components/schemas/DebuggerRepeaterResult",
             "x-reb-execution": {
               "kind": "action",
@@ -10585,6 +10588,9 @@
                     "type": "null"
                   }
                 ]
+              },
+              "marker_fuzz": {
+                "$ref": "#/components/schemas/MarkerFuzzCaseGuard"
               }
             },
             "required": [
@@ -10596,7 +10602,7 @@
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/requests.rs"
             ],
-            "description": "Resolves {{variables}} in the isolated session. Resolved URL/method/headers/body are validated again; GET/HEAD cannot have a nonempty body. Returns initial execution state, not necessarily completed response.",
+            "description": "Resolves {{variables}} in the isolated session. Resolved URL/method/headers/body are validated again; GET/HEAD cannot have a nonempty body. Returns initial execution state, not necessarily completed response. Optional marker_fuzz selects the stricter literal, exact-scope per-case mode described in protocol/marker-fuzz-v1.md.",
             "x-result-schema": "#/components/schemas/DebuggerRepeaterResult",
             "x-reb-execution": {
               "kind": "action",
@@ -22267,6 +22273,135 @@
           }
         },
         "description": "Explicit bounded local UTF-8 snapshot. Exact URL/method, selected disposable target and experiment; expiry must be in next five minutes. See protocol/local-overrides-v1.md. No filesystem reads or automatic arming."
+      },
+      "MarkerFuzzCaseGuard": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "plan_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "case_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 15
+          },
+          "case_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16
+          },
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "x-max-utf8-bytes": 4096
+          },
+          "experiment_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "session_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "exact_origin": {
+            "type": "string",
+            "description": "Exact canonical credential-free HTTP(S) origin."
+          },
+          "exact_method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "HEAD",
+              "POST"
+            ]
+          },
+          "request_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expires_at_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "x-max-utf8-bytes": 128
+          }
+        },
+        "required": [
+          "version",
+          "plan_sha256",
+          "case_index",
+          "case_count",
+          "target_id",
+          "experiment_id",
+          "session_id",
+          "exact_origin",
+          "exact_method",
+          "request_sha256",
+          "expires_at_ms",
+          "instance_id"
+        ],
+        "description": "Explicit literal marker mode. Backend checks current exact disposable target/experiment/session, continue interception, canonical origin/method, reviewed request digest, <=8 KiB request fields, timeout 100..5000 ms and future deadline <=60 s. Only accept: */* and content-type: text/plain; charset=utf-8. No variable expansion or redirects; raw response prefix and retained UTF-8 text each <=8 KiB, with truncation marked; headers <=2 KiB. case_index < case_count. Aggregate plan/count/rate/byte scheduling is runner-owned."
+      },
+      "MarkerFuzzExpectedExecution": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "x-max-utf8-bytes": 4096
+          },
+          "experiment_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "session_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "execution_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "plan_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "case_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 15
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "x-max-utf8-bytes": 128
+          }
+        },
+        "required": [
+          "target_id",
+          "experiment_id",
+          "session_id",
+          "execution_id",
+          "plan_sha256",
+          "case_index",
+          "instance_id"
+        ],
+        "description": "Compare complete active marker execution identity before cancellation; stale or replacement executions are not cancelled."
       }
     }
   },

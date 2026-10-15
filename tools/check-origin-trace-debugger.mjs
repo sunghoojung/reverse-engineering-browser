@@ -1,3 +1,4 @@
+import {checkMarkerFuzzIntegration} from './marker-fuzz-integration.mjs';
 import {createHash} from 'node:crypto';
 import {checkWebSocketInteractions} from './check-websocket-ui.mjs';
 import {platformEditEvent, selectRenderedOption} from './rendered-keyboard.mjs';
@@ -6262,6 +6263,11 @@ const fixture = createServer((req, res) => {
     res.end();
     return;
   }
+  if (req.url === "/marker-redirect") {
+    res.writeHead(302, {Location: "/echo"});
+    res.end();
+    return;
+  }
   if (req.url === "/slow") {
     setTimeout(() => {
       if (!res.destroyed) {
@@ -6772,6 +6778,8 @@ try {
     );
     assert(s.repeater.history[3].response.cancelled);
     console.log(`PASS ${name} repeater cancellation`);
+    passed++;
+    await checkMarkerFuzzIntegration({baseUrl:url,fixtureUrl,get,until});
     passed++;
     await action("navigate_object_experiment", { url: fixtureUrl + "/page" });
     await until((s) => s.request_interception.pending_requests === 0);

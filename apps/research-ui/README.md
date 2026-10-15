@@ -248,6 +248,17 @@ history remain ephemeral. See [Native Console v2](../../protocol/native-console-
 for exact operation, bounds, contracts and required post-build verification.
 The synthetic wire fixture supplies scripted responses and never executes JS.
 
+### Private cookie import
+
+For an explicitly selected Chrome/Firefox cookie export, use the separate
+[user-operated import tool](../../protocol/cookie-import-v1.md):
+`node tools/import-browser-cookies.mjs --browser /absolute/path/to/chromium`.
+It applies and privately verifies a strict supported subset in a fresh,
+short-lived off-record browser context. A second local confirmation is required
+before browsing; clear/expiry closes the context and owned browser. This is a
+terminal handoff, not a menu/API action or a cookie-enabled Traffic experiment.
+Real credentials must remain with the user. The tool is not an origin firewall.
+
 ## Run
 
 ```sh

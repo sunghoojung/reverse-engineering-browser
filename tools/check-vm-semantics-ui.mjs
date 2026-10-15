@@ -181,6 +181,9 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  assert.equal(await evaluate(`document.querySelectorAll('${root} .vm-listing-row').length`),14);
  assert.match(await evaluate(`document.querySelector('${root} .vm-context-summary').textContent`),/owned-16bit-compatibility-demo/);
  await screenshot('vm-compatibility-demo-memory-store-desktop.png');
+ await click('.primary-nav > [data-screen="sources"]');await click('#nav-vm-workspace');
+ assert.equal(await evaluate(`document.querySelector('[aria-label="Execution step"]').value`),'6','Primary VM return preserves exact imported selection');
+ assert.equal(await evaluate(`document.querySelector('${root}').hidden`),false,'Primary VM return preserves imported provider');
  await ensureVisible('[aria-label="Execution step"]');await selectRenderedOption({evaluate,click,key,selector:'[aria-label="Execution step"]',index:13,keyboardFocus:true});
  await visibleClick('#vm-state-tab-instruction');assert.match(await text(),/halted/);
  await screenshot('vm-compatibility-demo-halted-desktop.png');

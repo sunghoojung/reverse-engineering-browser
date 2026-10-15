@@ -277,6 +277,8 @@ export async function checkOwnedVmDebuggerInteractions({evaluate, viewport, clic
   if (await evaluate('!!document.querySelector("#vm-show-owned")')) await click('#vm-show-owned');
   const capability = await data(); assert(capability.available, 'Rendered live acceptance requires the actual native helper'); assert.equal(capability.session, null, 'Use an isolated owned-fixture backend');
   await activate('create'); await wait('paused', '0'); const created = await data(); assert.equal(created.session.records.length, 0);
+  assert.equal(await evaluate("document.querySelector('#nav-vm-workspace').textContent"),'VM','Native state polling keeps the primary label compact');
+  assert.match(await evaluate("document.querySelector('#nav-vm-workspace').getAttribute('aria-label')"),/paused/);
   assert(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(toolbarSelector('[data-owned-vm-refresh]'))})`), 'Completed Create keeps the stable enabled fallback');
   await delay(800); assert.equal((await data()).session.executed_count, '0', 'Creation and reads do not execute');
   const originalTheme=await evaluate("document.documentElement.getAttribute('data-theme')");

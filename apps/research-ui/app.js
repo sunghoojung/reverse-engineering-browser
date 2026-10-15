@@ -10736,7 +10736,7 @@
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         if (typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.setVisible(screenName === 'vm');
         document.querySelectorAll('.nav-button').forEach(button => {
-          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && ['vm', 'field-provenance'].includes(screenName));
+          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && screenName === 'field-provenance');
           if (active) button.setAttribute('aria-current', 'page');
           else button.removeAttribute('aria-current');
         });

@@ -171,8 +171,8 @@ export async function runOwnedVmNativeBrowser(options) {
     await send('Runtime.enable'); await send('Page.enable'); await send('Network.enable'); await viewport(1440, 900);
     await send('Page.navigate', {url: endpoint});
     await until(() => evaluate('document.readyState === "complete" && typeof vmExecutionWorkspace !== "undefined" && !!vmExecutionWorkspace?.owned'), 'integrated application load');
-    await click('#advanced-navigation > summary'); await click('#nav-vm-workspace'); await click('#vm-show-owned');
-    await until(() => evaluate('vmExecutionWorkspace.owned.controller.model().view?.available && !document.querySelector("#screen-vm").hidden && !document.querySelector("#vm-owned-debugger").hidden'), 'Advanced → VM workspace → Live owned fixture');
+    await click('#nav-vm-workspace'); await click('#vm-show-owned');
+    await until(() => evaluate('vmExecutionWorkspace.owned.controller.model().view?.available && !document.querySelector("#screen-vm").hidden && !document.querySelector("#vm-owned-debugger").hidden'), 'VM tab → Live owned fixture');
     assert.equal(receipt.controls.length, 0, 'Opening integrated UI does not issue VM controls');
     phase = 'real rendered cooperative fixture flow';
     await checkOwnedVmDebuggerInteractions({evaluate, viewport, click, key, screenshot, root: '#vm-owned-debugger', toolbarRoot: '#vm-owned-controls'});

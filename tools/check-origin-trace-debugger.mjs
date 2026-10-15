@@ -2738,6 +2738,9 @@ async function canvasArtifact(id,text=canvasText,session='1') {
 function canvasContext(patch={}) {
   const sourceAssignments=[];
   class CanvasNode extends TrafficFixtureNode {
+    get parentElement(){return this.parentNode;}
+    matches(selector){return selector==='details[open]'?this.tagName==='DETAILS'&&this.open:super.matches(selector);}
+    focus(){document.activeElement=this;}
     set src(value){sourceAssignments.push(this);this.setAttribute('src',value);}get src(){return this.getAttribute('src')??'';}
   }
   const screen=new TrafficFixtureNode();screen.id='screen-signals';screen.hidden=patch.hidden??false;
@@ -2749,10 +2752,10 @@ function canvasContext(patch={}) {
   let context, events=[];
   const canvasEvents=artifacts=>artifacts.map(artifact=>({category:'canvas',type:'api_call',operation:'canvas.toDataURL',payload:Buffer.from('canvas.toDataURL').toString('hex'),
     session_id:artifact.session_id,process_id:1,frame_id:'1',sequence_number:artifact.creator_event_id,monotonic_time_ns:artifact.creator_event_id}));
-  context=ownedContext({functions:['canvasReadbackName','canvasRenderCaptures','canvasPreview','renderCanvasCapture','renderFingerprintRendering','showScreen'],
+  context=ownedContext({functions:['canvasReadbackName','canvasCallLabel','canvasRenderCaptures','canvasPreview','renderCanvasCapture','renderFingerprintRendering','showScreen'],
     document,elements,nativeCanvasDrawingMethods:new Set(),nativeCanvasCallLimit:128,
     integerValue:(event,key)=>BigInt(event[key]),integerText:(event,key)=>String(event[key]),decodePayload:event=>event.operation,
-    textElement:(tag,className,text)=>{const node=new TrafficFixtureNode(tag);node.className=className;node.textContent=text;return node;},
+    textElement:(tag,className,text)=>{const node=new CanvasNode(tag);node.className=className;node.textContent=text;return node;},
     signalEventKey:event=>`${event.session_id}:${event.sequence_number}`,matchingSignalProfileFamily:()=>null,
     renderSignalSurfaceOverview(){},renderFingerprintActivity(){context.api.renderFingerprintRendering(events);},
     investigationBeforeScreen(){},float32Panel:{cancel(){}},evidenceWorkspace:{sync(){},setVisible(){}},
@@ -3081,7 +3084,9 @@ const canvasPngUrl=bytes=>'data:image/png;base64,'+bytes.toString('base64');
   assert.deepEqual([...c.state.canvasPreviewOwners.values()].filter(owner=>owner.mounted).map(owner=>owner.artifact.artifact_id),['6','5','4','3']);
   assert.match(c.elements.signalRenderList.textContent,/16 Mi-pixel/);
   const oldImages=[...c.elements.signalRenderList.querySelectorAll('img')];
-  for(let i=0;i<10;i++)c.render();assert(oldImages.every(image=>!image.src));assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,4);
+  for(let i=0;i<10;i++)c.render();assert(oldImages.every(image=>image.src));
+  assert.deepEqual(c.elements.signalRenderList.querySelectorAll('img'),oldImages,'Unchanged refresh keeps admitted image nodes without overlapping source allocation');
+  assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,4);
   c.events(artifacts.slice(0,2));c.render();assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,2);
   assert(artifacts.slice(2).every(artifact=>artifact.content===undefined));
   c.state.signalView='activity';c.render();assert(c.sourceAssignments.every(image=>!image.src));
@@ -3092,7 +3097,23 @@ const canvasPngUrl=bytes=>'data:image/png;base64,'+bytes.toString('base64');
   c.events([artifact]);c.render();await canvasSettled(c);
   assert.match(c.elements.signalRenderList.textContent,/Sensitive Canvas output was captured locally/);
   const oldImage=c.elements.signalRenderList.querySelector('img'),owner=c.state.canvasPreviewOwners.values().next().value;
-  c.render();const currentImage=c.elements.signalRenderList.querySelector('img');
+  const pressedSummary=c.elements.signalRenderList.querySelector('summary'),details=pressedSummary.parentNode;
+  details.open=true;pressedSummary.focus();
+  const sourceCount=c.sourceAssignments.length;
+  for(let refresh=0;refresh<200;refresh++)c.render();
+  assert.equal(c.elements.signalRenderList.querySelector('summary'),pressedSummary,'Unchanged refresh must retain the pressed native summary until pointer release');
+  assert.equal(c.sandbox.document.activeElement,pressedSummary);assert.equal(details.open,true);
+  assert.equal(c.sourceAssignments.length,sourceCount,'Unchanged refresh does not reassign image src');
+  // The production reader refuses a second write while the verified text is
+  // present. Replaced source objects and catalog failure are tested separately.
+  c.sandbox.fetch=async()=>{throw new Error('Verified Canvas text must not be fetched or mutated in place');};
+  await c.api.loadArtifactContent(artifact,{canvasOwner:owner});assert.equal(artifact.content,canvasText);
+  c.state.canvasImageCaptureEnabled=false;c.render();
+  assert.notEqual(c.elements.signalRenderList.querySelector('summary'),pressedSummary,'Changed visible input invalidates render cache');
+  assert.equal(c.elements.signalRenderList.querySelector('details').open,true,'Genuine update preserves expanded disclosure');
+  assert.equal(c.sandbox.document.activeElement,c.elements.signalRenderList.querySelector('summary'),'Genuine update restores disclosure focus');
+  c.sandbox.fetch=async()=>new Response(canvasText);
+  const currentImage=c.elements.signalRenderList.querySelector('img');
   for(const fail of oldImage.listeners.get('error'))fail();assert.equal(owner.imageError,undefined,'Detached error cannot poison current render');
   for(const fail of currentImage.listeners.get('error'))fail();assert.match(owner.imageError,/could not decode/);
   assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0);assert.equal(artifact.content,canvasText);
@@ -3104,6 +3125,24 @@ const canvasPngUrl=bytes=>'data:image/png;base64,'+bytes.toString('base64');
   assert.equal(forged.querySelectorAll('img').length,0,'Copied descriptors cannot reuse owner admission');
   const absent=canvasContext();absent.events([artifact]);absent.render();assert.match(absent.elements.signalRenderList.textContent,/Operation metadata remains available/);
   canvasOwnershipReceipt.push({test:'decoder_error_visible_retained_bytes_stale_dom_and_owner_events_ignored',status:'passed'});
+}
+{
+  const artifact=await canvasArtifact('1'),c=canvasContext({state:{artifacts:[artifact]},fetch:async()=>new Response(canvasText)});
+  c.events([artifact]);c.render();await canvasSettled(c);
+  const original=c.elements.signalRenderList.querySelector('summary'),oldImage=c.elements.signalRenderList.querySelector('img');
+  const originalCaptures=c.sandbox.canvasRenderCaptures;
+  c.sandbox.canvasRenderCaptures=events=>originalCaptures(events).map(capture=>({...capture,calls:[{name:'fillRect',arguments:[],observedOnly:true}]}));
+  c.render();assert.notEqual(c.elements.signalRenderList.querySelector('summary'),original,'Changed calls replace stale cards');assert.equal(oldImage.src,'');
+  const currentImage=c.elements.signalRenderList.querySelector('img');
+  c.state.artifactReceiverError='Catalog unavailable';c.render();
+  assert.equal(currentImage.src,'');assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0);
+  assert.equal(c.state.canvasPreviewOwners.size,0,'Catalog error retires every owner');
+  c.state.artifactReceiverError=null;
+  const replacement=await canvasArtifact('1',canvasText,'2');c.state.artifacts=[replacement];c.events([replacement]);c.render();await canvasSettled(c);
+  assert.notEqual(c.elements.signalRenderList.querySelector('summary'),original,'New session cannot reuse old disclosure');
+  assert(c.elements.signalRenderList.querySelector('img'));
+  c.events([]);c.render();assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0);assert.equal(c.state.canvasPreviewOwners.size,0);
+  canvasOwnershipReceipt.push({test:'unchanged_pressed_summary_and_image_stability_changed_inputs_catalog_failure_and_scope_invalidation',status:'passed',unchangedRefreshes:200});
 }
 console.log('PASS Canvas PNG admission before img.src: declared axes/per-image/gallery pixels, narrow static RGB/RGBA8 profile, CRC/chunk/base64 validation, no inflation, exact owners and stale decoder-error protection (not decoder-memory or rendered QA)');
 

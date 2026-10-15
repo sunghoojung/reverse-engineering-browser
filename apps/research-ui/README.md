@@ -843,7 +843,11 @@ current readbacks. Canvas owns a separate maximum of 24 previews and 8 MiB of
 UTF-16 text reservations/retained text; each descriptor reserves twice its
 encoded byte size before admission (at most 2 MiB encoded bytes per preview).
 Newest previews have priority, and budget omissions remain labeled without
-refetching on every refresh. At most two unfinished preview reads are allowed,
+refetching on every refresh. Unchanged polling retains the same cards, native
+disclosure controls and admitted image nodes, including across pointer press
+and release. Changed render inputs or exact source ownership invalidate that
+reuse; updated disclosures preserve their expanded state and focus.
+At most two unfinished preview reads are allowed,
 including retired reads whose fetch or response-body/reader cancellation has
 not settled. Header/body errors remain visible immediately; explicit retries
 do not bypass cancellation credits. Their bounded streaming

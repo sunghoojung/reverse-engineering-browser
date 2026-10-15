@@ -483,6 +483,7 @@
         // Remove src before detaching: hidden/detached gallery nodes must not own image data.
         elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
         elements.signalRenderList.replaceChildren();
+        delete elements.signalRenderList.canvasRender;
       }
 
       function syncCanvasPreviews(captures) {
@@ -706,7 +707,7 @@
         // Count only the exact current owners and prioritize newest captures.
         // Old DOM sources are removed below before any new source is assigned.
         for (const owner of state.canvasPreviewOwners?.values() ?? []) {
-          delete owner.mounted; delete owner.image;
+          delete owner.mounted;
         }
         let pixels = 0;
         for (const capture of captures) {
@@ -728,6 +729,29 @@
             ? `${captures.length} newest of ${readbackCount} canvas readbacks`
             : `${captures.length} canvas ${captures.length === 1 ? 'readback' : 'readbacks'}`
           : 'No canvas readbacks';
+        // Keep the native activation target alive across unchanged polling,
+        // including a refresh between pointer-down and pointer-up. The stamp
+        // contains only bounded render inputs, never another copy of image text.
+        // Owner/object identity also matters: a replaced source must retire its
+        // old image and handlers even when its visible metadata is unchanged.
+        const owners = captures.map(capture => capture.artifact &&
+          state.canvasPreviewOwners?.get(sourceIdentity(capture.artifact)));
+        const stamp = JSON.stringify([state.canvasImageCaptureEnabled, state.artifactReceiverError, captures.map((capture, index) => {
+          const artifact = capture.artifact, owner = owners[index];
+          return [capture.id, capture.context, capture.width, capture.height, capture.readback,
+            capture.demo, capture.calls, capture.callsTruncated, capture.operationHash,
+            signalEventKey(capture.evidenceEvent), matchingSignalProfileFamily(capture.evidenceEvent)?.confidence,
+            capture.previewReason, artifact && sourceIdentity(artifact), artifact && sourceIsCurrent(artifact),
+            artifact?.artifact_id, artifact?.content !== undefined, artifact?.contentTruncated,
+            artifact?.loading, artifact?.loadError, artifact?.canvasPreviewNotice,
+            owner?.mounted, owner?.imageInfo, owner?.imageError];
+        })]);
+        const previous = elements.signalRenderList.canvasRender;
+        if (captures.length && previous?.stamp === stamp &&
+            owners.every((owner, index) => owner === previous.owners[index] &&
+              captures[index].artifact === previous.artifacts[index])) return;
+        delete elements.signalRenderList.canvasRender;
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) delete owner.image;
         if (!captures.length) {
           elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
           elements.signalRenderList.replaceChildren(textElement(
@@ -747,6 +771,7 @@
           detail.open = expanded.has(detail.dataset.captureKey);
           if (focused && detail.dataset.captureKey === focused) detail.querySelector('summary').focus({preventScroll: true});
         });
+        elements.signalRenderList.canvasRender = {stamp, owners, artifacts: captures.map(capture => capture.artifact)};
       }
 
       function renderSignalSurfaceOverview(signalEvents) {

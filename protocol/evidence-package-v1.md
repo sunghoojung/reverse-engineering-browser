@@ -318,6 +318,10 @@ UTF-8 bytes per string. There are at most 1024 events, 64 artifacts, 4096
 relationships, and 4096 gaps, with the same selector bounds. Results contain at
 most 64 issues and 64 KiB. Runtime also enforces its bounded concurrency and
 two-second cooperative CPU budget; these are not hard process-kill guarantees.
+The fixed embedded validation schema is initialized before that per-input
+budget starts, including when another caller is initializing it. Parsing,
+validation and canonicalization of supplied metadata still share the same
+two seconds. Comparison and export keep their existing whole-work deadlines.
 Parsed resource-limit or CPU-budget exhaustion produces safe `invalid` result
 data with `resource_limit`; request-body read/admission deadlines remain HTTP
 408. Large object-array uniqueness is checked semantically rather than through

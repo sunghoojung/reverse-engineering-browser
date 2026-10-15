@@ -9,6 +9,7 @@ import {join, resolve} from 'node:path';
 import {runInNewContext} from 'node:vm';
 import {network} from './traffic-capture-qa.mjs';
 import {checkPassiveSecurityInteractions} from './check-passive-security-ui.mjs';
+import {selectRenderedOption} from './rendered-keyboard.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const traffic = await readFile(join(root, 'apps/research-ui/traffic_view.js'), 'utf8');
@@ -191,13 +192,15 @@ async function checkBrowser() {
   async function until(check,description) {phase=description;for(let i=0;i<200;i++){const value=await check();if(value)return value;await delay(50);}throw new Error(`Timed out: ${description}`);}
   const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{commands.delete(id);reject(new Error(`CDP timeout: ${method}`));},10000);commands.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params}));});
   const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.text+' '+JSON.stringify(result.exceptionDetails.exception));return result.result.value;};
-  const key=async (key,code)=>{
+  const key=async (key,code,options={})=>{
     const windowsVirtualKeyCode={Tab:9,Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowUp:38}[key];
-    // Match the repository's native CDP input shape. Enter needs its character
-    // event for native summary/button activation, not only a keydown event.
-    await send('Input.dispatchKeyEvent',{type:key==='Enter'?'keyDown':'rawKeyDown',key,code,windowsVirtualKeyCode,
-      ...(key==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
-    await send('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode});
+    // Text-producing native input is required for Enter activation and macOS
+    // select type-ahead; navigation keys retain rawKeyDown semantics.
+    const event={key,code,windowsVirtualKeyCode,
+      ...(key==='Enter'?{text:'\r',unmodifiedText:'\r'}:{}),...options};
+    await send('Input.dispatchKeyEvent',{type:event.text?'keyDown':'rawKeyDown',...event});
+    const {text,unmodifiedText,...release}=event;
+    await send('Input.dispatchKeyEvent',{type:'keyUp',...release});
   };
   const click=async selector=>{const point=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});n.scrollIntoView({block:'nearest'});const r=n.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});};
   const shot=async name=>{const result=await send('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(result.data,'base64'));};
@@ -320,18 +323,14 @@ async function checkBrowser() {
     }
     await scrollCatalogTo('.api-catalog-differences li');
     await shot('catalog-comparison-differences-360');
-    await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').focus()");
-    await key('End','End');
+    await selectRenderedOption({evaluate,click,key,selector:'.api-catalog-compare-controls label:nth-child(2) select',index:2,keyboardFocus:true});
     assert.equal(await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').value"),'2');
     assert.equal(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),'','Changing a comparison choice clears stale results');
     await click('.api-catalog-compare-controls button');
     assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/body_truncated/);
     await scrollCatalogTo('.api-catalog-comparison-result p:last-child');
     await shot('catalog-comparison-unavailable-360');
-    // Programmatic focus avoids opening a platform select popup; the selection
-    // itself still uses keyboard input, including the same-source refusal.
-    await evaluate("document.querySelector('.api-catalog-compare-controls label:nth-child(2) select').focus()");
-    await key('Home','Home');
+    await selectRenderedOption({evaluate,click,key,selector:'.api-catalog-compare-controls label:nth-child(2) select',index:0,keyboardFocus:true});
     assert.equal(await evaluate("document.querySelector('.api-catalog-compare-controls button').disabled"),true);
     assert.match(await evaluate("document.querySelector('.api-catalog-comparison-result').textContent"),/two different captured source identities/);
     await click('#api-catalog-search');await send('Input.insertText',{text:'cursor'});
@@ -340,7 +339,7 @@ async function checkBrowser() {
     assert.equal(await evaluate("document.querySelectorAll('.api-catalog-observation').length"),1,'Expanded endpoint stays open after filtering');
     assert.match(await evaluate("document.querySelector('.api-catalog-observation').textContent"),/synthetic-variant/);
     await click('#api-catalog-clear');
-    await evaluate("document.querySelector('#api-catalog-response').focus()");await key('End','End');
+    await selectRenderedOption({evaluate,click,key,selector:'#api-catalog-response',index:3,keyboardFocus:true});
     assert.match(await evaluate("document.querySelector('#api-catalog-filter-status').textContent"),/1 of 3 observations/);
     assert.match(await evaluate("document.querySelector('.api-catalog-observation').textContent"),/503/);
     await click('#api-catalog-clear');

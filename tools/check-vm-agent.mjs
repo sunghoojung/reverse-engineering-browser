@@ -88,6 +88,108 @@ try {
   for (const file of [link, dir, fifo, '/dev/null', join(directory, 'missing')]) await bad(['inspect', '--input', file], 2, 'input_refused');
   assert.equal(calls.length, 0, 'Offline commands and invalid state must remain offline');
 
+  const definition = {format: 'reb-vm-definition-v1', definition_id: 'agent-static', architecture: 'stack',
+    opcode_bytes: 1, operand_endianness: 'little', register_count: 0, opcodes: [
+      {code: '01', mnemonic: 'PUSH', operands: [{name: 'value', width: 2, signed: true, kind: 'immediate'}],
+        semantics: {operation: 'stack_const', args: ['value']}, flow: {kind: 'next'}},
+      {code: 'ff', mnemonic: 'HALT', operands: [], semantics: {operation: 'halt', args: []}, flow: {kind: 'halt'}},
+    ]};
+  const bytecode = {format: 'reb-vm-bytecode-v1', image_id: 'agent-bytes', definition_id: 'agent-static',
+    entry_offsets: [0], bytes_hex: '01feffff'};
+  const definitionFile = await input('definition.json', definition), bytecodeFile = await input('bytecode.json', bytecode);
+  const staticArgs = command => [command, '--definition', definitionFile, '--input', bytecodeFile];
+  const definitionResult = await good('validate-definition', '--definition', definitionFile);
+  assert.equal(definitionResult.format, 'reb-vm-agent-static-analysis-v1');
+  assert.deepEqual(definitionResult.result, {valid: true, definition});
+  assert.equal(definitionResult.definition_source_sha256, hash(await readFile(definitionFile)));
+  assert.equal(definitionResult.source_sha256, null); assert.equal(definitionResult.executes_imported_code, false);
+  const decoded = await good(...staticArgs('decode-bytecode'));
+  assert.deepEqual(decoded.result.instructions.map(value => [value.offset, value.size, value.opcode, value.operands.map(item => item.value)]),
+    [[0, 3, '01', [-2]], [3, 1, 'ff', []]]);
+  assert.equal(decoded.source_sha256, hash(await readFile(bytecodeFile)));
+  assert.equal(decoded.result.runtime_state, 'unknown'); assert.equal(decoded.result.equivalence_proven, false);
+  assert.equal(Object.hasOwn(decoded.result, 'cfg'), false);
+  assert(decoded.result.instructions.every(value => !Object.hasOwn(value, 'pseudocode')));
+  const analyzed = await good(...staticArgs('analyze-static'));
+  assert.equal(analyzed.result.format, 'reb-vm-static-analysis-v1');
+  assert.equal(analyzed.result.provenance.definition_source_sha256, definitionResult.definition_source_sha256);
+  assert.equal(analyzed.result.provenance.image_source_sha256, decoded.source_sha256);
+  assert.equal(analyzed.result.provenance.image_bytes_sha256, hash(Buffer.from('01feffff', 'hex')));
+  assert.equal(analyzed.result.cfg.complete, false); assert.equal(analyzed.executes_imported_code, false);
+  const instruction = await good(...staticArgs('select-instruction'), '--pc', '3');
+  assert.equal(instruction.result.instruction.id, 'insn:3'); assert.equal(instruction.result.instruction.offset, 3);
+  assert.deepEqual(instruction.result.pseudocode.map(value => [value.instruction_id, value.offset]), [['insn:3', 3]]);
+  assert.equal(instruction.result.runtime_state, 'unknown'); assert.equal(instruction.result.equivalence_proven, false);
+  assert.deepEqual(instruction.result.outgoing_edges, []);
+  assert.deepEqual(instruction.result.incoming_edges, [{from_offset: 0, to_offset: 3, kind: 'fallthrough', status: 'resolved', evidence: 'declared_static'}]);
+  const prettyDefinition = await input('definition-pretty.json', JSON.stringify(definition, null, 2));
+  const prettyImage = await input('bytecode-pretty.json', JSON.stringify(bytecode, null, 2));
+  const pretty = await good('analyze-static', '--definition', prettyDefinition, '--input', prettyImage);
+  assert.notEqual(pretty.definition_source_sha256, analyzed.definition_source_sha256);
+  assert.notEqual(pretty.source_sha256, analyzed.source_sha256);
+  assert.equal(pretty.result.provenance.definition_canonical_sha256, analyzed.result.provenance.definition_canonical_sha256);
+  assert.equal(pretty.result.provenance.image_bytes_sha256, analyzed.result.provenance.image_bytes_sha256);
+  const unknownFile = await input('unknown-bytecode.json', {...bytecode, bytes_hex: '01feff02ff'});
+  const unknown = await good('analyze-static', '--definition', definitionFile, '--input', unknownFile);
+  assert.equal(unknown.result.coverage.stop_reason, 'unknown_opcode');
+  assert.equal(unknown.result.coverage.decoded_bytes, 3); assert.equal(unknown.result.coverage.undecoded_bytes, 2);
+  await bad(['select-instruction', '--definition', definitionFile, '--input', unknownFile, '--pc', '4'], 2, 'selection_refused');
+  for (const pc of ['1', '2', '4', '03', '-0', '-1', '+3', '3.0', '3e0', '9007199254740992']) {
+    await bad([...staticArgs('select-instruction'), '--pc', pc], 2, 'selection_refused');
+  }
+  const wrongDefinition = await input('wrong-definition.json', {...bytecode, definition_id: 'other'});
+  await bad(['analyze-static', '--definition', definitionFile, '--input', wrongDefinition], 2, 'analysis_refused');
+  for (const args of [
+    ['validate-definition', '--definition', definitionFile, '--input', bytecodeFile],
+    [...staticArgs('analyze-static'), '--base-url', base], [...staticArgs('decode-bytecode'), '--timeout-ms', '1'],
+    [...staticArgs('select-instruction')], ['analyze-static', '--input', bytecodeFile],
+    ['execute-bytecode', '--definition', definitionFile, '--input', bytecodeFile],
+  ]) await bad(args, 2, 'usage');
+  for (const data of ['{}', '{"format":1,"format":2}', '\ufeff' + JSON.stringify(definition), Buffer.from([0xff]), ' '.repeat(1048577)]) {
+    const malformed = await input('malformed-static.json', data);
+    await bad(['validate-definition', '--definition', malformed], 2, 'input_refused');
+    await bad(['analyze-static', '--definition', definitionFile, '--input', malformed], 2, 'input_refused');
+  }
+  for (const file of [link, dir, fifo, '/dev/null', join(directory, 'missing')]) {
+    await bad(['validate-definition', '--definition', file], 2, 'input_refused');
+    await bad(['analyze-static', '--definition', definitionFile, '--input', file], 2, 'input_refused');
+  }
+  const blockedNetwork = await input('network-blocker.cjs', `
+    const deny = () => { throw Error('Offline command attempted network access'); };
+    for (const name of ['node:http', 'node:https']) {
+      const api = require(name); api.request = deny; api.get = deny;
+    }
+    require('node:net').Socket.prototype.connect = deny;
+    require('node:tls').connect = deny;
+    require('node:dns').lookup = deny;
+    globalThis.fetch = deny;
+    require('node:module').syncBuiltinESMExports();
+  `);
+  for (const args of [['capabilities'], ['validate-definition', '--definition', definitionFile],
+    staticArgs('decode-bytecode'), staticArgs('analyze-static'), [...staticArgs('select-instruction'), '--pc', '0']]) {
+    const offline = spawnSync(process.execPath, ['--require', blockedNetwork, cli, ...args], {encoding: 'utf8', timeout: 10000});
+    assert.equal(offline.status, 0, offline.stderr); assert.equal(offline.stderr, '');
+    assert.equal(typeof JSON.parse(offline.stdout), 'object');
+  }
+  const denseDefinition = {...definition, opcodes: [{code: '00', mnemonic: 'UNSPECIFIED',
+    operands: Array.from({length: 8}, (_, index) => ({name: `arg${index}`, width: 1, signed: false, kind: 'immediate'})),
+    semantics: {operation: 'unknown', args: []}, flow: {kind: 'next'}}]};
+  const denseDefinitionFile = await input('dense-definition.json', denseDefinition);
+  const denseImageFile = await input('dense-bytecode.json', {...bytecode, bytes_hex: '00'.repeat(9 * 4096)});
+  await bad(['analyze-static', '--definition', denseDefinitionFile, '--input', denseImageFile], 2, 'output_limit');
+  const definitionBytes = JSON.stringify(definition);
+  const paddedDefinition = await input('max-file-definition.json', definitionBytes + ' '.repeat(1048576 - Buffer.byteLength(definitionBytes)));
+  const exactLimit = await good('validate-definition', '--definition', paddedDefinition);
+  assert.equal(exactLimit.definition_source_sha256, hash(await readFile(paddedDefinition)));
+  const registry = capabilities().imported_static;
+  assert.deepEqual(registry.commands, ['validate-definition', 'decode-bytecode', 'analyze-static', 'select-instruction']);
+  assert.equal(registry.live_capture_adapter.available, false); assert.equal(registry.executes_plugins, false);
+  assert.equal(registry.network_requests, 0); assert.equal(registry.runtime_state, 'unknown');
+  assert.equal(capabilities().owned.creation.available, false);
+  assert.equal(await readFile(definitionFile, 'utf8'), JSON.stringify(definition));
+  assert.equal(await readFile(bytecodeFile, 'utf8'), JSON.stringify(bytecode));
+  assert.equal(calls.length, 0, 'All static import commands must remain offline and preserve source files');
+
   reply(view()); assert.deepEqual(await good(...statusArgs), view()); assert.deepEqual(calls.at(-1), {method: 'GET', path: '/api/vm-debugger', headers: {accept: 'application/json', origin: base, host: base.slice(7), connection: 'close'}, body: ''});
   assert.deepEqual(await good(...traceArgs), view()); const query = new URL(calls.at(-1).path, base); assert.equal(query.pathname, '/api/vm-debugger/trace'); assert.deepEqual(Object.fromEntries(query.searchParams), {backend_instance_id: 'instance', session_id: 'session', run_id: 'run', run_generation: '9007199254740993'});
   const unavailable = {...view(), available: false, unavailable_reason: 'Authored unavailable fixture', session: null}; reply(unavailable); assert.deepEqual(await good(...statusArgs), unavailable);
@@ -158,4 +260,4 @@ try {
 } finally {
   for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); await rm(directory, {recursive: true, force: true});
 }
-console.log('PASS VM agent facade: offline capabilities/analysis, exact provenance/u64 scope, explicit controls, authored loopback transport, bounded strict responses, pending/rejected/unknown outcomes and no retries. No native execution or rendered acceptance claimed.');
+console.log('PASS VM agent facade: offline capabilities/observations/declarative static analysis, exact provenance/u64 scope, explicit controls, authored loopback transport, bounded strict responses, pending/rejected/unknown outcomes and no retries. No native execution or rendered acceptance claimed.');

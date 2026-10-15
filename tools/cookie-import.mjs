@@ -45,8 +45,9 @@ function normalize(row,format,destination,now) {
       row.name.startsWith('__Http-') && (!row.secure || !row.httpOnly) || row.name.startsWith('__Host-Http-') && (!row.secure || !row.httpOnly || !row.hostOnly || row.path !== '/')) fail('prefix');
   if (row.session ? Object.hasOwn(row,'expirationDate') : typeof row.expirationDate !== 'number' || !Number.isFinite(row.expirationDate) ||
       row.expirationDate <= now+5 || row.expirationDate > now+400*86400) fail('expiry');
-  const param={name:row.name,value:row.value,url:destination.origin+'/',path:row.path,secure:row.secure,httpOnly:row.httpOnly};
-  if (!row.hostOnly) param.domain='.'+destination.host;
+  // Chromium promotes Secure when CookieParam.url is HTTPS, even with secure:false.
+  // Domain-only input preserves the reviewed flag; no leading dot means host-only.
+  const param={name:row.name,value:row.value,domain:(row.hostOnly?'':'.')+destination.host,path:row.path,secure:row.secure,httpOnly:row.httpOnly};
   if (sameSites[row.sameSite]) param.sameSite=sameSites[row.sameSite];
   if (!row.session) param.expires=row.expirationDate;
   return {param,session:row.session,hostOnly:row.hostOnly,sameSite:row.sameSite};

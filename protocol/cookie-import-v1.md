@@ -90,6 +90,12 @@ requires `firstPartyDomain`, exactly the empty string.
   rather than encoded or repaired. Paths must begin with `/`, be printable ASCII
   at most 1024 bytes, and contain no semicolon or backslash.
 - Preserve `Secure` and `HttpOnly` booleans and valid security prefixes.
+  CDP receives `domain` without a leading dot for host-only cookies and with a
+  leading dot for domain cookies. `url` is omitted: Chromium otherwise promotes
+  `secure:false` to true for an HTTPS cookie URL. This is storage construction,
+  not navigation; the separately reviewed destination remains HTTPS. Readback
+  still requires the exact reviewed Secure flag, including false. See Chromium's
+  [cookie parameter normalization](https://chromium.googlesource.com/chromium/src/+/ab1bea184dd1273785ed3510992f2a977e94c180/content/browser/devtools/protocol/network_handler.cc#402).
   Preserve `strict`, `lax`, `no_restriction` and `unspecified` SameSite separately;
   unspecified is omitted from CDP, not rewritten to explicit Lax.
   SameSite=None without Secure is refused.

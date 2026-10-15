@@ -279,6 +279,14 @@ export async function checkOwnedVmDebuggerInteractions({evaluate, viewport, clic
   await activate('create'); await wait('paused', '0'); const created = await data(); assert.equal(created.session.records.length, 0);
   assert(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(toolbarSelector('[data-owned-vm-refresh]'))})`), 'Completed Create keeps the stable enabled fallback');
   await delay(800); assert.equal((await data()).session.executed_count, '0', 'Creation and reads do not execute');
+  const originalTheme=await evaluate("document.documentElement.getAttribute('data-theme')");
+  for(const theme of ['dark','light']){
+    await evaluate(`document.documentElement.setAttribute('data-theme',${JSON.stringify(theme)})`);
+    const roles=await evaluate(`(()=>{const style=getComputedStyle(document.querySelector('#screen-vm'));const rgb=hex=>'rgb('+hex.trim().slice(1).match(/../g).map(x=>parseInt(x,16)).join(', ')+')';return [...document.querySelectorAll('#vm-owned-controls [data-owned-vm-action]')].map(button=>{const action=button.getAttribute('data-owned-vm-action'),role=button.disabled?'disabled':['create','run','step'].includes(action)?'action':['pause','reset'].includes(action)?'change':'stop';return {action,actual:getComputedStyle(button).backgroundColor,expected:rgb(style.getPropertyValue('--vm-'+role+'-bg'))};});})()`);
+    assert.equal(roles.length,7);for(const role of roles)assert.equal(role.actual,role.expected,`${theme} native ${role.action} must use its semantic color`);
+  }
+  await evaluate(originalTheme===null?"document.documentElement.removeAttribute('data-theme')":`document.documentElement.setAttribute('data-theme',${JSON.stringify(originalTheme)})`);
+
   let reachedStep = false;
   for (let i = 0; i < 20; i++) {
     if (await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(toolbarSelector(control('step')))})`)) { reachedStep = true; break; }

@@ -3986,3 +3986,65 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   }
   #screen-vm:not([hidden]):has(> #vm-owned-controls:not([hidden])) > #vm-semantics-workflow:not([hidden]) .vm-execution-body { min-height: 0; }
 }
+
+/* VM semantic color roles: labels, selected rails and change text remain the
+   non-color cues. These tokens do not change workspace geometry. */
+#screen-vm {
+  --vm-action-bg: #c4b5fd; --vm-action-fg: #211b36;
+  --vm-control-bg: #34304c; --vm-control-fg: #eeeaff; --vm-control-line: #8d83a9;
+  --vm-selected-bg: #123b3e; --vm-selected-fg: #c8fff4; --vm-selected-line: #5eead4;
+  --vm-change-bg: #47331b; --vm-change-fg: #ffdfa2;
+  --vm-stop-bg: #4c2636; --vm-stop-fg: #ffb3c7;
+  --vm-focus: #facc15; --vm-disabled-bg: #302e3d; --vm-disabled-fg: #a9a5bc;
+}
+:root[data-theme="light"] #screen-vm {
+  --vm-action-bg: #5b21b6; --vm-action-fg: #ffffff;
+  --vm-control-bg: #f0ebff; --vm-control-fg: #452278; --vm-control-line: #80709a;
+  --vm-selected-bg: #d6f5ef; --vm-selected-fg: #134e4a; --vm-selected-line: #0f766e;
+  --vm-change-bg: #fff1cd; --vm-change-fg: #713f12;
+  --vm-stop-bg: #fde4ec; --vm-stop-fg: #9d174d;
+  --vm-focus: #5b21b6; --vm-disabled-bg: #eceaf0; --vm-disabled-fg: #666171;
+}
+#screen-vm :where(.vm-workspace-switch button, .vm-step-controls button, .vm-listing-pager button,
+  .vm-panel-controls button, .vm-context-header button, .vm-execution-navigation > button,
+  .owned-vm-debugger-actions button, .owned-vm-debugger-tabs button, .owned-vm-debugger-opcodes button) {
+  background: var(--vm-control-bg); color: var(--vm-control-fg); border-color: var(--vm-control-line);
+}
+#screen-vm :is(.vm-file-control, [data-owned-vm-action="create"], [data-owned-vm-action="run"], [data-owned-vm-action="step"]) {
+  background: var(--vm-action-bg); color: var(--vm-action-fg); border-color: var(--vm-action-bg);
+}
+#screen-vm :is([data-owned-vm-action="pause"], [data-owned-vm-action="reset"]) {
+  background: var(--vm-change-bg); color: var(--vm-change-fg); border-color: var(--vm-change-fg);
+}
+#screen-vm :is([data-owned-vm-action="stop"], [data-owned-vm-action="close"], .vm-clear-traces) {
+  background: var(--vm-stop-bg); color: var(--vm-stop-fg); border-color: var(--vm-stop-fg);
+}
+#screen-vm :is(.vm-workspace-switch [aria-pressed="true"], .vm-panel-controls [aria-pressed="true"],
+  .vm-inspector-tabs [aria-selected="true"], .owned-vm-debugger-tabs [aria-selected="true"],
+  .owned-vm-debugger-opcodes [aria-pressed="true"]):not(:disabled) {
+  background: var(--vm-selected-bg); color: var(--vm-selected-fg); border-color: var(--vm-selected-line);
+  box-shadow: inset 0 -3px var(--vm-selected-line);
+}
+#screen-vm :is(.vm-listing-row[aria-selected="true"], .owned-vm-debugger-history [aria-pressed="true"]):not(:disabled) {
+  background: var(--vm-selected-bg); color: var(--vm-selected-fg); box-shadow: inset 4px 0 var(--vm-selected-line);
+}
+#screen-vm .vm-listing-row[aria-selected="true"] > :last-child { color: var(--vm-selected-fg); }
+#screen-vm :is(.vm-state-row[data-changed="true"], .owned-vm-debugger-table-scroll [data-changed="true"]) {
+  background: var(--vm-change-bg); color: var(--vm-change-fg);
+}
+#screen-vm .vm-state-row[data-changed="true"] > :last-child { color: var(--vm-change-fg); }
+#screen-vm .vm-state-row[data-selected="true"] { border-left-color: var(--vm-selected-line); }
+#screen-vm button:disabled {
+  background: var(--vm-disabled-bg); color: var(--vm-disabled-fg); border-color: var(--vm-disabled-fg);
+  opacity: 1; box-shadow: none; cursor: not-allowed;
+}
+#screen-vm :is(button, input, select, summary):focus, #screen-vm .vm-file-control:focus-within {
+  outline: 2px solid var(--vm-focus); outline-offset: -2px;
+}
+#screen-vm .vm-pane-heading > span, #screen-vm .owned-vm-debugger-toolbar > strong { color: var(--vm-action-bg); }
+:root[data-theme="light"] #screen-vm .vm-pane-heading > span,
+:root[data-theme="light"] #screen-vm .owned-vm-debugger-toolbar > strong { color: var(--vm-action-bg); }
+#screen-vm :is([data-owned-vm-action="create"], [data-owned-vm-action="run"], [data-owned-vm-action="step"]):focus,
+#screen-vm .vm-file-control:focus-within { outline-color: var(--vm-action-fg); }
+
+#screen-vm .vm-listing-row[aria-selected="true"] > span::before { color: var(--vm-selected-fg); }

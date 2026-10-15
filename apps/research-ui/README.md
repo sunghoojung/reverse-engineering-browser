@@ -1675,6 +1675,33 @@ layouts through `tools/check-vm-semantics-ui.mjs`. Controller checks do not esta
 rendered or native acceptance; run the rendered gate on a sandbox-capable browser
 and inspect the packaged macOS app, including desktop 200% zoom.
 
+### Observed execution path
+
+In the Execution workspace toolbar, **Listing / Path** switches the same retained
+execution pane between rows and an observed occurrence graph. The right-hand
+State inspector, exact selection, filters and 64-item page remain synchronized.
+At narrow widths, choosing Path reveals it inside the existing Listing pane;
+Enter opens State, and **Back to selected row** returns to the exact path node.
+The tab pair supports Left/Right/Home/End. Nodes support the same Up/Down,
+Home/End, Page Up/Down and Enter keys as the listing. Switching views never runs
+code or changes the selected sequence.
+
+Each node retains sequence, supplied PC/opcode/operands, evidence references,
+and candidate meanings. Repeated PCs remain separate occurrences. Arrows join
+only consecutive recorded sequence IDs. Missing execution has an explicit gap;
+filters and page boundaries label hidden observations without shortcut edges.
+Observed PC movement is separate from unknown branch alternatives. The graph
+is not a static CFG, and neither supplied continuity nor matching candidate
+semantics establishes completeness, causal dependence or equivalence.
+Trace identity remains visible in the path summary; **Provenance and limits**
+retains the complete supplied identity, coverage and exact import-file digest.
+
+The bounded shared `observedPath` model and the offline `path` command are
+specified in the [VM semantics contract](../../protocol/vm-semantics-v1.md#observed-execution-path).
+The UI adds no capture adapter or new production asset. Imported traces from
+any admitted backend retain their supplied-provenance limits; owned fixtures
+are acceptance data, not a requirement on the investigated VM.
+
 ### Live owned fixture controls
 
 Open **VM tab** without a captured finding. The workspace also offers **Live owned fixture** when the Rust backend has the

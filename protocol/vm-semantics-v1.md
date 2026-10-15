@@ -131,6 +131,40 @@ no retained occurrence and pages past the end return empty items, never a
 neighboring location or step. `total` is at most 256; `next_page` is null at
 the end. Occurrences are snapshot observations, not accesses or reads.
 
+## Observed execution path
+
+`observedPath(trace)` validates the same complete bounded input and returns
+`reb-vm-observed-path-v1`. This is a graph of retained execution occurrences,
+not a static control-flow graph, recovered basic blocks or a decoder. It retains
+identity, architecture, coverage, supplied-origin trust and warnings, and always
+sets `static_cfg_complete: false` and `equivalence_proven: false`.
+
+There is one node per retained sequence, even when PCs/opcodes repeat. Nodes
+contain `sequence`, `pc_before`, `pc_after`, `opcode`, `operands`,
+`instruction_size`, `evidence_refs`, `halted_after`, `supplied_advance_pc`,
+`pc_movement`, and `branch_alternatives: "unknown"`. The supplied advance is
+before-PC plus supplied instruction size, or null when outside the PC bound.
+Movement is `halted_snapshot`, `matches_supplied_advance`, or
+`differs_from_supplied_advance`; these labels do not identify branch semantics.
+Supplied decoded operands do not establish an unrecorded destination.
+
+An edge contains `from_sequence`, `to_sequence`, `observed_pc`,
+`kind: "recorded_transition"`, and the deduplicated endpoint evidence references.
+It exists only for neighboring input records with consecutive exact sequence
+IDs, whose adjacent states already satisfy the trace validator. `observed_pc`
+is the first record's after-PC and the second record's before-PC. A gap has
+`before_sequence`, `after_sequence`, `missing_steps`, and
+`kind: "sequence_gap"`; it has no edge. Missing counts describe the sequence
+interval, independently of the supplied total dropped-step count. Unknown
+prefix/suffix coverage is not reconstructed. A final after-PC does not create
+a successor node or establish program termination.
+
+The full model has at most 256 nodes, 255 edges and 255 gaps, with at most 255
+combined edges and gaps. It never merges repeated PCs, filters stored evidence,
+executes code, infers causal dependence or invents branch alternatives. Coverage
+marked complete describes supplied retained continuity only. All IDs and
+references remain supplied, unauthenticated claims.
+
 ## Reports and agent CLI
 
 `node tools/vm-semantics.mjs inspect TRACE.json OUTPUT.json` lists exact identity,
@@ -138,6 +172,11 @@ coverage, steps, changed cells, observed PC edges and candidate operations.
 Candidate operations are those fitting every retained observation for that
 opcode under the fixed operand convention. Multiple candidates remain ambiguous;
 no candidate is unknown. Neither outcome proves semantics.
+
+`node tools/vm-semantics.mjs path TRACE.json OUTPUT.json` exports the complete
+observed-path model. Its envelope is `source_sha256`, `hypotheses_sha256: null`,
+and `result`, using the same private atomic no-overwrite output and exact input
+hash as inspect. Existing inspect, step, compare and validate shapes are unchanged.
 
 `node tools/vm-semantics.mjs step TRACE.json SEQUENCE OUTPUT.json` returns one
 exact retained state transition, including evidence references.
@@ -194,3 +233,8 @@ navigation brings a retained selected location onto its page when the active
 filter includes it; otherwise the UI explicitly labels it hidden/absent.
 Counterexample navigation shows all locations and reveals/focuses its first
 observed mismatch, or focuses the step heading if that location is absent.
+
+`node tools/check-vm-observed-path.mjs` independently authored snapshots cover
+repeated PCs, gap boundaries, exact evidence, large sequence IDs, unknown
+alternatives, limits, immutability, malformed input, and the real offline path CLI.
+The existing controller and rendered suites also exercise the optional Path view.

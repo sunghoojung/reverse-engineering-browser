@@ -103,6 +103,7 @@ javascript-check:
 	node tools/check-vm-semantics.mjs
 	node tools/check-vm-compatibility-demo.mjs
 	node tools/check-vm-linked-model.mjs
+	node tools/check-vm-observed-path.mjs
 	node tools/check-vm-compare-cli.mjs
 	node tools/check-python-client-project.mjs
 	node tools/check-api-observation-catalog-ui.mjs

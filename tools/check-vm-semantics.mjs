@@ -183,6 +183,35 @@ findButton(ui.map,'Support step 1').events.click();assert.equal(ui.selector.valu
 console.log('PASS phone focus regression:off-page Enter selects focused sequence, cell→occurrences→Close restores current selected cell, support/occurrence links expose exact state');
 for(const width of [900,1440]){ui.changeLayout(360);ui.setPanel('listing');ui.panelButtons.listing.focus();ui.changeLayout(width);assert.equal(document.activeElement,ui.filter);ui.changeLayout(360);ui.setPanel('state');ui.panelButtons.state.focus();ui.changeLayout(width);assert.equal(document.activeElement,ui.stateButtons.instruction);ui.changeLayout(360);ui.panelButtons.evidence.events.click();ui.panelButtons.evidence.focus();ui.changeLayout(width);assert.equal(document.activeElement,ui.contextButtons.occurrences);}
 
+// The optional Path is the same selected execution occurrence, never a PC graph.
+ui.input.files=[file(dense)];await ui.input.events.change();ui.setPanel('listing');ui.setExecutionView('path');
+const pathEdges=()=>descendants(ui.listingBody).filter(e=>e.attributes['data-vm-path-edge']);
+assert.equal(listingRows().length,64);assert(listingRows().every(row=>row.className==='vm-path-node'));
+assert.equal(pathEdges().length,63);assert.equal(ui.selector.value,'0');
+assert(rowBySequence(1).attributes['aria-label'].includes('Recorded 0 → 1'));assert(rowBySequence(0).attributes['aria-label'].includes('First retained observation'));
+assert.equal(ui.viewButtons.path.attributes['aria-selected'],'true');assert.equal(ui.viewButtons.listing.tabIndex,-1);
+assert(ui.listingBody.textContent.includes('Branch alternatives unknown'));assert(ui.listingBody.textContent.includes('not a static CFG'));
+assert(press(0,'PageDown'));assert.equal(ui.selector.value,'64');assert.equal(pathEdges().length,63);
+assert.equal(pathEdges()[0].attributes['data-vm-path-edge'],'64:65');assert(ui.listingBody.textContent.includes('Earlier retained observations'));
+assert(press(64,'Enter'));assert(document.activeElement.textContent.includes('Step 64'));ui.focusSelectedRow();assert.equal(document.activeElement,rowBySequence(64));
+ui.setExecutionView('listing');assert.equal(ui.selector.value,'64');assert.equal(rowBySequence(64).className,'vm-listing-row');
+ui.viewButtons.listing.events.keydown({key:'ArrowRight',preventDefault(){}});assert.equal(document.activeElement,ui.viewButtons.path);assert.equal(rowBySequence(64).className,'vm-path-node');
+const filteredPath=copy(dense);filteredPath.steps.forEach((s,index)=>{s.opcode=index%2?'bb':'aa';});
+ui.input.files=[file(filteredPath)];await ui.input.events.change();ui.go(64,null,'listing');
+ui.filter.value='aa';ui.filter.events.input();const sequences=listingRows().map(row=>Number(row.attributes['data-vm-sequence']));
+assert.equal(listingRows().length,64);assert.equal(pathEdges().length,0);assert(ui.listingBody.textContent.includes('retained rows hidden by filter'));
+for(const edge of pathEdges()){const [from,to]=edge.attributes['data-vm-path-edge'].split(':').map(Number);assert.equal(to,from+1);assert(sequences.includes(from)&&sequences.includes(to));}
+ui.filter.value='no-match';ui.filter.events.input();assert.equal(pathEdges().length,0);assert.equal(ui.selector.value,'64');ui.focusSelectedRow();assert.equal(ui.filter.value,'');
+ui.input.files=[file(reg)];await ui.input.events.change();ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:reg.identity.trace_id,mappings:[{opcode:'03',operation:'register_const'}]})];await ui.hypothesis.events.change();
+assert(rowBySequence(0).attributes['aria-label'].includes('supplied operands 0, 7'));assert(rowBySequence(0).attributes['aria-label'].includes(reg.steps[0].evidence_refs[0]));assert(rowBySequence(0).attributes['aria-label'].includes('; matched;'));assert(rowBySequence(0).textContent.includes('matched'));
+ui.input.files=[file(runtimeOnly)];await ui.input.events.change();assert.equal(listingRows().length,2);assert.equal(pathEdges().length,0);assert(ui.listingBody.textContent.includes('Gap before '+Number.MAX_SAFE_INTEGER));assert(rowBySequence(Number.MAX_SAFE_INTEGER).attributes['aria-label'].includes('Gap before '+Number.MAX_SAFE_INTEGER));
+assert(ui.listingBody.textContent.includes('Evidence (unresolved)'));rowBySequence(Number.MAX_SAFE_INTEGER).events.click();assert.equal(ui.selector.value,String(Number.MAX_SAFE_INTEGER));
+ui.input.files=[file({bad:true})];await ui.input.events.change();assert.equal(ui.selector.value,String(Number.MAX_SAFE_INTEGER));assert.equal(pathEdges().length,0);
+ui.changeLayout(360);ui.setPanel('listing');ui.focusSelectedRow();assert.equal(document.activeElement,rowBySequence(Number.MAX_SAFE_INTEGER));assert(press(Number.MAX_SAFE_INTEGER,'Enter'));assert.equal(mountedRoot.attributes['data-panel'],'state');
+ui.clear.events.click();assert.equal(listingRows().length,0);assert.equal(pathEdges().length,0);assert.equal(document.activeElement,ui.input);
+ui.setExecutionView('listing');
+console.log('PASS observed Path controller: shared64-node paging/selection/State, tab and row keys, exact large IDs, no gap/filter/page shortcuts, invalid-import retention, clear and narrow focus');
+
 // The local mode switch changes visibility only; neither owner is reconstructed.
 const shellRoot=new Element('section'),findingsRoot=new Element('div'),findingsButton=new Element('button'),executionButton=new Element('button'),findingNode=new Element('article');
 findingsRoot.append(findingNode);findingsRoot.scrollTop=150;shellRoot.hidden=true;

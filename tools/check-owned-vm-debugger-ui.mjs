@@ -316,6 +316,50 @@ export async function checkOwnedVmDebuggerInteractions({evaluate, viewport, clic
     await click('#vm-show-owned'); await click('#vm-show-execution');
     assert(await evaluate('!document.querySelector("#vm-owned-controls").hidden && document.querySelector("#vm-owned-debugger").hidden'));
     assert.equal((await data()).session.run_id, retainedRun, 'Provider switches preserve the exact stopped native run');
+    await viewport(1440, 900);
+    const densityTrace = {format: 'reb-vm-trace-v1', identity: {trace_id: 'owned-live-controls-density', investigation_id: '1', finding_id: '2', artifact_id: '3', artifact_sha256: 'a'.repeat(64), scope_id: 'owned-density', backend: 'fixture'}, architecture: 'register', coverage: {complete: true, dropped_steps: 0, limitations: ['Authored imported layout fixture; unrelated to the native run.']}, steps: Array.from({length: 32}, (_, sequence) => ({sequence, opcode: '00', operands: [], instruction_size: 1, before: {pc: sequence, halted: false, registers: [], stack: [], memory: []}, after: {pc: sequence + 1, halted: false, registers: [], stack: [], memory: []}, evidence_refs: ['owned-density:' + sequence]}))};
+    await evaluate(`(async()=>{const input=document.querySelector('[aria-label="Import VM execution trace"]'),transfer=new DataTransfer();transfer.items.add(new File([${JSON.stringify(JSON.stringify(densityTrace))}],'owned-density.json',{type:'application/json'}));input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));const deadline=performance.now()+5000;while(document.querySelector('[aria-label="Execution step"]').options.length!==32){if(performance.now()>deadline)throw Error('Owned density trace import did not settle');await new Promise(resolve=>setTimeout(resolve,10));}})()`);
+    assert(await evaluate(`(()=>{const body=document.querySelector('.vm-listing-body'),box=body.getBoundingClientRect();return [...body.querySelectorAll('[data-vm-sequence]')].filter(row=>{const r=row.getBoundingClientRect();return r.top>=box.top&&r.bottom<=box.bottom&&r.top>=0&&r.bottom<=innerHeight;}).length>=12})()`), 'Imported listing with retained native controls must show at least12 complete rows');
+    assert(await evaluate(`[...document.querySelectorAll('#vm-owned-controls [data-owned-vm-action]')].every(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight})`), 'All native execution actions remain visible beside imported evidence');
+    assert.equal((await data()).session.run_id, retainedRun);assert.equal((await data()).session.executed_count, '1');
+    await screenshot('owned-vm-imported-live-controls-density.png');
+    const importedClick=async target=>{await evaluate(`document.querySelector(${JSON.stringify(target)}).scrollIntoView({block:'nearest'})`);await click(target);};
+    await viewport(360, 740);
+    await evaluate(`(async()=>{const deadline=performance.now()+3000;while(document.querySelector('#vm-semantics-workflow').dataset.layout!=='narrow'){if(performance.now()>deadline)throw Error('Imported narrow layout did not settle');await new Promise(resolve=>setTimeout(resolve,10));}})()`);
+    await evaluate(`(()=>{const row=document.querySelector('#vm-semantics-workflow [data-vm-sequence="0"]');row.focus();row.scrollIntoView({block:'center'});})()`);
+    assert(await evaluate(`(()=>{const screen=document.querySelector('#screen-vm'),body=document.querySelector('#vm-semantics-workflow .vm-listing-body'),box=body.getBoundingClientRect(),outer=screen.getBoundingClientRect();return box.height>=240&&screen.scrollHeight>screen.clientHeight&&[...body.querySelectorAll('[data-vm-sequence]')].filter(row=>{const r=row.getBoundingClientRect();return r.top>=Math.max(0,box.top,outer.top)&&r.bottom<=Math.min(innerHeight,box.bottom,outer.bottom)}).length>=2})()`), 'Phone coexistence must scroll vertically and retain at least two complete imported rows');
+    assert(await evaluate(`(()=>{const e=document.activeElement,r=e.getBoundingClientRect();return e.getAttribute('data-vm-sequence')==='0'&&r.top>=0&&r.bottom<=innerHeight&&getComputedStyle(e).outlineStyle!=='none'})()`), 'Phone imported selection remains visibly focused with live controls retained');
+    await key('ArrowDown','ArrowDown',{windowsVirtualKeyCode:40});
+    assert.equal(await evaluate(`document.querySelector('[aria-label="Execution step"]').value`),'1');
+    assert.equal((await data()).session.run_id,retainedRun);assert.equal((await data()).session.executed_count,'1');
+    await screenshot('owned-vm-imported-live-controls-phone.png');
+    await key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});
+    await evaluate(`(()=>{const cell=document.querySelector('#vm-semantics-workflow [data-vm-location="pc"] button');cell.focus();cell.scrollIntoView({block:'center'});})()`);
+    assert(await evaluate(`(()=>{const e=document.activeElement,r=e.closest('.vm-state-row').getBoundingClientRect();return e.textContent==='pc'&&r.top>=0&&r.bottom<=innerHeight&&getComputedStyle(e).outlineStyle!=='none'})()`), 'Phone coexistence preserves a complete focused state cell');
+    await screenshot('owned-vm-imported-live-controls-phone-state.png');
+    await importedClick('#vm-semantics-workflow .vm-step-inspector > button');
+    assert.equal(await evaluate(`document.activeElement.getAttribute('data-vm-sequence')`),'1');
+    await importedClick('#vm-semantics-workflow [data-vm-panel="evidence"]');
+    await importedClick('#vm-semantics-workflow .vm-context-header > button');
+    assert.equal(await evaluate(`document.activeElement.getAttribute('data-vm-panel')`),'listing');
+    assert.equal((await data()).session.run_id,retainedRun);assert.equal((await data()).session.executed_count,'1');
+    // CSS viewport equivalent of a1440x900 window at200%; actual browser zoom
+    // remains a separate native acceptance gate. Use real pointer hit testing.
+    await viewport(720,450);await activate('reset');await wait('paused','0');
+    const pointerControl=async(action,invoke=false)=>{const target=toolbarSelector(action==='refresh'?'[data-owned-vm-refresh]':control(action));await evaluate(`document.querySelector(${JSON.stringify(target)}).scrollIntoView({block:'center'})`);assert(await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(target)}),r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y),owner=document.querySelector('#vm-owned-controls').getBoundingClientRect();return !e.disabled&&owner.height>0&&r.width>0&&r.height>0&&x>=0&&x<innerWidth&&y>=0&&y<innerHeight&&(hit===e||e.contains(hit))})()`), 'Native '+action+' must remain pointer-reachable beside imported evidence');if(invoke)await click(target);};
+    assert(await evaluate(`(()=>{const root=document.querySelector('#vm-semantics-workflow'),pane=root.querySelector('.vm-execution-body').getBoundingClientRect(),controls=document.querySelector('#vm-owned-controls').getBoundingClientRect(),listing=root.querySelector('.vm-listing-body');return Math.abs(pane.height-600)<=1&&controls.height>0&&root.getBoundingClientRect().top>=controls.bottom-1&&listing.scrollHeight>listing.clientHeight})()`),'Coexisting analysis has a bounded pane independent of retained row count');
+    await pointerControl('stop');await pointerControl('run',true);await wait('running');
+    await pointerControl('stop');await pointerControl('pause',true);await wait('paused');
+    await pointerControl('stop',true);await wait('stopped');await pointerControl('refresh',true);
+    await pointerControl('reset',true);await wait('paused','0');await pointerControl('step',true);await wait('paused','1');
+    await pointerControl('stop',true);await wait('stopped','1');await pointerControl('close');
+    await screenshot('owned-vm-imported-live-controls-zoom-pointer.png');
+    await viewport(1440,450);await pointerControl('close');await pointerControl('refresh',true);
+    assert(await evaluate(`(()=>{const controls=document.querySelector('#vm-owned-controls').getBoundingClientRect(),root=document.querySelector('#vm-semantics-workflow');return controls.height>0&&root.getBoundingClientRect().top>=controls.bottom-1&&Math.abs(root.querySelector('.vm-execution-body').getBoundingClientRect().height-600)<=1})()`),'Wide-short coexistence keeps controls separate from bounded analysis');
+
+
+
+
   }
   await activate('close'); await wait('idle', '0');
   if (integrated) assert(await evaluate('(()=>{const e=document.activeElement,r=e.getBoundingClientRect();return e.id==="vm-show-execution"&&document.querySelector("#vm-owned-controls").hidden&&r.width>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&getComputedStyle(e).outlineStyle!=="none"})()'), 'Close from imported evidence restores visible provider focus');

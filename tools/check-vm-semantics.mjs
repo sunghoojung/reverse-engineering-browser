@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import {installVmFindingsFixture} from './check-vm-semantics-ui.mjs';
 import {webcrypto} from 'node:crypto';
 import {mkdtemp,writeFile,readFile,rm,stat,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -228,6 +229,109 @@ executionButton.events.click();assert.equal(shellRoot.hidden,false);assert.equal
 shell.showWorkspace('findings');assert.equal(shellRoot.hidden,true);assert.equal(findingsButton.attributes['aria-pressed'],'true');
 document.querySelector=()=>null;
 console.log('PASS VM-local Findings/Execution round trip preserves both DOM owners, selected sequence and finding scroll; finding entry restores Findings (DOM model, not rendered/source-link acceptance)');
+
+// A real failed analyzer poll must read the same retained owners that the
+// rendered fixture populated. Reproduce the old projection-only admission too.
+const vmAppSource=await readFile(new URL('../apps/research-ui/app.js',import.meta.url),'utf8');
+const vmEvidenceSource=await readFile(new URL('../apps/research-ui/evidence_models.js',import.meta.url),'utf8');
+const vmRefreshSource=vmAppSource.slice(vmAppSource.indexOf('      async function refreshVmAnalysis('),vmAppSource.indexOf('      function setNetworkNotice('));
+const vmFixtureState={vmFindings:[],lastValidAnalysisFindings:[],eventVmFindings:[],vmAnalysisRequestId:null};
+let vmFixtureRenders=0;
+const vmFixtureApi=runInNewContext(`${vmEvidenceSource}\n${vmRefreshSource}\n;({install:${installVmFindingsFixture.toString()},refreshVmAnalysis})`,{state:vmFixtureState,location:{protocol:'http:'},TextEncoder,crypto:webcrypto,fetch:async()=>({ok:false,status:503}),renderVmLab:()=>{vmFixtureRenders++;}});
+await vmFixtureApi.install();
+const exactVmFinding='analysis:000000000000000000009876';
+const admittedVmFinding=vmFixtureState.vmFindings[0];
+assert.equal(admittedVmFinding.findingId,exactVmFinding);
+vmFixtureState.lastValidAnalysisFindings=[];
+await vmFixtureApi.refreshVmAnalysis();
+assert.equal(vmFixtureState.vmFindings.length,0,'Projection-only fixture reproduces the CI Findings 0 failure');
+await vmFixtureApi.install();
+const retainedVmFinding=vmFixtureState.vmFindings[0];
+await vmFixtureApi.refreshVmAnalysis();
+assert.equal(vmFixtureState.vmFindings[0],retainedVmFinding);
+assert.equal(vmFixtureState.selectedVmFindingId,exactVmFinding);
+assert.equal(vmFixtureState.vmAnalysisStatus,'unavailable');
+assert.match(vmFixtureState.vmAnalysisError,/503/);
+assert.equal(vmFixtureRenders,4);
+console.log('PASS actual VM fixture admission and failed analyzer poll: projection-only CI counterexample, normalized retained finding identity and visible error render (not rendered QA)');
+
+// Mount the production Findings render functions and workspace switch together.
+// A held analyzer response settles while Findings is hidden, as in CI polling.
+const vmFindingDocument={activeElement:null};
+class FindingElement {
+ constructor(tag){this.tagName=tag;this.children=[];this.events={};this.attributes={};this.dataset={};this.style={};this.text='';this.scrollTop=0;this.hidden=false;this.replacements=0;this.className='';this.classList={contains:name=>this.className.split(' ').includes(name)};}
+ set textContent(value){this.text=String(value);this.children=[];}get textContent(){return this.text+this.children.map(child=>child.textContent).join('');}
+ append(...nodes){this.children.push(...nodes);}
+ contains(node){return this===node||this.children.some(child=>child.contains(node));}
+ replaceChildren(...nodes){if(this.contains(vmFindingDocument.activeElement))vmFindingDocument.activeElement=null;this.children=nodes;this.text='';this.replacements++;}
+ setAttribute(name,value){this.attributes[name]=String(value);}
+ addEventListener(name,handler){this.events[name]=handler;}
+ querySelectorAll(selector){return this.children.flatMap(child=>[...(selector==='.'+child.className?[child]:[]),...child.querySelectorAll(selector)]);}
+ focus(){vmFindingDocument.activeElement=this;}
+}
+vmFindingDocument.createElement=tag=>new FindingElement(tag);
+const vmFindingElements=Object.fromEntries(['vmCount','vmNotice','vmList','vmDetail'].map(name=>[name,new FindingElement('div')]));
+const vmFindingShell=new FindingElement('section'),vmExecutionShell=new FindingElement('section'),vmFindingSwitch=new FindingElement('button'),vmExecutionSwitch=new FindingElement('button');
+vmFindingShell.append(vmFindingElements.vmList,vmFindingElements.vmDetail);
+const vmFindingNodes=new Map([['#vm-semantics-workflow',vmExecutionShell],['#vm-findings-workspace',vmFindingShell],['#vm-show-findings',vmFindingSwitch],['#vm-show-execution',vmExecutionSwitch]]);
+vmFindingDocument.querySelector=selector=>vmFindingNodes.get(selector)??null;
+const vmFindingState={events:[],vmFindings:[],lastValidAnalysisFindings:[],eventVmFindings:[],vmAnalysisRequestId:null,broker:'connected',malformedVmFindings:0};
+let finishVmPoll;
+const vmLabSource=vmAppSource.slice(vmAppSource.indexOf('      function vmField('),vmAppSource.indexOf('      function requestDomain('));
+const vmTextSource=vmAppSource.slice(vmAppSource.indexOf('      function textElement('),vmAppSource.indexOf('      function requestOriginLabel('));
+const vmShellSource=source.slice(source.indexOf('// Keep both workspaces mounted:'));
+const vmFindingApi=runInNewContext(`${vmEvidenceSource}\n${vmRefreshSource}\n${vmTextSource}\n${vmLabSource}\n${vmShellSource}\n;({install:${installVmFindingsFixture.toString()},refreshVmAnalysis,renderVmLab,vmFindingsFromEvents,shell:vmExecutionWorkspace})`,{state:vmFindingState,elements:vmFindingElements,document:vmFindingDocument,location:{protocol:'http:'},TextEncoder,crypto:webcrypto,mountVmSemantics:()=>({}),fetch:()=>new Promise(resolve=>{finishVmPoll=resolve;}),showScreen:()=>{},selectArtifact:()=>{}});
+await vmFindingApi.install();
+vmFindingElements.vmList.children[0].focus();vmFindingElements.vmList.scrollTop=57;vmFindingElements.vmDetail.scrollTop=150;
+const vmRetained={list:vmFindingElements.vmList.children[0],detail:vmFindingElements.vmDetail.children[0],focus:vmFindingDocument.activeElement};
+const checkVmRetained=()=>{
+ assert.equal(vmFindingElements.vmList.children[0],vmRetained.list,'Unchanged or failed VM refresh must retain the actual finding row');
+ assert.equal(vmFindingElements.vmDetail.children[0],vmRetained.detail,'Unchanged or failed VM refresh must retain the actual detail DOM');
+ assert.equal(vmFindingDocument.activeElement,vmRetained.focus);
+ assert.equal(vmFindingState.selectedVmFindingId,exactVmFinding);
+ assert.equal(vmFindingElements.vmList.scrollTop,57);assert.equal(vmFindingElements.vmDetail.scrollTop,150);
+};
+const heldVmPoll=vmFindingApi.refreshVmAnalysis();
+vmExecutionSwitch.focus();vmRetained.focus=vmExecutionSwitch;vmExecutionSwitch.events.click();assert.equal(vmFindingShell.hidden,true);
+finishVmPoll({ok:false,status:503});await heldVmPoll;
+vmFindingSwitch.focus();vmRetained.focus=vmFindingSwitch;vmFindingSwitch.events.click();assert.equal(vmFindingShell.hidden,false);
+checkVmRetained();assert.equal(vmFindingElements.vmNotice.dataset.kind,'disconnected');assert.match(vmFindingElements.vmNotice.textContent,/Last valid VM evidence remains visible/);
+vmRetained.list.focus();vmRetained.focus=vmRetained.list;
+for(let index=0;index<20;index++){vmFindingState.vmFindings=copy(vmFindingState.vmFindings);vmFindingApi.renderVmLab();checkVmRetained();}
+vmRetained.focus=vmFindingElements.vmDetail.querySelectorAll('.secondary-button')[0];vmRetained.focus.focus();
+const goodVmDocument={contract_version:1,document_kind:'vm-analysis',document_digest:'a'.repeat(64),profile_digest:'b'.repeat(64),profile:{profile_id:'anti-bot-vm-detection-v1'},input_coverage:{complete:false,omissions:[]},mixed_findings:[],results:vmFindingState.lastValidAnalysisFindings.map(finding=>copy(finding.analysis))};
+for(const reply of [{status:304},{ok:false,status:503},{ok:true,status:200,json:async()=>({bad:true})},{ok:true,status:200,headers:{get:()=>null},json:async()=>copy(goodVmDocument)}]){
+ const poll=vmFindingApi.refreshVmAnalysis();finishVmPoll(reply);await poll;checkVmRetained();
+ if(reply.status===304)assert.equal(vmFindingElements.vmNotice.hidden,true,'An unchanged success clears the prior failure notice');
+ if(reply.status===503)assert.equal(vmFindingElements.vmNotice.dataset.kind,'disconnected');
+ if(reply.status===200&&!reply.headers)assert.equal(vmFindingElements.vmNotice.dataset.kind,'malformed');
+}
+assert.equal(vmFindingElements.vmNotice.hidden,true,'Successful identical analysis clears the error notice without replacing findings');
+vmFindingState.vmFindings[0].analysis.observations[0].detail='Changed retained observation';vmFindingApi.renderVmLab();
+assert.notEqual(vmFindingElements.vmDetail.children[0],vmRetained.detail);assert.match(vmFindingElements.vmDetail.textContent,/Changed retained observation/);
+vmFindingState.vmFindings.push({...copy(vmFindingState.vmFindings[0]),findingId:'analysis:000000000000000000009877'});vmFindingApi.renderVmLab();
+assert.equal(vmFindingElements.vmList.children.length,2);
+vmFindingElements.vmList.children[1].events.click();assert.equal(vmFindingState.selectedVmFindingId,'analysis:000000000000000000009877');assert.equal(vmFindingDocument.activeElement,vmFindingElements.vmList.children[1]);
+assert(vmFindingElements.vmDetail.querySelectorAll('.secondary-button').length);
+vmFindingState.artifacts=[];vmFindingApi.renderVmLab();assert.equal(vmFindingElements.vmDetail.querySelectorAll('.secondary-button').length,0,'Expired source availability must update the detail');
+vmFindingState.artifacts=[{artifact_id:'9876'}];vmFindingApi.renderVmLab();assert(vmFindingElements.vmDetail.querySelectorAll('.secondary-button').length);
+vmFindingState.vmFindings=[];vmFindingApi.renderVmLab();assert.equal(vmFindingState.selectedVmFindingId,null);assert.equal(vmFindingElements.vmList.children.length,0);assert.match(vmFindingElements.vmDetail.textContent,/No valid VM findings/);
+const nativeVmEvent=(kind,id,sequence)=>{
+ const payload=Buffer.alloc(128);payload.writeUInt16LE(1,0);payload.writeUInt16LE(128,2);payload[4]=kind;payload[5]=1;payload[6]=1;
+ const label=kind===6?'Owned coverage':'Owned native interpreter';payload.writeUInt16LE(label.length,8);payload.write(label,72,'ascii');
+ payload.writeBigUInt64LE(BigInt(id),24);payload.writeBigUInt64LE(9007199254740993n,32);
+ if(kind===6){payload.writeUInt32LE(3,12);payload.writeUInt32LE(5,16);}
+ return {protocol_version:2,category:'vm',type:'vm_finding',payload_size:128,payload_truncated:false,payload:payload.toString('hex'),session_id:'9007199254740993',artifact_id:'9876',sequence_number:String(sequence),parent_event_id:'0',monotonic_time_ns:'18446744073709551615',process_id:1,thread_id:2};
+};
+vmFindingState.events=[nativeVmEvent(1,'18446744073709551614',1),nativeVmEvent(6,'18446744073709551615',2)];
+const nativeVmFindings=vmFindingApi.vmFindingsFromEvents(vmFindingState.events);assert.equal(nativeVmFindings.malformedCount,0);assert.equal(nativeVmFindings.findings.length,2);
+vmFindingState.eventVmFindings=nativeVmFindings.findings;vmFindingState.lastValidAnalysisFindings=[];vmFindingState.vmFindings=[...nativeVmFindings.findings];vmFindingState.selectedVmFindingId='18446744073709551614';
+vmFindingApi.renderVmLab();assert.match(vmFindingElements.vmDetail.textContent,/3 \/ 5/);assert.match(vmFindingElements.vmDetail.textContent,/9007199254740993/);
+const nativeVmNodes={list:vmFindingElements.vmList.children[0],detail:vmFindingElements.vmDetail.children[0]};nativeVmNodes.list.focus();
+for(const status of [503,304]){const poll=vmFindingApi.refreshVmAnalysis();finishVmPoll({ok:false,status});await poll;assert.equal(vmFindingElements.vmList.children[0],nativeVmNodes.list);assert.equal(vmFindingElements.vmDetail.children[0],nativeVmNodes.detail);assert.equal(vmFindingDocument.activeElement,nativeVmNodes.list);assert.equal(vmFindingState.selectedVmFindingId,'18446744073709551614');}
+assert.equal(vmFindingElements.vmNotice.hidden,true);
+vmFindingState.eventVmFindings[1].observedCount=4;vmFindingApi.renderVmLab();assert.notEqual(vmFindingElements.vmDetail.children[0],nativeVmNodes.detail);assert.match(vmFindingElements.vmDetail.textContent,/4 \/ 5/);
+console.log('PASS production VM Findings refresh/mode interleaving: stable actual nodes, exact selection, focus and scroll; unchanged/304/failed/malformed/identical-200 refreshes; changed findings, selection, source expiry, empty state and decoded native uint64/coverage findings (DOM model, not rendered QA)');
 
 // Numerical contrast checks cover the actual VM theme tokens. Rendered QA also
 // checks computed colors so selector regressions cannot pass on token math alone.

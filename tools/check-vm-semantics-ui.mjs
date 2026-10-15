@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import {selectRenderedOption} from './rendered-keyboard.mjs';
 import {recordCompatibilityDemo} from './generate-vm-compatibility-demo.mjs';
+// Use the same normalized retained owners as refreshVmAnalysis. Assigning only
+// vmFindings loses this fixture when the ordinary analyzer poll fails.
+export async function installVmFindingsFixture() {
+ const content='// Owned VM finding source fixture\n',bytes=new TextEncoder().encode(content),digest=await crypto.subtle.digest('SHA-256',bytes);
+ state.artifacts=[{protocol_version:1,artifact_id:'9876',session_id:'11',navigation_id:'13',frame_id:'17',parent_artifact_id:'0',creator_event_id:'19',execution_context_id:'23',capture_origin:'dynamic_javascript',kind:'javascript',url:'https://fixture.invalid/vm-owned.js',mime_type:'text/javascript',byte_size:bytes.length,sha256:Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join(''),sensitive:false,content}];
+ const analysis={contract_version:1,document_kind:'vm-analysis',document_digest:'a'.repeat(64),profile_digest:'b'.repeat(64),profile:{profile_id:'anti-bot-vm-detection-v1'},input_coverage:{complete:false,omissions:[]},mixed_findings:[],results:[{finding_id:'000000000000000000009876',artifact_id:'9876',runtime:'javascript',tier:'candidate',vm_score:20,anti_bot_score:0,status:'partial',evidence_families:['owned fixture'],related_request_ids:[],observations:Array.from({length:40},(_,i)=>({rule_id:'owned:'+i,family:'owned fixture',detail:'Owned deterministic observation '+i,weight:1,coordinate:{byte_offset:0,byte_size:bytes.length}})),coverage:{complete:false,residual_unknowns:['Synthetic fixture only']}}]};
+ if(!isVmAnalysisDocument(analysis))throw Error('Invalid owned VM analysis fixture');
+ state.lastValidAnalysisFindings=vmFindingsFromAnalysis(analysis);
+ state.eventVmFindings=[];
+ state.vmFindings=[...state.lastValidAnalysisFindings,...state.eventVmFindings];
+ state.selectedVmFindingId='analysis:000000000000000000009876';
+ renderVmLab();
+}
 export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,screenshot}) {
  const before={pc:0,halted:false,registers:[0],stack:[],memory:[]},after={...before,pc:1,registers:[7]},halted={...after,halted:true};
  const trace={format:'reb-vm-trace-v1',identity:{trace_id:'owned-ui',investigation_id:'1',finding_id:'2',artifact_id:'3',artifact_sha256:'a'.repeat(64),scope_id:'owned-ui',backend:'native'},architecture:'register',coverage:{complete:true,dropped_steps:0,limitations:['<img src=x onerror=alert(1)> inert fixture']},steps:[{sequence:0,opcode:'03',operands:[0,7],instruction_size:1,before,after,evidence_refs:['fixture:0']},{sequence:1,opcode:'09',operands:[],instruction_size:1,before:after,after:halted,evidence_refs:['fixture:1']}]};
@@ -153,12 +166,18 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  await viewport(1440,900);await visibleClick('#vm-state-tab-instruction');
  // A normalized owned finding uses the unchanged real finding/source render path.
  await click('#vm-show-findings');
- await evaluate(`(async()=>{const content='// Owned VM finding source fixture\\n',bytes=new TextEncoder().encode(content),digest=await crypto.subtle.digest('SHA-256',bytes);state.artifacts=[{protocol_version:1,artifact_id:'9876',session_id:'11',navigation_id:'13',frame_id:'17',parent_artifact_id:'0',creator_event_id:'19',execution_context_id:'23',capture_origin:'dynamic_javascript',kind:'javascript',url:'https://fixture.invalid/vm-owned.js',mime_type:'text/javascript',byte_size:bytes.length,sha256:Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join(''),sensitive:false,content}];state.vmFindings=[{findingId:'owned-finding',investigationId:'owned-investigation',sourceArtifactId:'9876',hostRuntime:'javascript',confidence:'candidate',analysis:{vm_score:20,anti_bot_score:0,status:'partial',evidence_families:['owned fixture'],observations:Array.from({length:40},(_,i)=>({rule_id:'owned:'+i,detail:'Owned deterministic observation '+i,weight:1})),coverage:{residual_unknowns:['Synthetic fixture only']}}}];state.selectedVmFindingId='owned-finding';renderVmLab();})()`);
+ await evaluate(`(${installVmFindingsFixture.toString()})()`);
  await visibleClick('#vm-detail button');assert.equal(await evaluate('state.selectedArtifactId'),'9876');assert.equal(await evaluate(`document.querySelector('#screen-sources').hidden`),false);
  await evaluate(`showScreen('vm',elements.requestVmCandidates)`);assert.equal(await evaluate(`document.querySelector('#vm-findings-workspace').hidden`),false);
  await evaluate(`window.vmFindingNodes={list:document.querySelector('#vm-list').firstChild,detail:document.querySelector('#vm-detail').firstChild};document.querySelector('#vm-detail').scrollTop=150;window.vmFindingScroll=document.querySelector('#vm-detail').scrollTop;`);
- await click('#vm-show-execution');await click('#vm-show-findings');
- assert.equal(await evaluate(`vmFindingNodes.list===document.querySelector('#vm-list').firstChild&&vmFindingNodes.detail===document.querySelector('#vm-detail').firstChild&&document.querySelector('#vm-detail').scrollTop===vmFindingScroll&&state.selectedVmFindingId==='owned-finding'`),true,'Findings mode switch preserves DOM, exact identity and scroll');
+ assert.equal(await evaluate('vmFindingScroll'),150,'Owned Findings detail must have a nonzero retained scroll offset');
+ // Settle the ordinary failing analyzer poll while Findings is hidden. This
+ // deterministic interleaving preserves the original exact DOM/scroll assertion.
+ await click('#vm-show-execution');await evaluate('refreshVmAnalysis()');await click('#vm-show-findings');
+ assert.equal(await evaluate(`vmFindingNodes.list===document.querySelector('#vm-list').firstChild&&vmFindingNodes.detail===document.querySelector('#vm-detail').firstChild&&document.querySelector('#vm-detail').scrollTop===vmFindingScroll&&state.selectedVmFindingId==='analysis:000000000000000000009876'`),true,'Findings mode switch preserves DOM, exact identity and scroll');
+ assert.equal(await evaluate("state.vmAnalysisStatus"),'unavailable');
+ assert.match(await evaluate("document.querySelector('#vm-notice').textContent"),/Last valid VM evidence remains visible/);
+ assert.equal(await evaluate('document.activeElement.id'),'vm-show-findings');
  await click('#vm-show-execution');assert.equal(await evaluate(`document.querySelector('[aria-label="Execution step"]').value`),'0');
  // A short CSS viewport reproduces the available layout at 200% desktop zoom.
  // This is a layout regression; the separate actual browser-zoom gate remains.

@@ -109,7 +109,12 @@
         state.vmAnalysisStatus = 'loading';
         try {
           const response = await fetch(`/api/analysis/vm${query}`, { cache: 'no-store', headers });
-          if (response.status === 304) { state.vmAnalysisStatus = 'ready'; return; }
+          if (response.status === 304) {
+            state.vmAnalysisStatus = 'ready';
+            state.vmAnalysisError = null;
+            renderVmLab();
+            return;
+          }
           if (!response.ok) throw new Error(`Analyzer returned ${response.status}`);
           const document = await response.json();
           if (!isVmAnalysisDocument(document)) throw new TypeError('Malformed VM analysis response');
@@ -1441,6 +1446,7 @@
         elements.vmDetail.replaceChildren(summary, card);
       }
 
+      let renderedVmFindings = null;
       function renderVmLab() {
         const focusedFindingId = document.activeElement?.classList.contains('vm-row')
           ? document.activeElement.dataset.findingId
@@ -1467,6 +1473,13 @@
         } else {
           elements.vmNotice.hidden = true;
         }
+        // Poll errors and identical snapshots change the notice, not the owned
+        // finding DOM. Keep focus and scroll even when a poll settles in another
+        // VM mode. Source availability is part of the selected detail's input.
+        const selectedSourceId = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId)?.sourceArtifactId;
+        const renderKey = JSON.stringify([state.vmFindings, state.selectedVmFindingId,
+          state.artifacts.some(artifact => artifact.artifact_id === selectedSourceId)]);
+        if (renderKey === renderedVmFindings) return;
         const selectedExists = state.vmFindings.some(finding => finding.findingId === state.selectedVmFindingId);
         elements.vmList.replaceChildren(...state.vmFindings.map((finding, index) => {
           const row = document.createElement('button'); row.className = 'vm-row'; row.type = 'button';
@@ -1502,6 +1515,7 @@
             .find(row => row.dataset.findingId === focusedFindingId)?.focus({ preventScroll: true });
         }
         renderVmDetail();
+        renderedVmFindings = renderKey;
       }
 
       function requestDomain(request) {

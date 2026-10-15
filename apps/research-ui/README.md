@@ -1650,8 +1650,11 @@ all cells, including the maximum 706 state / 1,218 comparison locations.
 
 Within VM investigation, **Findings / Execution workspace** switches between two
 mounted views. Finding selection, detail scroll and source actions remain in the
-Findings view; incoming finding navigation returns there. Imported traces never
-bind themselves to a finding by a supplied ID or hash.
+Findings view; incoming finding navigation returns there. Identical or failed
+analyzer refreshes update the status notice without rebuilding retained findings,
+so a poll finishing in another VM mode preserves the same nodes, focus and scroll.
+Changed findings, selection and source availability still update the view.
+Imported traces never bind themselves to a finding by a supplied ID or hash.
 
 Execution uses the remaining workspace height. At 1,100 px usable width it shows
 trace/opcode navigation, a dominant **Retained execution listing**, and the

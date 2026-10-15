@@ -9229,7 +9229,40 @@
               "rewrite_body": {},
               "response_code": {},
               "response_headers": {},
-              "response_body": {}
+              "response_body": {},
+              "local_override": {
+                "$ref": "#/components/schemas/LocalOverrideV1"
+              },
+              "expected_local_override": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "metadata",
+                  "method_filter",
+                  "content_type"
+                ],
+                "properties": {
+                  "metadata": {
+                    "$ref": "#/components/schemas/LocalOverrideV1"
+                  },
+                  "method_filter": {
+                    "enum": [
+                      "GET",
+                      "HEAD"
+                    ]
+                  },
+                  "content_type": {
+                    "type": "string",
+                    "enum": [
+                      "text/plain; charset=utf-8",
+                      "text/javascript; charset=utf-8",
+                      "application/json; charset=utf-8",
+                      "text/css; charset=utf-8"
+                    ]
+                  }
+                },
+                "description": "Compare-and-disarm guard for mode continue. All metadata fields, method and content type must match the currently armed local override, even after expiry; conflict leaves it unchanged."
+              }
             },
             "required": [
               "action",
@@ -22188,6 +22221,48 @@
             }
           }
         ]
+      },
+      "LocalOverrideV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "exact_url",
+          "target_id",
+          "experiment_id",
+          "expires_at_ms",
+          "asset_sha256"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "exact_url": {
+            "type": "string",
+            "minLength": 1,
+            "x-max-utf8-bytes": 2048
+          },
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "x-max-utf8-bytes": 4096
+          },
+          "experiment_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "expires_at_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "asset_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "description": "Explicit bounded local UTF-8 snapshot. Exact URL/method, selected disposable target and experiment; expiry must be in next five minutes. See protocol/local-overrides-v1.md. No filesystem reads or automatic arming."
       }
     }
   },

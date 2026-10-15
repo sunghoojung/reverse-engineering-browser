@@ -2,6 +2,7 @@ mod api_catalog;
 mod automation;
 mod body_diff;
 mod connection;
+mod element_screenshot;
 mod experiment;
 mod fields;
 mod heap;
@@ -473,6 +474,8 @@ impl Debugger {
             )
         };
         match action {
+            "inspect_element_document" => return self.element_screenshot(request, false).await,
+            "capture_element_screenshot" => return self.element_screenshot(request, true).await,
             "pause" | "resume" | "step_over" | "step_into" | "step_out" => {
                 let method = match action {
                     "pause" => "Debugger.pause",
@@ -797,6 +800,23 @@ impl Debugger {
     async fn event(self: &Arc<Self>, message: Value) {
         let method = message["method"].as_str().unwrap_or("");
         let p = &message["params"];
+        if [
+            "Page.frameNavigated",
+            "Page.navigatedWithinDocument",
+            "Page.documentOpened",
+            "Page.frameResized",
+        ]
+        .contains(&method)
+        {
+            self.update(|s| {
+                s["element_document_epoch"] = json!(
+                    s["element_document_epoch"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .saturating_add(1)
+                );
+            });
+        }
         match method {
             "Debugger.scriptParsed"=>if let Some(script)=parse::script(p) {self.update(|s| {self.hooks.candidate_source_changed(s["target"]["id"].as_str().unwrap_or(""));let scripts=s["scripts"].as_array_mut().unwrap();scripts.retain(|v|v["script_id"]!=script["script_id"]);if scripts.len()>=5000 {self.hooks.candidate_catalog_incomplete.store(true,Ordering::Release);scripts.remove(0);}scripts.push(script);});}else{self.hooks.candidate_catalog_incomplete.store(true,Ordering::Release);self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);},
             "Runtime.executionContextDestroyed"|"Runtime.executionContextsCleared"=>{self.update(|s| {self.hooks.candidate_source_changed(s["target"]["id"].as_str().unwrap_or(""));let clear=method.ends_with("Cleared");s["scripts"].as_array_mut().unwrap().retain(|v|v["target_type"]=="worker" || (!clear && v["execution_context_id"]!=p["executionContextId"]));let ids=s["scripts"].as_array().unwrap().iter().map(|v|v["script_id"].clone()).collect::<Vec<_>>();for b in s["breakpoints"].as_array_mut().unwrap() {b["locations"].as_array_mut().unwrap().retain(|l|ids.contains(&l["script_id"]));}})},

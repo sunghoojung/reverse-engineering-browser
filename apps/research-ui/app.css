@@ -4090,3 +4090,20 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-semantics-workflow[data-execution-view="path"] .vm-listing-body > p:not(.vm-path-summary) { margin: 8px 12px; }
 .vm-semantics-workflow[data-execution-view="path"] .vm-listing-gap,
 .vm-semantics-workflow[data-execution-view="path"] .vm-listing-filter-gap { border-left-style: dashed; }
+
+      #screen-experiments .element-screenshot-workspace { grid-column: 1 / -1; grid-row: 3; min-width: 0; min-height: 0; overflow: auto; padding: 12px; }
+      @media (max-width: 1000px) { #screen-experiments .element-screenshot-workspace { grid-row: 4; } }
+      .element-screenshot-workspace .experiment-card { margin-bottom: 12px; }
+      .element-screenshot-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 260px); gap: 12px; align-items: start; }
+      .element-screenshot-stage { position: relative; min-width: 0; overflow: hidden; }
+      .element-screenshot-stage img { display: block; width: 100%; height: auto; }
+      .element-screenshot-box { position: absolute; box-sizing: border-box; padding: 0; background: transparent; border: 1px solid #7c3aed; color: #fff; cursor: pointer; }
+      .element-screenshot-box span { position: absolute; left: 0; top: 0; min-width: 18px; padding: 1px 3px; background: #5b21b6; color: #fff; font: bold 12px/16px sans-serif; }
+      .element-screenshot-box[aria-pressed="true"] { border: 3px solid #f59e0b; background: rgb(245 158 11 / 12%); }
+      .element-screenshot-box[aria-pressed="true"] span { background: #78350f; }
+      .element-screenshot-box:focus-visible, .element-screenshot-row:focus-visible { outline: 3px solid #0891b2; outline-offset: -3px; }
+      .element-screenshot-list { display: flex; flex-direction: column; gap: 4px; max-height: 70vh; overflow: auto; }
+      .element-screenshot-row { text-align: left; padding: 9px; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); cursor: pointer; }
+      .element-screenshot-row[aria-pressed="true"] { border-color: #f59e0b; box-shadow: inset 3px 0 #f59e0b; }
+      [data-element-metadata], [data-element-notice] { overflow-wrap: anywhere; }
+      @media (max-width: 700px) { .element-screenshot-layout { grid-template-columns: minmax(0, 1fr); } .element-screenshot-list { max-height: 240px; } }

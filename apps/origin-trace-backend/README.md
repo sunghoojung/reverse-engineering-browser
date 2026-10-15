@@ -265,3 +265,13 @@ adds strict per-case literal scope/digest checks and exact guarded cancellation.
 Ordinary Repeater behavior is unchanged. See
 [the versioned workflow](../../protocol/marker-fuzz-v1.md) for input, commands,
 privacy boundaries, per-case evidence and stop-on-unknown behavior.
+
+## Local element screenshot markup
+
+`inspect_element_document` and `capture_element_screenshot` use bounded CDP
+snapshot/layout/screenshot reads on the exact selected primary disposable page.
+The original owner/document/revision is rechecked before and after capture;
+PNG and DOM text/attributes are never retained in debugger state or written to
+files. The feature refuses observed form/private/editable content and frames,
+while explicitly retaining unknown pixel sensitivity, timing and occlusion.
+See [Element screenshot v1](../../protocol/element-screenshot-v1.md).

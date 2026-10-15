@@ -1,4 +1,6 @@
       const passiveSecurityPanel = installPassiveSecurityReport({getRequest: () => apiCatalogResolveSource(state.selectedCaptureIdentity,state.requests).record});
+
+      const elementScreenshotPanel = RebElementScreenshot.install({getState: () => state.debuggerSession});
       const trafficCaptureExport = installTrafficCaptureExport(
         document.querySelector('#traffic-capture-export'),
         () => state.requests.find(request => request.id === state.selectedRequestId)
@@ -2394,7 +2396,7 @@
       }
 
       function setExperimentMode(mode, focus = false) {
-        if (!['interceptor', 'repeater', 'object', 'hooks', 'automation'].includes(mode)) return;
+        if (!['interceptor', 'repeater', 'object', 'hooks', 'automation', 'screenshot'].includes(mode)) return;
         if (state.sourceHooksOpen) closeSourceHooks(false);
         state.experimentMode = mode;
         elements.interceptionWorkspace.hidden = mode !== 'interceptor';
@@ -2462,7 +2464,7 @@
         if (!sharedMode) {
           elements.actionScopeBadge.dataset.kind = contextExists ? '' : 'offline';
           elements.actionScopeBadge.textContent = 'Target only';
-          const labels = {repeater: 'Repeater', object: 'Object Lab', hooks: 'Runtime Hooks'};
+          const labels = {repeater: 'Repeater', object: 'Object Lab', hooks: 'Runtime Hooks', screenshot: 'Element screenshot'};
           elements.actionScopeMessage.textContent = `${labels[state.experimentMode]} stays on the primary disposable page. Shared scope applies to Interceptor and Automation.`;
         } else {
           elements.actionScopeBadge.dataset.kind = ['error', 'partial'].includes(scope?.state) ? 'error'
@@ -3889,6 +3891,7 @@
       }
 
       function renderExperiment() {
+        if (typeof elementScreenshotPanel !== 'undefined') elementScreenshotPanel.setVisible(state.experimentMode === 'screenshot' && document.querySelector('#screen-experiments')?.hidden === false);
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === state.experimentMode;
           button.setAttribute('aria-selected', String(selected));
@@ -3900,6 +3903,11 @@
         elements.hooksWorkspace.hidden = !state.sourceHooksOpen && state.experimentMode !== 'hooks';
         elements.automationWorkspace.hidden = state.experimentMode !== 'automation';
         renderActionScope();
+        if (state.experimentMode === 'screenshot') {
+          elements.experimentTitle.textContent = 'Element screenshot';
+          elements.experimentSubtitle.textContent = 'Exact disposable document · bounded local pixels and layout';
+          return;
+        }
         if (state.experimentMode === 'repeater') {
           renderRepeater();
           return;
@@ -10406,6 +10414,7 @@
       }
 
       function renderDebugger() {
+        if (typeof elementScreenshotPanel !== 'undefined') elementScreenshotPanel.refresh();
         const session = state.debuggerSession;
         const paused = session?.state === 'paused';
         const running = session?.state === 'running';
@@ -10732,6 +10741,7 @@
           state.originTraceGeneration += 1;
           state.originTraceStatus = state.originTrace ? 'ready' : 'idle';
         }
+        if (typeof elementScreenshotPanel !== 'undefined') elementScreenshotPanel.setVisible(screenName === 'experiments' && state.experimentMode === 'screenshot');
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (screenName !== 'tools') float32Panel.cancel();

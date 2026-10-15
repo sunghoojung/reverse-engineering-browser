@@ -1,5 +1,7 @@
 import {checkMarkerFuzzIntegration} from './marker-fuzz-integration.mjs';
 import {createHash} from 'node:crypto';
+import {elementScreenshotFixtureRoute,checkElementScreenshotCapture} from './check-element-screenshot-capture.mjs';
+import {checkElementScreenshotUI} from './check-element-screenshot-ui.mjs';
 import {checkWebSocketInteractions} from './check-websocket-ui.mjs';
 import {platformEditEvent, selectRenderedOption} from './rendered-keyboard.mjs';
 import {checkCandidateExperimentController} from './check-candidate-experiment-controller.mjs';
@@ -48,8 +50,9 @@ const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const candidateBridgeBrowser = process.argv[2] === "--candidate-bridge-ui-browser";
+const elementScreenshotBrowser = process.argv[2] === "--element-screenshot-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[candidateBridgeBrowser || fieldsOnly || canvasBrowser || sourcesTreeBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[elementScreenshotBrowser || candidateBridgeBrowser || fieldsOnly || canvasBrowser || sourcesTreeBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkCandidateFixture();
 await checkCandidateExperimentController(root);
 await checkSourceWindowModel(root);
@@ -6250,9 +6253,10 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const candidateRequestReceipts = [];
 const candidateStartup = {phase:'fixture', browser_stderr:'', backend_stderr:'', broker_stderr:''};
 let candidateBroker;
-const candidateOutput = process.env.REB_UI_SCREENSHOTS || join(root,'build/candidate-bridge-ui-qa');
-if (candidateBridgeBrowser) await mkdir(candidateOutput,{recursive:true});
+const candidateOutput = process.env.REB_UI_SCREENSHOTS || join(root,elementScreenshotBrowser?'build/element-screenshot-ui-qa':'build/candidate-bridge-ui-qa');
+if (candidateBridgeBrowser || elementScreenshotBrowser) await mkdir(candidateOutput,{recursive:true});
 const fixture = createServer((req, res) => {
+  if (elementScreenshotFixtureRoute(req,res)) return;
   if (candidateFixtureRoute(req, res, candidateRequestReceipts)) return;
   if (process.env.ORIGIN_TRACE_FIXTURE_LOG)
     console.log("FIXTURE", req.method, req.url);
@@ -6333,7 +6337,7 @@ try {
     const profile = join(directory, "browser");
     await mkdir(profile);
     const browser = spawn(
-      process.env.ORIGIN_TRACE_TEST_BROWSER || (candidateBridgeBrowser ? process.env.REB_UI_CHROMIUM : undefined) ||
+      process.env.ORIGIN_TRACE_TEST_BROWSER || (candidateBridgeBrowser || elementScreenshotBrowser ? process.env.REB_UI_CHROMIUM : undefined) ||
         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
       [
         "--headless=new",
@@ -6347,9 +6351,9 @@ try {
         `--user-data-dir=${profile}`,
         fixtureUrl + (candidateBridgeBrowser ? "/candidate-page" : "/page"),
       ],
-      { stdio: candidateBridgeBrowser ? ['ignore','ignore','pipe'] : "ignore" },
+      { stdio: candidateBridgeBrowser || elementScreenshotBrowser ? ['ignore','ignore','pipe'] : "ignore" },
     );
-    if (candidateBridgeBrowser) {
+    if (candidateBridgeBrowser || elementScreenshotBrowser) {
       candidateStartup.phase='browser startup';
       browser.stderr.on('data',chunk=>{candidateStartup.browser_stderr=(candidateStartup.browser_stderr+chunk).slice(-16384);});
       browser.on('error',error=>{candidateStartup.browser_error=error.message;});
@@ -6422,12 +6426,12 @@ try {
       },
     );
     resources.push(backend);
-    if (candidateBridgeBrowser) candidateStartup.phase='backend startup';
+    if (candidateBridgeBrowser || elementScreenshotBrowser) candidateStartup.phase='backend startup';
     let diagnostics = "";
     backend.stdout.resume();
     backend.stderr.on("data", (x) => {
       diagnostics += x;
-      if (candidateBridgeBrowser) candidateStartup.backend_stderr=diagnostics.slice(-16384);
+      if (candidateBridgeBrowser || elementScreenshotBrowser) candidateStartup.backend_stderr=diagnostics.slice(-16384);
       appendFile(join(directory, "stderr.log"), x);
     });
     backend.on("exit", (code) => {
@@ -6537,6 +6541,12 @@ try {
       );
     };
     await until((s) => s.state === "running");
+    if (elementScreenshotBrowser) {
+      const address = trafficDevtoolsAddress(await readFile(join(profile, "DevToolsActivePort"), "utf8"));
+      await checkElementScreenshotUI({address,uiURL:url,fixtureURL:fixtureUrl,root,socketFactory:trafficBrowserSocket});
+      passed++;
+      continue;
+    }
     if (candidateBridgeBrowser) {
       const address = trafficDevtoolsAddress(await readFile(join(profile, "DevToolsActivePort"), "utf8"));
       candidateStartup.phase='rendered journey';
@@ -6635,6 +6645,8 @@ try {
     const primary = s.target.id;
     assert(s.action_scope.targets.every((t) => t.connected && t.matched));
     console.log(`PASS ${name} isolated context`);
+    passed++;
+    await checkElementScreenshotCapture({action,get,until,baseURL:url,fixtureURL:fixtureUrl});
     passed++;
     await action("configure_request_interception", {
       mode: "fulfill",
@@ -7206,7 +7218,7 @@ try {
     if(candidateBroker.exitCode===null&&candidateBroker.signalCode===null)candidateBroker.kill('SIGKILL');
     candidateStartup.broker_cleanup={exit_code:candidateBroker.exitCode,signal:candidateBroker.signalCode};
   }
-  if (candidateBridgeBrowser) await writeFile(join(candidateOutput,'startup.json'),JSON.stringify(candidateStartup,null,2));
+  if (candidateBridgeBrowser || elementScreenshotBrowser) await writeFile(join(candidateOutput,'startup.json'),JSON.stringify(candidateStartup,null,2));
   for (const child of resources) {
     if (child.exitCode === null) child.kill("SIGTERM");
   }

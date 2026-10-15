@@ -32,7 +32,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 24] = [
+const UI_ASSETS: [&str; 25] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -57,6 +57,7 @@ const UI_ASSETS: [&str; 24] = [
     "pane_layout.js",
     "native_console.js",
     "native_console_completion.js",
+    "element_screenshot.js",
 ];
 #[derive(Clone, Copy)]
 enum PackageOperation {

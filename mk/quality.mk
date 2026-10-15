@@ -118,6 +118,7 @@ javascript-check:
 	node tools/check-vm-observed-path.mjs
 	node tools/check-vm-compare-cli.mjs
 	node tools/check-python-client-project.mjs
+	node tools/check-element-screenshot.mjs
 	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-package.mjs --contract-only

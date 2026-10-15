@@ -1757,3 +1757,23 @@ for a small source-derived 16bitjs ISA example: generate 14 recorded transitions
 import them through the existing trace input, and inspect call/return, multiply,
 memory, stack and a taken branch. It is an owned fixed-program fixture, not the
 upstream runtime or unknown-code decompilation.
+
+### Element screenshot markup
+
+Experiments → **Element screenshot** reads the explicitly selected primary
+isolated page opened in Objects. Inspect selects its exact bounded document;
+confirmation and **Grab local screenshot** capture raw local viewport pixels
+and numbered layout bounds. Pointer and keyboard selection changes only the
+local overlay. Form/editable/private-marked content, child frames, shadow trees,
+unsupported zoom and observed drift refuse capture. Raw text/images can still
+be sensitive, and before/after checks are not atomic or an occlusion guarantee.
+See [Element screenshot v1](../../protocol/element-screenshot-v1.md) for the
+closed API, geometry limits, privacy boundary and required real-browser checks.
+
+`make element-screenshot-ui-check` runs the real product capture workflow with
+native pointer/keyboard input at desktop, 600 px and 360 px widths, including
+actual PNG decode/geometry and clear/leave cancellation. Set
+`ORIGIN_TRACE_TEST_BROWSER` to an installed Chromium-compatible browser when
+needed. Outputs are authored-fixture UI QA images and metadata receipts under
+`build/element-screenshot-ui-qa` (or `REB_UI_SCREENSHOTS`). This runnable check
+still requires execution; it does not replace packaged macOS acceptance.

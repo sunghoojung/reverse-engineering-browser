@@ -528,6 +528,7 @@
               <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
               <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="object" aria-selected="false" tabindex="-1">Objects</button>
               <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="hooks" aria-selected="false" tabindex="-1">Hooks</button>
+              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="screenshot" aria-selected="false" tabindex="-1">Element screenshot</button>
               <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="automation" aria-selected="false" tabindex="-1">Automation</button>
             </div>
             <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
@@ -731,6 +732,20 @@
                 </div>
                 <div id="repeater-history" class="repeater-history" role="listbox" aria-label="Repeater request history"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">No Repeater requests yet.</div></div>
               </details>
+            </div>
+            <div id="element-screenshot-workspace" class="element-screenshot-workspace" hidden>
+              <article class="experiment-card">
+                <header><div><h2>Element screenshot</h2><p>Open an authorized page in Objects, then inspect and capture its exact document.</p></div></header>
+                <div class="experiment-body">
+                  <p class="experiment-privacy">Explicit raw local capture. Form controls, editable/private-marked content, frames and shadow trees are refused. Other text and images may still be sensitive.</p>
+                  <div class="experiment-actions"><button type="button" class="secondary-button" data-element-inspect>Inspect selected document</button><button type="button" class="trace-button" data-element-capture disabled>Grab local screenshot</button><button type="button" class="secondary-button" data-element-clear disabled>Cancel / clear</button></div>
+                  <label class="object-confirm"><input type="checkbox" data-element-confirm disabled /> I authorize raw pixels from this inspected disposable document to remain in this local panel.</label>
+                  <p data-element-notice role="status" aria-live="polite">No capture has been made.</p>
+                  <p data-element-metadata>No document selected.</p>
+                  <details><summary>Geometry, privacy and timing limits</summary><ul data-element-limits></ul><p>Labels may overlap. Select from the list with pointer, Tab, arrow keys, Home or End. Selection changes only the local markup.</p></details>
+                </div>
+              </article>
+              <div class="element-screenshot-layout"><div class="element-screenshot-stage" data-element-stage aria-label="Local screenshot with numbered layout bounds"></div><div class="element-screenshot-list" data-element-list aria-label="Captured element selection"></div></div>
             </div>
             <div id="object-workspace" class="experiment-workspace" hidden>
               <div class="experiment-column">
@@ -1429,6 +1444,7 @@
     <script src="native_console.js"></script>
     <script src="investigation_navigation.js"></script>
     <script src="investigation_notebook.js"></script>
+    <script src="element_screenshot.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

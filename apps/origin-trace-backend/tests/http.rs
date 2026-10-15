@@ -620,7 +620,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
     }
     assert_eq!(
         names.len(),
-        60,
+        62,
         "Review debugger action coverage when the dispatcher changes"
     );
     assert_eq!(names, mappings.keys().map(String::as_str).collect());
@@ -888,7 +888,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             "Dispatch coverage: {name}"
         );
     }
-    assert_eq!(action_names("DebuggerAction").len(), 60);
+    assert_eq!(action_names("DebuggerAction").len(), 62);
     for (name, source, pattern) in [
         (
             "NativeConsoleAction",

@@ -8,6 +8,8 @@ import {pathToFileURL} from 'node:url';
 import vm from '../apps/research-ui/vm_semantics.js';
 import owned from '../apps/research-ui/vm_debugger.js';
 import staticVm from '../apps/research-ui/vm_static.js';
+import contextualVm from '../apps/research-ui/vm_contextual.js';
+import contextualEvidence from '../apps/research-ui/vm_contextual_evidence.js';
 import {inspectLedger, ledgerLimits} from './vm-opcode-ledger.mjs';
 
 const INPUT_LIMIT = 1048576, OUTPUT_LIMIT = 4194304, DEFAULT_TIMEOUT = 9000;
@@ -27,6 +29,8 @@ const usage = `Usage: node tools/vm-agent.mjs COMMAND [OPTIONS]
   decode-bytecode --definition VM.json --input BYTECODE.json
   analyze-static --definition VM.json --input BYTECODE.json
   select-instruction --definition VM.json --input BYTECODE.json --pc N
+  analyze-contextual --definition BUILD.json --input IMAGE.json
+  link-contextual --definition BUILD.json --input IMAGE.json --evidence EVENTS.json
   opcode-ledger --definition VM.json --input LEDGER.json
   status --base-url URL                      Read cached owned-fixture state
   trace --base-url URL --state STATE.json    Read the exact saved native run
@@ -69,6 +73,10 @@ export function capabilities() {
       operand_endianness: ['little', 'big'], pc_units: 'byte-offset',
       limits: {bytecode_bytes: 65536, instructions: 4096, opcode_definitions: 256, operands_per_instruction: 8},
       extension_boundary: 'reviewed declarative definitions using supported model operations; no executable plugin loader'},
+    contextual: {commands: ['analyze-contextual', 'link-contextual'], definition_format: 'reb-vm-contextual-definition-v1',
+      image_format: 'reb-vm-contextual-image-v1', evidence_format: 'reb-vm-contextual-evidence-v1',
+      executes_imported_code: false, network_requests: 0, vendor_compatibility: 'unverified',
+      semantics: 'hash-bound supplied declarations; explicit supplied jump evidence is separate from declared edges'},
     opcode_evidence: {format: 'reb-vm-opcode-ledger-v1', commands: ['opcode-ledger'], network_requests: 0,
       executes_imported_code: false, tests_executed: false, references_verified: false, limits: ledgerLimits},
     owned: {schema: 'reb-owned-vm-debug-session-v1', read_commands: ['status', 'trace'], actions,
@@ -84,6 +92,7 @@ export function capabilities() {
       compare: ['--input', '--sequence', '--right', '--right-sequence'],
       'validate-definition': ['--definition'], 'decode-bytecode': ['--definition', '--input'],
       'analyze-static': ['--definition', '--input'], 'select-instruction': ['--definition', '--input', '--pc'],
+      'analyze-contextual': ['--definition', '--input'], 'link-contextual': ['--definition', '--input', '--evidence'],
       'opcode-ledger': ['--definition', '--input'], status: ['--base-url'],
       trace: ['--base-url', '--state'], action: ['--base-url', '--state', '--command-id'], online_optional: ['--timeout-ms']},
     limits: {input_file_bytes: INPUT_LIMIT, output_bytes: OUTPUT_LIMIT}, writes_files: false,
@@ -97,6 +106,7 @@ function options(argv) {
     compare: ['input', 'sequence', 'right', 'right-sequence'],
     'validate-definition': ['definition'], 'decode-bytecode': ['definition', 'input'],
     'analyze-static': ['definition', 'input'], 'select-instruction': ['definition', 'input', 'pc'],
+    'analyze-contextual': ['definition', 'input'], 'link-contextual': ['definition', 'input', 'evidence'],
     'opcode-ledger': ['definition', 'input'], status: ['base-url'], trace: ['base-url', 'state'],
     action: ['base-url', 'state', 'command-id']};
   if (!Object.hasOwn(required, command) || command === 'action' && !actions.includes(action)) fail('usage', 'Use --help for explicit supported commands. Create is not supported by this facade.');
@@ -222,6 +232,16 @@ function validateAction(value, saved, action, commandId) {
 export async function execute(argv) {
   const opts = options(argv), {command, action} = opts;
   if (command === 'capabilities') return capabilities();
+  if (['analyze-contextual', 'link-contextual'].includes(command)) {
+    const definition = await readBounded(opts.definition, text => { contextualVm.parseDefinition(text); return text; });
+    const source = await readBounded(opts.input, text => { contextualVm.parseImage(text); return text; });
+    const evidence = command === 'link-contextual' ? await readBounded(opts.evidence, text => { contextualEvidence.parseEvidence(text); return text; }) : null;
+    try {
+      const result = evidence ? await contextualEvidence.link(definition.value, source.value, evidence.value) : await contextualVm.analyze(definition.value, source.value);
+      return {format: 'reb-vm-agent-contextual-analysis-v1', command, executes_imported_code: false,
+        definition_source_sha256: definition.sha256, source_sha256: source.sha256, evidence_source_sha256: evidence?.sha256 ?? null, result};
+    } catch { fail('analysis_refused', 'Contextual build, image hash, evidence identity or bounded analysis failed.'); }
+  }
   if (command === 'opcode-ledger') {
     const definition = await readBounded(opts.definition, text => { staticVm.parseDefinition(text); return text; });
     return (await readBounded(opts.input, text => inspectLedger(text, definition.value))).value;

@@ -495,20 +495,24 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
   const navigationEntry=document.querySelector('#nav-vm-workspace');
   const staticButton=document.querySelector('#vm-show-static'),staticRoot=document.querySelector('#vm-static-workspace');
   const staticAnalysis=staticRoot&&typeof mountVmStatic==='function'?mountVmStatic(staticRoot):null;
+  const contextualButton=document.querySelector('#vm-show-contextual'),contextualRoot=document.querySelector('#vm-contextual-workspace');
+  const contextualAnalysis=contextualRoot&&typeof mountVmContextual==='function'?mountVmContextual(contextualRoot):null;
   let mode='findings',screenVisible=false,hasSession=false,owned=null;
   const sync=()=>{
     root.hidden=mode!=='execution';if(findings)findings.hidden=mode!=='findings';
     if(ownedRoot)ownedRoot.hidden=mode!=='owned';
     if(staticRoot)staticRoot.hidden=mode!=='static';
+    if(contextualRoot)contextualRoot.hidden=mode!=='contextual';
     if(controls){
       const hide=mode!=='owned'&&!hasSession;
-      if(hide&&controls.contains(document.activeElement))(mode==='static'?staticButton:mode==='execution'?executionButton:findingsButton)?.focus({preventScroll:true});
+      if(hide&&controls.contains(document.activeElement))(mode==='contextual'?contextualButton:mode==='static'?staticButton:mode==='execution'?executionButton:findingsButton)?.focus({preventScroll:true});
       controls.hidden=hide;
     }
     findingsButton?.setAttribute('aria-pressed',String(mode==='findings'));
     executionButton?.setAttribute('aria-pressed',String(mode==='execution'));
     ownedButton?.setAttribute('aria-pressed',String(mode==='owned'));
     staticButton?.setAttribute('aria-pressed',String(mode==='static'));
+    contextualButton?.setAttribute('aria-pressed',String(mode==='contextual'));
     owned?.setVisible(screenVisible&&(mode==='owned'||hasSession));
     if(owned)owned.panes.hidden=mode!=='owned';
   };
@@ -516,9 +520,10 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
     owned=mountOwnedVmDebugger(ownedRoot,{onState:view=>{hasSession=!!view.session;if(navigationEntry){navigationEntry.textContent='VM';const label=view.session?'VM workspace · '+view.session.state:'VM workspace';navigationEntry.setAttribute('aria-label',label);navigationEntry.setAttribute('title',label);}sync();}});
     if(controls)controls.append(owned.toolbar);
   }
-  const showWorkspace=next=>{mode=['findings','execution','owned',...(staticAnalysis?['static']:[])].includes(next)?next:'findings';sync();};
+  const showWorkspace=next=>{mode=['findings','execution','owned',...(staticAnalysis?['static']:[]),...(contextualAnalysis?['contextual']:[])].includes(next)?next:'findings';sync();};
   findingsButton?.addEventListener('click',()=>showWorkspace('findings'));executionButton?.addEventListener('click',()=>showWorkspace('execution'));ownedButton?.addEventListener('click',()=>showWorkspace('owned'));
   staticButton?.addEventListener('click',()=>showWorkspace('static'));
+  contextualButton?.addEventListener('click',()=>showWorkspace('contextual'));
   sync();
-  return {execution,owned,staticAnalysis,showWorkspace,setVisible:visible=>{screenVisible=!!visible;sync();}};
+  return {execution,owned,staticAnalysis,contextualAnalysis,showWorkspace,setVisible:visible=>{screenVisible=!!visible;sync();}};
 })();

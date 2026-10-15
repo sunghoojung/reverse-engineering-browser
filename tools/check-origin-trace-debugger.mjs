@@ -6304,7 +6304,9 @@ async function checkTrafficBrowser() {
     const vmSemantics=await checkVmSemanticsInteractions({evaluate,viewport,click,key,screenshot});
     const {checkVmStaticInteractions}=await import('./check-vm-static-ui.mjs');
     const vmStaticAnalysis=await checkVmStaticInteractions({evaluate,viewport,click,key,screenshot});
-    validation = {websocketInspection,vmSemantics,vmStaticAnalysis,capturedComparison,status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
+    const {checkVmContextualInteractions}=await import('./check-vm-contextual-ui.mjs');
+    const vmContextualAnalysis=await checkVmContextualInteractions({evaluate,viewport,click,key,screenshot});
+    validation = {websocketInspection,vmSemantics,vmStaticAnalysis,vmContextualAnalysis,capturedComparison,status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
     }
     diagnostics.phase = "validated";
     }

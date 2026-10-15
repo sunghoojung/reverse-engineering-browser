@@ -42,6 +42,8 @@ export async function checkPackageContract() {
   const nativeRoutes = native.slice(native.indexOf('switch requestURL.path'), native.indexOf('case "/api/health"'));
   assert.deepEqual([...nativeRoutes.matchAll(/"\/([^"/]+\.(?:js|css|html))"/g)].map(match => match[1]).sort(), [...publicAssets].sort());
   const backend = await readFile(join(root, 'apps/origin-trace-backend/src/app.rs'), 'utf8');
+  const backendCount = Number(backend.match(/const UI_ASSETS: \[&str; (\d+)\]/)[1]);
+  assert.equal(backendCount, publicAssets.length, 'Backend asset array size matches packaged public assets');
   const backendRoutes = backend.match(/const UI_ASSETS:[\s\S]+?= \[([\s\S]+?)\];/)[1];
   assert.deepEqual([...backendRoutes.matchAll(/"([^"]+)"/g)].map(match => match[1]).sort(), [...publicAssets].sort());
   const config = await readFile(join(root, 'apps/origin-trace-backend/src/config.rs'), 'utf8');

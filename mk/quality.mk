@@ -113,6 +113,7 @@ javascript-check:
 	node tools/check-owned-vm-debugger-ui.mjs
 	node tools/check-vm-semantics.mjs
 	node tools/check-vm-agent.mjs
+	node tools/check-vm-opcode-ledger.mjs
 	node tools/check-vm-static.mjs
 	node tools/check-vm-static-ui.mjs
 	node tools/check-vm-compatibility-demo.mjs

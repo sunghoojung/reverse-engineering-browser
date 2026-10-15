@@ -5763,6 +5763,7 @@
       }
 
       function setAnalystNotice(kind, message) {
+        state.localAnalystNoticeRevision = (state.localAnalystNoticeRevision ?? 0) + 1;
         state.localAnalystStatus = kind;
         state.localAnalystMessage = message;
         analystElements.notice.dataset.kind = kind;
@@ -5898,6 +5899,7 @@
         state.localAnalystRefreshing = true;
         const version = state.localAnalystVersion;
         if (!state.localAnalystLoaded) setAnalystNotice('loading', 'Loading the local analyst workspace…');
+        const noticeRevision = state.localAnalystNoticeRevision ?? 0;
         let loaded = false;
         try {
           try {
@@ -5914,9 +5916,14 @@
               if (state.localAnalystPendingSave) loaded = reconcileAnalystSave(body);
               else if (admitAnalystWorkspace(body)) {
                 const count = body.files.length;
-                setAnalystNotice(count ? 'ready' : 'empty', count
-                  ? `${count} saved ${count === 1 ? 'file' : 'files'} loaded from the permission-restricted local workspace.`
-                  : 'Start by saving a script or note.');
+                // Admit fresh data, but a routine load receipt must not erase a
+                // newer interaction warning. Conflicts and recovery errors above
+                // still publish their actionable outcome through their own path.
+                if (noticeRevision === (state.localAnalystNoticeRevision ?? 0)) {
+                  setAnalystNotice(count ? 'ready' : 'empty', count
+                    ? `${count} saved ${count === 1 ? 'file' : 'files'} loaded from the permission-restricted local workspace.`
+                    : 'Start by saving a script or note.');
+                }
                 loaded = true;
               }
             }

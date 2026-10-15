@@ -1697,3 +1697,13 @@ mode reports these controls unavailable; use a live workspace.
 cases. Its exported rendered flow requires the real backend and helper. Neither
 an authored browser harness nor a DOM model substitutes for native end-to-end
 acceptance, keyboard/focus QA or packaged-app execution.
+
+### Colored VM controls and compatibility example
+
+VM action, selected and changed-state colors have distinct dark/light palettes
+with text and focus contrast checks. Labels and explicit change markers remain
+visible. See [the owned compatibility example](../../docs/development/vm-compatibility-demo.md)
+for a small source-derived 16bitjs ISA example: generate 14 recorded transitions,
+import them through the existing trace input, and inspect call/return, multiply,
+memory, stack and a taken branch. It is an owned fixed-program fixture, not the
+upstream runtime or unknown-code decompilation.

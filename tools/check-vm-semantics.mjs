@@ -199,3 +199,18 @@ executionButton.events.click();assert.equal(shellRoot.hidden,false);assert.equal
 shell.showWorkspace('findings');assert.equal(shellRoot.hidden,true);assert.equal(findingsButton.attributes['aria-pressed'],'true');
 document.querySelector=()=>null;
 console.log('PASS VM-local Findings/Execution round trip preserves both DOM owners, selected sequence and finding scroll; finding entry restores Findings (DOM model, not rendered/source-link acceptance)');
+
+// Numerical contrast checks cover the actual VM theme tokens. Rendered QA also
+// checks computed colors so selector regressions cannot pass on token math alone.
+const vmCss=await readFile(new URL('../apps/research-ui/app.css',import.meta.url),'utf8');
+const vmPaletteBlocks=[...vmCss.matchAll(/(?:^|\n)(?:\:root\[data-theme="light"\] )?#screen-vm \{([^}]*--vm-action-bg[^}]*)\}/g)];
+assert.equal(vmPaletteBlocks.length,2);
+const luminance=hex=>{const rgb=hex.match(/[a-f0-9]{2}/gi).map(v=>parseInt(v,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;};
+const ratio=(a,b)=>{const x=luminance(a),y=luminance(b);return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);};
+for(const [index,match] of vmPaletteBlocks.entries()){
+ const palette=Object.fromEntries([...match[1].matchAll(/--vm-([a-z-]+):\s*(#[a-f0-9]{6})/g)].map(m=>[m[1],m[2]]));
+ for(const role of ['action','control','selected','change','stop','disabled'])assert(ratio(palette[role+'-fg'],palette[role+'-bg'])>=4.5,`${index}:${role} text contrast`);
+ assert(ratio(palette['action-fg'],palette['action-bg'])>=3,`${index}:primary focus contrast`);
+ for(const background of [palette['control-bg'],palette['selected-bg'],palette['stop-bg']])assert(ratio(palette.focus,background)>=3,`${index}:focus boundary contrast`);
+}
+console.log('PASS dark/light VM semantic role text contrast >=4.5 and focus contrast >=3 (token math, not rendered QA)');

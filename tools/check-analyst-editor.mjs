@@ -176,6 +176,26 @@ export async function checkAnalystController(root) {
   f=await controllerFixture(root);f.edit('Draft move');f.elements.folder.value='3';f.server.folders.pop();f.server.generation=2;
   assert.equal(await f.ui.refreshLocalAnalyst(true),true);assert.equal(f.elements.folder.value,'3');assert.match(f.elements.folder.textContent,/Unavailable folder #3/);
 
+  // An identical successful Reload cannot overwrite a newer dirty-navigation
+  // warning. Repeating the same warning also changes ownership, not its text.
+  for(const repeated of [false,true]){
+    f=await controllerFixture(root);
+    if(repeated){f.edit('Retained pending-reload draft');assert.equal(f.ui.selectAnalystFile(2),false);f.server.generation=2;f.server.files[1].content='Unrelated newer note';f.server.files[1].content_bytes=20;}
+    f.mode='hold-get';const reload=f.ui.refreshLocalAnalyst(true);assert(f.state.localAnalystRefreshing);
+    f.edit('Retained pending-reload draft');
+    assert.equal(f.ui.selectAnalystFile(2),false);const warning=f.state.localAnalystMessage;assert.match(warning,/Unsaved edits/);
+    f.held.shift()();assert.equal(await reload,true);
+    assert.equal(f.state.localAnalystMessage,warning);assert.equal(f.elements.notice.textContent,warning);
+    assert.equal(f.state.localAnalyst.generation,repeated?2:1,'Fresh nonconflicting data is admitted despite preserving the newer notice');
+    assert.equal(f.state.analystSelectedFileId,1);assert(f.state.analystDraftDirty);assert.equal(f.elements.content.value,'Retained pending-reload draft');assert.equal(f.postCount(),0);
+  }
+  // No newer notice: the normal receipt still appears. A genuinely conflicting
+  // response must still supersede the local warning with actionable conflict.
+  f=await controllerFixture(root);assert.equal(await f.ui.refreshLocalAnalyst(true),true);assert.match(f.state.localAnalystMessage,/2 saved files loaded/);
+  f=await controllerFixture(root);f.server.generation=2;f.server.files[0].content='Remote change';f.server.files[0].content_bytes=13;f.mode='hold-get';
+  const conflictingReload=f.ui.refreshLocalAnalyst(true);f.edit('Local retained');assert.equal(f.ui.selectAnalystFile(2),false);
+  f.held.shift()();assert.equal(await conflictingReload,false);assert.equal(f.state.localAnalystStatus,'conflict');assert.match(f.state.localAnalystMessage,/changed in another window/);assert.equal(f.elements.content.value,'Local retained');assert.equal(f.postCount(),0);
+
   // An older in-flight load cannot replace a successful new save.
   f=await controllerFixture(root);f.mode='hold-get';const load=f.ui.refreshLocalAnalyst(true);
   f.mode='ready';f.edit('Newer saved');assert.equal(await f.ui.saveAnalystFile(),true);f.held.shift()();assert.equal(await load,false);
@@ -267,7 +287,7 @@ export async function checkAnalystInteractions({evaluate,viewport,click,key,whee
   await viewport(1440,900);await enter();
   await evaluate(`window.analystWriteCalls=0; window.analystOriginalFetch=window.fetch;
     window.fetch=function(url,options={}){if(String(url)==='/api/local-analyst/actions'&&options.method==='POST')window.analystWriteCalls++;return window.analystOriginalFetch.apply(this,arguments);}`);
-await hit('#analyst-reload');await until(`state.localAnalyst.generation===${f.library.generation}`);
+await hit('#analyst-reload');await until(`state.localAnalyst.generation===${f.library.generation} && !state.localAnalystRefreshing`);
   await hit('#analyst-tree [data-folder-id="2"]');await hit(tree(1));
   await type('#analyst-content','Synthetic unsaved conclusion. <img src=x onerror=alert(1)>');
   await hit(tree(1));assert.equal(await evaluate('analystElements.content.value'),'Synthetic unsaved conclusion. <img src=x onerror=alert(1)>');

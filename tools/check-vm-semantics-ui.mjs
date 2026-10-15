@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {selectRenderedOption} from './rendered-keyboard.mjs';
+import {recordCompatibilityDemo} from './generate-vm-compatibility-demo.mjs';
 export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,screenshot}) {
  const before={pc:0,halted:false,registers:[0],stack:[],memory:[]},after={...before,pc:1,registers:[7]},halted={...after,halted:true};
  const trace={format:'reb-vm-trace-v1',identity:{trace_id:'owned-ui',investigation_id:'1',finding_id:'2',artifact_id:'3',artifact_sha256:'a'.repeat(64),scope_id:'owned-ui',backend:'native'},architecture:'register',coverage:{complete:true,dropped_steps:0,limitations:['<img src=x onerror=alert(1)> inert fixture']},steps:[{sequence:0,opcode:'03',operands:[0,7],instruction_size:1,before,after,evidence_refs:['fixture:0']},{sequence:1,opcode:'09',operands:[],instruction_size:1,before:after,after:halted,evidence_refs:['fixture:1']}]};
@@ -65,6 +66,17 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
   assert.equal(await evaluate(`(()=>{const e=document.querySelector('${root}');return e.scrollWidth<=e.clientWidth+1&&document.querySelector('.vm-grid').getBoundingClientRect().bottom<=innerHeight+1})()`),true);
   assert.equal(await evaluate(`(()=>{const e=document.activeElement,r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&s.outlineStyle!=='none'})()`),true,'Keyboard focus must be visible');
   assert.equal(await evaluate(`(()=>{const rows=[...document.querySelectorAll('${root} .vm-state-row')];return rows.length>0&&rows.every(row=>[...row.children].every(e=>e.scrollWidth<=e.clientWidth+1))})()`),true,'State cells must remain readable');
+  {
+   const theme=await evaluate("document.documentElement.getAttribute('data-theme')");
+   for(const palette of ['dark','light']){
+    await evaluate(`document.documentElement.setAttribute('data-theme',${JSON.stringify(palette)})`);
+    const colors=await evaluate(`(()=>{const rgb=s=>s.match(/[0-9.]+/g).slice(0,3).map(Number),lum=s=>{const a=rgb(s).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return a[0]*.2126+a[1]*.7152+a[2]*.0722;},ratio=(a,b)=>(Math.max(lum(a),lum(b))+.05)/(Math.min(lum(a),lum(b))+.05);return ['.vm-file-control','.vm-clear-traces','.vm-listing-row[aria-selected="true"]','.vm-state-row[data-changed="true"]'].map(selector=>{const n=document.querySelector('#vm-semantics-workflow '+selector);if(!n)throw Error('Missing color role '+selector);const c=getComputedStyle(n);return {selector,contrast:ratio(c.color,c.backgroundColor),pseudoContrast:selector.includes('vm-listing-row')?ratio(getComputedStyle(n.querySelector('span'),'::before').color,c.backgroundColor):99,background:c.backgroundColor};});})()`);
+    assert(colors.every(role=>role.contrast>=4.5&&(width===1440||role.pseudoContrast>=4.5)),`${palette} rendered VM text contrast must be at least4.5`);
+    assert.equal(new Set(colors.map(role=>role.background)).size,4,'Action, clear, selection and changed roles must remain visually distinct');
+    await screenshot(`vm-semantic-colors-${palette}-${width}.png`);
+   }
+   await evaluate(theme===null?"document.documentElement.removeAttribute('data-theme')":`document.documentElement.setAttribute('data-theme',${JSON.stringify(theme)})`);
+  }
   await screenshot(`vm-semantics-${width}.png`);
  }
  const sparse=JSON.parse(JSON.stringify(trace));sparse.coverage={complete:false,dropped_steps:3,limitations:['synthetic gaps']};sparse.steps[1].sequence=4;sparse.steps[0].before.memory=[[0,0],[9,null]];sparse.steps[0].after.memory=[[9,null],[20,0]];sparse.steps[0].before.stack=[0];sparse.steps[0].after.stack=[];
@@ -159,6 +171,19 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  if(!consoleWasOpen)await click('#native-console-toggle');
  assert.equal(await evaluate(`document.documentElement.scrollWidth<=innerWidth&&document.querySelector('${root}').getBoundingClientRect().bottom<=innerHeight`),true);await screenshot('vm-execution-console-open.png');
  if(!consoleWasOpen)await click('#native-console-toggle');
+ // Record the reviewed owned compatibility fixture, then use the ordinary file
+ // import path. This is real fixture execution, never upstream or site capture.
+ await importFile(recordCompatibilityDemo(),'Import VM execution trace');
+ await ensureVisible('[aria-label="Execution step"]');await selectRenderedOption({evaluate,click,key,selector:'[aria-label="Execution step"]',index:6,keyboardFocus:true});
+ await visibleClick('#vm-state-tab-memory');
+ assert.equal(await evaluate(`document.querySelector('${root} [data-vm-location="memory:64"]').getAttribute('data-changed')`),'true');
+ assert.match(await evaluate(`document.querySelector('${root} [data-vm-location="memory:64"]').textContent`),/42/);
+ assert.equal(await evaluate(`document.querySelectorAll('${root} .vm-listing-row').length`),14);
+ assert.match(await evaluate(`document.querySelector('${root} .vm-context-summary').textContent`),/owned-16bit-compatibility-demo/);
+ await screenshot('vm-compatibility-demo-memory-store-desktop.png');
+ await ensureVisible('[aria-label="Execution step"]');await selectRenderedOption({evaluate,click,key,selector:'[aria-label="Execution step"]',index:13,keyboardFocus:true});
+ await visibleClick('#vm-state-tab-instruction');assert.match(await text(),/halted/);
+ await screenshot('vm-compatibility-demo-halted-desktop.png');
  await byText('Clear imported traces');assert.equal(await evaluate("document.querySelector('[aria-label=\"Execution step\"]').disabled"),true);assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Import VM execution trace');
  return {status:'passed',checks:['real file digest import','opcode support → exact step → cell','manually paired comparison','invalid comparison retains both traces','counterexample → exact step → mismatch','inert payload','clear and focus','readable cells and visible keyboard focus at three viewports','full-height retained listing and64-row keyboard paging','exact Instruction/Registers/Stack/Memory tabs','360px cell/occurrence/support focus restoration','Findings DOM/source/scroll round trip','1440/1024/760/600/360 layouts and Console geometry','720×450 short-height vertical scroll and keyboard inspection']};
 }

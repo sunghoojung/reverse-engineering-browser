@@ -101,6 +101,7 @@ javascript-check:
 	node tools/check-owned-vm-integration.mjs
 	node tools/check-owned-vm-debugger-ui.mjs
 	node tools/check-vm-semantics.mjs
+	node tools/check-vm-agent.mjs
 	node tools/check-vm-compatibility-demo.mjs
 	node tools/check-vm-linked-model.mjs
 	node tools/check-vm-observed-path.mjs

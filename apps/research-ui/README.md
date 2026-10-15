@@ -1148,7 +1148,9 @@ Raw body continue to show inert source text. See
 
 Deobfuscation stays inside **Sources**. Select a JavaScript source and use the
 **Static cleanup** control to switch between original evidence and the mapped derived view.
-Cleanup opens its Details report and uses REB's existing local Rust/Oxc worker;
+Open **Details > Static cleanup** to inspect the report. Cleanup preserves the
+current sidebar visibility so narrow-screen overlays do not hide the code. It
+uses REB's existing local Rust/Oxc worker;
 it does not call or embed an online deobfuscation service. No input is executed
 or uploaded to a third-party service. **Compare original / cleaned** shows
 both inert texts with independently labeled 8,192-UTF-16-unit prefix limits,

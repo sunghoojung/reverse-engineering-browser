@@ -11337,11 +11337,9 @@
         investigationPassiveSource = false;
         sourceFactsPanel.cancel();
         state.sourceDeobfuscated = !state.sourceDeobfuscated;
-        if (state.sourceDeobfuscated) {
-          state.sourceSidebarOpen = true;
-          document.querySelector('#deobfuscation-details').open = true;
-          renderSourceSidebar();
-        }
+        // Keep the editor's reading area and the user's Details preference.
+        // At narrow widths Details is an overlay, so opening it here hides code.
+        if (state.sourceDeobfuscated) document.querySelector('#deobfuscation-details').open = true;
         renderSources();
       });
       elements.sourceWasm.addEventListener('click', () => {

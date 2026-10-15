@@ -2419,10 +2419,15 @@ function ownedDerivedPayload(source, original, replacements) {
   const context={document,elements,state,investigationPassiveSource:true,sourceFactsPanel:{cancel(){cancellations++;}},renderSources(){renders++;}};
   runInNewContext(sourceProductionFunction('renderSourceSidebar')+appSection("      elements.sourceDeob.addEventListener('click'", "      elements.sourceWasm.addEventListener('click'"),context);
   elements.sourceDeob.listeners.click[0]();
-  assert.equal(elements.sourceSidebar.hidden,false);assert.equal(elements.sourceSidebarToggle.getAttribute('aria-expanded'),'true');
-  assert.equal(screen.dataset.sidebarOpen,'true');assert.equal(details.open,true);assert.equal(state.sourceDeobfuscated,true);
+  assert.equal(elements.sourceSidebar.hidden,true,'Cleanup must not overlay the code editor');
+  assert.equal(state.sourceSidebarOpen,false,'Cleanup preserves the explicit Details preference');
+  assert.equal(details.open,true);assert.equal(state.sourceDeobfuscated,true);
   elements.sourceDeob.listeners.click[0]();assert.equal(state.sourceDeobfuscated,false);assert.equal(renders,2);assert.equal(cancellations,2);
-  sourceOwnershipReceipt.push({test:'static_cleanup_click_opens_closed_details_and_original_toggle',status:'passed'});
+  state.sourceSidebarOpen=true;context.renderSourceSidebar();
+  elements.sourceDeob.listeners.click[0]();
+  assert.equal(elements.sourceSidebar.hidden,false,'Already open Details stays open');
+  assert.equal(state.sourceSidebarOpen,true);
+  sourceOwnershipReceipt.push({test:'static_cleanup_preserves_sidebar_visibility_and_original_toggle',status:'passed'});
 }
 {
   const original='/*'+'x'.repeat(8189)+'😀'+'y'.repeat(200)+'*/ const result=1+2;';

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Agent-facing adapter only: fixed owned-fixture routes and inert saved evidence.
+// Agent-facing adapter only: fixed owned-fixture routes and inert declarative inputs.
 import {constants} from 'node:fs';
 import {open} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -7,6 +7,7 @@ import {request} from 'node:http';
 import {pathToFileURL} from 'node:url';
 import vm from '../apps/research-ui/vm_semantics.js';
 import owned from '../apps/research-ui/vm_debugger.js';
+import staticVm from '../apps/research-ui/vm_static.js';
 
 const INPUT_LIMIT = 1048576, OUTPUT_LIMIT = 4194304, DEFAULT_TIMEOUT = 9000;
 const scopeKeys = ['backend_instance_id', 'session_id', 'run_id', 'run_generation'];
@@ -21,6 +22,10 @@ const usage = `Usage: node tools/vm-agent.mjs COMMAND [OPTIONS]
   select-step --input TRACE.json --sequence N
   validate --input TRACE.json --hypotheses HYPOTHESES.json
   compare --input LEFT.json --sequence N --right RIGHT.json --right-sequence N
+  validate-definition --definition VM.json  Validate inert declarative VM layout
+  decode-bytecode --definition VM.json --input BYTECODE.json
+  analyze-static --definition VM.json --input BYTECODE.json
+  select-instruction --definition VM.json --input BYTECODE.json --pc N
   status --base-url URL                      Read cached owned-fixture state
   trace --base-url URL --state STATE.json    Read the exact saved native run
   action ACTION --base-url URL --state STATE.json --command-id ID
@@ -29,7 +34,8 @@ ACTION: run | pause | step | stop | reset | close. Actions are explicit writes.
 URL: http://127.0.0.1:PORT or http://[::1]:PORT, optional trailing slash.
 Online commands accept --timeout-ms 1..10000 (default ${DEFAULT_TIMEOUT}).
 STATE is a reviewed raw reb-owned-vm-debug-session-v1 view from status/reb-api.
-Imported traces are inert: select-step never executes code. No arbitrary code,
+Imported traces are inert: select-step never executes code. Static commands
+interpret declarative metadata only, never execute imported bytecode. No arbitrary code,
 URL targets, port scanning, redirects, proxies, storage writes or automatic retries.
 Create is unavailable here; use the existing owned-fixture UI or reb-api after
 reviewing reb-api describe vm_debugger_action --action create.
@@ -52,6 +58,15 @@ export function capabilities() {
   return {format: 'reb-vm-agent-capabilities-v1', discovery: 'offline-static-not-server-attestation',
     offline: {format: 'reb-vm-trace-v1', commands: ['inspect', 'select-step', 'validate', 'compare'], executes_imported_code: false,
       semantics: 'existing bounded supplied-observation model; hypotheses are not proof', network_requests: 0},
+    imported_static: {definition_format: 'reb-vm-definition-v1', bytecode_format: 'reb-vm-bytecode-v1',
+      commands: ['validate-definition', 'decode-bytecode', 'analyze-static', 'select-instruction'],
+      executes_imported_code: false, executes_plugins: false, network_requests: 0,
+      semantics: 'researcher-supplied declarative layout and meanings; static edges and pseudocode are not observed execution',
+      runtime_state: 'unknown', live_capture_adapter: {available: false},
+      architectures: ['stack', 'register'], opcode_bytes: [1, 2], operand_width_bytes: [1, 2, 4],
+      operand_endianness: ['little', 'big'], pc_units: 'byte-offset',
+      limits: {bytecode_bytes: 65536, instructions: 4096, opcode_definitions: 256, operands_per_instruction: 8},
+      extension_boundary: 'reviewed declarative definitions using supported model operations; no executable plugin loader'},
     owned: {schema: 'reb-owned-vm-debug-session-v1', read_commands: ['status', 'trace'], actions,
       target: 'existing repository-owned cooperative native register/stack fixtures only', exact_scope: scopeKeys,
       action_requires: ['explicit action', 'reviewed saved state', 'user-supplied command ID', 'selected loopback base URL'],
@@ -62,7 +77,10 @@ export function capabilities() {
     transport: {hosts: ['127.0.0.1', '::1'], protocol: 'http', explicit_port: true, redirects: false, proxies: false,
       auto_retry: false, timeout_ms: DEFAULT_TIMEOUT, maximum_timeout_ms: 10000, response_bytes: INPUT_LIMIT, request_bytes: 2048},
     options: {inspect: ['--input'], 'select-step': ['--input', '--sequence'], validate: ['--input', '--hypotheses'],
-      compare: ['--input', '--sequence', '--right', '--right-sequence'], status: ['--base-url'],
+      compare: ['--input', '--sequence', '--right', '--right-sequence'],
+      'validate-definition': ['--definition'], 'decode-bytecode': ['--definition', '--input'],
+      'analyze-static': ['--definition', '--input'], 'select-instruction': ['--definition', '--input', '--pc'],
+      status: ['--base-url'],
       trace: ['--base-url', '--state'], action: ['--base-url', '--state', '--command-id'], online_optional: ['--timeout-ms']},
     limits: {input_file_bytes: INPUT_LIMIT, output_bytes: OUTPUT_LIMIT}, writes_files: false,
     exit_codes: {'0': 'confirmed result; Run means scheduling acknowledged', '2': 'invalid/refused/read failure',
@@ -72,7 +90,10 @@ export function capabilities() {
 function options(argv) {
   const args = [...argv], command = args.shift(), action = command === 'action' ? args.shift() : null;
   const required = {capabilities: [], inspect: ['input'], 'select-step': ['input', 'sequence'], validate: ['input', 'hypotheses'],
-    compare: ['input', 'sequence', 'right', 'right-sequence'], status: ['base-url'], trace: ['base-url', 'state'],
+    compare: ['input', 'sequence', 'right', 'right-sequence'],
+    'validate-definition': ['definition'], 'decode-bytecode': ['definition', 'input'],
+    'analyze-static': ['definition', 'input'], 'select-instruction': ['definition', 'input', 'pc'],
+    status: ['base-url'], trace: ['base-url', 'state'],
     action: ['base-url', 'state', 'command-id']};
   if (!Object.hasOwn(required, command) || command === 'action' && !actions.includes(action)) fail('usage', 'Use --help for explicit supported commands. Create is not supported by this facade.');
   const online = ['status', 'trace', 'action'].includes(command), result = {};
@@ -219,6 +240,46 @@ export async function execute(argv) {
     } catch (error) {
       if (error instanceof Refusal) throw error;
       fail('analysis_refused', 'Supplied evidence, hypotheses or exact step selection failed the existing offline model.');
+    }
+    return report;
+  }
+  if (['validate-definition', 'decode-bytecode', 'analyze-static', 'select-instruction'].includes(command)) {
+    const definition = await readBounded(opts.definition, text => ({text, parsed: staticVm.parseDefinition(text)}));
+    const report = {format: 'reb-vm-agent-static-analysis-v1', command, definition_source_sha256: definition.sha256,
+      source_sha256: null, executes_imported_code: false, result: null};
+    if (command === 'validate-definition') {
+      report.result = {valid: true, definition: definition.value.parsed};
+      return report;
+    }
+    const source = await readBounded(opts.input, text => ({text, parsed: staticVm.parseImage(text)}));
+    report.source_sha256 = source.sha256;
+    try {
+      // Pass original strict UTF-8 text so the shared model preserves exact
+      // source hashes separately from its explicitly canonical definition hash.
+      const analysis = await staticVm.analyze(definition.value.text, source.value.text);
+      if (command === 'analyze-static') report.result = analysis;
+      if (command === 'decode-bytecode') report.result = {
+        definition_id: analysis.definition.definition_id, image_id: analysis.image.image_id,
+        provenance: analysis.provenance,
+        instructions: analysis.instructions.map(({pseudocode: _pseudocode, ...instruction}) => instruction),
+        coverage: analysis.coverage, diagnostics: analysis.diagnostics, warnings: analysis.warnings,
+        runtime_state: 'unknown', equivalence_proven: false,
+      };
+      if (command === 'select-instruction') {
+        if (!/^(0|[1-9][0-9]*)$/.test(opts.pc) || !Number.isSafeInteger(Number(opts.pc))) fail('selection_refused', 'Select an exact canonical nonnegative byte-offset PC.');
+        const pc = Number(opts.pc), instruction = analysis.instructions.find(value => value.offset === pc);
+        if (!instruction) fail('selection_refused', 'No decoded instruction starts at the exact selected byte offset.');
+        report.result = {definition_id: analysis.definition.definition_id, image_id: analysis.image.image_id,
+          provenance: analysis.provenance, coverage: analysis.coverage, diagnostics: analysis.diagnostics, warnings: analysis.warnings,
+          instruction, cfg_node: analysis.cfg.nodes.find(value => value.offset === pc),
+          incoming_edges: analysis.cfg.edges.filter(value => value.to_offset === pc),
+          outgoing_edges: analysis.cfg.edges.filter(value => value.from_offset === pc),
+          pseudocode: analysis.pseudocode.filter(value => value.instruction_id === instruction.id),
+          runtime_state: 'unknown', equivalence_proven: false};
+      }
+    } catch (error) {
+      if (error instanceof Refusal) throw error;
+      fail('analysis_refused', 'Declarative definition, bytecode identity or static analysis failed the bounded model.');
     }
     return report;
   }

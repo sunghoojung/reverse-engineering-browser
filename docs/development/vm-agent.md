@@ -1,9 +1,9 @@
 # Bounded VM agent commands
 
 `node tools/vm-agent.mjs --help` exposes an optional dependency-free Node.js 22+
-facade over the existing [offline VM model](../../protocol/vm-semantics-v1.md)
-and [owned native debugger API](../../protocol/owned-vm-debugger-v1.md). It does
-not replace `reb-api`, add an API server, or change backend contracts.
+facade over the [offline observation model](../../protocol/vm-semantics-v1.md),
+declarative static bytecode model, and
+[owned native debugger API](../../protocol/owned-vm-debugger-v1.md). It does not replace `reb-api`, add an API server, or change backend contracts.
 
 The useful difference from a generic `reb-api call` is strict VM-response and
 identity validation plus explicit pending, rejected and uncertain command
@@ -45,6 +45,100 @@ checks a bounded declarative hypothesis against supplied observations. Neither
 executes imported code, proves recovered semantics, or creates a native run.
 All offline commands have zero network requests. The original
 `tools/vm-semantics.mjs` remains the private, no-clobber file-export workflow.
+
+## Declarative definitions and imported static bytecode
+
+The additive commands consume an explicit
+[`reb-vm-definition-v1` definition](../../protocol/vm-definition-v1.schema.json)
+and [`reb-vm-bytecode-v1` image](../../protocol/vm-bytecode-v1.schema.json). Both inputs are inert strict JSON. The shared
+`apps/research-ui/vm_static.js` model performs validation, byte decoding,
+instruction-level static CFG construction and instruction-linked pseudocode.
+It neither starts an interpreter nor runs a plugin, script or imported bytecode.
+
+```sh
+node tools/vm-agent.mjs validate-definition --definition reviewed-vm.json
+node tools/vm-agent.mjs decode-bytecode --definition reviewed-vm.json --input reviewed-bytecode.json
+node tools/vm-agent.mjs analyze-static --definition reviewed-vm.json --input reviewed-bytecode.json
+node tools/vm-agent.mjs select-instruction --definition reviewed-vm.json --input reviewed-bytecode.json --pc 3
+```
+
+`validate-definition` checks the supported schema and returns the validated
+definition. `decode-bytecode` returns decoded instructions, exact input/byte
+provenance, coverage and diagnostics. `analyze-static` additionally returns the
+static CFG and linked pseudocode. `select-instruction` selects an exact decoded
+instruction-start byte offset and returns its pseudocode, CFG node, incoming and
+outgoing edges with full coverage and diagnostics. It refuses an operand byte,
+unknown tail, truncated tail or missing instruction; it never picks the nearest
+instruction. This `--pc` is a byte offset, distinct from existing native-fixture
+instruction-index PCs and supplied-trace sequence IDs.
+
+The output envelope is `reb-vm-agent-static-analysis-v1`, with `command`,
+`definition_source_sha256`, nullable `source_sha256`, `executes_imported_code:
+false`, and `result`. The two outer hashes identify exact UTF-8 file bytes,
+including whitespace; `source_sha256` is null for definition-only validation.
+The shared analysis distinguishes those source-text hashes from its explicit
+canonical-definition hash and the hash of the raw bytes decoded from
+`bytes_hex`. Formatting the JSON differently changes source-file hashes without
+changing the canonical definition or bytecode-byte hashes. A supplied ID or hash
+is never proof of capture origin, authorization, or recovered semantic accuracy.
+
+Definitions select stack or register architecture, one- or two-byte literal
+opcodes, little- or big-endian one-, two- or four-byte operands, register bounds,
+operand names/kinds, supported declarative operations and control-flow targets.
+There is no embedded JavaScript, expression evaluator, custom opcode callback,
+module loader or executable template. An unfamiliar meaning can remain
+`unknown`; supported declared meanings are researcher hypotheses, not observed
+facts. Pseudocode is generated text with an exact instruction ID/offset, never a
+program to execute. Operand widths describe encoding only; runtime arithmetic
+width, overflow, flags and memory behavior remain unspecified. No inferred
+register, stack or memory state is substituted for missing runtime observations.
+
+Decoding starts at byte zero and stops at unknown opcodes, truncated operands,
+invalid operands or the instruction budget. The undecoded tail remains explicit.
+Entry offsets and branch/call targets are classified against decoded boundaries;
+mid-instruction, out-of-range, undecoded and unknown targets remain visible.
+CFG edges are declared static possibilities. Conditional edges do not establish
+which branch ran, call continuation is not proof that a call returns, and return
+or unknown flow cannot invent concrete targets. Reachability is static only;
+CFG completeness and semantic equivalence are not claimed.
+
+The `imported_static` capability registry explicitly separates these commands
+from `offline` supplied-observation analysis and `owned` native-fixture controls.
+All static commands use zero network requests. They reject endpoint, timeout,
+plugin and action options and never discover a backend, refresh a run or retry.
+Each input file remains capped at 1 MiB; the model additionally caps bytecode at
+64 KiB, decoded instructions at 4096, opcode definitions at 256 and operands per
+instruction at eight. The normal 4 MiB stdout bound still applies atomically.
+
+An agent can validate a reviewed definition, decode reviewed bytes, inspect
+uncertain edges, select an exact instruction and compare a proposed definition
+revision using another explicit invocation. This workflow does not grant
+permission to capture or upload evidence. Review generated output as untrusted
+data, preserve the original bytes and definitions, and keep all unknowns visible
+when proposing changes. Existing trace-validation commands remain a separate
+way to test supported hypotheses against supplied observations.
+
+### Future capture-adapter boundary
+
+The imported-static registry reports `live_capture_adapter.available: false`.
+There is no arbitrary live-VM adapter, capture discovery service or plugin
+execution mechanism in this facade. New declarative definitions extend layouts
+only within the current supported vocabulary. Additional operations require a
+reviewed model/protocol change and independent tests. A future capture adapter
+would need its own versioned evidence/provenance and authorization contract,
+bounded loss/partial-state reporting, exact target/run identity, and explicit
+controls before it could supply observed execution. The existing owned native
+fixture provider remains the only live execution-control provider here; its
+saved-scope requirements and uncertainty handling are unchanged.
+
+`node tools/check-vm-static.mjs` checks independently hand-specified stack and
+register programs with literal expected offsets, operands, static edges and
+pseudocode links, plus malformed definitions, unknown/truncated tails,
+mid-instruction targets and bounds. These golden expectations are not generated
+by the analyzer. The CLI suite separately invokes all new commands in child
+processes with network entry points disabled, checks exact source hashes,
+selection refusals, strict input/file bounds and unchanged source files. Neither
+suite claims real imported execution or rendered/native application acceptance.
 
 ## Read an explicitly selected native backend
 
@@ -162,8 +256,8 @@ never executed. Preserve the original uncertain result.
 
 `node tools/check-vm-agent.mjs` exercises the actual CLI subprocess against an
 authored loopback HTTP server and synthetic offline files. It covers scopes,
-large exact values, all commands, pre-dispatch refusal, provenance/revision
-mismatch, malformed input, transport bounds, deadlines, pending/unknown replies,
+large exact values, all commands, declarative static inputs and exact instruction
+selection, pre-dispatch refusal, provenance/revision mismatch, malformed input, transport bounds, deadlines, pending/unknown replies,
 and no-retry/no-redirect behavior. These tests do not claim real native helper
 execution or rendered application acceptance; those remain the existing owned
 VM integration and UI suites. `make javascript-check` runs the new test.

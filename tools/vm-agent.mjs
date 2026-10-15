@@ -8,6 +8,7 @@ import {pathToFileURL} from 'node:url';
 import vm from '../apps/research-ui/vm_semantics.js';
 import owned from '../apps/research-ui/vm_debugger.js';
 import staticVm from '../apps/research-ui/vm_static.js';
+import {inspectLedger, ledgerLimits} from './vm-opcode-ledger.mjs';
 
 const INPUT_LIMIT = 1048576, OUTPUT_LIMIT = 4194304, DEFAULT_TIMEOUT = 9000;
 const scopeKeys = ['backend_instance_id', 'session_id', 'run_id', 'run_generation'];
@@ -26,6 +27,7 @@ const usage = `Usage: node tools/vm-agent.mjs COMMAND [OPTIONS]
   decode-bytecode --definition VM.json --input BYTECODE.json
   analyze-static --definition VM.json --input BYTECODE.json
   select-instruction --definition VM.json --input BYTECODE.json --pc N
+  opcode-ledger --definition VM.json --input LEDGER.json
   status --base-url URL                      Read cached owned-fixture state
   trace --base-url URL --state STATE.json    Read the exact saved native run
   action ACTION --base-url URL --state STATE.json --command-id ID
@@ -67,6 +69,8 @@ export function capabilities() {
       operand_endianness: ['little', 'big'], pc_units: 'byte-offset',
       limits: {bytecode_bytes: 65536, instructions: 4096, opcode_definitions: 256, operands_per_instruction: 8},
       extension_boundary: 'reviewed declarative definitions using supported model operations; no executable plugin loader'},
+    opcode_evidence: {format: 'reb-vm-opcode-ledger-v1', commands: ['opcode-ledger'], network_requests: 0,
+      executes_imported_code: false, tests_executed: false, references_verified: false, limits: ledgerLimits},
     owned: {schema: 'reb-owned-vm-debug-session-v1', read_commands: ['status', 'trace'], actions,
       target: 'existing repository-owned cooperative native register/stack fixtures only', exact_scope: scopeKeys,
       action_requires: ['explicit action', 'reviewed saved state', 'user-supplied command ID', 'selected loopback base URL'],
@@ -80,7 +84,7 @@ export function capabilities() {
       compare: ['--input', '--sequence', '--right', '--right-sequence'],
       'validate-definition': ['--definition'], 'decode-bytecode': ['--definition', '--input'],
       'analyze-static': ['--definition', '--input'], 'select-instruction': ['--definition', '--input', '--pc'],
-      status: ['--base-url'],
+      'opcode-ledger': ['--definition', '--input'], status: ['--base-url'],
       trace: ['--base-url', '--state'], action: ['--base-url', '--state', '--command-id'], online_optional: ['--timeout-ms']},
     limits: {input_file_bytes: INPUT_LIMIT, output_bytes: OUTPUT_LIMIT}, writes_files: false,
     exit_codes: {'0': 'confirmed result; Run means scheduling acknowledged', '2': 'invalid/refused/read failure',
@@ -93,7 +97,7 @@ function options(argv) {
     compare: ['input', 'sequence', 'right', 'right-sequence'],
     'validate-definition': ['definition'], 'decode-bytecode': ['definition', 'input'],
     'analyze-static': ['definition', 'input'], 'select-instruction': ['definition', 'input', 'pc'],
-    status: ['base-url'], trace: ['base-url', 'state'],
+    'opcode-ledger': ['definition', 'input'], status: ['base-url'], trace: ['base-url', 'state'],
     action: ['base-url', 'state', 'command-id']};
   if (!Object.hasOwn(required, command) || command === 'action' && !actions.includes(action)) fail('usage', 'Use --help for explicit supported commands. Create is not supported by this facade.');
   const online = ['status', 'trace', 'action'].includes(command), result = {};
@@ -218,6 +222,10 @@ function validateAction(value, saved, action, commandId) {
 export async function execute(argv) {
   const opts = options(argv), {command, action} = opts;
   if (command === 'capabilities') return capabilities();
+  if (command === 'opcode-ledger') {
+    const definition = await readBounded(opts.definition, text => { staticVm.parseDefinition(text); return text; });
+    return (await readBounded(opts.input, text => inspectLedger(text, definition.value))).value;
+  }
   if (['inspect', 'select-step', 'validate', 'compare'].includes(command)) {
     const source = await readBounded(opts.input, text => vm.trace(vm.parse(text)));
     const report = {format: 'reb-vm-agent-analysis-v1', command, source_sha256: source.sha256, hypotheses_sha256: null, result: null};

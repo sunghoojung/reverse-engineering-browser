@@ -1,0 +1,249 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "definition_id",
+    "definition_source_sha256",
+    "entries"
+  ],
+  "properties": {
+    "format": {
+      "const": "reb-vm-opcode-ledger-v1"
+    },
+    "definition_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$(?![\\s\\S])",
+      "maxLength": 128
+    },
+    "definition_source_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$(?![\\s\\S])"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "opcode",
+          "status",
+          "meaning",
+          "handler_location",
+          "operand_format",
+          "source_refs",
+          "test_status",
+          "test_refs",
+          "unresolved_questions"
+        ],
+        "properties": {
+          "opcode": {
+            "type": "string",
+            "pattern": "^(?:[a-f0-9]{2}|[a-f0-9]{4})$(?![\\s\\S])"
+          },
+          "status": {
+            "enum": [
+              "observed",
+              "inferred",
+              "unmodeled"
+            ]
+          },
+          "meaning": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]*$(?![\\s\\S])"
+              }
+            ]
+          },
+          "handler_location": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "artifact_id",
+                  "byte_offset"
+                ],
+                "properties": {
+                  "artifact_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.:-]{1,128}$(?![\\s\\S])",
+                    "maxLength": 128
+                  },
+                  "byte_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                }
+              }
+            ]
+          },
+          "operand_format": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]*$(?![\\s\\S])"
+              }
+            ]
+          },
+          "source_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "artifact_id",
+                "event_id"
+              ],
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:-]{1,128}$(?![\\s\\S])",
+                  "maxLength": 128
+                },
+                "event_id": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.:-]{1,128}$(?![\\s\\S])",
+                      "maxLength": 128
+                    }
+                  ]
+                }
+              }
+            },
+            "maxItems": 16,
+            "uniqueItems": true
+          },
+          "test_status": {
+            "enum": [
+              "not_run",
+              "passed",
+              "failed",
+              "inconclusive"
+            ]
+          },
+          "test_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "artifact_id",
+                "event_id"
+              ],
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:-]{1,128}$(?![\\s\\S])",
+                  "maxLength": 128
+                },
+                "event_id": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.:-]{1,128}$(?![\\s\\S])",
+                      "maxLength": 128
+                    }
+                  ]
+                }
+              }
+            },
+            "maxItems": 16,
+            "uniqueItems": true
+          },
+          "unresolved_questions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]*$(?![\\s\\S])"
+            },
+            "maxItems": 16
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "unmodeled"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "meaning": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "meaning": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]*$(?![\\s\\S])"
+                },
+                "source_refs": {
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "test_status": {
+                  "const": "not_run"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "test_refs": {
+                  "maxItems": 0
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "test_refs": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "maxItems": 256
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://origin-trace.local/protocol/vm-opcode-ledger-v1.schema.json",
+  "title": "Researcher-supplied opcode evidence ledger v1",
+  "$comment": "Model additionally enforces strict UTF-8 JSON, 1 MiB, canonical safe integer tokens, no duplicate keys, no lone surrogates, unique opcode codes, exact definition source hash and declared opcode membership."
+}

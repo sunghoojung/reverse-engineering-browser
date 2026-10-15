@@ -84,3 +84,8 @@ Use `node tools/export-graphql-sdl.mjs --input introspection.json --output schem
 Use `node tools/vm-semantics.mjs --help` for offline VM trace inspection, exact-step retrieval and declarative opcode hypothesis validation. The [v1 contract](../protocol/vm-semantics-v1.md) distinguishes supplied state observations, inferred candidates and unknown semantics. The same workflow is in the existing VM findings view.
 
 Use `node tools/vm-agent.mjs --help` for the optional [bounded VM agent facade](../docs/development/vm-agent.md): offline JSON capabilities and supplied-trace analyses, strict exact-run reads, and explicit scoped controls for existing owned native fixtures. Imported traces remain inert; the facade never creates sessions or retries uncertain commands.
+
+Use `node tools/vm-agent.mjs opcode-ledger --definition VM.json --input LEDGER.json`
+for the [offline opcode evidence ledger](../protocol/vm-opcode-ledger-v1.md), including
+strict import validation, exportable entries and explicitly bounded definition-table
+coverage. Source references and test statuses remain unverified researcher assertions.

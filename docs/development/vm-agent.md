@@ -356,3 +356,14 @@ responses. `owned_vm_debugger.rs` methods `Owner::start`, `Owner::handle` and
 `Owner::complete` establish
 the corresponding real state transitions; `answer` copies the completed Run
 view synchronously before the actor can process another tick.
+
+## Opcode evidence ledger
+
+`node tools/vm-agent.mjs opcode-ledger --definition reviewed-vm.json --input reviewed-ledger.json`
+imports the strict [opcode evidence ledger](../../protocol/vm-opcode-ledger-v1.md),
+returns the unchanged validated ledger for explicit export, and reports observed,
+inferred, unmodeled and missing-entry counts over the declared opcode table.
+It binds the exact definition file hash, not runtime or bytecode identity.
+Handler locations, source artifact/event citations, test reports and unresolved
+questions remain supplied unverified evidence. It does not promote unknown
+semantics, execute tests, resolve citations or contact a network endpoint.

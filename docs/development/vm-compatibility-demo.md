@@ -13,7 +13,7 @@ The existing layout and responsive row-count requirements are unchanged.
     node tools/generate-vm-compatibility-demo.mjs /tmp/owned-vm-demo.json
     node tools/check-vm-compatibility-demo.mjs
 
-Open Advanced → VM workspace → Execution workspace → Import trace and select
+Open VM tab → Execution workspace → Import trace and select
 that JSON file. Existing output files are refused. The generated trace is small,
 uses the normal bounded import contract, and contains no host data. Importing
 it does not start a native fixture or execute supplied code in the application.

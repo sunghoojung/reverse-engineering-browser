@@ -94,10 +94,12 @@ export async function checkAdvancedNavigation(root) {
   const source=app.slice(app.indexOf('      function showScreen('),app.indexOf('      async function refresh()'));
   const html=await readFile(join(root,'apps/research-ui/index.html'),'utf8');
   const vmEntry=html.match(/<button\b[^>]*id="nav-vm-workspace"[^>]*>/)?.[0];
-  assert(vmEntry,'VM workspace must have a real Advanced entry');
+  assert(vmEntry,'VM workspace must have a primary entry');
+  assert.equal((html.match(/id="nav-vm-workspace"/g)||[]).length,1);
+  assert(html.indexOf('id="nav-vm-workspace"')<html.indexOf('id="advanced-navigation"'),'VM must precede and be outside Advanced');
   assert.match(vmEntry,/class="[^"]*\bnav-button\b[^"]*"/,'VM entry must use shared navigation focus semantics');
-  const advanced=['vm','backtrace','memory','experiments','analyst','tools'];
-  const names=['traffic','api-collection','sources','signals',...advanced,'evidence','field-provenance'];
+  const advanced=['backtrace','memory','experiments','analyst','tools'];
+  const names=['traffic','api-collection','sources','vm','signals',...advanced,'evidence','field-provenance'];
   for(const narrow of [false,true]) {
     const focused=[],frames=[];let current='traffic';
     const document={activeElement:null};
@@ -122,10 +124,13 @@ export async function checkAdvancedNavigation(root) {
     for(const name of ['renderFingerprintActivity','renderRuntimeHookTraffic','renderBacktrace','renderExperiment','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderDebugger','renderSources','renderMemory','renderVmLab'])context[name]=noop;
     const showScreen=runInNewContext(source+';showScreen',context);
     const flush=()=>{for(const callback of frames.splice(0))callback();};
-    for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence']) {
+    for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence','vm','field-provenance']) {
       showScreen(name);flush();
       assert.equal(group.open,false,`${name}: linked navigation must not open or retain Advanced at ${narrow?'narrow':'wide'} widths`);
       assert.equal(screens.filter(screen=>!screen.hidden).length,1);
+      const currentButtons=buttons.filter(button=>button['aria-current']==='page');
+      assert.equal(currentButtons.length,1,'Exactly one workspace tab is current');
+      assert.equal(currentButtons[0].dataset.screen,name==='backtraces'||name==='evidence'?'backtrace':name==='field-provenance'?'traffic':name);
     }
     for(const name of advanced) {
       const button=buttons.find(button=>button.dataset.screen===name);
@@ -138,11 +143,13 @@ export async function checkAdvancedNavigation(root) {
       // Selecting the current workspace again is also a completed choice.
       group.open=true;showScreen(name,button);assert.equal(group.open,false);
     }
-    const primary=buttons.find(button=>button.dataset.screen==='sources');
-    group.open=true;document.activeElement=primary;focused.length=0;
-    showScreen('sources',primary);flush();
-    assert.equal(group.open,false);assert.equal(document.activeElement,primary);
-    assert.deepEqual(focused,[],'Primary navigation must keep its own focus');
+    for(const name of ['sources','vm']){
+      const primary=buttons.find(button=>button.dataset.screen===name);
+      group.open=true;document.activeElement=primary;focused.length=0;
+      showScreen(name,primary);flush();
+      assert.equal(group.open,false);assert.equal(document.activeElement,primary);
+      assert.deepEqual(focused,[],'Primary navigation must keep its own focus');
+    }
     group.open=true;document.activeElement=destination;focused.length=0;
     showScreen('tools');
     assert.equal(group.open,false);assert.deepEqual(focused,[],'Linked navigation must not redirect unrelated focus to the menu');
@@ -297,7 +304,7 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
   // never a test-only assignment to details.open or synthetic button.click().
   for(const size of [[1440,900],[760,560],[360,740]]) {
     await viewport(...size);
-    const choices=size[0]===1440?['vm','backtrace','memory','experiments','analyst','tools']:['vm','tools'];
+    const choices=size[0]===1440?['backtrace','memory','experiments','analyst','tools']:['tools'];
     for(const name of choices) {
       await click('#advanced-navigation > summary');
       await until("document.querySelector('#advanced-navigation').open",'Pointer did not open Advanced');
@@ -310,20 +317,14 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
     }
     await enter();await until("document.querySelector('#advanced-navigation').open",'Enter did not reopen Advanced');
     await key('Tab','Tab',{windowsVirtualKeyCode:9});
-    assert.equal(await evaluate('document.activeElement.dataset.screen'),'vm','Tab must enter the chooser at VM workspace');
-    await key('Tab','Tab',{windowsVirtualKeyCode:9});
-    assert.equal(await evaluate('document.activeElement.dataset.screen'),'backtrace','The next Tab must reach Backtraces');
+    assert.equal(await evaluate('document.activeElement.dataset.screen'),'backtrace','Tab must enter the chooser at Backtraces');
     await key('Escape','Escape',{windowsVirtualKeyCode:27});await closed('Escape from chooser');
-    assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true);
-    await enter();await until("document.querySelector('#advanced-navigation').open",'Keyboard could not reopen Advanced for VM');
-    await key('Tab','Tab',{windowsVirtualKeyCode:9});await enter();
-    await arrived('vm',`Keyboard VM choice at ${size[0]}`);
     assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true);
     for(let repeat=0;repeat<2;repeat++) {
       await enter();await until("document.querySelector('#advanced-navigation').open",'Keyboard could not reopen Advanced');
       await key('Tab','Tab',{windowsVirtualKeyCode:9});
-      assert.equal(await evaluate('document.activeElement.dataset.screen'),'vm');
-      await key('Tab','Tab',{windowsVirtualKeyCode:9});await enter();
+      assert.equal(await evaluate('document.activeElement.dataset.screen'),'backtrace');
+      await enter();
       await arrived('backtrace',`Keyboard choice ${repeat+1} at ${size[0]}`);
       assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true);
     }
@@ -331,6 +332,25 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
     await click('#advanced-navigation > summary');
     await click('.nav-button[data-screen="sources"]');await arrived('sources',`Primary choice at ${size[0]}`);
     assert.equal(await evaluate('document.activeElement.dataset.screen'),'sources','Primary choice must keep its own focus');
+    await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.id'),'nav-vm-workspace','VM follows Sources in primary keyboard order');
+    await key(' ','Space',{windowsVirtualKeyCode:32,text:' ',unmodifiedText:' '});await arrived('vm',`Primary VM Space at ${size[0]}`);
+    assert.equal(await evaluate('document.activeElement.id'),'nav-vm-workspace');
+    assert.equal(await evaluate(`[...document.querySelectorAll('.primary-nav [aria-current="page"]')].map(n=>n.dataset.screen).join(',')`),'vm');
+    await key('Tab','Tab',{windowsVirtualKeyCode:9,modifiers:8});assert.equal(await evaluate('document.activeElement.dataset.screen'),'sources');
+    await key('Tab','Tab',{windowsVirtualKeyCode:9});await enter();await arrived('vm',`Repeated primary VM Enter at ${size[0]}`);
+    assert.equal(await evaluate("(()=>{const s=getComputedStyle(document.activeElement);return s.outlineStyle!=='none'&&parseFloat(s.outlineWidth)>0;})()"),true,'Keyboard-focused VM must have a visible outline');
+    await screenshot(`investigation-primary-vm-${size[0]}`);
+
+  }
+  for(const [width,height] of [[1440,900],[1024,740],[760,560],[600,800],[481,740],[480,740],[360,740],[720,450]]){
+    await viewport(width,height);await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    assert.equal(await evaluate(`(()=>{const controls=[...document.querySelectorAll('.primary-nav > button, .primary-nav > details > summary, .toolbar-actions > button')];return controls.every(node=>{const r=node.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight&&node.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2));});})()`),true,`All top-level controls must remain reachable at ${width}×${height}`);
+    await click('#nav-vm-workspace');await arrived('vm',`Top-level VM at ${width}`);
+    assert.equal(await evaluate("document.querySelector('#nav-vm-workspace').textContent"),'VM','Session state must not expand the primary label');
+    assert.equal(await evaluate("document.activeElement.id"),'nav-vm-workspace');
+    await click('#advanced-navigation > summary');
+    assert.equal(await evaluate(`(()=>{const menu=document.querySelector('#advanced-navigation .advanced-items');const r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight;})()`),true,`Advanced menu must remain in view at ${width}×${height}`);
+    await key('Escape','Escape',{windowsVirtualKeyCode:27});
   }
   // Rebuild a real short-label return trail. With Back to Requests + Forward,
   // the old flex layout squeezed the open notice into a 150px right column.

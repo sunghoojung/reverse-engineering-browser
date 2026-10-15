@@ -158,7 +158,7 @@ node tools/check-owned-vm-native-browser.mjs \
 All four paths are required. This runner creates fresh temporary evidence stores,
 starts the actual Rust backend on an ephemeral loopback port with the specified
 native helper, loads the integrated UI in a normal sandboxed Chromium, and opens
-Advanced → VM workspace → Live owned fixture through rendered controls. It then
+VM tab → Live owned fixture through rendered controls. It then
 runs the real-helper keyboard/state/provider-switch flow. It never starts a
 mock-response server or substitutes a JavaScript VM.
 

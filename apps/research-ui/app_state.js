@@ -251,6 +251,7 @@
         localAnalystRefreshing: false,
         localAnalystSaving: false,
         localAnalystVersion: 0,
+        localAnalystNoticeRevision: 0,
         localAnalystNeedsReload: false,
         localAnalystPendingSave: null,
         analystDraftBase: null,

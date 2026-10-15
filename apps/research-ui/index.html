@@ -117,6 +117,7 @@
                       <button class="exchange-button" type="button" data-traffic-export="raw" data-traffic-destination="clipboard">Copy raw capture</button>
                       <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="download">Save redacted copy</button>
                       <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="clipboard">Copy redacted copy</button>
+                      <button id="passive-security-open" class="exchange-button" type="button" aria-haspopup="dialog">Local passive security report</button>
                       <button class="exchange-button" type="button" data-client-capture="draft">Review captured request in Repeater</button>
                       <button class="exchange-button" type="button" data-client-capture="raw">Export raw client project</button>
                       <button class="exchange-button" type="button" data-client-capture="redacted_copy">Export redacted client project</button>
@@ -1369,6 +1370,12 @@
         </section>
       </div>
 
+      <dialog id="passive-security" class="api-catalog" aria-labelledby="passive-security-title" aria-describedby="passive-security-scope">
+        <header class="api-catalog-header"><h2 id="passive-security-title">Local passive security report</h2><button id="passive-security-close" class="secondary-button" type="button" autofocus>Close</button></header>
+        <p id="passive-security-scope">One selected retained capture. Header observations and secret-looking counts only. No target requests, credential checks or automatic changes.</p>
+        <p id="passive-security-status" role="status" aria-live="polite"></p>
+        <div id="passive-security-content" class="api-catalog-content" tabindex="0" aria-label="Passive security observations"></div>
+      </dialog>
       <dialog id="api-catalog" class="api-catalog" aria-labelledby="api-catalog-title" aria-describedby="api-catalog-scope">
         <header class="api-catalog-header"><h2 id="api-catalog-title">Observed API catalog</h2><button id="api-catalog-refresh" class="secondary-button" type="button">Refresh snapshot</button><button id="api-catalog-close" class="secondary-button" type="button" autofocus>Close</button></header>
         <p id="api-catalog-scope">Structural observations from the newest retained Traffic records. Not an API specification. Paths and names may contain private data. Raw Traffic is unchanged.</p>
@@ -1412,6 +1419,7 @@
     <script src="traffic_view.js"></script>
     <script src="api_catalog.js"></script>
     <script src="captured_client.js"></script>
+    <script src="passive_security.js"></script>
     <script src="vm_debugger.js"></script>
     <script src="vm_semantics.js"></script>
     <script src="request_value_test.js"></script>

@@ -1,3 +1,4 @@
+      const passiveSecurityPanel = installPassiveSecurityReport({getRequest: () => apiCatalogResolveSource(state.selectedCaptureIdentity,state.requests).record});
       const trafficCaptureExport = installTrafficCaptureExport(
         document.querySelector('#traffic-capture-export'),
         () => state.requests.find(request => request.id === state.selectedRequestId)
@@ -1275,6 +1276,7 @@
         state.signalProfileEtag = null;
         state.signalProfileGeneration += 1;
         evidencePackagePanel.sync();
+        passiveSecurityPanel.sync();
       }
 
       function renderRequestCount(visibleCount, loadedCount) {
@@ -1953,6 +1955,7 @@
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         updateSelectionSummary(request);
         trafficCaptureExport.sync();
+        passiveSecurityPanel.sync();
         capturedClientWorkflow.sync();
         document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;

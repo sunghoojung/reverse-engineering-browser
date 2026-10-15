@@ -8,6 +8,7 @@ import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {runInNewContext} from 'node:vm';
 import {network} from './traffic-capture-qa.mjs';
+import {checkPassiveSecurityInteractions} from './check-passive-security-ui.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const traffic = await readFile(join(root, 'apps/research-ui/traffic_view.js'), 'utf8');
@@ -225,6 +226,7 @@ async function checkBrowser() {
     await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});
     await until(()=>evaluate("typeof state !== 'undefined' && state.requests.length===1"),'loaded real Traffic UI');
     assert.equal(catalogReads,0,'Boot and debugger polling must not read catalog');
+    const passiveSecurity=await checkPassiveSecurityInteractions({evaluate,send,click,key,shot,until});
     const raw=await evaluate('JSON.stringify(state.requests[0].captureRecord)');
     await click('#open-api-catalog');
     await until(()=>evaluate("document.querySelector('#api-catalog-status').textContent.includes('Snapshot loaded')"),'catalog loaded');
@@ -432,7 +434,7 @@ async function checkBrowser() {
     const downloaded=await until(async()=>{try{return await readFile(join(output,'reb-client-project.raw.zip'));}catch{return null;}},'explicit client ZIP download');
     assert.equal(downloaded.readUInt32LE(0),0x04034b50);
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);
-    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download'],keyboard:['Tab filter focus','Enter clear filters','Home/End comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
+    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',passive_security:passiveSecurity,product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download'],keyboard:['Tab filter focus','Enter clear filters','Home/End comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
     console.log(`PASS rendered catalog: keyboard and pointer, three viewports, scrolling, inert markup, raw header preservation, explicit read-only lifecycle, source invalidation. Evidence: ${output}`);
   } catch (error) {
     firstFailure=error;

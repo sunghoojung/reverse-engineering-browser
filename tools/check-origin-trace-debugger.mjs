@@ -1327,7 +1327,7 @@ console.log('PASS artifact-only and empty-catalog refresh synchronize the Eviden
 // Evidence operation immediately rather than waiting for the next view render.
 const packageResetState={selectedRequestId:'evicted',originTraceGeneration:0,signalProfileGeneration:0};let packageResetContext;
 const packageReset=runInNewContext(appSection('      function resetRequestSelection()', '      function renderRequestCount(')+';resetRequestSelection',{
-  state:packageResetState,evidencePackagePanel:{sync(){packageResetContext=packageResetState.selectedRequestId;}}
+  state:packageResetState,passiveSecurityPanel:{sync(){}},evidencePackagePanel:{sync(){packageResetContext=packageResetState.selectedRequestId;}}
 });packageReset();assert.equal(packageResetContext,null);
 
 // Every inspector render must refresh the strip from the same current request;
@@ -1342,7 +1342,7 @@ let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
-    state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}}, capturedClientWorkflow: {sync() {}},
+    state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}}, passiveSecurityPanel: {sync() {}}, capturedClientWorkflow: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, renderTrafficComparison() {}, openFieldProvenance() {},
   });

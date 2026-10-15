@@ -73,7 +73,7 @@ export async function checkInvestigationCore(root) {
   assert.equal(model.investigationResolve(oldIdentity,replacedRequests,model.investigationRequestIdentity).status,'stale');
   const retiredSelection={selectedRequestId:originalRequests[0].id,trafficDetailOpen:true,originTraceGeneration:0,signalProfileGeneration:0};
   const resetSelection=app.slice(app.indexOf('      function resetRequestSelection('),app.indexOf('      function renderRequestCount('));
-  runInNewContext(resetSelection+';resetRequestSelection()',{state:retiredSelection,evidencePackagePanel:{sync(){}}});
+  runInNewContext(resetSelection+';resetRequestSelection()',{state:retiredSelection,evidencePackagePanel:{sync(){}},passiveSecurityPanel:{sync(){}}});
   assert.equal(retiredSelection.selectedRequestId,null);assert.match(retiredSelection.trafficSelectionNotice,/left the retained capture window/);
   assert.equal(retiredSelection.trafficDetailOpen,true,'Retiring the old identity intentionally leaves its inspector open; later QA must close it through the control');
   const freshRequests=await fixtureRequests('14'),freshIdentity=model.investigationRequestIdentity(freshRequests[0]);

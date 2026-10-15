@@ -1,0 +1,186 @@
+{
+  "format": "reb-vm-definition-v1",
+  "definition_id": "owned-static-register-v1",
+  "architecture": "register",
+  "opcode_bytes": 1,
+  "operand_endianness": "little",
+  "register_count": 4,
+  "opcodes": [
+    {
+      "code": "00",
+      "mnemonic": "NOP",
+      "operands": [],
+      "semantics": {
+        "operation": "nop",
+        "args": []
+      },
+      "flow": {
+        "kind": "next"
+      }
+    },
+    {
+      "code": "10",
+      "mnemonic": "CONST",
+      "operands": [
+        {
+          "name": "destination",
+          "width": 1,
+          "signed": false,
+          "kind": "register"
+        },
+        {
+          "name": "value",
+          "width": 2,
+          "signed": true,
+          "kind": "immediate"
+        }
+      ],
+      "semantics": {
+        "operation": "register_const",
+        "args": [
+          "destination",
+          "value"
+        ]
+      },
+      "flow": {
+        "kind": "next"
+      }
+    },
+    {
+      "code": "11",
+      "mnemonic": "ADD",
+      "operands": [
+        {
+          "name": "destination",
+          "width": 1,
+          "signed": false,
+          "kind": "register"
+        },
+        {
+          "name": "left",
+          "width": 1,
+          "signed": false,
+          "kind": "register"
+        },
+        {
+          "name": "right",
+          "width": 1,
+          "signed": false,
+          "kind": "register"
+        }
+      ],
+      "semantics": {
+        "operation": "register_add",
+        "args": [
+          "destination",
+          "left",
+          "right"
+        ]
+      },
+      "flow": {
+        "kind": "next"
+      }
+    },
+    {
+      "code": "12",
+      "mnemonic": "BRANCH_ZERO",
+      "operands": [
+        {
+          "name": "condition",
+          "width": 1,
+          "signed": false,
+          "kind": "register"
+        },
+        {
+          "name": "target",
+          "width": 2,
+          "signed": false,
+          "kind": "address"
+        }
+      ],
+      "semantics": {
+        "operation": "branch_zero",
+        "args": [
+          "condition"
+        ]
+      },
+      "flow": {
+        "kind": "branch",
+        "target": {
+          "operand": "target",
+          "base": "absolute"
+        }
+      }
+    },
+    {
+      "code": "13",
+      "mnemonic": "CALL",
+      "operands": [
+        {
+          "name": "target",
+          "width": 2,
+          "signed": false,
+          "kind": "address"
+        }
+      ],
+      "semantics": {
+        "operation": "call",
+        "args": []
+      },
+      "flow": {
+        "kind": "call",
+        "target": {
+          "operand": "target",
+          "base": "absolute"
+        }
+      }
+    },
+    {
+      "code": "14",
+      "mnemonic": "RETURN",
+      "operands": [],
+      "semantics": {
+        "operation": "return",
+        "args": []
+      },
+      "flow": {
+        "kind": "return"
+      }
+    },
+    {
+      "code": "15",
+      "mnemonic": "JUMP_REL",
+      "operands": [
+        {
+          "name": "displacement",
+          "width": 1,
+          "signed": true,
+          "kind": "offset"
+        }
+      ],
+      "semantics": {
+        "operation": "jump",
+        "args": []
+      },
+      "flow": {
+        "kind": "jump",
+        "target": {
+          "operand": "displacement",
+          "base": "next"
+        }
+      }
+    },
+    {
+      "code": "ff",
+      "mnemonic": "HALT",
+      "operands": [],
+      "semantics": {
+        "operation": "halt",
+        "args": []
+      },
+      "flow": {
+        "kind": "halt"
+      }
+    }
+  ]
+}

@@ -1618,3 +1618,59 @@ controls restore keyboard focus after rerendering. A counterexample link reveals
 its first mismatching observed location even when it is on a later page, showing
 all locations for that explicit navigation. Raw audits and CLI reports retain
 all cells, including the maximum 706 state / 1,218 comparison locations.
+
+### Retained execution workspace
+
+Within VM investigation, **Findings / Execution workspace** switches between two
+mounted views. Finding selection, detail scroll and source actions remain in the
+Findings view; incoming finding navigation returns there. Imported traces never
+bind themselves to a finding by a supplied ID or hash.
+
+Execution uses the remaining workspace height. At 1,100 px usable width it shows
+trace/opcode navigation, a dominant **Retained execution listing**, and the
+synchronized selected-step inspector. At 760–1,099 px navigation becomes a
+closeable drawer; below 760 px **Listing / State / Evidence** selects one pane.
+These thresholds use workspace width, including when the surrounding app changes.
+The existing Console remains separate. Occurrences, validation, manual comparison
+and complete raw audits open in a contextual area that starts closed.
+
+The workspace has one compact action toolbar and three labeled areas: Navigation,
+Execution and State. Paging stays below the listing; provenance and advanced
+analysis open on demand. Selected instructions have an accent rail, and changed
+snapshot cells have a separate tint plus a literal changed label. These cues do
+not infer reads or writes. Full instruction bytes remain unavailable; PC units
+remain adapter-defined. The short-height layout scrolls rather than shrinking
+the listing or text.
+
+Rows preserve increasing exact sequence IDs, including repeated PCs and explicit
+retained gaps. The 64-row pages never choose another step. Literal filtering over
+supplied sequence/PC/opcode/operand text and opcode filtering preserve selection;
+**Reveal selected step** clears a filter that hides it and returns to its page.
+Filtered-out retained observations are labeled separately from missing execution.
+With a row focused, Up/Down, Home/End and Page Up/Down select exact matching rows
+across pages; Enter inspects that row. **Back to selected row** restores it. No
+shortcut runs code, and editor/IME and application history shortcuts are unchanged.
+
+**Instruction**, **Registers**, **Stack** and **Memory** use one selected-step
+report. Instruction includes a paged complete snapshot overview; other tabs filter
+its exact namespaces. Selected locations remain marked and linked to retained
+occurrences. The instruction size is supplied in adapter-defined PC units. Opcode
+hex is only the supplied 1–8-byte field, not a verified complete instruction
+encoding. Full instruction bytes and operand-byte layout are unavailable; the UI
+never reconstructs bytes or treats a PC as a source offset. A fitting candidate
+remains **Inferred**, multiple candidates **Ambiguous**, and no fit **Unknown**.
+
+**Provenance and limits** exposes complete supplied identity, coverage and hashes.
+The selected-step raw audit now contains the complete shared report, including
+instruction size, identity, coverage and all cells, plus the exact input-file
+hash and the existing observed-changes view. This is UI audit completeness only;
+the trace schema and existing offline CLI envelopes are unchanged.
+
+The existing `node tools/check-vm-semantics.mjs` controller suite also covers the
+256-row listing, four pages, large exact IDs, repeated PCs, filter/selection
+independence, keyboard navigation, namespaces, durable occurrence-close focus and
+100 bounded paging actions. The full Requests rendered gate retains its previous
+assertions and adds workspace/Findings/source round trips and 1440/1024/760/600/360
+layouts through `tools/check-vm-semantics-ui.mjs`. Controller checks do not establish
+rendered or native acceptance; run the rendered gate on a sandbox-capable browser
+and inspect the packaged macOS app, including desktop 200% zoom.

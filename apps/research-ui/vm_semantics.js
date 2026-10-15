@@ -265,7 +265,7 @@ function mountVmSemantics(root) {
     const restore=pager(listingPager,'Retained steps',rows.length,listingPage,(page,direction)=>{listingPage=page;renderListing(direction);},focusDirection);
     const shown=rows.slice(listingPage*pageSize,(listingPage+1)*pageSize),selectedVisible=shown.some(s=>s.sequence===selected);
     filterStatus.textContent=`${rows.length} matching / ${current.steps.length} retained rows. ${current.steps.length-rows.length} retained rows hidden by filter.${opcodeFilter!==null?' Supplied opcode filter: '+opcodeFilter+'.':''}`;
-    listingStatus.textContent=`Selected sequence ${selected}${selectedVisible?'':' (off this page or hidden by filter)'}. Rows are retained observations, not execution controls.`;
+    listingStatus.textContent=`Selected ${selected}${selectedVisible?'':' · off this page or filtered'} · PC units adapter-defined · Full instruction bytes unavailable.`;
     let previousIndex=null;
     for(const s of shown){const index=current.steps.findIndex(item=>item.sequence===s.sequence),previous=current.steps[index-1];
       if(previous&&previous.sequence+1!==s.sequence){const gap=node('p',`⚠ Gap before ${s.sequence}: previous retained sequence ${previous.sequence}; missing execution is unknown.`);gap.className='vm-listing-gap';listingBody.append(gap);}
@@ -304,19 +304,19 @@ function mountVmSemantics(root) {
     for(const item of report.items){const row=node('div');row.className='vm-occurrence';row.append(stepLink(item.sequence),node('span',`${valueText(item.before)} → ${valueText(item.after)}${item.changed?' · changed':''}`));occurrences.append(row);}
     const previous=button('Previous occurrences',()=>{occurrencePage--;showOccurrences('previous');}),next=button('Next occurrences',()=>{occurrencePage++;showOccurrences('next');});previous.disabled=occurrencePage===0;next.disabled=(occurrencePage+1)*16>=report.total;occurrences.append(previous,next);if(focusDirection)(focusDirection==='previous'?(previous.disabled?next:previous):(next.disabled?previous:next)).focus();
   };
-  const cellRow=(cell)=>{const row=node('div');row.className='vm-state-row';row.setAttribute('data-vm-location',cell.location);const location=button(cell.location,()=>{selectedLocation=cell.location;occurrencePage=0;display();openContext('occurrences',true,()=>{setPanel('state');if(selectedCellButton)selectedCellButton.focus();else stepHeading.focus();});});location.setAttribute('aria-pressed',String(selectedLocation===cell.location));row.setAttribute('data-selected',String(selectedLocation===cell.location));if(selectedLocation===cell.location)selectedCellButton=location;row.append(location,node('span',`Before: ${valueText(cell.before)}`),node('span',`After: ${valueText(cell.after)}`),node('span',cell.changed?'changed':'unchanged snapshot'));return row;};
+  const cellRow=(cell)=>{const row=node('div');row.className='vm-state-row';row.setAttribute('data-vm-location',cell.location);const location=button(cell.location,()=>{selectedLocation=cell.location;occurrencePage=0;display();openContext('occurrences',true,()=>{setPanel('state');if(selectedCellButton)selectedCellButton.focus();else stepHeading.focus();});});location.setAttribute('aria-pressed',String(selectedLocation===cell.location));row.setAttribute('data-selected',String(selectedLocation===cell.location));row.setAttribute('data-changed',String(cell.changed));if(selectedLocation===cell.location)selectedCellButton=location;row.append(location,node('span',`Before: ${valueText(cell.before)}`),node('span',`After: ${valueText(cell.after)}`),node('span',cell.changed?'changed':'unchanged snapshot'));return row;};
   const display=(focusDirection=null,focusSection='state')=>{
     if(!current)return;if(!selectedReport||selectedReport.step.sequence!==Number(selector.value))selectedReport=vmSemantics.step(current,Number(selector.value));const report=selectedReport,step=report.step;
     stepHeading.textContent=`Step ${step.sequence} · opcode ${step.opcode} · PC ${step.before.pc} → ${step.after.pc}`;
     previous.disabled=report.previous_sequence===null;next.disabled=report.next_sequence===null;
     stateView.replaceChildren();stateView.setAttribute('aria-labelledby',stateButtons[stateTab].id);selectedCellButton=null;
-    instruction.replaceChildren(node('p',`Supplied opcode hex: ${step.opcode}`),node('p',`Supplied decoded operands: ${step.operands.join(', ')||'none'}`),node('p',`Supplied instruction size: ${step.instruction_size} adapter-defined PC units.`),node('p','Full instruction bytes unavailable in this trace format. Operand byte layout and reads are unknown.'),node('p',candidateText(step.opcode)+'; fits retained cases only, never proven semantics.'),node('p',`Evidence references (unresolved, inert): ${step.evidence_refs.join(', ')}`));
+    instruction.replaceChildren();const metadata=node('dl');metadata.className='vm-instruction-metadata';for(const [label,value] of [['Supplied opcode hex',step.opcode],['Supplied operands',step.operands.join(', ')||'none'],['Instruction size',step.instruction_size+' adapter-defined PC units'],['Candidate meaning',candidateText(step.opcode)]])metadata.append(node('dt',label),node('dd',value));instruction.append(metadata,audit('Interpretation limits and references',node('p',`Candidate meanings fit retained cases only, never proven semantics. Full instruction bytes unavailable. Operand byte layout, reads and intermediate writes are unknown. Evidence references (unresolved, inert): ${step.evidence_refs.join(', ')}`)));
     const outcome=validationReport?.results.find(r=>r.sequence===step.sequence);instructionStatus.textContent=outcome?`Hypothesis: ${outcome.status==='unknown'?'no mapping':outcome.status}${outcome.operation?' · '+outcome.operation:''}. Observed matches never prove equivalence.`:'No hypothesis validation requested.';
     breadcrumb.textContent=`Selected sequence ${step.sequence} · PC ${step.before.pc} → ${step.after.pc}`;
     stateView.append(node('h4',stateTab==='instruction'?'Snapshot overview':stateTab==='stack'?'Stack slots (not native frames)':stateTab==='memory'?'Sparse memory observations (not raw bytes)':'Register observations'));
     if(report.previous_sequence!==null&&report.previous_sequence+1!==step.sequence)stateView.append(node('p',`Gap before selected step: previous retained sequence ${report.previous_sequence}; missing execution is unknown.`));
     if(report.next_sequence!==null&&step.sequence+1!==report.next_sequence)stateView.append(node('p',`Gap after selected step: next retained sequence ${report.next_sequence}; missing execution is unknown.`));
-    stateView.append(node('p',`Operands: ${step.operands.length?step.operands.join(', '):'none'}. Reads and intermediate writes: unknown.`));
+    stateView.append(node('p','Reads and intermediate writes: unknown.'));
     const namespaceCells=report.cells.filter(c=>stateTab==='instruction'||c.location.split(':')[0]===stateTab);
     const cells=namespaceCells.filter(c=>!changesOnly.checked||c.changed);
     if(alignSelectedLocation){const index=cells.findIndex(c=>c.location===selectedLocation);if(index>=0)statePage=Math.floor(index/pageSize);alignSelectedLocation=false;}
@@ -346,7 +346,7 @@ function mountVmSemantics(root) {
     const restorePageFocus=pager(map,'Opcodes',report.opcodes.length,opcodePage,(page,direction)=>{opcodePage=page;renderMap(direction);},focusDirection);
     for(const opcode of report.opcodes.slice(opcodePage*pageSize,(opcodePage+1)*pageSize)){
       const group=node('details'),support=node('div');let supportPage=0;
-      group.append(node('summary',`Opcode ${opcode.opcode}: ${candidateText(opcode.opcode)} · ${opcode.observations} supporting observations`));
+      const candidates=opcode.candidates??[];group.append(node('summary',`${opcode.opcode} · ${opcode.observations} observations · ${candidates.length===1?'Inferred':candidates.length?'Ambiguous':'Unknown'}`),node('p',candidateText(opcode.opcode)+' · fits retained observations only.'));
       group.append(button('Filter opcode '+opcode.opcode,()=>{opcodeFilter=opcode.opcode;listingPage=0;renderListing();setPanel('listing');if(layout!=='wide')setNavigation(false,true);}));
       const renderSupport=(focusDirection=null)=>{
         support.replaceChildren();const restore=pager(support,'Support steps',opcode.sequences.length,supportPage,(page,direction)=>{supportPage=page;renderSupport(direction);},focusDirection);
@@ -380,21 +380,19 @@ function mountVmSemantics(root) {
   const clear=button('Clear imported traces',()=>{serial++;comparisonSerial++;hypothesisSerial++;current=comparison=inspection=selectedReport=null;listingPage=0;opcodeFilter=null;filter.value='';contextSummary.textContent='No supplied trace loaded';traceSummary.textContent='No imported traces';breadcrumb.textContent='No retained step selected';instruction.replaceChildren();instructionStatus.textContent='';contextOpen=false;setPanel('listing');updateContext();renderListing();sourceHash=comparisonHash=hypothesisHash=null;validationReport=pairedReport=null;selectedLocation=null;occurrencePage=0;statePage=comparisonPage=validationPage=opcodePage=mismatchPage=0;alignSelectedLocation=false;selectedCellButton=null;for(const e of [selector,comparisonSelector]){e.replaceChildren();e.disabled=true;}hypothesis.disabled=true;previous.disabled=next.disabled=true;for(const e of [input,comparisonInput,hypothesis])e.value='';for(const e of [details,map,validation,identity,comparisonIdentity,stateView,stepHeading,occurrences,validationView,comparisonView])e.textContent='';notice.textContent='Imported traces cleared. Existing findings are unchanged.';input.focus();});
   const toolbar=node('div');toolbar.className='vm-execution-toolbar';
   const importControl=node('label','Import trace');importControl.className='vm-file-control secondary-button';importControl.append(input);
-  const compareOpen=button('Compare',()=>openContext('comparison',true)),validationOpen=button('Validate hypothesis',()=>openContext('validation',true));
   const shortcuts=node('details');shortcuts.className='vm-shortcuts';shortcuts.append(node('summary','Shortcuts'),node('p','With a retained row focused: ↑/↓ previous/next matching row; Home/End first/last; Page Up/Down 64 rows; Enter inspect selected state. Tab visits panes and controls. Navigation never executes code.'));
-  toolbar.append(importControl,compareOpen,validationOpen,clear,shortcuts);
-  const contextStrip=node('div');contextStrip.className='vm-evidence-strip';
+  toolbar.append(importControl,clear,shortcuts,navigationToggle,panelControls);
+  const contextStrip=node('div');contextStrip.className='vm-workspace-notice';
   const provenance=node('details');provenance.append(node('summary','Full provenance and limits'),identity,comparisonIdentity,node('p','Supplied identities and origin are not authenticated. Snapshot changes do not prove reads, intermediate writes or causal dependency. Matching absence or unknown values never establish equality. Exact input-file hashes do not establish alignment or native capture.'));
-  const provenanceOpen=button('Provenance and limits',()=>{provenance.open=true;openContext('audit',true);});
-  contextStrip.append(contextSummary,node('p','PC units adapter-defined · Full instruction bytes unavailable'),provenanceOpen,breadcrumb,notice);
-  const mobileToolbar=node('div');mobileToolbar.className='vm-mobile-toolbar';mobileToolbar.append(navigationToggle,panelControls);
+  const provenanceOpen=button('Provenance and limits',()=>{if(navigationOpen)setNavigation(false);provenance.open=true;openContext('audit',true,()=>{if(layout!=='wide'){setNavigation(true);provenanceOpen.focus();}else{provenanceOpen.focus();}});});
+  contextStrip.append(notice);
   const listingHead=node('div');listingHead.className='vm-listing-head';
   const stepControls=node('div');stepControls.className='vm-step-controls';stepControls.append(selector,previous,next);
   const filters=node('div');filters.className='vm-step-controls';filters.append(filter,clearFilter,button('Reveal selected step',focusSelectedRow));
   const columns=node('div');columns.className='vm-listing-columns';columns.setAttribute('aria-hidden','true');for(const label of ['Sequence','PC before → after','Supplied opcode hex','Supplied operands','Candidate meaning'])columns.append(node('span',label));
-  listingHead.append(title,stepControls,filters,filterStatus,listingPager,columns);listing.append(listingHead,listingBody,listingStatus);
-  navigator.append(navigationClose,node('h3','Traces'),traceSummary,node('h3','Opcode observations'),map);
-  inspector.append(stepHeading);makeTabs(inspector,[['instruction','Instruction'],['registers','Registers'],['stack','Stack'],['memory','Memory']],stateButtons,'instruction',setStateTab,'state-tab');
+  const listingHeading=node('header');listingHeading.className='vm-pane-heading';listingHeading.append(node('span','Execution'),title);title.title='Retained observations only. PC units are adapter-defined; full instruction bytes are unavailable.';const listingFooter=node('footer');listingFooter.className='vm-listing-footer';listingFooter.append(listingPager,listingStatus);listingHead.append(listingHeading,stepControls,filters,filterStatus,columns);listing.append(listingHead,listingBody,listingFooter);
+  const navigationHeading=node('header');navigationHeading.className='vm-pane-heading';navigationHeading.append(node('span','Navigation'),node('h2','Trace & opcodes'));provenance.append(traceSummary);navigator.append(navigationClose,navigationHeading,contextSummary,provenanceOpen,node('h3','Opcode observations'),map);
+  const inspectorHeading=node('header');inspectorHeading.className='vm-pane-heading';inspectorHeading.append(node('span','State'),node('h2','Selected instruction'),stepHeading);inspector.append(inspectorHeading);makeTabs(inspector,[['instruction','Instruction'],['registers','Registers'],['stack','Stack'],['memory','Memory']],stateButtons,'instruction',setStateTab,'state-tab');
   const inspectorScroll=node('div');inspectorScroll.className='vm-inspector-body';stateView.setAttribute('role','tabpanel');stateView.setAttribute('aria-labelledby',stateButtons.instruction.id);stateView.id='vm-state-panel';
   for(const b of Object.values(stateButtons))b.setAttribute('aria-controls',stateView.id);
   inspectorScroll.append(instruction,instructionStatus,changesLabel,stateView,button('Open complete selected-step audit',()=>openContext('audit',true)));inspector.append(inspectorScroll,button('Back to selected row',focusSelectedRow));
@@ -403,11 +401,11 @@ function mountVmSemantics(root) {
   contextPanels.occurrences.append(occurrences);
   contextPanels.validation.append(node('h3','Hypothesis counterexamples'),hypothesis,validationView);
   contextPanels.comparison.append(node('h3','Manual two-trace comparison'),node('p','At most two imported traces. Choose each exact sequence deliberately. No alignment by PC, sequence, opcode or hash.'),comparisonInput,clearComparison,comparisonSelector,compare,comparisonView);
-  contextPanels.audit.append(provenance,audit('Raw selected-step audit',details),audit('Raw validation audit',validation));
+  contextPanels.audit.append(node('p','PC units adapter-defined · Full instruction bytes unavailable'),breadcrumb,provenance,audit('Raw selected-step audit',details),audit('Raw validation audit',validation));
   for(const [key,p] of Object.entries(contextPanels)){p.className='vm-context-panel';p.setAttribute('role','tabpanel');p.id='vm-context-panel-'+key;p.setAttribute('aria-labelledby',contextButtons[key].id);contextButtons[key].setAttribute('aria-controls',p.id);context.append(p);}
   const contextLaunchers=node('nav');contextLaunchers.className='vm-context-launchers';contextLaunchers.setAttribute('aria-label','Open execution evidence');
   for(const [key,label] of [['occurrences','Occurrences'],['validation','Validation'],['comparison','Manual comparison'],['audit','Raw audit']])contextLaunchers.append(button(label,()=>openContext(key,true)));
-  body.append(navigator,listing,inspector,context);root.append(toolbar,contextStrip,mobileToolbar,body,contextLaunchers);
+  body.append(navigator,listing,inspector,context);root.append(toolbar,contextStrip,body,contextLaunchers);
   root.setAttribute('data-layout',layout);root.setAttribute('data-navigation-open','false');setPanel('listing');updateContext();renderListing();
   const changeLayout=width=>{
     const next=width>=1100?'wide':width>=760?'medium':'narrow';if(next===layout)return;

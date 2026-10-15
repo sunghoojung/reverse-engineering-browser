@@ -1634,6 +1634,14 @@ These thresholds use workspace width, including when the surrounding app changes
 The existing Console remains separate. Occurrences, validation, manual comparison
 and complete raw audits open in a contextual area that starts closed.
 
+The workspace has one compact action toolbar and three labeled areas: Navigation,
+Execution and State. Paging stays below the listing; provenance and advanced
+analysis open on demand. Selected instructions have an accent rail, and changed
+snapshot cells have a separate tint plus a literal changed label. These cues do
+not infer reads or writes. Full instruction bytes remain unavailable; PC units
+remain adapter-defined. The short-height layout scrolls rather than shrinking
+the listing or text.
+
 Rows preserve increasing exact sequence IDs, including repeated PCs and explicit
 retained gaps. The 64-row pages never choose another step. Literal filtering over
 supplied sequence/PC/opcode/operand text and opcode filtering preserve selection;

@@ -65,8 +65,12 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  await importFile(listingTrace,'Import VM execution trace');
  await byText('Close evidence');
  assert.equal(await evaluate(`document.querySelector('${root}').dataset.layout`),'wide');
- assert.equal(await evaluate(`getComputedStyle(document.querySelector('${root} .vm-execution-body')).gridRowStart`),'4');
+ assert.equal(await evaluate(`getComputedStyle(document.querySelector('${root} .vm-execution-body')).gridRowStart`),'3');
  assert.equal(await evaluate(`document.querySelector('.vm-findings-workspace').hidden`),true);
+ assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('${root} .vm-pane-heading > span'),e=>e.textContent)`),['Navigation','Execution','State']);
+ assert.equal(await evaluate(`document.querySelectorAll('${root} .vm-execution-toolbar').length`),1);
+ assert.equal(await evaluate(`document.querySelectorAll('${root} .vm-evidence-strip, ${root} .vm-mobile-toolbar').length`),0);
+ assert.equal(await evaluate(`document.querySelector('${root} .vm-listing-pager').parentElement.className`),'vm-listing-footer');
  assert.equal(await evaluate(`(()=>{const body=document.querySelector('${root} .vm-listing-body'),box=body.getBoundingClientRect();return [...body.querySelectorAll('[data-vm-sequence]')].filter(row=>{const r=row.getBoundingClientRect();return r.top>=box.top&&r.bottom<=box.bottom;}).length>=12;})()`),true,'Wide listing must show at least12 complete rows');
  assert.equal(await evaluate(`document.querySelectorAll('${root} [data-vm-sequence]').length`),64);
  await byText('Next retained steps page');assert.equal(await evaluate(`document.querySelector('[aria-label="Execution step"]').value`),'0');
@@ -87,6 +91,24 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  }
  for(const width of [1024,1440]){await viewport(360,740);await click(root+' [data-vm-panel="listing"]');await evaluate(`document.querySelector('${root} [data-vm-panel="listing"]').focus()`);await viewport(width,900);await evaluate(`(async()=>{const deadline=performance.now()+3000;while(document.activeElement!==document.querySelector('[aria-label="Filter retained execution rows"]')){if(performance.now()>deadline)throw Error('Resize left focus on hidden mobile panel control');await new Promise(resolve=>setTimeout(resolve,10));}})()`);assert(await focusedVisible());}
  await viewport(1024,768);await visibleClick(root+' .vm-navigation-toggle');await key('Tab','Tab',{windowsVirtualKeyCode:9});await evaluate(`document.querySelector('${root} .vm-navigation-close').focus()`);await viewport(1440,900);await evaluate(`(async()=>{const deadline=performance.now()+3000;while(document.activeElement!==document.querySelector('${root} .vm-execution-navigation')){if(performance.now()>deadline)throw Error('Resize left focus on hidden navigation control');await new Promise(resolve=>setTimeout(resolve,10));}})()`);assert(await focusedVisible());await viewport(1024,768);await click(root+' .vm-navigation-close');
+ for(const width of [1024,360]){
+  await viewport(width,740);await click(root+' .vm-navigation-toggle');
+  await click(root+' .vm-execution-navigation > button:not(.vm-navigation-close)');
+  assert.equal(await evaluate(`document.querySelector('${root}').dataset.navigationOpen`),'false');
+  assert.equal(await evaluate('document.activeElement.id'),'vm-context-tab-audit');
+  assert(await focusedVisible());await click(root+' .vm-context-header > button');
+  assert.equal(await evaluate(`document.querySelector('${root}').dataset.navigationOpen`),'true');
+  assert.equal(await evaluate('document.activeElement.textContent'),'Provenance and limits');
+  assert(await focusedVisible());await click(root+' .vm-navigation-close');
+ }
+ await viewport(1024,740);await click(root+' .vm-navigation-toggle');
+ await click(root+' .vm-execution-navigation > button:not(.vm-navigation-close)');
+ await viewport(360,740);
+ await evaluate(`(async()=>{const deadline=performance.now()+3000;while(document.activeElement?.getAttribute('data-vm-panel')!=='evidence'){if(performance.now()>deadline)throw Error('Resize did not restore visible Evidence panel focus');await new Promise(resolve=>setTimeout(resolve,10));}})()`);
+ assert(await focusedVisible(),'Resized-open provenance must retain a visible focus outline');
+ await click(root+' .vm-context-header > button');
+ assert.equal(await evaluate('document.activeElement.textContent'),'Provenance and limits');
+ assert(await focusedVisible());await click(root+' .vm-navigation-close');
  await viewport(360,740);await visibleClick('#vm-state-tab-instruction');
  if(await evaluate(`document.querySelector('[aria-label="Show changed locations only"]').checked`))await visibleClick('[aria-label="Show changed locations only"]');
  await keyboardActivate(root+' [data-vm-location="registers:0"] button');assert.equal(await evaluate(`document.querySelector('${root}').dataset.panel`),'evidence');assert.equal(await evaluate('document.activeElement.id'),'vm-context-tab-occurrences');

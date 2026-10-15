@@ -1147,7 +1147,23 @@ Raw body continue to show inert source text. See
 ## Deobfuscation engines
 
 Deobfuscation stays inside **Sources**. Select a JavaScript source and use the
-**Deob** toggle to switch between original evidence and the mapped derived view.
+**Static cleanup** control to switch between original evidence and the mapped derived view.
+Cleanup opens its Details report and uses REB's existing local Rust/Oxc worker;
+it does not call or embed an online deobfuscation service. No input is executed
+or uploaded to a third-party service. **Compare original / cleaned** shows
+both inert texts with independently labeled 8,192-UTF-16-unit prefix limits,
+without splitting a surrogate pair. Full-source SHA-256 values identify the
+original and cleaned UTF-8 text; the cleaned hash is computed locally after
+source-map admission and is not an equivalence proof. The existing changed-span
+inspector retains exact original/derived ranges beyond those previews.
+**Original** returns the editor to retained evidence. **Discard cleaned result**
+removes the current option's cached derivation, retires a pending retry and
+returns to original text; late responses cannot restore it. Another analysis
+requires explicit retry. Neither action edits or deletes the original artifact.
+Unsupported behavior remains visibly unresolved even if no resource budget was
+reached; no safe rewrites is not a claim that source is unobfuscated. This is a
+separate ephemeral derived view, not a persisted replacement capture.
+
 The adjacent **{ }** control pretty prints JavaScript, JSON, CSS, and HTML using
 the detected source type. It can format either the original evidence or the
 active deobfuscated representation, so an unchanged deobfuscation result does
@@ -1156,7 +1172,7 @@ whitespace, keeps source-line mappings back to the captured bytes, and never
 rewrites stored evidence. Input is capped at 2 MiB and formatted output at 4
 MiB, with 250,000 lexical tokens and 500,000 mapping segments as pathological
 input guards.
-**Details > Deobfuscation** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
+**Details > Static cleanup** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
 over captured artifacts. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
 The Rust backend preserves classification, formatting, and literal-table

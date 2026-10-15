@@ -8298,8 +8298,9 @@
         elements.sourcePretty.title = state.sourceFormatted ? 'Show source without pretty printing' : `Pretty print ${sourceSyntaxLabel(sourceSyntaxLanguage(source))}`;
         elements.sourceDeob.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourceDeob.setAttribute('aria-pressed', String(state.sourceDeobfuscated));
-        elements.sourceDeob.setAttribute('aria-label', state.sourceDeobfuscated ? 'Show original evidence' : 'Show deobfuscated representation');
-        elements.sourceDeob.title = state.sourceDeobfuscated ? 'Show original evidence' : 'Show deobfuscated representation';
+        elements.sourceDeob.setAttribute('aria-label', state.sourceDeobfuscated ? 'Show original evidence' : 'Run local static cleanup');
+        elements.sourceDeob.title = state.sourceDeobfuscated ? 'Show original evidence' : 'Run local static cleanup';
+        elements.sourceDeob.textContent = state.sourceDeobfuscated ? 'Original' : 'Static cleanup';
         elements.sourceHookPivot.disabled = !['running', 'paused'].includes(state.debuggerSession?.state);
         elements.sourceHookPivot.setAttribute('aria-expanded', String(state.sourceHooksOpen));
       }
@@ -8472,7 +8473,8 @@
           }
         }
         // Local admission metadata, never an analyzer-provided proof or duplicate source.
-        return {changes, synthetic, originalBytes: bytes.length, derivedBytes: derivedBytes.length,
+        const derivedSha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', derivedBytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+        return {changes, synthetic, originalBytes: bytes.length, derivedBytes: derivedBytes.length, derivedSha256,
           byteRanges: payload.engine === 'rust-oxc' && representation.offset_unit === 'utf-8-byte'};
       }
 
@@ -8574,6 +8576,30 @@
       function retryDeobfuscation(reference) {
         const owner = deobfuscationOwner(reference);
         if (owner) return loadDeobfuscation(owner.source, {retry: true});
+      }
+
+      function discardStaticCleanup(reference, view) {
+        const owner = deobfuscationOwner(reference, view);
+        if (!owner) return;
+        const request = state.deobfuscationRequests.get(owner.key);
+        if (request) {
+          request.status = 'cancelled';
+          request.error = 'Cleaned result discarded. Original evidence is unchanged. Retry explicitly to create another result.';
+          request.controller?.abort();
+          delete request.controller;
+        }
+        retireDeobfuscationReveal(view);
+        state.deobfuscationCache.delete(owner.key);
+        state.sourceDeobfuscated = false;
+        state.sourceFormatted = false;
+        renderSources();
+      }
+
+      function toggleStaticCleanupComparison(reference, view) {
+        const owner = deobfuscationOwner(reference, view);
+        if (!owner) return;
+        view.compare = !view.compare;
+        renderDeobfuscationReport(owner.source);
       }
 
       function retireDeobfuscationReveal(view) {
@@ -8690,7 +8716,7 @@
         const payload = target.deobfuscation;
         const inspection = payload?.sourceInspection;
         const view = payload?.inspectorView;
-        const stamp = JSON.stringify([key, request?.status, request?.error, view?.change, view?.pages, view?.notice, view?.revealing]);
+        const stamp = JSON.stringify([key, request?.status, request?.error, view?.change, view?.pages, view?.notice, view?.revealing, view?.compare]);
         if (container.deobfuscationRender?.stamp === stamp && container.deobfuscationRender?.view === view) return;
         const sameOwner = container.deobfuscationRender?.key === key;
         if (sameOwner && container.deobfuscationRender?.view === view && view) {
@@ -8726,11 +8752,13 @@
         } else {
           const analysis = payload.analysis, summary = analysis.representation ?? {};
           const changes = inspection.changes;
-          nodes.push(textElement('strong', 'deobfuscation-title', `Static analysis · ${changes.length ? `${changes.length} changed spans` : 'No safe rewrites found'}`));
+          nodes.push(textElement('strong', 'deobfuscation-title', `Static cleanup · ${changes.length ? `${changes.length} changed spans` : 'No safe rewrites found'}`));
           nodes.push(deobfuscationRow('Bytes', `${formatByteSize(inspection.originalBytes)} → ${formatByteSize(inspection.derivedBytes)}`));
           nodes.push(deobfuscationRow('Source', `${target.source_type === 'script' ? 'Live script' : 'Captured artifact'} ${target.script_id ?? target.artifact_id}`));
-          nodes.push(deobfuscationRow('SHA-256', analysis.source.sha256));
-          nodes.push(textElement('p', 'deobfuscation-note', 'Original bytes are unchanged. Static reconstruction does not execute this source or prove equivalent runtime behavior. Pretty printing is a separate display layer.'));
+          nodes.push(deobfuscationRow('Original SHA-256', analysis.source.sha256));
+          nodes.push(deobfuscationRow('Cleaned SHA-256', inspection.derivedSha256));
+          nodes.push(textElement('p', 'deobfuscation-note', 'Original bytes are unchanged. Cleanup runs locally without executing the input or uploading it to a third-party service. SHA-256 identifies each complete UTF-8 text, not its preview. Static reconstruction does not prove equivalent runtime behavior. Pretty printing is a separate display layer.'));
+          nodes.push(textElement('p', 'deobfuscation-notice', 'Recovery is partial in scope: unsupported decoding and runtime-dependent behavior remain unresolved. No safe rewrites does not mean the source is unobfuscated.'));
           if (summary.truncated || payload.representation.truncated) nodes.push(textElement('p', 'deobfuscation-notice', 'Partial result: a transformation budget was reached. Unreduced source remains.'));
           if (!inspection.byteRanges) nodes.push(textElement('p', 'deobfuscation-notice', 'Legacy code-point map. Exact UTF-8 change inspection is unavailable for this report.'));
           if (inspection.synthetic) nodes.push(textElement('p', 'deobfuscation-note', `${inspection.synthetic} synthetic insertion segments are separate from replacement spans. Verbatim segments preserve identical source slices.`));
@@ -8762,6 +8790,26 @@
             nodes.push(deobfuscationButton('reveal', view.revealing ? 'Verifying original bytes…' : 'Reveal original range', revealDeobfuscationChange.bind(null, reference, view), Boolean(view.revealing || unavailable)));
             if (unavailable) nodes.push(textElement('p', 'deobfuscation-note', `Original range navigation: ${unavailable}`));
           }
+          const cleanupControls = document.createElement('div'); cleanupControls.className = 'deobfuscation-controls';
+          const compare = deobfuscationButton('compare', view.compare ? 'Hide comparison' : 'Compare original / cleaned', toggleStaticCleanupComparison.bind(null, reference, view));
+          compare.setAttribute('aria-expanded', String(Boolean(view.compare)));
+          cleanupControls.append(compare, deobfuscationButton('discard', 'Discard cleaned result', discardStaticCleanup.bind(null, reference, view)));
+          nodes.push(cleanupControls);
+          if (view.compare) {
+            const comparison = document.createElement('div'); comparison.className = 'static-cleanup-comparison';
+            for (const [label, text] of [['Original', payload.original_source], ['Cleaned', payload.representation.text]]) {
+              let end = Math.min(text.length, 8192);
+              if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
+              const block = document.createElement('section'); block.className = 'deobfuscation-snippet';
+              block.append(textElement('strong', '', `${label} · ${end < text.length ? 'prefix preview' : 'complete text'}`));
+              const code = textElement('pre', '', text.slice(0, end)); code.tabIndex = 0;
+              code.dataset.deobControl = `comparison-${label.toLowerCase()}`;
+              code.setAttribute('aria-label', `${label} static cleanup comparison`); block.append(code);
+              if (end < text.length) block.append(textElement('p', 'deobfuscation-note', `Preview shows ${end} of ${text.length} UTF-16 units. Use the source editor and changed-span inspector for the remaining text.`));
+              comparison.append(block);
+            }
+            nodes.push(comparison);
+          }
           if (view.notice) {const notice = textElement('p', 'deobfuscation-notice', view.notice); notice.setAttribute('role', 'status'); nodes.push(notice);}
           const transformations = summary.transformations ?? [];
           const total = transformations.reduce((sum, entry) => sum + entry.count, 0);
@@ -8782,7 +8830,7 @@
           nodes.push(deobfuscationDisclosure(reference, view, 'limits', 'Assumptions and limits', limits));
         }
         container.replaceChildren(...nodes);
-        container.deobfuscationRender.stamp = JSON.stringify([key, request?.status, request?.error, view?.change, view?.pages, view?.notice, view?.revealing]);
+        container.deobfuscationRender.stamp = JSON.stringify([key, request?.status, request?.error, view?.change, view?.pages, view?.notice, view?.revealing, view?.compare]);
         scroller.scrollTop = scroll;
         for (const node of container.querySelectorAll('pre')) {
           const previous = snippetScroll.find(([key]) => key === node.dataset.deobControl);
@@ -11289,6 +11337,11 @@
         investigationPassiveSource = false;
         sourceFactsPanel.cancel();
         state.sourceDeobfuscated = !state.sourceDeobfuscated;
+        if (state.sourceDeobfuscated) {
+          state.sourceSidebarOpen = true;
+          document.querySelector('#deobfuscation-details').open = true;
+          renderSourceSidebar();
+        }
         renderSources();
       });
       elements.sourceWasm.addEventListener('click', () => {

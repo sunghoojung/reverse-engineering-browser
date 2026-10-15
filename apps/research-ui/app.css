@@ -4183,3 +4183,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #vm-static-workspace:not([hidden]) { height: auto; min-height: 0; grid-template-rows: auto auto 600px; }
   .vm-static-listing { grid-template-rows: auto minmax(240px, 1fr) auto; overflow-y: auto; }
 }
+
+/* Comparison is bounded inert text; narrow sidebars stack both versions. */
+.static-cleanup-comparison { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; min-width: 0; }
+.static-cleanup-comparison .deobfuscation-snippet { margin: 0; }
+.static-cleanup-comparison pre { max-height: 240px; }

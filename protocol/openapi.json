@@ -4187,7 +4187,7 @@
             },
             {
               "id": "exact-retained-traffic",
-              "condition": "All five original identity fields must match current retained Traffic. The public request ID must be unique across the retained window. Scope and sharing authorization are the researcher’s responsibility."
+              "condition": "All five original identity fields must match current retained Traffic. The public request ID must be unique across the retained window. Scope and sharing authorization are the researcher\u2019s responsibility."
             }
           ],
           "confirmations": [],
@@ -12157,9 +12157,109 @@
               ]
             },
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "inspect_element_document"
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "x-max-utf8-bytes": 4096
+              }
+            },
+            "required": [
+              "action",
+              "target_id"
+            ],
+            "description": "Explicit bounded ephemeral capture of the exact selected disposable top-level document. Refuses private/editable fields, frames, unsupported geometry and observed drift. Raw image/text may still be sensitive; no export, provider or page script.",
+            "x-source": "apps/origin-trace-backend/src/debugger/element_screenshot.rs",
+            "x-result-schema": "#/components/schemas/DebuggerElementDocumentResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "sensitive-capture"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "selected-disposable-document",
+                  "condition": "The exact selected, running primary disposable page must still belong to the same live experiment. Capture requires the original complete selection and matching before/after fingerprints."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Bounded CDP reads only; no evaluation, page mutation, file write or upload. No atomic pixel/DOM equivalence or secrecy guarantee.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/element_screenshot.rs",
+                  "symbol": "Debugger::element_screenshot"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "capture_element_screenshot"
+              },
+              "selection": {
+                "$ref": "#/components/schemas/ElementDocumentSelection"
+              },
+              "confirm_sensitive": {
+                "const": true,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "selection",
+              "confirm_sensitive"
+            ],
+            "description": "Explicit bounded ephemeral capture of the exact selected disposable top-level document. Refuses private/editable fields, frames, unsupported geometry and observed drift. Raw image/text may still be sensitive; no export, provider or page script.",
+            "x-source": "apps/origin-trace-backend/src/debugger/element_screenshot.rs",
+            "x-result-schema": "#/components/schemas/DebuggerElementScreenshotResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "sensitive-capture"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "selected-disposable-document",
+                  "condition": "The exact selected, running primary disposable page must still belong to the same live experiment. Capture requires the original complete selection and matching before/after fingerprints."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_sensitive",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Bounded CDP reads only; no evaluation, page mutation, file write or upload. No atomic pixel/DOM equivalence or secrecy guarantee.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/element_screenshot.rs",
+                  "symbol": "Debugger::element_screenshot"
+                }
+              ]
+            }
           }
         ],
-        "description": "All 60 action envelopes have source-backed request fields, types and requiredness, including conditional fields. Variants marked partial identify remaining complex runtime constraints explicitly. Session availability, record identity, mutation confirmation and state locks still apply. Extra properties remain allowed where dispatch ignores them."
+        "description": "All 62 action envelopes have source-backed request fields, types and requiredness, including conditional fields. Variants marked partial identify remaining complex runtime constraints explicitly. Session availability, record identity, mutation confirmation and state locks still apply. Extra properties remain allowed where dispatch ignores them."
       },
       "DebuggerResult": {
         "oneOf": [
@@ -12213,6 +12313,12 @@
           },
           {
             "$ref": "#/components/schemas/DebuggerDiffResult"
+          },
+          {
+            "$ref": "#/components/schemas/DebuggerElementDocumentResult"
+          },
+          {
+            "$ref": "#/components/schemas/DebuggerElementScreenshotResult"
           }
         ],
         "description": "Closed source-backed action response envelopes. Branch by the requested action using x-action-results; nested experiment/CDP/heap state remains partially typed. No unrestricted object fallback.",
@@ -12396,6 +12502,12 @@
           },
           "bind_runtime_candidate": {
             "$ref": "#/components/schemas/DebuggerRuntimeHooksResult"
+          },
+          "inspect_element_document": {
+            "$ref": "#/components/schemas/DebuggerElementDocumentResult"
+          },
+          "capture_element_screenshot": {
+            "$ref": "#/components/schemas/DebuggerElementScreenshotResult"
           }
         }
       },
@@ -12537,6 +12649,11 @@
           "limits": {
             "type": "object",
             "additionalProperties": true
+          },
+          "element_document_epoch": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "required": [
@@ -22402,6 +22519,287 @@
           "instance_id"
         ],
         "description": "Compare complete active marker execution identity before cancellation; stale or replacement executions are not cancelled."
+      },
+      "ElementDocumentSelection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "session_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "document_epoch": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "frame_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "loader_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "document_node_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "revision": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "connection_epoch": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Exact connection lifetime from debugger network.capture_epoch; changes on same-page reconnect."
+          }
+        },
+        "required": [
+          "instance_id",
+          "session_id",
+          "target_id",
+          "document_epoch",
+          "frame_id",
+          "loader_id",
+          "document_node_id",
+          "revision",
+          "connection_epoch"
+        ]
+      },
+      "ElementViewport": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "x": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10000000
+          },
+          "y": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10000000
+          },
+          "width": {
+            "type": "number",
+            "minimum": 1e-06,
+            "maximum": 4096
+          },
+          "height": {
+            "type": "number",
+            "minimum": 1e-06,
+            "maximum": 4096
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "width",
+          "height"
+        ]
+      },
+      "ElementCaptureBox": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 128
+          },
+          "node_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "x": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 4096
+          },
+          "y": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 4096
+          },
+          "width": {
+            "type": "number",
+            "minimum": 1e-06,
+            "maximum": 4096
+          },
+          "height": {
+            "type": "number",
+            "minimum": 1e-06,
+            "maximum": 4096
+          },
+          "viewport_clipped": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "number",
+          "node_id",
+          "x",
+          "y",
+          "width",
+          "height",
+          "viewport_clipped"
+        ]
+      },
+      "ElementDocument": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "selection": {
+            "$ref": "#/components/schemas/ElementDocumentSelection"
+          },
+          "viewport": {
+            "$ref": "#/components/schemas/ElementViewport"
+          },
+          "elements": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "$ref": "#/components/schemas/ElementCaptureBox"
+            }
+          },
+          "outside_viewport": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4096
+          },
+          "limitations": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "x-max-utf8-bytes": 1024
+            }
+          }
+        },
+        "required": [
+          "selection",
+          "viewport",
+          "elements",
+          "outside_viewport",
+          "limitations"
+        ]
+      },
+      "ElementScreenshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "const": "reb-element-screenshot-v1"
+          },
+          "document": {
+            "$ref": "#/components/schemas/ElementDocument"
+          },
+          "image": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mime": {
+                "const": "image/png"
+              },
+              "base64": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 5592408,
+                "x-max-utf8-bytes": 5592408
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "mime",
+              "base64",
+              "width",
+              "height",
+              "sha256"
+            ]
+          },
+          "consistency": {
+            "const": "before-after-observed-stable"
+          },
+          "occlusion": {
+            "const": "unknown"
+          }
+        },
+        "required": [
+          "format",
+          "document",
+          "image",
+          "consistency",
+          "occlusion"
+        ]
+      },
+      "DebuggerElementDocumentResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "const": true,
+            "type": "boolean"
+          },
+          "document": {
+            "$ref": "#/components/schemas/ElementDocument"
+          }
+        },
+        "required": [
+          "ok",
+          "document"
+        ]
+      },
+      "DebuggerElementScreenshotResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "const": true,
+            "type": "boolean"
+          },
+          "capture": {
+            "$ref": "#/components/schemas/ElementScreenshot"
+          }
+        },
+        "required": [
+          "ok",
+          "capture"
+        ]
       }
     }
   },

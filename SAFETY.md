@@ -82,6 +82,14 @@ it.
   document selection and are never automatically retried. See
   [Native Console v2](protocol/native-console-v2.md) for these limits.
 
+- Element screenshot markup requires an explicit selected disposable document and
+  raw-local-capture confirmation. Observed form/editable/private-marked content,
+  child frames and shadow trees refuse capture. Other text/images and transient
+  changes may still be sensitive; before/after checks are not redaction or an
+  atomic privacy guarantee. PNGs stay in ephemeral local panel memory and are
+  never automatically exported, logged, persisted or sent to providers. See
+  [Element screenshot v1](protocol/element-screenshot-v1.md).
+
 ## Local operation and evidence
 
 - Keep control and evidence traffic on `localhost` or another user-only local

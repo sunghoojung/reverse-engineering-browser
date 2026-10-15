@@ -83,7 +83,7 @@ origin-trace-backend:
 backend-e2e: origin-trace-backend debugger-transport heap-snapshot decoder deob-worker-build
 	node tools/check-origin-trace-debugger.mjs
 
-app-build: heap-snapshot decoder broker artifact-receiver debugger-transport native-console-build
+app-build: heap-snapshot decoder broker artifact-receiver debugger-transport native-console-build $(NATIVE_VM_FIXTURE_BINARY)
 	./scripts/build-research-app.sh
 
 app: app-build

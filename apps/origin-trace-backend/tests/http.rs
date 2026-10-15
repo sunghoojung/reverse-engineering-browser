@@ -63,6 +63,7 @@ impl Server {
                     "--decoder",
                     "--debugger-transport",
                     "--native-console",
+                    "--owned-vm-fixture",
                     "--brave-binary",
                     "--heap-snapshot",
                     "--deobfuscator",
@@ -592,7 +593,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 30, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 33, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -774,7 +775,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 30);
+    assert_eq!(operation_count, 33);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -784,6 +785,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         "AnalystAction",
         "DebuggerAction",
         "NativeConsoleAction",
+        "OwnedVmDebuggerAction",
     ] {
         let variants = schemas[name]["oneOf"]
             .as_array()
@@ -824,7 +826,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             action_count += 1;
         }
     }
-    assert_eq!(action_count, 75);
+    assert_eq!(action_count, 82);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -6383,4 +6385,131 @@ async fn exact_network_request_has_closed_selection_safe_errors_and_offline_disc
             .exists()
     );
     assert!(!server.root.path().join("collection.json").exists());
+}
+
+#[tokio::test]
+async fn owned_vm_cached_reads_and_rejected_controls_never_launch_helper() {
+    let server = Server::start_with_helper_canaries(true).await;
+    let spec: Value = serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+    for _ in 0..3 {
+        let response = server.get("/api/vm-debugger").await;
+        assert_eq!(response.status(), 200);
+        let view: Value = response.json().await.unwrap();
+        assert_schema(
+            &spec,
+            &spec["components"]["schemas"]["OwnedVmDebuggerState"],
+            &view,
+            "owned cached state",
+        );
+        assert!(view["session"].is_null());
+    }
+    let body = r#"{"action":"create","command_id":"http-canary","fixture":"register"}"#;
+    for media in [
+        "text/plain",
+        "application/json; charset=utf-16",
+        "application/json; charset=utf-8; charset=utf-8",
+    ] {
+        let response = server
+            .client
+            .post(format!("{}/api/vm-debugger/actions", server.url))
+            .header("content-type", media)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 415, "{media}");
+    }
+    let response = server
+        .client
+        .post(format!("{}/api/vm-debugger/actions", server.url))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 415);
+    for body in [
+        r#"{"action":"create","action":"create","command_id":"duplicate","fixture":"register"}"#,
+        r#"{"action":"create","command_id":"arbitrary","fixture":"site-bytecode"}"#,
+        r#"{"action":"create","command_id":"extra","fixture":"register","path":"/tmp/no"}"#,
+    ] {
+        let response = server
+            .client
+            .post(format!("{}/api/vm-debugger/actions", server.url))
+            .header("content-type", "application/json; charset=utf-8")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+    }
+    let response = server
+        .client
+        .post(format!("{}/api/vm-debugger/actions", server.url))
+        .header("sec-fetch-site", "cross-site")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    let response = server.get("/api/vm-debugger/trace?backend_instance_id=old&session_id=old&run_id=old&run_generation=1").await;
+    assert_eq!(response.status(), 409);
+    assert!(
+        server
+            .get("/api/vm-debugger")
+            .await
+            .json::<Value>()
+            .await
+            .unwrap()["session"]
+            .is_null()
+    );
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[test]
+fn owned_vm_all_control_variants_are_cli_read_only_rejected_before_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = root.path().join("endpoint");
+    std::fs::write(
+        &endpoint,
+        format!("http://{}", listener.local_addr().unwrap()),
+    )
+    .unwrap();
+    for action in ["create", "run", "pause", "step", "stop", "reset", "close"] {
+        let body = root.path().join(format!("{action}.json"));
+        std::fs::write(
+            &body,
+            serde_json::to_vec(&json!({"action":action})).unwrap(),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args([
+                "call",
+                "vm_debugger_action",
+                "--read-only",
+                "--endpoint-file",
+            ])
+            .arg(&endpoint)
+            .arg("--body-file")
+            .arg(&body)
+            .args(["--timeout", "0.1"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{action}: {output:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("--read-only rejects operation"), "{error}");
+        assert!(error.contains("No request was sent"), "{error}");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }

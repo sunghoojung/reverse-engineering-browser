@@ -13,5 +13,5 @@ include mk/quality.mk
 
 all: native-vm-fixture demo producer broker artifact-producer artifact-receiver heap-snapshot decoder debugger-transport native-console-build
 
-.PHONY: native-vm-fixture native-vm-recorder-check
+.PHONY: native-vm-fixture native-vm-recorder-check owned-vm-helper-check
 native-vm-fixture: $(NATIVE_VM_FIXTURE_BINARY)

@@ -141,13 +141,24 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/investigation_notebook.js", "/traffic_view.js", "/api_catalog.js", "/captured_client.js", "/vm_semantics.js", "/traffic_comparison.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/investigation_notebook.js", "/traffic_view.js", "/api_catalog.js", "/captured_client.js", "/vm_semantics.js", "/vm_debugger.js", "/traffic_comparison.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
         )
       case "/api/health":
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
+      case "/api/vm-debugger":
+        response = (try JSONSerialization.data(withJSONObject: [
+          "schema": "reb-owned-vm-debug-session-v1", "available": false,
+          "unavailable_reason": "Open a live workspace to run the owned native fixture.",
+          "backend_instance_id": "stored-evidence", "session": NSNull()
+        ]), "application/json; charset=utf-8", 200, [:])
+      case "/api/vm-debugger/actions", "/api/vm-debugger/trace":
+        response = (try JSONSerialization.data(withJSONObject: [
+          "error": "Owned fixture controls require a live workspace.",
+          "code": "dependency_unavailable", "details": [:]
+        ]), "application/json; charset=utf-8", 503, [:])
       case "/api/native-console":
         response = (Data("{\"contract_version\":2,\"available\":false,\"state\":\"idle\",\"session_id\":null,\"message\":\"Open a live workspace to use the native console\"}".utf8), "application/json; charset=utf-8", 200, [:])
       case "/api/evidence/packages/export", "/api/evidence/packages/validate", "/api/evidence/packages/compare":

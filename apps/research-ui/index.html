@@ -28,6 +28,7 @@
           <details id="advanced-navigation" class="advanced-navigation">
             <summary>Advanced</summary>
             <div class="advanced-items">
+          <button id="nav-vm-workspace" class="secondary-button" type="button" data-screen="vm" aria-controls="screen-vm">VM workspace</button>
           <button class="nav-button" data-screen="backtrace"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3v9a3 3 0 0 0 3 3h9m-4-4 4 4-4 4"/></svg><span>Backtraces</span></button>
           <button id="nav-memory" class="nav-button" data-screen="memory"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5h10v10H5zM8 2v3m4-3v3M8 15v3m4-3v3M2 8h3m-3 4h3m10-4h3m-3 4h3"/></svg><span>Memory</span></button>
           <button class="nav-button" data-screen="experiments"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 2h6m-5 0v6l-5 9h14l-5-9V2M6 12h8"/></svg><span>Experiments</span></button>
@@ -416,8 +417,9 @@
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
               <div><h1>VM investigation</h1></div>
-              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button></nav>
+              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live owned fixture</button></nav>
             </header>
+            <div id="vm-owned-controls" hidden></div>
             <div id="vm-findings-workspace" class="vm-findings-workspace">
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
             <div class="vm-grid">
@@ -428,6 +430,7 @@
               <div id="vm-detail" class="vm-detail" tabindex="0"></div>
             </div>
             </div>
+            <section id="vm-owned-debugger" aria-label="Live owned native fixture" hidden></section>
             <section id="vm-semantics-workflow" class="vm-semantics-workflow" aria-label="VM execution workspace" hidden></section>
           </section>
 
@@ -1408,6 +1411,7 @@
     <script src="traffic_view.js"></script>
     <script src="api_catalog.js"></script>
     <script src="captured_client.js"></script>
+    <script src="vm_debugger.js"></script>
     <script src="vm_semantics.js"></script>
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>

@@ -1674,3 +1674,26 @@ assertions and adds workspace/Findings/source round trips and 1440/1024/760/600/
 layouts through `tools/check-vm-semantics-ui.mjs`. Controller checks do not establish
 rendered or native acceptance; run the rendered gate on a sandbox-capable browser
 and inspect the packaged macOS app, including desktop 200% zoom.
+
+### Live owned fixture controls
+
+Open **Advanced → VM workspace** without a captured finding. The workspace also offers **Live owned fixture** when the Rust backend has the
+bundled `OriginTraceOwnedVmFixture` helper (development binary:
+`build/reb-native-vm-fixture`). Create explicitly chooses the fixed register or
+stack program and starts paused before instruction one. Run, Pause, Step, Stop,
+Reset and Close control that actual native helper. Imported execution traces
+remain inert. Controls remain reachable across the VM workspace while a session
+exists; leaving VM stops status polling but does not pause execution. Runs expire
+after 60 seconds including paused time.
+
+The native state inspector preserves full unsigned 64-bit strings, evidence
+classification, initial state, separate live/history selection and recorder loss.
+Declared fixture opcode names do not imply recovered semantics for captured VMs.
+See [the public contract](../../protocol/owned-vm-debugger-v1.md) for identities,
+uncertain outcomes, explicit recovery and API discovery. Stored-evidence native
+mode reports these controls unavailable; use a live workspace.
+
+`node tools/check-owned-vm-debugger-ui.mjs` exercises authored response/controller
+cases. Its exported rendered flow requires the real backend and helper. Neither
+an authored browser harness nor a DOM model substitutes for native end-to-end
+acceptance, keyboard/focus QA or packaged-app execution.

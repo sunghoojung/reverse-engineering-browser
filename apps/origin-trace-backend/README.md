@@ -230,3 +230,18 @@ retired clipboard owners.
 
 Retained CDP rows include bounded [source timing evidence](../../protocol/network-timing-v1.md). Missing clocks and lifecycle anomalies remain explicit; legacy display durations do not establish HAR fidelity.
 Enabled network content capture also retains bounded [WebSocket message observations](../../protocol/websocket-capture-v1.md) in the existing debugger snapshot; no message replay or handshake credentials are added.
+
+### Owned cooperative VM fixture
+
+`--owned-vm-fixture PATH` overrides the bounded repository-owned helper location;
+otherwise the app resolves `OriginTraceOwnedVmFixture` beside its executable or
+`build/reb-native-vm-fixture` for development. This startup option is not exposed
+through HTTP. The API accepts only the built-in register/stack fixture names.
+GET `/api/vm-debugger` is inert; explicit control POSTs are strict, identity-bound
+and limited to 2 KiB. See [owned-vm-debugger-v1](../../protocol/owned-vm-debugger-v1.md).
+
+Build and check the helper with `make owned-vm-helper-check`. The normal `make
+check` gate also runs the ignored real-helper actor acceptance test with the
+compiled helper path. Running it directly requires `REB_OWNED_VM_TEST_HELPER` and
+`cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
+owned_vm_real_helper -- --ignored`.

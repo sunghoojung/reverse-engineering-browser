@@ -803,6 +803,13 @@ pub(crate) fn workspace(
     if handlers.is_empty() {
         omissions.push(json!({"reason":"handler-unavailable","detail":"No static integer handler candidate was visible in the dispatch region."}));
     }
+    let owned = if runtime == "javascript" {
+        std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|source| crate::vm_effects::attach_owned(source, &mut handlers))
+    } else {
+        None
+    };
     let invocations = events
         .iter()
         .filter(|event| event["type"] == "vm_finding")
@@ -871,8 +878,18 @@ pub(crate) fn workspace(
             "detail": "Only the first 256 residual unknowns are retained."
         }));
     }
-    let coverage =
-        crate::vm_byte_coverage::coverage(&snapshots, handlers.len(), &[], &unknowns, omissions);
+    let attributions = if owned.is_some() {
+        crate::vm_effects::attributed_prefix(&snapshots, &handlers)
+    } else {
+        Vec::new()
+    };
+    let coverage = crate::vm_byte_coverage::coverage(
+        &snapshots,
+        handlers.len(),
+        &attributions,
+        &unknowns,
+        omissions,
+    );
     let mut workspace = json!({
         "interpreter_artifact_id": artifact["artifact_id"],
         "source_artifact_sha256": artifact["sha256"],
@@ -992,13 +1009,30 @@ mod tests {
     }
 
     fn analyze(source: &str, events: &[Value]) -> (tempfile::TempDir, Value, Value) {
-        analyze_artifact(source.as_bytes(), "javascript", events)
+        analyze_artifact_with_snapshot(source.as_bytes(), "javascript", events, None)
     }
 
     fn analyze_artifact(
         bytes: &[u8],
         kind: &str,
         events: &[Value],
+    ) -> (tempfile::TempDir, Value, Value) {
+        analyze_artifact_with_snapshot(bytes, kind, events, None)
+    }
+
+    fn analyze_with_snapshot(
+        source: &str,
+        events: &[Value],
+        snapshot: Option<&[u8]>,
+    ) -> (tempfile::TempDir, Value, Value) {
+        analyze_artifact_with_snapshot(source.as_bytes(), "javascript", events, snapshot)
+    }
+
+    fn analyze_artifact_with_snapshot(
+        bytes: &[u8],
+        kind: &str,
+        events: &[Value],
+        snapshot: Option<&[u8]>,
     ) -> (tempfile::TempDir, Value, Value) {
         let root = tempfile::tempdir().expect("artifact store");
         fs::create_dir_all(root.path().join("blobs")).expect("blob directory");
@@ -1030,6 +1064,24 @@ mod tests {
             ),
         )
         .expect("manifest");
+        if let Some(bytes) = snapshot {
+            let hash = hex::encode(Sha256::digest(bytes));
+            fs::write(root.path().join(format!("blobs/{hash}.bin")), bytes).unwrap();
+            let mut snapshot = artifact.clone();
+            snapshot["artifact_id"] = json!("2");
+            snapshot["parent_artifact_id"] = json!("1");
+            snapshot["capture_origin"] = json!("runtime_typed_array");
+            snapshot["kind"] = json!("bytecode_buffer");
+            snapshot["mime_type"] = json!("application/octet-stream");
+            snapshot["byte_size"] = json!(bytes.len());
+            snapshot["sha256"] = json!(hash);
+            snapshot["content_path"] = json!(format!("blobs/{hash}.bin"));
+            fs::write(
+                root.path().join("manifest.jsonl"),
+                format!("{artifact}\n{snapshot}\n"),
+            )
+            .unwrap();
+        }
         let event_store = root.path().join("events.jsonl");
         let event_lines = events
             .iter()
@@ -1211,6 +1263,50 @@ mod tests {
                 .iter()
                 .any(|omission| omission["reason"] == "snapshot-limit")
         );
+    }
+
+    #[test]
+    fn owned_effects_bind_exact_sources_and_keep_observed_rows_inferred() {
+        for source in [
+            include_str!("../../../tools/fixtures/vm-workspace-effects/stack.js"),
+            include_str!("../../../tools/fixtures/vm-workspace-effects/register.js"),
+            include_str!("../../../tools/fixtures/native-vm-dispatch/stack-reference.js"),
+            include_str!("../../../tools/fixtures/native-vm-dispatch/register-reference.js"),
+        ] {
+            let (_, _, document) = analyze(source, &[event(1)]);
+            let rows = document["workspaces"][0]["handlers"].as_array().unwrap();
+            assert_eq!(rows.len(), 8);
+            assert!(
+                rows.iter()
+                    .all(|row| row["effects"][0]["evidence_class"] == "inferred")
+            );
+            assert_eq!(rows[0]["state"], "observed");
+            assert_schema(&document);
+            let (_, _, altered) = analyze(&format!("{source}\n"), &[event(1)]);
+            assert!(
+                altered["workspaces"][0]["handlers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["effects"] == json!([]))
+            );
+            assert_schema(&altered);
+        }
+    }
+
+    #[test]
+    fn owned_byte_layout_characterizes_verified_snapshot_without_executing_source() {
+        let source = include_str!("../../../tools/fixtures/vm-workspace-effects/stack.js");
+        let (_, _, document) = analyze_with_snapshot(source, &[event(1)], Some(&[1, 7, 8]));
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["coverage"]["characterized_bytes"], 3);
+        assert_eq!(workspace["coverage"]["retained_snapshot_bytes"], 3);
+        assert_eq!(workspace["coverage"]["complete"], true);
+        assert_eq!(
+            workspace["samples"][0]["instruction_pointer_units"],
+            "unknown"
+        );
+        assert_schema(&document);
     }
 
     #[test]

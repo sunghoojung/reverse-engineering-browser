@@ -1533,6 +1533,50 @@
         return section;
       }
 
+      function vmEffectCellText(cell) {
+        const location = cell.index ?? (cell.operand === null ? 'unknown' : `operand ${cell.operand}`);
+        return `${cell.space}[${location}] = ${cell.value ?? 'unknown'}`;
+      }
+
+      function renderVmEffects(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.setAttribute('aria-label', 'Declarative opcode effects');
+        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
+        heading.append(textElement('h4', '', 'Declarative effects'), textElement('span', '', 'owned declarations · no execution'));
+        section.append(heading);
+        let count = 0;
+        const total = workspace.handlers.reduce((sum, handler) => sum + handler.effects.length, 0);
+        for (const handler of workspace.handlers) {
+          const effects = handler.effects ?? [];
+          if (effects.length > 1 && !vmUniqueWorkspaceEffect(handler)) {
+            section.append(textElement('div', 'vm-workspace-notice', `Opcode ${handler.opcode ?? 'unknown'} has conflicting effects. Every declaration is retained; none is selected for traversal.`));
+          }
+          for (const effect of effects) {
+            if (count >= 256) break;
+            count++;
+            const row = document.createElement('details'); row.className = 'vm-effect-row';
+            const summary = document.createElement('summary');
+            summary.textContent = `Opcode ${handler.opcode ?? 'unknown'} · ${effect.operation} · ${effect.evidence_class}`;
+            row.append(summary);
+            const fields = document.createElement('div'); fields.className = 'vm-fields';
+            const span = value => value === null ? 'unknown' : `${value.byte_offset} + ${value.byte_size} bytes`;
+            const target = effect.flow.target_operand === null ? effect.flow.target_offset ?? 'unknown' : `operand ${effect.flow.target_operand}`;
+            fields.append(vmField('effect', effect.effect_id), vmField('instruction bytes', effect.instruction_size ?? 'unknown'),
+              vmField('flow', `${effect.flow.kind}${['branch', 'jump', 'call'].includes(effect.flow.kind) ? ` → ${target}` : ''}`),
+              vmField('atomic group', span(effect.atomic_group)), vmField('superoperator', span(effect.superoperator)));
+            row.append(fields);
+            const body = document.createElement('div'); body.className = 'vm-effect-detail';
+            body.append(textElement('div', '', `Operands: ${effect.operand_layout.length ? effect.operand_layout.map(operand => `${operand.name} (${operand.kind}): ${operand.byte_offset === null ? 'byte location unknown' : `+${operand.byte_offset}, ${operand.byte_size} bytes, little-endian`}`).join('; ') : 'none declared'}`),
+              textElement('div', '', `Reads: ${effect.reads.length ? effect.reads.map(vmEffectCellText).join('; ') : 'none declared'}`),
+              textElement('div', '', `Writes: ${effect.writes.length ? effect.writes.map(vmEffectCellText).join('; ') : 'none declared'}`));
+            row.append(body); section.append(row);
+          }
+        }
+        if (total > count) section.append(textElement('div', 'vm-workspace-notice', `${total - count} additional effects retained in the document; display limited to 256 rows.`));
+        if (count === 0) section.append(textElement('div', 'vm-workspace-empty', 'No source-bound declarative effects are available. Observed changed cells do not establish reads or causes.'));
+        return section;
+      }
+
       function renderVmBytecode(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
@@ -1631,6 +1675,7 @@
         container.append(
           head,
           renderVmHandlers(workspace),
+          renderVmEffects(workspace),
           renderVmBytecode(workspace),
           renderVmWorkspaceCoverage(workspace),
           renderVmWorkspaceUnknowns(workspace)

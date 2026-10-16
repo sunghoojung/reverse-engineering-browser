@@ -141,3 +141,30 @@ can still be partial when the snapshot was truncated or an unknown remains.
 visible. A static-only initializer retains its distinct omission instead of
 also being described as an absent runtime snapshot. No source decoder, native
 instruction-index mapping or missing operand layout is invented for coverage.
+
+## Declarative owned effects
+
+The producer attaches bounded effect rows only for the exact full source hashes
+of the repository-owned [declarations](../tools/fixtures/vm-workspace-effects/README.md).
+Their closed vocabulary describes operands, declared reads/writes, control flow,
+and optional atomic/superoperator spans. It contains no expression, script,
+import, decoder, evaluator, or arbitrary identifier execution surface. Operand
+bytes use only the explicitly owned unsigned little-endian layout; null sizes,
+locations, indices and values remain unknown. Static operand-width guesses and
+changed snapshot cells are never substituted for missing declarations.
+
+The byte-encoded fixtures declare a literal one-byte opcode and a linear code
+encoding, allowing a bounded prefix of retained opcode/operand bytes to be
+attributed until an unknown opcode, layout or truncated instruction. This is
+structural characterization, not execution coverage. Native reference fixtures
+retain instruction-index units and null byte layouts, so they cannot contribute
+byte attribution. Inferred effects remain inferred even when the handler has an
+observed dispatch sample. Distinct incompatible effect rows are retained; a
+contradicted row or inconsistent known meanings prevents choosing one meaning.
+Unknown atomic groups and fused instructions stay null.
+
+The effects panel exposes every row's evidence class, operand layout, access
+sets and flow without interpreting captured code. At most 256 rows are rendered,
+with an explicit display-limit notice; all bounded rows remain in the document.
+`tools/check-owned-vm-helper.py` verifies native declarations against the same
+independent fixed-fixture transition goldens used by the native semantics check.

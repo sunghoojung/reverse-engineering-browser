@@ -1,0 +1,337 @@
+{
+  "format": "reb-owned-workspace-effects-v1",
+  "source_sha256": "e7642645d42efacfc7f2690bde55feb839a7b7ab431352514db31e8090775f0e",
+  "model": "register",
+  "entry_offset": 0,
+  "operand_endianness": "little",
+  "handlers": [
+    {
+      "opcode": 1,
+      "effects": [
+        {
+          "effect_id": "owned-register-constant-v1",
+          "evidence_class": "inferred",
+          "operation": "constant",
+          "instruction_size": 3,
+          "operand_layout": [
+            {
+              "name": "destination",
+              "kind": "register",
+              "byte_offset": 1,
+              "byte_size": 1
+            },
+            {
+              "name": "value",
+              "kind": "immediate",
+              "byte_offset": 2,
+              "byte_size": 1
+            }
+          ],
+          "reads": [],
+          "writes": [
+            {
+              "space": "register",
+              "index": null,
+              "operand": "destination",
+              "value": null
+            }
+          ],
+          "flow": {
+            "kind": "next",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 2,
+      "effects": [
+        {
+          "effect_id": "owned-register-add_modulo_2_64-v1",
+          "evidence_class": "inferred",
+          "operation": "add_modulo_2_64",
+          "instruction_size": 4,
+          "operand_layout": [
+            {
+              "name": "destination",
+              "kind": "register",
+              "byte_offset": 1,
+              "byte_size": 1
+            },
+            {
+              "name": "left",
+              "kind": "register",
+              "byte_offset": 2,
+              "byte_size": 1
+            },
+            {
+              "name": "right",
+              "kind": "register",
+              "byte_offset": 3,
+              "byte_size": 1
+            }
+          ],
+          "reads": [
+            {
+              "space": "register",
+              "index": null,
+              "operand": "left",
+              "value": null
+            },
+            {
+              "space": "register",
+              "index": null,
+              "operand": "right",
+              "value": null
+            }
+          ],
+          "writes": [
+            {
+              "space": "register",
+              "index": null,
+              "operand": "destination",
+              "value": null
+            }
+          ],
+          "flow": {
+            "kind": "next",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 3,
+      "effects": [
+        {
+          "effect_id": "owned-register-store-v1",
+          "evidence_class": "inferred",
+          "operation": "store",
+          "instruction_size": 3,
+          "operand_layout": [
+            {
+              "name": "address",
+              "kind": "address",
+              "byte_offset": 1,
+              "byte_size": 1
+            },
+            {
+              "name": "source",
+              "kind": "register",
+              "byte_offset": 2,
+              "byte_size": 1
+            }
+          ],
+          "reads": [
+            {
+              "space": "register",
+              "index": null,
+              "operand": "source",
+              "value": null
+            }
+          ],
+          "writes": [
+            {
+              "space": "memory",
+              "index": null,
+              "operand": "address",
+              "value": null
+            }
+          ],
+          "flow": {
+            "kind": "next",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 4,
+      "effects": [
+        {
+          "effect_id": "owned-register-load-v1",
+          "evidence_class": "inferred",
+          "operation": "load",
+          "instruction_size": 3,
+          "operand_layout": [
+            {
+              "name": "destination",
+              "kind": "register",
+              "byte_offset": 1,
+              "byte_size": 1
+            },
+            {
+              "name": "address",
+              "kind": "address",
+              "byte_offset": 2,
+              "byte_size": 1
+            }
+          ],
+          "reads": [
+            {
+              "space": "memory",
+              "index": null,
+              "operand": "address",
+              "value": null
+            }
+          ],
+          "writes": [
+            {
+              "space": "register",
+              "index": null,
+              "operand": "destination",
+              "value": null
+            }
+          ],
+          "flow": {
+            "kind": "next",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 5,
+      "effects": [
+        {
+          "effect_id": "owned-register-branch_zero-v1",
+          "evidence_class": "inferred",
+          "operation": "branch_zero",
+          "instruction_size": 3,
+          "operand_layout": [
+            {
+              "name": "condition",
+              "kind": "register",
+              "byte_offset": 1,
+              "byte_size": 1
+            },
+            {
+              "name": "target",
+              "kind": "target",
+              "byte_offset": 2,
+              "byte_size": 1
+            }
+          ],
+          "reads": [
+            {
+              "space": "register",
+              "index": null,
+              "operand": "condition",
+              "value": null
+            }
+          ],
+          "writes": [],
+          "flow": {
+            "kind": "branch",
+            "target_operand": "target",
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 6,
+      "effects": [
+        {
+          "effect_id": "owned-register-jump-v1",
+          "evidence_class": "inferred",
+          "operation": "jump",
+          "instruction_size": 2,
+          "operand_layout": [
+            {
+              "name": "target",
+              "kind": "target",
+              "byte_offset": 1,
+              "byte_size": 1
+            }
+          ],
+          "reads": [],
+          "writes": [],
+          "flow": {
+            "kind": "jump",
+            "target_operand": "target",
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 7,
+      "effects": [
+        {
+          "effect_id": "owned-register-branch_nonzero-v1",
+          "evidence_class": "inferred",
+          "operation": "branch_nonzero",
+          "instruction_size": 3,
+          "operand_layout": [
+            {
+              "name": "condition",
+              "kind": "register",
+              "byte_offset": 1,
+              "byte_size": 1
+            },
+            {
+              "name": "target",
+              "kind": "target",
+              "byte_offset": 2,
+              "byte_size": 1
+            }
+          ],
+          "reads": [
+            {
+              "space": "register",
+              "index": null,
+              "operand": "condition",
+              "value": null
+            }
+          ],
+          "writes": [],
+          "flow": {
+            "kind": "branch",
+            "target_operand": "target",
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 8,
+      "effects": [
+        {
+          "effect_id": "owned-register-halt-v1",
+          "evidence_class": "inferred",
+          "operation": "halt",
+          "instruction_size": 1,
+          "operand_layout": [],
+          "reads": [],
+          "writes": [],
+          "flow": {
+            "kind": "halt",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    }
+  ]
+}

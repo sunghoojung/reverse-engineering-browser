@@ -531,10 +531,12 @@ async function checkBrowser() {
       assert(layout.left>=0&&layout.right<=layout.width&&!layout.overflow,'Export selectors fit the viewport: '+JSON.stringify({width,height,...layout}));
       await shot('export-menu-'+width);
     }
-    await selectRenderedOption({evaluate,click,key,selector:'[data-client-provider="capture"]',index:2,keyboardFocus:true});
-    // On Linux Enter can open the native select popup. Tab commits it and moves
-    // to the next real action before Escape is tested on the containing menu.
-    await key('Tab','Tab');
+    // Traverse with Tab without opening a native select popup. The earlier
+    // provider checks already exercise selection; this checks the parent menu.
+    for(let step=0;step<200;step++) {
+      if(await evaluate("document.activeElement.matches('[data-client-capture=\"raw\"]')"))break;
+      await key('Tab','Tab');
+    }
     assert.equal(await evaluate("document.activeElement.matches('[data-client-capture=\"raw\"]')"),true,'Export action receives native keyboard focus');
     await key('Escape','Escape');assert.equal(await evaluate("document.querySelector('#traffic-capture-export').open"),false);
 

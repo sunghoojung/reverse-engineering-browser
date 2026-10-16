@@ -58,6 +58,60 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("['ArrowUp', 'ArrowDown', 'Home', 'End']", sources)
         self.assertIn("Missing samples do not suppress inferred handlers", sources)
 
+    def test_analysis_selection_is_artifact_scoped_and_ambiguous_bindings_fail_closed(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        presentation = app[app.index("      function vmSessionPresentation"):app.index("      function renderVmSessionStatus")]
+        result = self.run_evidence_model(presentation + f"""
+const document = {json.dumps(fixture)};
+const first = document.workspaces[0], second = structuredClone(first);
+first.capture_mode = 'native-stealth'; second.capture_mode = 'cdp-attached';
+second.interpreter_artifact_id = '303'; second.samples = []; second.sample_count = 0; second.snapshots = [];
+document.workspaces.push(second);
+const analysisResult = workspace => ({{artifact_id:workspace.interpreter_artifact_id,
+  artifact_sha256:workspace.source_artifact_sha256, finding_id:workspace.finding_id, runtime:'javascript',
+  status:'complete',tier:'candidate',vm_score:20,anti_bot_score:0,evidence_families:[],observations:[],
+  related_request_ids:[],coverage:{{complete:true}}}});
+const analysis = {{contract_version:1,document_kind:'vm-analysis',document_digest:document.analysis_digest,
+  profile_digest:'a'.repeat(64),profile:{{profile_id:'anti-bot-vm-detection-v1'}},
+  input_coverage:{{complete:true,omissions:[]}},capture_mode:'unknown',
+  results:[analysisResult(first),analysisResult(second)],mixed_findings:[]}};
+const findings = vmFindingsFromAnalysis(analysis);
+const labels = findings.map(finding => vmSessionPresentation({{vmAnalysisDocument:analysis,
+  vmOpcodeWorkspace:document,vmFindings:findings,selectedVmFindingId:finding.findingId}}).label);
+const snapshots = findings.map(finding => vmOpcodeWorkspaceForFinding(document,finding).snapshots.length);
+const wrongHash = structuredClone(findings[0]); wrongHash.analysis.artifact_sha256 = '0'.repeat(64);
+const wrongFinding = structuredClone(findings[0]); wrongFinding.analysis.finding_id = '0'.repeat(24);
+const wrongArtifact = structuredClone(findings[0]); wrongArtifact.sourceArtifactId = '303';
+const duplicate = {{...document,workspaces:[first,structuredClone(first)]}};
+const native = {{findingId:'105',sourceArtifactId:'302'}};
+const mixed = {{finding_id:first.finding_id,runtime:'mixed',tier:'candidate',artifact_ids:['302','401']}};
+analysis.mixed_findings = [mixed,{{...mixed,artifact_ids:['302','402']}}];
+const mixedRows = vmFindingsFromAnalysis(analysis).filter(row => row.analysis.runtime === 'mixed');
+const invalidTuples = [undefined,null,'302',[],['302'],['302','401','402'],['0302','401']].map(artifact_ids => {{
+  const bad = {{...analysis,mixed_findings:[{{...mixed,artifact_ids}}]}};
+  try {{return !isVmAnalysisDocument(bad);}} catch {{return false;}}
+}});
+process.stdout.write(JSON.stringify({{
+  distinct:new Set(findings.map(row => row.findingId)).size === 2, labels, snapshots,
+  mixedDistinct:new Set(mixedRows.map(row => row.findingId)).size === 2,
+  mixedBound:mixedRows.every(row => vmOpcodeWorkspaceForFinding(document,row) === first), invalidTuples,
+  refusals:[wrongHash,wrongFinding,wrongArtifact].map(row => vmOpcodeWorkspaceForFinding(document,row) === null),
+  ambiguous:vmOpcodeWorkspaceForFinding(duplicate,findings[0]) === null,
+  nativeBound:vmOpcodeWorkspaceForFinding(document,native) === first,
+  nativeAmbiguous:vmOpcodeWorkspaceForFinding(duplicate,native) === null,
+  wrongSuffixRejected:vmOpcodeWorkspaceForFinding(document,{{findingId:`analysis:${{first.finding_id}}:artifact:999`,sourceArtifactId:'302'}}) === null,
+  hashOnlyRejected:vmOpcodeWorkspaceForFinding(document,{{findingId:`analysis:${{first.finding_id}}`}}) === null
+}}));
+""")
+        self.assertTrue(result["distinct"])
+        self.assertEqual(result["labels"], ["Native stealth", "CDP attached"])
+        self.assertEqual(result["snapshots"], [1, 0])
+        self.assertEqual(result["refusals"], [True] * 3)
+        self.assertEqual(result["invalidTuples"], [True] * 7)
+        for key in ("mixedDistinct", "mixedBound", "ambiguous", "nativeBound", "nativeAmbiguous", "hashOnlyRejected", "wrongSuffixRejected"):
+            self.assertTrue(result[key], key)
+
     def test_v2_rejects_missing_identity_forged_counts_and_malformed_rows(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         result = self.run_evidence_model(

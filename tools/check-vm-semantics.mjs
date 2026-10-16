@@ -239,7 +239,7 @@ const vmFixtureState={vmFindings:[],lastValidAnalysisFindings:[],eventVmFindings
 let vmFixtureRenders=0;
 const vmFixtureApi=runInNewContext(`${vmEvidenceSource}\n${vmRefreshSource}\n;({install:${installVmFindingsFixture.toString()},refreshVmAnalysis})`,{state:vmFixtureState,location:{protocol:'http:'},TextEncoder,crypto:webcrypto,fetch:async()=>({ok:false,status:503}),renderVmLab:()=>{vmFixtureRenders++;}});
 await vmFixtureApi.install();
-const exactVmFinding='analysis:000000000000000000009876';
+const exactVmFinding='analysis:000000000000000000009876:artifact:9876';
 const admittedVmFinding=vmFixtureState.vmFindings[0];
 assert.equal(admittedVmFinding.findingId,exactVmFinding);
 vmFixtureState.lastValidAnalysisFindings=[];

@@ -158,6 +158,8 @@ if (process.argv.includes('--fixture-only')) {
       await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
       await click('#nav-vm-workspace');
       assert.equal(await evaluate("document.querySelector('#screen-vm').hidden"), false);
+      assert.deepEqual(await evaluate("(()=>{const body=getComputedStyle(document.body),screen=getComputedStyle(document.querySelector('#screen-vm'));return {background:body.backgroundColor,text:body.color,base:screen.getPropertyValue('--bg').trim(),surface:screen.getPropertyValue('--panel').trim(),accent:screen.getPropertyValue('--accent').trim()};})()"),
+        {background:'rgb(35, 33, 54)',text:'rgb(224, 222, 244)',base:'#232136',surface:'#2a273f',accent:'#c4a7e7'}, 'Actual full shell retains Rosé Pine Moon theme');
       for (const [mode, panel] of modes) {
         await click('#vm-show-' + mode);
         assert.equal(await evaluate(`document.querySelector('#${panel}').hidden`), false, `${mode} panel at ${width}`);

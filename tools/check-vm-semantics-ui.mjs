@@ -37,6 +37,8 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.id'),'vm-show-owned');
  await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.id'),'vm-show-static');
  assert.equal(await evaluate(`(()=>{const e=document.activeElement,r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(e).outlineStyle!=='none'})()`),true,'Static mode keyboard focus must be visible');
+ await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.id'),'vm-show-contextual');
+ assert.equal(await evaluate(`(()=>{const e=document.activeElement,r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(e).outlineStyle!=='none'})()`),true,'Contextual mode keyboard focus must be visible');
  await key('Tab','Tab',{windowsVirtualKeyCode:9});assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Import VM execution trace');
  // Intermediate pane controls can be outside the intentionally scrollable
  // workspace viewport. Scroll them into view before the real pointer action;

@@ -250,6 +250,7 @@ function mountVmSemantics(root) {
   const input=fileInput('Import VM execution trace'),comparisonInput=fileInput('Import comparison VM trace'),hypothesis=fileInput('Validate opcode hypothesis file');hypothesis.disabled=true;
   const selector=select('Execution step'),comparisonSelector=select('Comparison execution step');
   const identity=node('div'),comparisonIdentity=node('div'),map=node('div'),details=pre(),validation=pre(),stateView=node('div'),stepHeading=node('h3'),occurrences=node('div'),validationView=node('div'),comparisonView=node('div');
+  map.className='vm-opcode-map';
   stepHeading.tabIndex=-1;stateView.className='vm-state-view';
   const changesOnly=node('input');changesOnly.type='checkbox';changesOnly.checked=true;changesOnly.setAttribute('aria-label','Show changed locations only');
   const changesLabel=node('label');changesLabel.className='vm-inline-control';changesLabel.append(changesOnly,node('span','Changes only'));
@@ -450,14 +451,14 @@ function mountVmSemantics(root) {
   listing.id='vm-execution-observations';listing.setAttribute('role','tabpanel');listing.setAttribute('aria-labelledby',viewButtons.listing.id);
   const contextStrip=node('div');contextStrip.className='vm-workspace-notice';
   const provenance=node('details');provenance.append(node('summary','Full provenance and limits'),identity,comparisonIdentity,node('p','Supplied identities and origin are not authenticated. Snapshot changes do not prove reads, intermediate writes or causal dependency. Matching absence or unknown values never establish equality. Exact input-file hashes do not establish alignment or native capture.'));
-  const provenanceOpen=button('Provenance and limits',()=>{if(navigationOpen)setNavigation(false);provenance.open=true;openContext('audit',true,()=>{if(layout!=='wide'){setNavigation(true);provenanceOpen.focus();}else{provenanceOpen.focus();}});});
+  const provenanceOpen=button('Provenance and limits',()=>{if(navigationOpen)setNavigation(false);provenance.open=true;openContext('audit',true,()=>{if(layout!=='wide'){setNavigation(true);provenanceOpen.focus();}else{provenanceOpen.focus();}});});provenanceOpen.id='vm-open-provenance';
   contextStrip.append(notice);
   const listingHead=node('div');listingHead.className='vm-listing-head';
   const stepControls=node('div');stepControls.className='vm-step-controls';stepControls.append(selector,previous,next);
   const filters=node('div');filters.className='vm-step-controls';filters.append(filter,clearFilter,button('Reveal selected step',focusSelectedRow));
   const columns=node('div');columns.className='vm-listing-columns';columns.setAttribute('aria-hidden','true');for(const label of ['Sequence','PC before → after','Supplied opcode hex','Supplied operands','Candidate meaning'])columns.append(node('span',label));
   const listingHeading=node('header');listingHeading.className='vm-pane-heading';listingHeading.append(node('span','Execution'),title);title.title='Retained observations only. PC units are adapter-defined; full instruction bytes are unavailable.';const listingFooter=node('footer');listingFooter.className='vm-listing-footer';listingFooter.append(listingPager,listingStatus);listingHead.append(listingHeading,stepControls,filters,filterStatus,columns);listing.append(listingHead,listingBody,listingFooter);
-  const navigationHeading=node('header');navigationHeading.className='vm-pane-heading';navigationHeading.append(node('span','Navigation'),node('h2','Trace & opcodes'));provenance.append(traceSummary);navigator.append(navigationClose,navigationHeading,contextSummary,provenanceOpen,node('h3','Opcode observations'),map);
+  const navigationHeading=node('header');navigationHeading.className='vm-pane-heading';navigationHeading.append(node('span','Navigation'),node('h2','Trace & opcodes'));provenance.append(traceSummary);navigator.append(navigationClose,navigationHeading,provenanceOpen,contextSummary,node('h3','Opcode observations'),map);
   const inspectorHeading=node('header');inspectorHeading.className='vm-pane-heading';inspectorHeading.append(node('span','State'),node('h2','Selected instruction'),stepHeading);inspector.append(inspectorHeading);makeTabs(inspector,[['instruction','Instruction'],['registers','Registers'],['stack','Stack'],['memory','Memory']],stateButtons,'instruction',setStateTab,'state-tab');
   const inspectorScroll=node('div');inspectorScroll.className='vm-inspector-body';stateView.setAttribute('role','tabpanel');stateView.setAttribute('aria-labelledby',stateButtons.instruction.id);stateView.id='vm-state-panel';
   for(const b of Object.values(stateButtons))b.setAttribute('aria-controls',stateView.id);
@@ -495,20 +496,24 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
   const navigationEntry=document.querySelector('#nav-vm-workspace');
   const staticButton=document.querySelector('#vm-show-static'),staticRoot=document.querySelector('#vm-static-workspace');
   const staticAnalysis=staticRoot&&typeof mountVmStatic==='function'?mountVmStatic(staticRoot):null;
+  const contextualButton=document.querySelector('#vm-show-contextual'),contextualRoot=document.querySelector('#vm-contextual-workspace');
+  const contextualAnalysis=contextualRoot&&typeof mountVmContextual==='function'?mountVmContextual(contextualRoot):null;
   let mode='findings',screenVisible=false,hasSession=false,owned=null;
   const sync=()=>{
     root.hidden=mode!=='execution';if(findings)findings.hidden=mode!=='findings';
     if(ownedRoot)ownedRoot.hidden=mode!=='owned';
     if(staticRoot)staticRoot.hidden=mode!=='static';
+    if(contextualRoot)contextualRoot.hidden=mode!=='contextual';
     if(controls){
       const hide=mode!=='owned'&&!hasSession;
-      if(hide&&controls.contains(document.activeElement))(mode==='static'?staticButton:mode==='execution'?executionButton:findingsButton)?.focus({preventScroll:true});
+      if(hide&&controls.contains(document.activeElement))(mode==='contextual'?contextualButton:mode==='static'?staticButton:mode==='execution'?executionButton:findingsButton)?.focus({preventScroll:true});
       controls.hidden=hide;
     }
     findingsButton?.setAttribute('aria-pressed',String(mode==='findings'));
     executionButton?.setAttribute('aria-pressed',String(mode==='execution'));
     ownedButton?.setAttribute('aria-pressed',String(mode==='owned'));
     staticButton?.setAttribute('aria-pressed',String(mode==='static'));
+    contextualButton?.setAttribute('aria-pressed',String(mode==='contextual'));
     owned?.setVisible(screenVisible&&(mode==='owned'||hasSession));
     if(owned)owned.panes.hidden=mode!=='owned';
   };
@@ -516,9 +521,10 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
     owned=mountOwnedVmDebugger(ownedRoot,{onState:view=>{hasSession=!!view.session;if(navigationEntry){navigationEntry.textContent='VM';const label=view.session?'VM workspace · '+view.session.state:'VM workspace';navigationEntry.setAttribute('aria-label',label);navigationEntry.setAttribute('title',label);}sync();}});
     if(controls)controls.append(owned.toolbar);
   }
-  const showWorkspace=next=>{mode=['findings','execution','owned',...(staticAnalysis?['static']:[])].includes(next)?next:'findings';sync();};
+  const showWorkspace=next=>{mode=['findings','execution','owned',...(staticAnalysis?['static']:[]),...(contextualAnalysis?['contextual']:[])].includes(next)?next:'findings';sync();};
   findingsButton?.addEventListener('click',()=>showWorkspace('findings'));executionButton?.addEventListener('click',()=>showWorkspace('execution'));ownedButton?.addEventListener('click',()=>showWorkspace('owned'));
   staticButton?.addEventListener('click',()=>showWorkspace('static'));
+  contextualButton?.addEventListener('click',()=>showWorkspace('contextual'));
   sync();
-  return {execution,owned,staticAnalysis,showWorkspace,setVisible:visible=>{screenVisible=!!visible;sync();}};
+  return {execution,owned,staticAnalysis,contextualAnalysis,showWorkspace,setVisible:visible=>{screenVisible=!!visible;sync();}};
 })();

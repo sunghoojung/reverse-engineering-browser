@@ -1,0 +1,41 @@
+{
+  "format": "reb-vm-contextual-evidence-v1",
+  "identity": {
+    "build_id": "owned-jump",
+    "definition_id": "owned-jump-map",
+    "image_id": "owned-jump-bytes",
+    "image_bytes_sha256": "39c9cd4151308e19d816a0959c569b1e3d5722267bb895620baca268fba9ccb7",
+    "definition_canonical_sha256": "66f965cd41ec94b0dc90c096d3493a839fbac1625acd947c680792088f08aefe"
+  },
+  "capture_id": "authored-fixture",
+  "run_id": "authored-run-1",
+  "context_id": "authored-vm-1",
+  "mapping_provenance": {
+    "kind": "supplied",
+    "reference": "authored-map-v1"
+  },
+  "events": [
+    {
+      "event_id": "jump-0",
+      "sequence": 0,
+      "kind": "jump",
+      "pc": 0,
+      "decoder_state": "entry",
+      "raw_opcode": "aa",
+      "to": {
+        "pc": 2,
+        "decoder_state": "done"
+      }
+    },
+    {
+      "event_id": "halt-1",
+      "sequence": 1,
+      "kind": "step",
+      "pc": 2,
+      "decoder_state": "done",
+      "raw_opcode": "bb",
+      "to": null
+    }
+  ],
+  "gaps": []
+}

@@ -1,0 +1,57 @@
+{
+  "format": "reb-vm-contextual-definition-v1",
+  "build_id": "owned-jump",
+  "definition_id": "owned-jump-map",
+  "image_sha256": "39c9cd4151308e19d816a0959c569b1e3d5722267bb895620baca268fba9ccb7",
+  "architecture": "stack",
+  "opcode_bytes": 1,
+  "operand_endianness": "little",
+  "register_count": 0,
+  "instructions": [
+    {
+      "instruction_id": "JUMP",
+      "mnemonic": "JUMP",
+      "operands": [],
+      "operations": [
+        {
+          "operation": "jump",
+          "args": []
+        }
+      ],
+      "flow": {
+        "kind": "jump",
+        "target": null
+      }
+    },
+    {
+      "instruction_id": "HALT",
+      "mnemonic": "HALT",
+      "operands": [],
+      "operations": [
+        {
+          "operation": "halt",
+          "args": []
+        }
+      ],
+      "flow": {
+        "kind": "halt"
+      }
+    }
+  ],
+  "mappings": [
+    {
+      "pc": 0,
+      "decoder_state": "entry",
+      "raw_opcode": "aa",
+      "instruction_id": "JUMP",
+      "next_decoder_state": null
+    },
+    {
+      "pc": 2,
+      "decoder_state": "done",
+      "raw_opcode": "bb",
+      "instruction_id": "HALT",
+      "next_decoder_state": null
+    }
+  ]
+}

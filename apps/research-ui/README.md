@@ -1888,3 +1888,50 @@ actual PNG decode/geometry and clear/leave cancellation. Set
 needed. Outputs are authored-fixture UI QA images and metadata receipts under
 `build/element-screenshot-ui-qa` (or `REB_UI_SCREENSHOTS`). This runnable check
 still requires execution; it does not replace packaged macOS acceptance.
+
+### Per-build contextual VM analysis
+
+**VM → Contextual build** is an independent offline workspace for supplied
+`reb-vm-contextual-definition-v1` definitions and hash-bound
+`reb-vm-contextual-image-v1` images. Import both JSON files, optionally import
+`reb-vm-contextual-evidence-v1` observations, then choose **Analyze build**.
+Every input is strict UTF-8 JSON, at most 1 MiB. The image is at most 64 KiB.
+No input is executed, fetched, uploaded, or automatically attached to findings.
+**Clear** removes these local inputs; **Remove evidence** returns to declared-only
+analysis. Invalid imports preserve previous valid inputs; valid replacements
+invalidate the previous report and any pending analysis.
+
+Contexts are keyed by byte-offset PC and decoder-state identity. The same opcode
+or PC can have different supplied meanings in different states. Missing mappings
+or state remain explicit unknowns and stop only that context. Select a context
+to see ordered macro operations, abstract pseudocode, declared outgoing edges,
+separately labelled supplied observed jumps, and event/capture/run/context
+references. All context, jump, reference and diagnostic lists are paged. Unlinked
+events remain inspectable under **All supplied event links**; they never borrow
+a nearby instruction or invent an adjacency edge. Matching a declared edge does
+not verify semantics, evidence authenticity, completeness or equivalence.
+
+The supported contract is declarative, hash-bound per-build decoding and linking
+explicit supplied observations. It does not recover vendor VM definitions,
+decrypt images, extract keys/seeds, capture a vendor runtime, or bypass anti-debug
+checks. Vendor compatibility remains unverified. Existing **Static bytecode**,
+**Execution workspace**, **Findings** and **Live owned fixture** workflows remain
+independent, with live safety controls preserved when switching modes.
+
+Authored examples (not runtime captures) are in `tools/fixtures/vm-contextual/`:
+
+```sh
+node tools/vm-agent.mjs analyze-contextual \
+  --definition tools/fixtures/vm-contextual/definition.json \
+  --input tools/fixtures/vm-contextual/image.json
+node tools/vm-agent.mjs link-contextual \
+  --definition tools/fixtures/vm-contextual/definition.json \
+  --input tools/fixtures/vm-contextual/image.json \
+  --evidence tools/fixtures/vm-contextual/evidence.json
+```
+
+The CLI enforces regular non-symlink file bounds, preserves exact source hashes,
+and makes no network requests. See [contextual decoding](../../protocol/vm-contextual-v1.md)
+and [runtime evidence linking](../../protocol/vm-contextual-evidence-v1.md).
+`tools/check-vm-contextual-ui.mjs` covers controller/CLI boundaries; its rendered
+flow is part of the existing browser gate, not macOS packaged-app acceptance.

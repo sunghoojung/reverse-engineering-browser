@@ -38,7 +38,11 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                                 std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 const std::string& source_url,
-                                mojo_base::BigBuffer content) override;
+                                mojo_base::BigBuffer content,
+                                std::uint64_t allocating_script_id,
+                                bool allocating_script_is_eval,
+                                mojo_base::BigBuffer allocating_script_source,
+                                std::uint64_t allocating_script_session_id) override;
 
   void Configure(std::uint64_t session_id,
                  std::uint64_t category_mask,

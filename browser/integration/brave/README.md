@@ -194,3 +194,26 @@ an embedder callback after initialization; no JavaScript constructor or host
 builtin is wrapped. Buffers from 32 bytes through 16 MiB are copied into
 `bytecode_buffer` artifacts, with at most 16 snapshots per session sharing the
 existing 16-artifact, 32-MiB transfer queue.
+
+Runtime snapshots now carry exact allocating-script provenance. After the VM
+capture gate, V8 exposes the innermost JavaScript frame's native script identity,
+source and script URL without enabling Inspector. Source is copied once per
+execution-context/script identity and configuration (at most 16 entries per
+renderer sequence). The browser scopes that identity by renderer, execution
+context and frame, assigns a `runtime_allocating_script` JavaScript artifact,
+and writes its ID into the buffer's `parent_artifact_id`. No document-URL or
+likely-VM guessing is involved. A missing source/URL or exhausted registry emits
+an explicit capture failure. Network source artifacts remain independent.
+
+The exact-script source and buffer share the existing bounded artifact queue;
+a failed source transfer can therefore leave an unresolved parent. VM Lab keeps
+that snapshot unjoined and describes runtime snapshot unavailability. This is
+capture evidence, not a guarantee that every allocation or script was retained.
+
+Native generated artifacts still report unknown navigation ID `0`; this change
+adds no browser navigation-identity provider. The allocating source and buffer
+share that value. Execution-context tokens change on document replacement and
+are part of both renderer cache and browser registry keys, preventing a reused
+V8 script ID or frame token from selecting a previous document's source. Offline
+nonzero-navigation mismatch tests verify the workspace join contract, not a
+live navigation-ID producer.

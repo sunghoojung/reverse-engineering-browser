@@ -16,7 +16,8 @@ class VmLabTests(unittest.TestCase):
             self.skipTest("Node.js is not installed")
         model = (UI_DIRECTORY / "evidence_models.js").read_text(encoding="utf-8")
         completed = subprocess.run(
-            [node, "-e", model + "\n" + exercise],
+            [node],
+            input=model + "\n" + exercise,
             check=True,
             capture_output=True,
             text=True,
@@ -164,6 +165,25 @@ process.stdout.write(JSON.stringify({accepted: isBrokerEvent(sample)}));
         )
 
         self.assertTrue(result["accepted"])
+
+    def test_allocating_script_origin_requires_javascript_and_context(self) -> None:
+        result = self.run_evidence_model("""
+const artifact = {
+  protocol_version: 1, artifact_id: '1', session_id: '1', navigation_id: '1',
+  frame_id: '1', parent_artifact_id: '0', creator_event_id: '0',
+  execution_context_id: '4', capture_origin: 'runtime_allocating_script',
+  kind: 'javascript', url: 'fixture://owned/script.js', mime_type: 'text/javascript',
+  byte_size: 32, sha256: 'a'.repeat(64), sensitive: false
+};
+process.stdout.write(JSON.stringify({
+  valid: isArtifact(artifact),
+  missingContext: isArtifact({...artifact, execution_context_id: '0'}),
+  wrongKind: isArtifact({...artifact, kind: 'bytecode_buffer'})
+}));
+""")
+        self.assertTrue(result["valid"])
+        self.assertFalse(result["missingContext"])
+        self.assertFalse(result["wrongKind"])
 
     def test_runtime_typed_array_artifact_requires_bytecode_and_context(self) -> None:
         result = self.run_evidence_model(

@@ -44,6 +44,16 @@ enum class NativeArtifactCaptureOrigin : std::uint16_t {
   kWebAssemblyInstantiate = 5,
   kCanvasToDataUrl = 6,
   kRuntimeTypedArray = 7,
+  kRuntimeAllocatingScript = 8,
+};
+
+// Transient views: emitters must copy before returning. The script identity is
+// native V8 identity scoped by the execution context, never inferred from a URL.
+struct NativeRuntimeScript final {
+  std::uint64_t script_id = 0;
+  bool is_eval = false;
+  std::span<const std::uint8_t> source;
+  std::uint64_t session_id = 0;
 };
 
 using NativeGeneratedArtifactEmitter = void (*)(NativeArtifactKind kind,
@@ -52,7 +62,8 @@ using NativeGeneratedArtifactEmitter = void (*)(NativeArtifactKind kind,
                                                 std::uint64_t execution_context_id,
                                                 std::uint64_t frame_id,
                                                 std::string_view source_url,
-                                                std::span<const std::uint8_t> content) noexcept;
+                                                std::span<const std::uint8_t> content,
+                                                const NativeRuntimeScript& script) noexcept;
 
 enum class NativeArtifactReceiveStatus : std::uint32_t {
   kAccepted = 0,

@@ -48,10 +48,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] bool IsArtifactCaptureEnabled() const noexcept;
   [[nodiscard]] bool IsVmCaptureEnabled() const noexcept;
   [[nodiscard]] bool IsCanvasImageCaptureEnabled() const noexcept;
+  [[nodiscard]] bool RuntimeScriptSourceNeeded(std::uint64_t execution_context_id,
+                                               std::uint64_t script_id) const noexcept;
   void CaptureRuntimeTypedArray(std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 std::string_view source_url,
-                                std::span<const std::uint8_t> content) noexcept;
+                                std::span<const std::uint8_t> content,
+                                const NativeRuntimeScript& script) noexcept;
   void CaptureGeneratedArtifact(NativeArtifactKind kind,
                                 NativeArtifactCaptureOrigin capture_origin,
                                 std::uint64_t creator_event_id,
@@ -88,6 +91,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
 
  private:
   NativeProbeSink() = default;
+
+  std::uint64_t RecordRuntimeBufferEvent(NativeProbeType type,
+                                         std::uint64_t frame_id,
+                                         std::string_view reason,
+                                         std::uint64_t generation) noexcept;
 
   [[nodiscard]] std::uint64_t RecordSurfaceOperation(
       NativeProbeCategory category,

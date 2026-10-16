@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "base/no_destructor.h"
@@ -54,13 +55,24 @@ class NativeArtifactCaptureSink final {
       const network::mojom::URLResponseHead& response_head,
       mojo::ScopedDataPipeConsumerHandle body);
 
-  void CaptureGeneratedArtifact(NativeArtifactKind kind,
-                                NativeArtifactCaptureOrigin capture_origin,
+  void CaptureRuntimeTypedArray(int renderer_process_id,
+                                std::uint64_t capture_session_id,
+                                std::uint64_t script_id,
+                                bool is_eval,
                                 std::uint64_t creator_event_id,
                                 std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 std::string_view source_url,
+                                mojo_base::BigBuffer script_source,
                                 mojo_base::BigBuffer content);
+  std::uint64_t CaptureGeneratedArtifact(NativeArtifactKind kind,
+                                         NativeArtifactCaptureOrigin capture_origin,
+                                         std::uint64_t creator_event_id,
+                                         std::uint64_t execution_context_id,
+                                         std::uint64_t frame_id,
+                                         std::string_view source_url,
+                                         mojo_base::BigBuffer content,
+                                         std::uint64_t parent_artifact_id = 0);
 
   static void TransferCompleted(std::uint64_t artifact_id,
                                 NativeArtifactReceiveStatus status) noexcept;
@@ -108,6 +120,9 @@ class NativeArtifactCaptureSink final {
   std::atomic<std::size_t> active_bytes_{0};
   std::atomic<std::size_t> runtime_typed_array_count_{0};
   std::map<std::uint64_t, PendingContext> pending_;
+  // Only the browser assigns artifact IDs. Never key this relation by URL.
+  using ScriptKey = std::tuple<int, std::uint64_t, std::uint64_t, std::uint64_t>;
+  std::map<ScriptKey, std::uint64_t> allocating_scripts_;
 };
 
 }  // namespace reb

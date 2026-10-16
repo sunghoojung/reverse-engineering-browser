@@ -1,0 +1,73 @@
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 8bbea4f..5307e36 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -325,6 +325,16 @@ using ApiImplementationCallback = void (*)(const FunctionCallbackInfo<Value>&);
+ // --- Callback for WebAssembly.compileStreaming ---
+ using WasmStreamingCallback = void (*)(const FunctionCallbackInfo<Value>&);
+ 
++// Exact innermost JavaScript frame identity. Values are borrowed handles and
++// are only valid within the caller's HandleScope. This never enables Inspector.
++struct RuntimeBufferScript {
++  int script_id = 0;
++  bool is_eval = false;
++  Local<Context> context;
++  Local<String> source;
++  Local<String> name;
++};
++
+ enum class RuntimeBufferKind {
+   kArrayBuffer,
+   kUint8Array,
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index 615396e..1c88059 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -1760,6 +1760,10 @@ class V8_EXPORT Isolate {
+ 
+   void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
+ 
++  // Use synchronously from the native runtime-buffer callback, after the
++  // embedder's capture gate. Does not execute JavaScript or enable debugging.
++  bool GetRuntimeBufferAllocatingScript(RuntimeBufferScript* result);
++
+   void SetWasmAsyncResolvePromiseCallback(
+       WasmAsyncResolvePromiseCallback callback);
+ 
+diff --git a/src/api/api.cc b/src/api/api.cc
+index eaa9562..2202299 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -11010,6 +11010,32 @@ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
+ CALLBACK_SETTER(RuntimeBufferCallback, RuntimeBufferCallback,
+                 runtime_buffer_callback)
+ 
++bool Isolate::GetRuntimeBufferAllocatingScript(RuntimeBufferScript* result) {
++  if (result == nullptr) return false;
++  *result = {};
++  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
++  i::JavaScriptStackFrameIterator iterator(isolate);
++  if (iterator.done()) return false;
++  // GetInnermost preserves an inlined allocator's script instead of naming
++  // the outer optimized function. Only this one JavaScript frame is inspected.
++  const i::FrameSummary summary = i::FrameSummary::GetInnermost(iterator.frame());
++  if (!summary.IsJavaScript()) return false;
++  const auto script_object = summary.AsJavaScript().script();
++  if (!i::IsScript(*script_object)) return false;
++  const auto script = i::Cast<i::Script>(script_object);
++  if (script->id() <= 0 || !i::IsString(script->source())) return false;
++  result->context = Utils::ToLocal(summary.AsJavaScript().native_context());
++  result->script_id = script->id();
++  result->is_eval = script->compilation_type() == i::Script::CompilationType::kEval;
++  result->source = Utils::ToLocal(
++      i::direct_handle(i::Cast<i::String>(script->source()), isolate));
++  const auto name = script->GetNameOrSourceURL();
++  if (i::IsString(name)) {
++    result->name = Utils::ToLocal(i::direct_handle(i::Cast<i::String>(name), isolate));
++  }
++  return true;
++}
++
+ CALLBACK_SETTER(WasmAsyncResolvePromiseCallback,
+                 WasmAsyncResolvePromiseCallback,
+                 wasm_async_resolve_promise_callback)

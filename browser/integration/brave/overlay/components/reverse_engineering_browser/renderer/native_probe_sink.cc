@@ -50,6 +50,13 @@ constexpr std::size_t kCanvasDataUrlMaxBytes = 2U * 1024U * 1024U;
 constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
 constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 
+struct RuntimeScriptCache final {
+  std::uint64_t generation = 0;
+  std::array<std::pair<std::uint64_t, std::uint64_t>, kRuntimeTypedArrayMaxSnapshots> keys{};
+  std::size_t count = 0;
+};
+thread_local RuntimeScriptCache runtime_script_cache;
+
 void SetPayload(NativeProbeEvent& event,
                 const std::string_view first,
                 const std::string_view second = {}) noexcept {
@@ -175,17 +182,30 @@ bool NativeProbeSink::IsVmCaptureEnabled() const noexcept {
          MonotonicTimeNs() < expires_at;
 }
 
-void NativeProbeSink::CaptureRuntimeTypedArray(
-    const std::uint64_t execution_context_id,
-    const std::uint64_t frame_id,
-    const std::string_view source_url,
-    const std::span<const std::uint8_t> content) noexcept {
+bool NativeProbeSink::RuntimeScriptSourceNeeded(const std::uint64_t execution_context_id,
+                                                const std::uint64_t script_id) const noexcept {
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (runtime_script_cache.generation != generation) {
+    runtime_script_cache = {};
+    runtime_script_cache.generation = generation;
+  }
+  const auto key = std::pair{execution_context_id, script_id};
+  return std::find(runtime_script_cache.keys.begin(),
+                   runtime_script_cache.keys.begin() +
+                       static_cast<std::ptrdiff_t>(runtime_script_cache.count),
+                   key) == runtime_script_cache.keys.begin() +
+                               static_cast<std::ptrdiff_t>(runtime_script_cache.count);
+}
+
+void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_context_id,
+                                               const std::uint64_t frame_id,
+                                               const std::string_view source_url,
+                                               const std::span<const std::uint8_t> content,
+                                               const NativeRuntimeScript& script) noexcept {
   if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
     return;
   }
-  if (execution_context_id == 0 || source_url.empty() ||
-      source_url.size() > kNativeArtifactMaxUrlBytes ||
-      content.size() < kRuntimeTypedArrayMinBytes ||
+  if (content.size() < kRuntimeTypedArrayMinBytes ||
       content.size() > kNativeArtifactMaxContentBytes) {
     return;
   }
@@ -204,27 +224,64 @@ void NativeProbeSink::CaptureRuntimeTypedArray(
       MonotonicTimeNs() >= expires_at) {
     return;
   }
+  if (script.script_id == 0 ||
+      (script.source.empty() &&
+       RuntimeScriptSourceNeeded(execution_context_id, script.script_id)) ||
+      script.source.size() > kNativeArtifactMaxContentBytes) {
+    RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                             "allocating_script_unavailable", generation);
+    return;
+  }
+  if (execution_context_id == 0 || source_url.empty() ||
+      source_url.size() > kNativeArtifactMaxUrlBytes) {
+    RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                             "allocating_script_url_unavailable", generation);
+    return;
+  }
   const std::size_t snapshot_index =
       runtime_typed_array_count_.fetch_add(1, std::memory_order_relaxed);
   if (snapshot_index >= kRuntimeTypedArrayMaxSnapshots) {
     if (snapshot_index == kRuntimeTypedArrayMaxSnapshots) {
-      NativeProbeEvent event;
-      event.header.category = NativeProbeCategory::kVm;
-      event.header.type = NativeProbeType::kArtifactCaptureFailed;
-      event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-      event.header.monotonic_time_ns = MonotonicTimeNs();
-      event.header.session_id = session_id_.load(std::memory_order_relaxed);
-      event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
-      event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
-      event.header.frame_id = frame_id;
-      SetPayload(event, "runtime_typed_array_session_limit");
-      emitter(event, generation);
+      RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                               "runtime_typed_array_session_limit", generation);
     }
     return;
   }
+  NativeRuntimeScript scoped_script = script;
+  scoped_script.session_id = session_id_.load(std::memory_order_relaxed);
+  if (config_generation_.load(std::memory_order_acquire) != generation) {
+    return;
+  }
+  const std::uint64_t creator_event_id = RecordRuntimeBufferEvent(
+      NativeProbeType::kApiCall, frame_id, "runtime_typed_array_snapshot", generation);
   artifact_emitter(NativeArtifactKind::kBytecodeBuffer,
-                   NativeArtifactCaptureOrigin::kRuntimeTypedArray, 0, execution_context_id,
-                   frame_id, source_url, content);
+                   NativeArtifactCaptureOrigin::kRuntimeTypedArray, creator_event_id,
+                   execution_context_id, frame_id, source_url, content, scoped_script);
+  if (!script.source.empty() && RuntimeScriptSourceNeeded(execution_context_id, script.script_id) &&
+      runtime_script_cache.count < runtime_script_cache.keys.size()) {
+    runtime_script_cache.keys[runtime_script_cache.count++] = {execution_context_id,
+                                                               script.script_id};
+  }
+}
+
+std::uint64_t NativeProbeSink::RecordRuntimeBufferEvent(const NativeProbeType type,
+                                                        const std::uint64_t frame_id,
+                                                        const std::string_view reason,
+                                                        const std::uint64_t generation) noexcept {
+  NativeProbeEvent event;
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = type;
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.monotonic_time_ns = MonotonicTimeNs();
+  event.header.session_id = session_id_.load(std::memory_order_relaxed);
+  event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  event.header.frame_id = frame_id;
+  SetPayload(event, reason);
+  const auto emitter = emitter_.load(std::memory_order_acquire);
+  return emitter && CanAdmitEvent(event, generation) && emitter(event, generation)
+             ? event.header.sequence_number
+             : 0;
 }
 
 void NativeProbeSink::CaptureGeneratedArtifact(
@@ -273,7 +330,7 @@ void NativeProbeSink::CaptureGeneratedArtifact(
     return;
   }
   artifact_emitter(kind, capture_origin, creator_event_id, execution_context_id, frame_id,
-                   source_url, content);
+                   source_url, content, {});
 }
 
 void NativeProbeSink::RecordApiCall(const NativeProbeCategory category,

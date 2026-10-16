@@ -165,6 +165,25 @@
         }
       }
 
+      async function refreshVmHostLinks() {
+        const workspace = state.vmOpcodeWorkspace;
+        if (!workspace || state.vmOpcodeWorkspaceEmbedded) return;
+        const generation = ++state.vmHostLinksGeneration;
+        try {
+          const response = await fetch('/api/analysis/vm/host-links', {cache: 'no-store'});
+          if (!response.ok) throw new Error(`Host links returned ${response.status}`);
+          const document = await response.json();
+          if (generation !== state.vmHostLinksGeneration || state.vmOpcodeWorkspace?.document_digest !== workspace.document_digest) return;
+          if (!isVmHostLinksDocument(document, workspace)) throw new TypeError('Malformed or stale host links');
+          state.vmHostLinks = document;
+          state.vmHostLinksStatus = 'ready';
+        } catch {
+          if (generation === state.vmHostLinksGeneration && state.vmOpcodeWorkspace?.document_digest === workspace.document_digest) {
+            state.vmHostLinksStatus = 'unavailable';
+          }
+        }
+      }
+
       async function refreshVmAnalysis(requestId = state.vmAnalysisRequestId) {
         if (location.protocol === 'file:') return;
         const normalizedRequestId = requestId || null;
@@ -178,6 +197,7 @@
             state.vmAnalysisStatus = 'ready';
             state.vmAnalysisError = null;
             await refreshVmOpcodeWorkspace(null, normalizedRequestId);
+            await refreshVmHostLinks();
             renderVmLab();
             return;
           }
@@ -192,6 +212,7 @@
           state.lastValidAnalysisFindings = vmFindingsFromAnalysis(document);
           state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
           await refreshVmOpcodeWorkspace(document, normalizedRequestId);
+          await refreshVmHostLinks();
         } catch (error) {
           retainVmAnalysisOnFailure(
             state,
@@ -1747,6 +1768,32 @@
         form.append(run,load);section.append(form,output);return section;
       }
 
+      function renderVmHostLinks(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.append(textElement('h4', '', 'Host event positions'));
+        section.append(textElement('p', '', 'A linked dispatch position does not establish exact request-value provenance.'));
+        const report = state.vmHostLinks;
+        const bound = report?.workspace_document_digest === state.vmOpcodeWorkspace?.document_digest;
+        const row = bound && report.workspaces.find(item => item.interpreter_artifact_id === workspace.interpreter_artifact_id &&
+          item.source_artifact_sha256 === workspace.source_artifact_sha256);
+        if (state.vmHostLinksStatus === 'unavailable') {
+          section.append(textElement('p', 'vm-workspace-empty', 'Host links unavailable. Any matching last valid links are retained.'));
+        }
+        if (!row || row.links.length === 0) {
+          section.append(textElement('p', 'vm-workspace-empty', 'Guest position unknown: no proven host-to-dispatch link is available.'));
+        }
+        if (row) {
+          for (const link of row.links.slice(0, 64)) {
+            const event = link.host_event, position = link.guest_position;
+            const label = position ? `PC ${position.instruction_pointer} (${position.instruction_pointer_units})` : 'unknown';
+            section.append(textElement('p', '', `${link.category}/${link.type} · event ${event.session_id}:${event.process_id}:${event.sequence_number} · ${label} · ${link.state}`));
+          }
+          if (row.links.length > 64) section.append(textElement('p', '', `Showing 64 of ${row.links.length} retained links. The bounded report contains all retained rows.`));
+          for (const omission of row.omissions) section.append(textElement('p', 'vm-workspace-empty', omission));
+        }
+        return section;
+      }
+
       function renderVmOpcodeWorkspace(selected) {
         const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
         const container = document.createElement('section'); container.className = 'vm-workspace';
@@ -1767,7 +1814,8 @@
           renderVmReachability(workspace),
           renderVmWorkspaceCoverage(workspace),
           renderVmWorkspaceUnknowns(workspace),
-          renderVmOwnedExperiment(workspace)
+          renderVmOwnedExperiment(workspace),
+          renderVmHostLinks(workspace)
         );
         return container;
       }
@@ -1945,7 +1993,7 @@
           state.artifacts.some(artifact => artifact.artifact_id === selectedSourceId)]);
         const workspaceKey = JSON.stringify([
           state.vmOpcodeWorkspaceStatus, state.vmOpcodeWorkspace?.document_digest ?? null,
-          state.selectedVmHandlerKey
+          state.selectedVmHandlerKey, state.vmHostLinksStatus, state.vmHostLinks?.document_digest ?? null
         ]);
         if (renderKey === renderedVmFindings && workspaceKey === renderedVmWorkspace) return;
         if (renderKey !== renderedVmFindings) {

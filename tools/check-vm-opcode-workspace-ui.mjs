@@ -14,6 +14,15 @@ const output = process.env.REB_VM_WORKSPACE_UI_OUTPUT || join(root, 'build/vm-wo
 const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
 const model = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const fixture = JSON.parse(await readFile(join(root, 'tests/research_ui/fixtures/vm-opcode-workspace-v2.json'), 'utf8'));
+const hostWorkspace = structuredClone(fixture), hostSource = hostWorkspace.workspaces[0], sample = hostSource.samples[0];
+const hostLinks = {contract_version: 1, document_kind: 'vm-host-links', workspace_document_digest: hostWorkspace.document_digest,
+  document_digest: 'e'.repeat(64), workspaces: [{interpreter_artifact_id: hostSource.interpreter_artifact_id,
+    source_artifact_sha256: hostSource.source_artifact_sha256, omissions: [], links: [{
+      host_event: {...sample.event, sequence_number: '50'}, category: 'runtime', type: 'api_call', state: 'observed',
+      reason: 'direct-dispatch-parent', guest_position: {sample_event: sample.event, invocation_event: sample.invocation_event,
+        invocation_id: sample.invocation_id, instruction_pointer: sample.instruction_pointer,
+        instruction_pointer_units: sample.instruction_pointer_units}}]}]};
+assert(runInNewContext(`${model}\nisVmHostLinksDocument(hostLinks, hostWorkspace)`, {hostLinks, hostWorkspace, TextEncoder}));
 const workspace = fixture.workspaces[0];
 workspace.runtime = 'webassembly'; workspace.model = 'unknown'; workspace.samples = []; workspace.sample_count = 0;
 workspace.handlers = [
@@ -34,6 +43,7 @@ console.log('PASS authored WASM workspace fixture and shipped-renderer boundarie
 if (process.argv.includes('--browser')) {
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
   const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
+const hostWorkspace=${JSON.stringify(hostWorkspace)},hostLinks=${JSON.stringify(hostLinks)};
 const state={vmOpcodeWorkspace:fixture,lastValidVmOpcodeWorkspace:fixture,vmOpcodeWorkspaceStatus:'ready',selectedVmHandlerKey:null,vmFindings:[selected],selectedVmFindingId:selected.findingId,
 vmAnalysisDocument:{document_digest:fixture.analysis_digest,capture_mode:'unknown'}};
 const elements={vmSessionStatus:document.querySelector('#status')};
@@ -121,6 +131,18 @@ render();`;
       await evaluate("state.vmAnalysisDocument={document_digest:fixture.analysis_digest,capture_mode:'unknown'};renderVmSessionStatus()");
 
     }
+    await evaluate("state.vmOpcodeWorkspace=hostWorkspace;state.vmHostLinks=hostLinks;state.vmHostLinksStatus='ready';render()");
+    assert((await evaluate('document.body.textContent')).includes('event 1:1:50'));
+    assert((await evaluate('document.body.textContent')).includes('exact request-value provenance'));
+    for (const width of [1440, 390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `host-links-${width}.png`), Buffer.from(data, 'base64'));
+    }
+    await evaluate("hostLinks.workspace_document_digest='stale';render()");
+    assert((await evaluate('document.body.textContent')).includes('Guest position unknown'));
+    await evaluate("state.vmOpcodeWorkspace=fixture;state.vmHostLinks=null;render()");
     await evaluate("retainVmOpcodeWorkspaceOnFailure(state,'malformed','synthetic malformed fixture');render()");
     assert((await evaluate('document.body.textContent')).includes('last valid workspace is retained'));
     await evaluate("state.vmOpcodeWorkspace={...fixture,workspaces:[]};state.vmOpcodeWorkspaceStatus='ready';render()");

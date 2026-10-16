@@ -838,6 +838,7 @@ fn input(path: &Path, line_limit: u64, record_limit: usize, source: &str) -> Res
 pub(crate) struct Documents {
     pub analysis: Value,
     pub opcode_workspace: Result<Value>,
+    pub host_links: Result<Value>,
 }
 
 pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documents> {
@@ -1027,14 +1028,20 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
         &canonical(&document)?,
     )?;
     let opcode_workspace = crate::vm_opcode::store(root, &document, opcode_workspaces);
+    let host_links = opcode_workspace
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|workspace| crate::vm_host_links::store(root, workspace, &artifacts, &events));
     Ok(Documents {
         analysis: document,
         opcode_workspace,
+        host_links,
     })
 }
 
 pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
     let documents = store_documents(root, event_store)?;
     documents.opcode_workspace?;
+    documents.host_links?;
     Ok(documents.analysis)
 }

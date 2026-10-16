@@ -302,3 +302,5 @@ PNG and DOM text/attributes are never retained in debugger state or written to
 files. The feature refuses observed form/private/editable content and frames,
 while explicitly retaining unknown pixel sensitivity, timing and occlusion.
 See [Element screenshot v1](../../protocol/element-screenshot-v1.md).
+
+VM Lab host positions are a separate digest-bound [host-links v1 report](../../protocol/vm-host-links-v1.md). Host payloads are not duplicated; missing dispatch evidence stays unknown.

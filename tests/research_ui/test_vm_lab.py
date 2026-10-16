@@ -86,6 +86,63 @@ process.stdout.write(JSON.stringify({{rejected}}));
         )
         self.assertEqual(result["rejected"], [True] * 14)
 
+    def test_webassembly_workspace_projects_dispatch_arms_and_non_vm_is_empty(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        workspace = fixture["workspaces"][0]
+        workspace["runtime"] = "webassembly"
+        workspace["model"] = "unknown"
+        workspace["handlers"] = [
+            {
+                "opcode": 0, "state": "inferred", "sample_count": 0,
+                "source": {"byte_offset": 45, "byte_size": 5},
+                "label": "br_table selector 0", "operand_width": 0,
+                "notes": "Guest opcode binding is unproven.", "effects": [],
+            },
+            {
+                "opcode": None, "state": "unknown", "sample_count": 0,
+                "source": {"byte_offset": 50, "byte_size": 3},
+                "label": "call_indirect target", "operand_width": 0,
+                "notes": "No static handler index or guest opcode binding is inferred.", "effects": [],
+            },
+        ]
+        workspace["samples"] = []
+        workspace["sample_count"] = 0
+        workspace["coverage"]["handler_count"] = 2
+        fixture["summary"]["handler_count"] = 2
+        fixture["summary"]["sample_count"] = 0
+        result = self.run_evidence_model(
+            f"""
+const document = {json.dumps(fixture)};
+const finding = {{findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'}};
+const workspace = vmOpcodeWorkspaceForFinding(document, finding);
+const rows = vmOpcodeRows(workspace);
+const accepted = isVmOpcodeWorkspaceDocument(document);
+const repeated = JSON.parse(JSON.stringify(document));
+repeated.workspaces[0].handlers.push({{...repeated.workspaces[0].handlers[0], source: {{byte_offset: 70, byte_size: 5}}}});
+repeated.workspaces[0].coverage.handler_count = 3;
+repeated.summary.handler_count = 3;
+const repeatedSelectorsAccepted = isVmOpcodeWorkspaceDocument(repeated);
+const repeatedKeys = vmOpcodeRows(repeated.workspaces[0]).map(row => row.key);
+const distinctSites = new Set(repeatedKeys).size === repeatedKeys.length;
+const negative = {{...document, workspaces: []}};
+const absent = vmOpcodeWorkspaceForFinding(negative, {{sourceArtifactId: 'non-vm'}});
+document.workspaces[0].handlers[1].state = 'inferred';
+const guessedIndexRejected = !isVmOpcodeWorkspaceDocument(document);
+process.stdout.write(JSON.stringify({{accepted, rows, absent, guessedIndexRejected, repeatedSelectorsAccepted, distinctSites}}));
+"""
+        )
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["rows"][0]["opcode"], "0x00")
+        self.assertEqual(result["rows"][1]["opcode"], "unknown")
+        self.assertEqual(result["rows"][1]["state"], "unknown")
+        self.assertTrue(result["guessedIndexRejected"])
+        self.assertTrue(result["repeatedSelectorsAccepted"])
+        self.assertTrue(result["distinctSites"])
+        self.assertIsNone(result["absent"])
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        self.assertIn("'WebAssembly · '", app)
+        self.assertIn("dispatch-arm candidates", app)
+
     def test_native_stealth_chip_explains_unavailable_debugger_tools(self) -> None:
         app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
         start = app.index("      function vmSessionPresentation")

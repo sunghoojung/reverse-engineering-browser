@@ -940,13 +940,10 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
         if !["javascript", "wasm"].contains(&artifact["kind"].as_str().unwrap_or("")) {
             continue;
         }
-        let (mut result, source) = match evidence::content(root, artifact, 16 * 1024 * 1024) {
+        let (mut result, bytes) = match evidence::content(root, artifact, 16 * 1024 * 1024) {
             Ok(bytes) => {
                 let result = analyze(artifact, &bytes, &events);
-                let source = (artifact["kind"] == "javascript")
-                    .then(|| std::str::from_utf8(&bytes).ok().map(str::to_owned))
-                    .flatten();
-                (result, source)
+                (result, Some(bytes))
             }
             Err(e) => (
                 failure(
@@ -969,11 +966,11 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 .unwrap()
                 .extend(omissions.clone());
         }
-        if let Some(source) = source
+        if let Some(bytes) = bytes
             && let Some(workspace) = crate::vm_opcode::workspace(
                 root,
                 artifact,
-                &source,
+                &bytes,
                 &result,
                 &snapshot_artifacts,
                 &events,

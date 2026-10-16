@@ -1480,7 +1480,7 @@
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(
           textElement('h4', '', 'Handlers'),
-          textElement('span', '', `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`)
+          textElement('span', '', workspace.runtime === 'webassembly' ? `${workspace.handlers.length} dispatch-arm candidates` : `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`)
         );
         section.append(heading);
         const rows = vmOpcodeRows(workspace);
@@ -1634,7 +1634,7 @@
         const head = document.createElement('div'); head.className = 'vm-workspace-title';
         head.append(
           textElement('div', '', 'Opcode workspace'),
-          textElement('span', '', `${workspace.model ?? 'unknown'} model · interpreter artifact ${workspace.interpreter_artifact_id}`)
+          textElement('span', '', `${workspace.runtime === 'webassembly' ? 'WebAssembly · ' : ''}${workspace.model ?? 'unknown'} model · interpreter artifact ${workspace.interpreter_artifact_id}`)
         );
         container.append(
           head,

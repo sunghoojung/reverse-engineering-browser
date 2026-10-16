@@ -84,3 +84,10 @@ const streaming = ui.ui.run('apply'); await new Promise(resolve => setTimeout(re
 assert.match(ui.status.textContent, /cleared/); assert(ui.button('Copy complete report JSON').disabled);
 const missingClipboard = harness({native: true, fetcher: async () => response()}); await missingClipboard.load(0); await missingClipboard.load(1); await missingClipboard.ui.run('apply'); await missingClipboard.button('Copy complete report JSON').click(); assert.match(missingClipboard.status.textContent, /Clipboard unavailable/);
 console.log('Mounted VM pack import, cancellation, stale-response, malformed-response and native-copy checks passed.');
+
+let bomBody;
+const bomUi = harness({fetcher: async (_url, options) => { bomBody = options.body; return response(); }});
+await bomUi.load(0, '\ufeff{}'); await bomUi.load(1); await bomUi.ui.run('apply');
+assert(bomBody.includes('\ufeff{}'), 'File import preserves BOM for the exact strict backend parser to reject');
+next = response({...report, rankings: {length: 0}}); await ui.ui.run('apply');
+assert.match(ui.status.textContent, /Malformed pack report/);

@@ -84,7 +84,8 @@ function mountVmAnalysisPacks(root) {
       if (!response.ok) { let message = `Local backend refused the request (${response.status}).`; try { const error = JSON.parse(text).error; if (typeof error === 'string' && error.length <= 8192) message = error; } catch {} throw new Error(message); }
       // Parse only for display metadata; downloads retain exact original text.
       const report = JSON.parse(text), expected = mode === 'apply' ? 'vm-pack-application' : 'vm-instruction-set-comparison';
-      if (report.contract_version !== 1 || report.document_kind !== expected || !/^[a-f0-9]{64}$/.test(report.document_digest)) throw new Error('Malformed pack report.');
+      if (report.contract_version !== 1 || report.document_kind !== expected || !/^[a-f0-9]{64}$/.test(report.document_digest) ||
+          !Array.isArray(mode === 'apply' ? report.rankings : report.rows) || mode === 'compare' && report.behavioral_equivalence_proven !== false) throw new Error('Malformed pack report.');
       reportText = text; output.textContent = text.length > 65536 ? `${text.slice(0, 65536)}\n… Preview limited to 65,536 characters. Download retains the complete report.` : text;
       const count = mode === 'apply' ? report.rankings?.length : report.rows?.length;
       status.textContent = `${mode === 'apply' ? 'Ranking overlay' : 'Build comparison'} ready · ${count ?? 'unknown'} rows · digest ${report.document_digest}. Original evidence retained; this is not proof of execution or equivalence.`;

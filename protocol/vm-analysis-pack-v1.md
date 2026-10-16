@@ -60,7 +60,9 @@ cargo run --locked --manifest-path apps/origin-trace-backend/Cargo.toml \
 
 Each input must satisfy workspace v2, pass recomputation of `document_digest`,
 and contain exactly one selected interpreter artifact. Duplicate numeric opcode
-rows and inconsistent summary/coverage counts are refused. Retained samples may
+rows are refused for JavaScript. WASM selectors are scoped by their exact source
+range, so different dispatch sites can repeat a selector; duplicate selector/site
+pairs are refused. Inconsistent summary/coverage counts are also refused. Retained samples may
 be fewer than total samples because the producer bounds retention. Both selected source hashes must have the same declared
 program family. Identity is the input document digest, exact interpreter
 artifact ID, and selected workspace source-artifact SHA-256. Original source
@@ -87,6 +89,11 @@ beyond 65,536 bytes remain `unknown`; they are never promoted by another row's
 label or a numeric opcode match. Effect equality is a comparison hypothesis,
 not proof of execution or semantic equivalence. Distinct but equivalent effect
 representations may remain unmatched. No fuzzy matching is attempted.
+WASM candidate selectors have no proven guest-opcode binding in the current
+contract. They remain separate unknown/unmatched rows (or preserve contradicted
+evidence) with `wasm-guest-binding-unavailable`, even if effects are attached.
+Their complete original source coordinates are retained; no cross-site or
+cross-build semantic alignment is inferred from selector numbers.
 
 The version-1 `vm-instruction-set-comparison` report has:
 

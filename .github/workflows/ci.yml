@@ -369,6 +369,7 @@ jobs:
           test -n "$REB_UI_CHROMIUM"
           node tools/check-vm-opcode-workspace-ui.mjs --browser
           REB_VMP_OUTPUT=build/vm-workspace-ui-qa/program node tools/check-vm-program-workspace-ui.mjs
+          node tools/check-vm-full-shell-ui.mjs
 
       - name: Upload rendered VM workspace QA
         if: always()

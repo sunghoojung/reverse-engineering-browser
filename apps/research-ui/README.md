@@ -2023,3 +2023,16 @@ fixture transitions. Back/Forward, Go to PC, and arrow/Home/End listing navigati
 share the selected instruction with State and Evidence & source. PC units are
 instruction indexes; gaps, unknown bytes, unconfirmed effects, and refused
 source digests remain explicit. The example never supplies capture provenance.
+
+### Full-page VM navigation check
+
+`node tools/check-vm-full-shell-ui.mjs --fixture-only` validates the authored
+HTTP response contracts without a browser. With `REB_UI_CHROMIUM` pointing to
+installed Chrome/Chromium, omit the flag to load the actual `index.html` and all
+shipped scripts. The loopback fixture admits one authored retained finding
+through the ordinary analysis API. It checks the primary VM entry, five VM
+modes, six finding panels and keyboard finding selection at 1440, 900 and 390
+pixels. Full-page and scrolled-dock screenshots are saved under
+`build/vm-workspace-ui-qa/full-shell`; CI includes them in the VM artifact.
+This verifies product-shell composition with synthetic responses, not native
+capture, guest execution, every feature's semantics or a live backend.

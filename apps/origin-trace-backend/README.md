@@ -63,6 +63,21 @@ served at `/api/analysis/vm`; the inspector-free opcode workspace is served at
 `/api/analysis/vm/opcodes`. A workspace failure does not hide a valid detector
 document. Its executable is
 `origin-trace-vm --artifacts DIR --events FILE`.
+Static guest-byte previews recognize a conservative subset of complete numeric `Uint8Array.of(...)` and
+`new Uint8Array([...])` literals, `Uint8Array.from("...", c => c.charCodeAt(0))`,
+`Uint8Array.fromBase64("...")`, and
+`new Uint8Array(new TextEncoder().encode("..."))`. String conversion follows the
+explicit constructor: character mapping truncates the first UTF-16 unit per
+string-iterator element, whereas TextEncoder produces UTF-8. The preview keeps
+256 bytes and hashes the full recognized initializer; its producer is always
+`static-initializer`, with an original-source byte offset and truncation flag.
+Malformed or noncanonical base64 may stay unavailable. Bare string constructor
+arguments, variables, unresolved assignments, custom
+mappers/decoders, and shadowed built-ins stay unavailable. Recognition reads at
+most 16 MiB and examines at most 4096 constructors. It never evaluates captured
+source, executes a decoder, or labels a static preview as a runtime snapshot.
+A workspace with only this preview reports `static-initializer-only`; without
+either preview it reports `runtime-snapshot-unavailable`.
 Offline `reb-api describe OPERATION --action ACTION` also exposes source-backed
 advisory effects and prerequisites while retaining the operation's common
 guards. See the [execution metadata contract](../../protocol/http-api.md#execution-metadata).

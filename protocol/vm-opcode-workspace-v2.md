@@ -153,9 +153,9 @@ bytes use only the explicitly owned unsigned little-endian layout; null sizes,
 locations, indices and values remain unknown. Static operand-width guesses and
 changed snapshot cells are never substituted for missing declarations.
 
-The byte-encoded fixtures declare a literal one-byte opcode and a linear code
-encoding, allowing a bounded prefix of retained opcode/operand bytes to be
-attributed until an unknown opcode, layout or truncated instruction. This is
+The byte-encoded fixtures declare a literal one-byte opcode and a code encoding.
+Only reachable instruction and operand spans are attributed; unknown opcodes,
+layouts or truncated instructions stop the corresponding path. This is
 structural characterization, not execution coverage. Native reference fixtures
 retain instruction-index units and null byte layouts, so they cannot contribute
 byte attribution. Inferred effects remain inferred even when the handler has an
@@ -168,3 +168,29 @@ sets and flow without interpreting captured code. At most 256 rows are rendered,
 with an explicit display-limit notice; all bounded rows remain in the document.
 `tools/check-owned-vm-helper.py` verifies native declarations against the same
 independent fixed-fixture transition goldens used by the native semantics check.
+
+## Reachable instruction graph
+
+Byte traversal starts only at a source-bound declared byte entry for each joined
+snapshot. Native instruction-index samples never supply entry positions. The
+walker follows fallthrough, both conditional branches, literal/operand targets,
+and calls plus their possible continuation. It does not evaluate predicates,
+execute captured code or modules, infer call-stack returns, or run a site decoder.
+Unsigned little-endian target operands must fit uint32; unknown/indirect targets
+are retained as null edges with `unknown-target` frontier entries.
+
+Each artifact/byte position is visited once; cycles do not imply runtime
+termination. Instruction spans cannot overlap. Unknown opcodes, missing layouts,
+conflicting effects, truncated instructions, unavailable snapshots, out-of-range
+targets, and preview gaps name their frontier reason. All skipped snapshots and
+truncated tails keep the graph partial even when a retained prefix reaches halt.
+Limits are 16 entries, 4096 instructions, 8192 edges, and 256 frontier rows; a
+limit is explicit rather than silently reported complete. A complete graph may
+still leave unreachable retained bytes uncharacterized, and sample/analysis
+omissions independently keep byte coverage partial.
+
+The UI renders static instruction positions and outgoing edges, followed by the
+unresolved frontier. The display caps instruction rows at 256 with a retained-row
+notice, while the document preserves the full bounded graph. Frontend validation
+checks opcode bytes, effect identity, exact implied outgoing edges, nonoverlap,
+reachability from entries, complete snapshot entries and resolved destinations.

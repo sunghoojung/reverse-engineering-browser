@@ -2135,6 +2135,9 @@
           (row.artifact_id === null || isCanonicalInteger(row.artifact_id, 0n, uint64Max)) &&
           (row.byte_offset === null || isSafeIntegerInRange(row.byte_offset, 0, 0xffffffff)) && reasons.includes(row.reason))) return false;
         return !traversal.complete || (entries.size > 0 && traversal.frontier.length === 0 &&
+          snapshots.every(snapshot => !snapshot.truncated && typeof snapshot.preview_hex === 'string' &&
+            snapshot.byte_count === snapshot.preview_hex.length / 2 &&
+            traversal.entry_offsets.some(entry => entry.artifact_id === snapshot.artifact_id)) &&
           [...entries].every(entry => instructions.has(entry)) && traversal.edges.every(row =>
             row.to_offset !== null && instructions.has(key(row.artifact_id, row.to_offset))));
       }

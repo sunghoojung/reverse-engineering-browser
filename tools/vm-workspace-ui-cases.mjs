@@ -11,6 +11,9 @@ export async function workspaceUiCases() {
     cases[name] = JSON.parse(await readFile(new URL(`tests/research_ui/fixtures/vm-byte-coverage-${name}-v2.json`, root), 'utf8'));
   }
   cases.contradicted = JSON.parse(await readFile(new URL('tests/research_ui/fixtures/vm-effects-contradicted-v2.json', root), 'utf8'));
+  for (const name of ['complete', 'frontier']) {
+    cases[`walk_${name}`] = JSON.parse(await readFile(new URL(`tests/research_ui/fixtures/vm-reachability-${name}-v2.json`, root), 'utf8'));
+  }
   cases.empty = structuredClone(cases.complete);
   cases.empty.summary.snapshot_count = 0;
   const empty = cases.empty.workspaces[0];

@@ -1577,6 +1577,38 @@
         return section;
       }
 
+      function renderVmReachability(workspace) {
+        const traversal = workspace.traversal;
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.setAttribute('aria-label', 'Reachable guest instructions');
+        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
+        heading.append(textElement('h4', '', 'Reachable instructions'), textElement('span', '', `${traversal.instructions.length} positions · ${traversal.complete ? 'walk complete' : 'frontier remains'}`));
+        section.append(heading);
+        section.append(textElement('div', 'vm-effect-detail', 'Declared static possibilities. Both branch edges are followed without executing captured source or modules.'));
+        const rows = document.createElement('div'); rows.className = 'vm-reachable-list';
+        const outgoing = new Map();
+        for (const edge of traversal.edges) {
+          const key = `${edge.artifact_id}:${edge.from_offset}`;
+          if (!outgoing.has(key)) outgoing.set(key, []);
+          outgoing.get(key).push(edge);
+        }
+        for (const instruction of traversal.instructions.slice(0, 256)) {
+          const row = document.createElement('details'); row.className = 'vm-effect-row';
+          const title = document.createElement('summary');
+          title.textContent = `Artifact ${instruction.artifact_id} · byte ${instruction.byte_offset} · opcode ${instruction.opcode} · ${instruction.byte_size} bytes`;
+          const edges = outgoing.get(`${instruction.artifact_id}:${instruction.byte_offset}`) ?? [];
+          row.append(title, textElement('div', 'vm-effect-detail', `${instruction.effect_id}: ${edges.length ? edges.map(edge => `${edge.kind} → ${edge.to_offset ?? 'unknown'}`).join('; ') : 'halt, no successor'}`));
+          rows.append(row);
+        }
+        section.append(rows);
+        if (traversal.instructions.length > 256) section.append(textElement('div', 'vm-workspace-notice', `${traversal.instructions.length - 256} additional instruction positions retained in the document; display limited to 256.`));
+        const frontier = document.createElement('ul'); frontier.className = 'vm-coverage-omissions';
+        if (traversal.frontier.length === 0) frontier.append(textElement('li', '', 'No unresolved reachable edge. This does not prove runtime termination or semantics.'));
+        for (const stop of traversal.frontier) frontier.append(textElement('li', '', `Artifact ${stop.artifact_id ?? 'unknown'} · byte ${stop.byte_offset ?? 'unknown'}: ${stop.reason}`));
+        section.append(frontier);
+        return section;
+      }
+
       function renderVmBytecode(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
@@ -1677,6 +1709,7 @@
           renderVmHandlers(workspace),
           renderVmEffects(workspace),
           renderVmBytecode(workspace),
+          renderVmReachability(workspace),
           renderVmWorkspaceCoverage(workspace),
           renderVmWorkspaceUnknowns(workspace)
         );

@@ -58,7 +58,10 @@ for disposable experiments still requires confirmation.
 
 The API CLI embeds the versioned OpenAPI document and requires an explicit
 loopback URL or endpoint file. The VM analyzer reads bounded input prefixes,
-reports omissions, and writes private analysis documents. Its executable is
+reports omissions, and writes private analysis documents. The base detector is
+served at `/api/analysis/vm`; the inspector-free opcode workspace is served at
+`/api/analysis/vm/opcodes`. A workspace failure does not hide a valid detector
+document. Its executable is
 `origin-trace-vm --artifacts DIR --events FILE`.
 Offline `reb-api describe OPERATION --action ACTION` also exposes source-backed
 advisory effects and prerequisites while retaining the operation's common

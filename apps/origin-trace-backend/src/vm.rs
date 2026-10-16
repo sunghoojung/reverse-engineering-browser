@@ -138,7 +138,7 @@ fn rank(observations: &[Value]) -> (u64, usize) {
             .len(),
     )
 }
-fn mask(source: &str) -> String {
+pub(crate) fn mask(source: &str) -> String {
     let mut bytes = source.as_bytes().to_vec();
     let mut index = 0;
     let mut quote = 0;
@@ -193,7 +193,8 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
     });
     static LOOP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:while|for)\s*\(").unwrap());
     static DISPATCH: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\bswitch\s*\(|\b[A-Za-z_$][\w$]*\s*\[[^\]]+\]\s*\(").unwrap()
+        Regex::new(r"\bswitch\s*\(|\b[A-Za-z_$][\w$]*\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(")
+            .unwrap()
     });
     let masked = mask(source);
     let mut openings = BTreeSet::new();
@@ -542,7 +543,7 @@ pub fn canonical(value: &Value) -> Result<Vec<u8>> {
     }
     Ok(encoded.into_bytes())
 }
-fn digest(value: &Value) -> Result<String> {
+pub(crate) fn digest(value: &Value) -> Result<String> {
     Ok(hex::encode(Sha256::digest(canonical(value)?)))
 }
 fn finding(hash: &str, rules: &[String]) -> String {
@@ -852,7 +853,12 @@ fn input(path: &Path, line_limit: u64, record_limit: usize, source: &str) -> Res
     }
     Ok((records, omissions, hex::encode(hash.finalize())))
 }
-pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
+pub(crate) struct Documents {
+    pub analysis: Value,
+    pub opcode_workspace: Result<Value>,
+}
+
+pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documents> {
     let (manifest, mut omissions, manifest_digest) = input(
         &root.join("manifest.jsonl"),
         65536,
@@ -863,16 +869,22 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
         input(event_store, 16384, 100000, "event")?;
     omissions.extend(event_omissions);
     let mut artifacts = Vec::new();
+    let mut snapshot_artifacts = Vec::new();
     let mut failures = Vec::new();
     let mut seen = BTreeSet::new();
     for (line, mut artifact) in manifest {
-        let error = evidence::validate_artifact(&mut artifact)
-            .err()
-            .map(|e| e.message)
-            .or_else(|| {
-                (!seen.insert(artifact["artifact_id"].as_str().unwrap_or("").to_owned()))
-                    .then(|| "duplicate artifact ID".into())
-            });
+        let snapshot_candidate = crate::vm_opcode::is_snapshot_candidate(&artifact);
+        let error = if snapshot_candidate {
+            crate::vm_opcode::validate_snapshot_artifact(&artifact)
+        } else {
+            evidence::validate_artifact(&mut artifact)
+        }
+        .err()
+        .map(|e| e.message)
+        .or_else(|| {
+            (!seen.insert(artifact["artifact_id"].as_str().unwrap_or("").to_owned()))
+                .then(|| "duplicate artifact ID".into())
+        });
         if let Some(reason) = error {
             let omission = json!({"reason":"invalid-artifact-manifest","line":line});
             omissions.push(omission.clone());
@@ -890,6 +902,8 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
                 })
                 .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
             failures.push(json!({"artifact_id":id,"artifact_sha256":hash,"runtime":match artifact["kind"].as_str() {Some("javascript")=>"javascript",Some("wasm")=>"webassembly",_=>"unknown"},"status":"failed","error":{"code":"invalid-artifact-manifest","message":format!("Artifact manifest line {line}: {reason}")},"coverage":{"complete":false,"omissions":[omission]}}));
+        } else if snapshot_candidate {
+            snapshot_artifacts.push(artifact);
         } else {
             artifacts.push(artifact);
         }
@@ -942,20 +956,30 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
     let events = events.into_iter().flatten().collect::<Vec<_>>();
     let profile = current_profile();
     let mut results = failures;
+    let mut opcode_workspaces = Vec::new();
     for artifact in &artifacts {
         if !["javascript", "wasm"].contains(&artifact["kind"].as_str().unwrap_or("")) {
             continue;
         }
-        let mut result = match evidence::content(root, artifact, 16 * 1024 * 1024) {
-            Ok(bytes) => analyze(artifact, &bytes, &events),
-            Err(e) => failure(
-                artifact,
-                if e.status == 400 {
-                    "artifact-byte-limit"
-                } else {
-                    "artifact-integrity"
-                },
-                &e.message,
+        let (mut result, source) = match evidence::content(root, artifact, 16 * 1024 * 1024) {
+            Ok(bytes) => {
+                let result = analyze(artifact, &bytes, &events);
+                let source = (artifact["kind"] == "javascript")
+                    .then(|| std::str::from_utf8(&bytes).ok().map(str::to_owned))
+                    .flatten();
+                (result, source)
+            }
+            Err(e) => (
+                failure(
+                    artifact,
+                    if e.status == 400 {
+                        "artifact-byte-limit"
+                    } else {
+                        "artifact-integrity"
+                    },
+                    &e.message,
+                ),
+                None,
             ),
         };
         if result["status"] != "failed" && !omissions.is_empty() {
@@ -965,6 +989,18 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
                 .as_array_mut()
                 .unwrap()
                 .extend(omissions.clone());
+        }
+        if let Some(source) = source
+            && let Some(workspace) = crate::vm_opcode::workspace(
+                root,
+                artifact,
+                &source,
+                &result,
+                &snapshot_artifacts,
+                &events,
+            )
+        {
+            opcode_workspaces.push(workspace);
         }
         results.push(result);
     }
@@ -999,5 +1035,15 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
         &root.join("analysis/vm-analysis-v1.json"),
         &canonical(&document)?,
     )?;
-    Ok(document)
+    let opcode_workspace = crate::vm_opcode::store(root, &document, opcode_workspaces);
+    Ok(Documents {
+        analysis: document,
+        opcode_workspace,
+    })
+}
+
+pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
+    let documents = store_documents(root, event_store)?;
+    documents.opcode_workspace?;
+    Ok(documents.analysis)
 }

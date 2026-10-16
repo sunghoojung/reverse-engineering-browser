@@ -1578,6 +1578,134 @@
         }
       }
     },
+    "/api/analysis/vm/opcodes": {
+      "get": {
+        "operationId": "get_vm_opcode_workspace",
+        "summary": "get VM opcode workspace",
+        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis.",
+        "tags": [
+          "analysis"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VmOpcodeWorkspace"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Workspace generation, storage, or validation failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "local-state-write",
+                "filesystem-write"
+              ],
+              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store_documents, writes artifacts/analysis/vm-opcode-workspace-v1.json, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
+            }
+          ],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Builds or returns the local opcode workspace; this GET is not guaranteed read-only. A workspace failure does not hide a valid VM analysis document.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm.rs",
+              "symbol": "store_documents"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/vm_opcode.rs",
+              "symbol": "store"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "analysis_input_signature"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/artifacts/{artifact_id}/content": {
       "get": {
         "operationId": "get_artifact_content",
@@ -5189,6 +5317,368 @@
           }
         },
         "x-source": "protocol/request-signal-profile-v1.schema.json"
+      },
+      "VmOpcodeWorkspace": {
+        "title": "Reverse Engineering Browser VM opcode workspace v1",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contract_version",
+          "document_kind",
+          "producer",
+          "profile_digest",
+          "analysis_digest",
+          "document_digest",
+          "inputs",
+          "workspaces",
+          "summary"
+        ],
+        "properties": {
+          "contract_version": {
+            "const": 1
+          },
+          "document_kind": {
+            "const": "vm-opcode-workspace"
+          },
+          "producer": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "version"
+            ],
+            "properties": {
+              "id": {
+                "const": "origin-trace-vm-opcode"
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "profile_digest": {
+            "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/digest"
+          },
+          "analysis_digest": {
+            "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/digest"
+          },
+          "document_digest": {
+            "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/digest"
+          },
+          "inputs": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifact_manifest_digest",
+              "event_store_digest"
+            ],
+            "properties": {
+              "artifact_manifest_digest": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nullableDigest"
+              },
+              "event_store_digest": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nullableDigest"
+              }
+            }
+          },
+          "workspaces": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/workspace"
+            }
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "workspace_count",
+              "handler_count",
+              "snapshot_count",
+              "sample_count",
+              "unknown_count"
+            ],
+            "properties": {
+              "workspace_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "handler_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "snapshot_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sample_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "$defs": {
+          "digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "nullableDigest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "uint64": {
+            "type": "string",
+            "pattern": "^(?:0|[1-9][0-9]*)$"
+          },
+          "findingId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{24}$"
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "byte_offset",
+              "byte_size"
+            ],
+            "properties": {
+              "byte_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byte_size": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "handler": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "opcode",
+              "state",
+              "source",
+              "operand_width",
+              "sample_count",
+              "notes"
+            ],
+            "properties": {
+              "opcode": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "handler_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "state": {
+                "enum": [
+                  "observed",
+                  "inferred",
+                  "correlated",
+                  "unknown"
+                ]
+              },
+              "source": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/source"
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "operand_width": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8
+              },
+              "sample_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "notes": {
+                "type": "string",
+                "maxLength": 240
+              }
+            }
+          },
+          "snapshot": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifact_id",
+              "origin",
+              "byte_count",
+              "preview_hex",
+              "truncated",
+              "unavailable_reason"
+            ],
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/uint64"
+              },
+              "origin": {
+                "const": "runtime-typed-array"
+              },
+              "sha256": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/digest"
+              },
+              "byte_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "preview_hex": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 8192,
+                    "pattern": "^(?:[0-9a-f]{2})*$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "unavailable_reason": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "omission": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              }
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "complete",
+              "characterized_opcodes",
+              "snapshot_bytes",
+              "omissions"
+            ],
+            "properties": {
+              "complete": {
+                "type": "boolean"
+              },
+              "characterized_opcodes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "snapshot_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "omissions": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/omission"
+                }
+              }
+            }
+          },
+          "workspace": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "interpreter_artifact_id",
+              "finding_id",
+              "model",
+              "handlers",
+              "snapshots",
+              "coverage",
+              "unknowns"
+            ],
+            "properties": {
+              "interpreter_artifact_id": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/uint64"
+              },
+              "bytecode_artifact_id": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/uint64"
+              },
+              "finding_id": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/findingId"
+              },
+              "model": {
+                "enum": [
+                  "stack",
+                  "register",
+                  "unknown"
+                ]
+              },
+              "handlers": {
+                "type": "array",
+                "maxItems": 1024,
+                "items": {
+                  "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/handler"
+                }
+              },
+              "snapshots": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/snapshot"
+                }
+              },
+              "coverage": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/coverage"
+              },
+              "unknowns": {
+                "type": "array",
+                "maxItems": 256,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                }
+              }
+            }
+          }
+        },
+        "x-source": "protocol/vm-opcode-workspace-v1.schema.json"
       },
       "VmAnalysis": {
         "title": "Origin Trace VM Analysis Document v1",

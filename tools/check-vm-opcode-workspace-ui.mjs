@@ -8,6 +8,8 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
+import {workspaceUiCases} from './vm-workspace-ui-cases.mjs';
+import {ownedOpcodeExperimentUiCase, checkOwnedOpcodeExperimentUi} from './owned-opcode-experiment-ui-cases.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const output = process.env.REB_VM_WORKSPACE_UI_OUTPUT || join(root, 'build/vm-workspace-ui-qa');
@@ -23,6 +25,8 @@ const hostLinks = {contract_version: 1, document_kind: 'vm-host-links', workspac
         invocation_id: sample.invocation_id, instruction_pointer: sample.instruction_pointer,
         instruction_pointer_units: sample.instruction_pointer_units}}]}]};
 assert(runInNewContext(`${model}\nisVmHostLinksDocument(hostLinks, hostWorkspace)`, {hostLinks, hostWorkspace, TextEncoder}));
+const workspaceCases = await workspaceUiCases();
+await ownedOpcodeExperimentUiCase();
 const workspace = fixture.workspaces[0];
 workspace.runtime = 'webassembly'; workspace.model = 'unknown'; workspace.samples = []; workspace.sample_count = 0;
 workspace.handlers = [
@@ -38,7 +42,7 @@ assert(runInNewContext(`${model}\nisVmOpcodeWorkspaceDocument(fixture)`, {fixtur
 const helper = app.slice(app.indexOf('      function textElement('), app.indexOf('      function emptyListboxOption('));
 const renders = app.slice(app.indexOf('      function vmField('), app.indexOf('      function renderVmOpcodeWorkspaceInPlace('));
 assert(helper.includes('function textElement')); assert(renders.includes('function renderVmOpcodeWorkspace'));
-console.log('PASS authored WASM workspace fixture and shipped-renderer boundaries (model check, not rendered QA)');
+console.log('PASS authored WASM, host links, coverage, effects, traversal and experiment fixtures plus shipped-renderer boundaries (model check, not rendered QA)');
 
 if (process.argv.includes('--browser')) {
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
@@ -51,7 +55,7 @@ function render(){document.querySelector('#workspace').replaceChildren(renderVmO
 render();`;
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/app.css"><style>html,body{overflow:auto;height:auto;min-height:100%}body{margin:0}main{padding:16px;max-width:1100px;margin:auto;min-width:0}</style>
-</head><body><main><p>Authored static WASM workspace. No module execution or browser capture.</p><div id="status" class="vm-session-status"></div><div id="workspace"></div></main>
+</head><body><main><p>Authored VM workspace states and experiment HTTP receipts. No captured source execution or browser capture.</p><div id="status" class="vm-session-status"></div><div id="workspace"></div></main>
 <script>${model}\n${helper}\n${renders}\n${setup}</script></body></html>`;
   const css = await readFile(join(root, 'apps/research-ui/app.css'));
   const server = createServer((request, response) => {
@@ -142,16 +146,62 @@ render();`;
     }
     await evaluate("hostLinks.workspace_document_digest='stale';render()");
     assert((await evaluate('document.body.textContent')).includes('Guest position unknown'));
-    await evaluate("state.vmOpcodeWorkspace=fixture;state.vmHostLinks=null;render()");
-    await evaluate("retainVmOpcodeWorkspaceOnFailure(state,'malformed','synthetic malformed fixture');render()");
+    for (const width of [1440, 390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      for (const [name, value] of Object.entries(workspaceCases).filter(([name]) => name !== 'malformed')) {
+        await evaluate(`state.vmOpcodeWorkspace=${JSON.stringify(value)};state.vmOpcodeWorkspaceStatus='ready';state.vmHostLinks=null;render()`);
+        const current = value.workspaces[0], coverage = current.coverage;
+        assert.equal(await evaluate("document.querySelector('.vm-coverage-line strong').textContent"),
+          `${coverage.characterized_bytes} / ${coverage.retained_snapshot_bytes}`);
+        assert.equal(await evaluate("document.querySelector('.vm-coverage-bar').getAttribute('aria-valuenow')"),
+          String(coverage.retained_snapshot_bytes ? coverage.characterized_bytes * 100 / coverage.retained_snapshot_bytes : 0));
+        const body = await evaluate('document.body.textContent');
+        assert(body.includes(`${coverage.uncharacterized_bytes} uncharacterized bytes`));
+        for (const omission of coverage.omissions) assert(body.includes(omission.reason));
+        if (name === 'contradicted') {
+          assert(body.includes('conflicting effects')); assert(body.includes('none is selected for traversal'));
+          assert(body.includes('register[unknown] = unknown'));
+          assert.equal(await evaluate("document.querySelectorAll('[aria-label=\"Declarative opcode effects\"] .vm-effect-row').length"), 3);
+          await evaluate("document.querySelector('[aria-label=\"Declarative opcode effects\"] summary').focus()");
+          for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+          assert.equal(await evaluate("document.querySelector('[aria-label=\"Declarative opcode effects\"] details').open"), true);
+        }
+        if (name.startsWith('walk_')) {
+          assert.equal(await evaluate("document.querySelectorAll('.vm-reachable-list details').length"), current.traversal.instructions.length);
+          assert(body.includes(`branch_taken → ${name === 'walk_frontier' ? 99 : 2}`));
+          assert(body.includes('branch_not_taken → 2'));
+          assert(body.includes(name === 'walk_frontier' ? 'frontier remains' : 'walk complete'));
+          if (name === 'walk_frontier') assert(body.includes('byte 99: past-snapshot'));
+          await evaluate("document.querySelector('.vm-reachable-list summary').focus()");
+          for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+          assert.equal(await evaluate("document.querySelector('.vm-reachable-list details').open"), true);
+          assert.equal(await evaluate("(()=>{const e=document.querySelector('.vm-reachable-list .vm-effect-detail');return e.getBoundingClientRect().height>0 && getComputedStyle(e).visibility==='visible';})()"), true);
+          const visibleEdges = await evaluate("document.querySelector('.vm-reachable-list .vm-effect-detail').innerText");
+          assert(visibleEdges.includes(`branch_taken → ${name === 'walk_frontier' ? 99 : 2}`));
+          assert(visibleEdges.includes('branch_not_taken → 2'));
+        }
+        assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+        await evaluate('scrollTo(0,0)');
+        const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+        await writeFile(join(output, `workspace-${name}-${width}.png`), Buffer.from(data, 'base64'));
+      }
+      await checkOwnedOpcodeExperimentUi({evaluate, send});
+      await evaluate('scrollTo(0,0)');
+      const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `owned-experiment-${width}.png`), Buffer.from(data, 'base64'));
+    }
+    await evaluate("state.vmOpcodeWorkspace=fixture;state.lastValidVmOpcodeWorkspace=fixture;state.vmHostLinks=null;render()");
+    await evaluate(`if(!isVmOpcodeWorkspaceDocument(${JSON.stringify(workspaceCases.malformed)})) retainVmOpcodeWorkspaceOnFailure(state,'malformed','synthetic malformed fixture');render()`);
+    assert.equal(await evaluate('state.vmOpcodeWorkspace === fixture'), true);
     assert((await evaluate('document.body.textContent')).includes('last valid workspace is retained'));
     await evaluate("state.vmOpcodeWorkspace={...fixture,workspaces:[]};state.vmOpcodeWorkspaceStatus='ready';render()");
     assert.equal(await evaluate("document.querySelectorAll('.vm-handler-row').length"), 0);
     assert((await evaluate('document.body.textContent')).includes('Workspace unavailable for this finding'));
     assert.deepEqual(errors, []);
     await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440, 390],
-      scope: 'Shipped workspace rendering with authored fixtures; no native capture, WASM execution or full-app polling acceptance'}, null, 2));
-    console.log(`PASS rendered WASM rows and persisted capture modes, keyboard selection, inert text, narrow layout, retained error and empty states: ${output}`);
+      cases: ['wasm', 'capture-mode', 'host-links', ...Object.keys(workspaceCases), 'owned-experiment'],
+      scope: 'Shipped workspace rendering and authored experiment HTTP failures; no native execution, browser capture or full-app polling acceptance'}, null, 2));
+    console.log(`PASS rendered VM workspace states, authored experiment failure, keyboard selection, inert text, narrow layout, retained error and empty states: ${output}`);
   } catch (error) {
     await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'failed', error: String(error.stack || error), diagnostics, errors}, null, 2));
     throw error;

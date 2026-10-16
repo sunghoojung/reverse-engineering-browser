@@ -94,66 +94,6 @@ pub(crate) fn unique_effect(handler: &Value) -> Option<&Value> {
         .then_some(first)
 }
 
-/// Fixed layout attribution is separate from reachability: every byte is
-/// interpreted only under this owned fixture's declared all-code encoding.
-/// Stop at an unknown opcode/layout; never resynchronize inside operand bytes.
-pub(crate) fn attributed_prefix(snapshots: &[Value], handlers: &[Value]) -> Vec<Value> {
-    let mut ranges = Vec::new();
-    'snapshots: for snapshot in snapshots.iter().take(16) {
-        let Some(bytes) = snapshot["preview_hex"]
-            .as_str()
-            .and_then(|text| hex::decode(text).ok())
-        else {
-            continue;
-        };
-        let bytes = &bytes[..bytes.len().min(4096)];
-        let mut offset = 0usize;
-        while offset < bytes.len() {
-            let opcode = u64::from(bytes[offset]);
-            let Some(effect) = handlers
-                .iter()
-                .find(|handler| handler["opcode"].as_u64() == Some(opcode))
-                .and_then(unique_effect)
-            else {
-                break;
-            };
-            let Some(size) = effect["instruction_size"]
-                .as_u64()
-                .filter(|size| (1..=65).contains(size))
-            else {
-                break;
-            };
-            let end = offset + size as usize;
-            if end > bytes.len() {
-                break;
-            }
-            let evidence = effect["evidence_class"].clone();
-            ranges.push(
-                json!({"artifact_id": snapshot["artifact_id"], "byte_offset": offset,
-                "byte_size": 1, "opcode": opcode, "kind": "opcode", "evidence_class": evidence}),
-            );
-            for operand in effect["operand_layout"].as_array().into_iter().flatten() {
-                if let Some((position, width)) = operand["byte_offset"]
-                    .as_u64()
-                    .zip(operand["byte_size"].as_u64())
-                    && position > 0
-                    && width > 0
-                    && position.checked_add(width).is_some_and(|end| end <= size)
-                {
-                    ranges.push(json!({"artifact_id": snapshot["artifact_id"], "byte_offset": offset + position as usize,
-                        "byte_size": width, "opcode": opcode, "kind": "operand", "evidence_class": evidence}));
-                }
-            }
-            if ranges.len() > crate::vm_byte_coverage::MAX_ATTRIBUTIONS {
-                ranges.truncate(crate::vm_byte_coverage::MAX_ATTRIBUTIONS + 1);
-                break 'snapshots;
-            }
-            offset = end;
-        }
-    }
-    ranges
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,21 +152,5 @@ mod tests {
         assert_eq!(handler["effects"][0]["evidence_class"], "inferred");
         assert_eq!(handler["effects"][1]["evidence_class"], "inferred");
         assert!(unique_effect(&handler).is_none());
-    }
-
-    #[test]
-    fn byte_attribution_stops_before_unknown_and_truncated_instructions() {
-        let declaration = owned_declaration(STACK_SOURCE).unwrap();
-        let handlers = declaration["handlers"].as_array().unwrap();
-        let ranges = attributed_prefix(
-            &[json!({"artifact_id":"1","preview_hex":"010702ff08"})],
-            handlers,
-        );
-        assert_eq!(ranges.len(), 3);
-        assert_eq!(ranges.last().unwrap()["byte_offset"], 2);
-        assert!(
-            attributed_prefix(&[json!({"artifact_id":"1","preview_hex":"01"})], handlers)
-                .is_empty()
-        );
     }
 }

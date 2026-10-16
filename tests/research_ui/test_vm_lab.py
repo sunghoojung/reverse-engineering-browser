@@ -279,6 +279,42 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(result["unknownCell"], "register[unknown] = unknown")
         self.assertIn("No source-bound declarative effects", result["emptyCopy"])
 
+    def test_reachable_graph_renders_both_edges_and_named_frontier(self) -> None:
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        start = app.index("      function renderVmReachability")
+        end = app.index("      function renderVmBytecode", start)
+        for name in ("complete", "frontier"):
+            fixture = json.loads((FIXTURE.parent / f"vm-reachability-{name}-v2.json").read_text(encoding="utf-8"))
+            result = self.run_evidence_model(
+                """
+class Element {
+  constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  setAttribute(key, value) { this.attributes[key] = value; }
+}
+const document = {createElement: tag => new Element(tag)};
+const textElement = (tag, cls, text) => { const node = new Element(tag); node.className = cls; node.textContent = text; return node; };
+const flatten = node => [node, ...node.children.flatMap(flatten)];
+""" + app[start:end] + f"""
+const fixture = {json.dumps(fixture)};
+process.stdout.write(JSON.stringify({{
+  accepted: isVmOpcodeWorkspaceDocument(fixture),
+  copy: flatten(renderVmReachability(fixture.workspaces[0])).map(row => row.textContent).join(' ')
+}}));
+"""
+            )
+            self.assertTrue(result["accepted"])
+            self.assertIn("branch_taken", result["copy"])
+            self.assertIn("branch_not_taken", result["copy"])
+            self.assertIn("byte 0", result["copy"])
+            self.assertIn("without executing captured source", result["copy"])
+            if name == "frontier":
+                self.assertIn("frontier remains", result["copy"])
+                self.assertIn("past-snapshot", result["copy"])
+                self.assertIn("byte 99", result["copy"])
+            else:
+                self.assertIn("walk complete", result["copy"])
+
     def session_presentation(self, state: dict) -> dict:
         app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
         start = app.index("      function vmSessionPresentation")

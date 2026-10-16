@@ -878,11 +878,27 @@ pub(crate) fn workspace(
             "detail": "Only the first 256 residual unknowns are retained."
         }));
     }
-    let attributions = if owned.is_some() {
-        crate::vm_effects::attributed_prefix(&snapshots, &handlers)
-    } else {
-        Vec::new()
-    };
+    let entry = owned
+        .as_ref()
+        .and_then(|declaration| declaration["entry_offset"].as_u64())
+        .and_then(|offset| u32::try_from(offset).ok());
+    let mut traversal = crate::vm_reachability::walk(&snapshots, &handlers, entry);
+    if omissions
+        .iter()
+        .any(|omission| omission["reason"] == "snapshot-limit")
+    {
+        traversal["complete"] = json!(false);
+        let frontier = traversal["frontier"]
+            .as_array_mut()
+            .expect("bounded frontier");
+        if frontier.len() < 256 {
+            frontier.push(json!({"artifact_id":null,"byte_offset":null,"reason":"snapshot-gap"}));
+        }
+    }
+    if traversal["complete"] != true {
+        omissions.push(json!({"reason":"reachable-frontier","detail":"The bounded instruction walk has unresolved entries or edges."}));
+    }
+    let attributions = crate::vm_reachability::attributions(&traversal, &handlers);
     let coverage = crate::vm_byte_coverage::coverage(
         &snapshots,
         handlers.len(),
@@ -903,9 +919,7 @@ pub(crate) fn workspace(
         "snapshots": snapshots,
         "coverage": coverage,
         "unknowns": unknowns,
-        "traversal": {"entry_offsets":[],"instructions":[],"edges":[],
-            "frontier":[{"artifact_id":null,"byte_offset":null,"reason":"entry-unavailable"}],
-            "complete":false},
+        "traversal": traversal,
     });
     if let Some(snapshot) = workspace["snapshots"]
         .as_array()
@@ -1306,6 +1320,32 @@ mod tests {
             workspace["samples"][0]["instruction_pointer_units"],
             "unknown"
         );
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn production_walk_retains_unknown_frontier_and_unreachable_bytes() {
+        let source = include_str!("../../../tools/fixtures/vm-workspace-effects/stack.js");
+        for (bytes, reason, characterized) in [
+            (vec![1, 7, 255, 8], "unknown-opcode", 2),
+            (vec![6, 99, 8], "past-snapshot", 2),
+            (vec![1], "truncated-instruction", 0),
+        ] {
+            let (_, _, document) = analyze_with_snapshot(source, &[event(1)], Some(&bytes));
+            let workspace = &document["workspaces"][0];
+            assert_eq!(workspace["traversal"]["complete"], false);
+            assert_eq!(workspace["traversal"]["frontier"][0]["reason"], reason);
+            assert_eq!(workspace["coverage"]["complete"], false);
+            assert_eq!(workspace["coverage"]["characterized_bytes"], characterized);
+            assert_schema(&document);
+        }
+        let (_, _, document) = analyze_with_snapshot(source, &[event(1)], Some(&[8, 1, 7]));
+        assert_eq!(document["workspaces"][0]["traversal"]["complete"], true);
+        assert_eq!(
+            document["workspaces"][0]["coverage"]["characterized_bytes"],
+            1
+        );
+        assert_eq!(document["workspaces"][0]["coverage"]["complete"], false);
         assert_schema(&document);
     }
 

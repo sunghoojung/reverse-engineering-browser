@@ -23,6 +23,7 @@ mod vm_byte_coverage;
 mod vm_bytecode;
 mod vm_effects;
 mod vm_opcode;
+mod vm_reachability;
 pub mod wasm;
 mod worker;
 mod workspace;

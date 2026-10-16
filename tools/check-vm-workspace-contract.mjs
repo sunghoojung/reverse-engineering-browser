@@ -33,3 +33,8 @@ const overlapCoverage={...coverage,attributions:[range(0,1,1,'opcode'),range(1,1
 assert.equal(api.isVmByteCoverage(overlapCoverage,[{...snapshot,preview_hex:'010100'}],handlers,[]),false);
 assert.equal(api.isVmByteCoverage({...coverage,attributions:[range(1,1,1,'operand')],characterized_bytes:1,uncharacterized_bytes:2,complete:false},[snapshot],handlers,[]),false);
 console.log('PASS overlapping instruction attribution and orphan operand refusal');
+
+assert.equal(api.isVmInstructionTraversal(traversal,[{...snapshot,truncated:true}],handlers),false);
+assert.equal(api.isVmInstructionTraversal(traversal,[{...snapshot,byte_count:4}],handlers),false);
+assert.equal(api.isVmInstructionTraversal(traversal,[snapshot,{...snapshot,artifact_id:'2'}],handlers),false);
+console.log('PASS complete traversal refuses truncated tails and missing snapshot entries');

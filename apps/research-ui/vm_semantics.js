@@ -451,7 +451,7 @@ function mountVmSemantics(root) {
   listing.id='vm-execution-observations';listing.setAttribute('role','tabpanel');listing.setAttribute('aria-labelledby',viewButtons.listing.id);
   const contextStrip=node('div');contextStrip.className='vm-workspace-notice';
   const provenance=node('details');provenance.append(node('summary','Full provenance and limits'),identity,comparisonIdentity,node('p','Supplied identities and origin are not authenticated. Snapshot changes do not prove reads, intermediate writes or causal dependency. Matching absence or unknown values never establish equality. Exact input-file hashes do not establish alignment or native capture.'));
-  const provenanceOpen=button('Provenance and limits',()=>{if(navigationOpen)setNavigation(false);provenance.open=true;openContext('audit',true,()=>{if(layout!=='wide'){setNavigation(true);provenanceOpen.focus();}else{provenanceOpen.focus();}});});
+  const provenanceOpen=button('Provenance and limits',()=>{if(navigationOpen)setNavigation(false);provenance.open=true;openContext('audit',true,()=>{if(layout!=='wide'){setNavigation(true);provenanceOpen.focus();}else{provenanceOpen.focus();}});});provenanceOpen.id='vm-open-provenance';
   contextStrip.append(notice);
   const listingHead=node('div');listingHead.className='vm-listing-head';
   const stepControls=node('div');stepControls.className='vm-step-controls';stepControls.append(selector,previous,next);

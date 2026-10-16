@@ -216,7 +216,16 @@ It writes, per likely-vm artifact:
 
 Handler extraction is deterministic and bounded. It never executes captured
 JavaScript. Switch-case integer labels become inferred opcode numbers.
-Computed property names stay unknown.
+A source citation includes the visible case body or function body, including
+nested helpers, rather than only its label. Nested switch labels do not become
+outer handler opcodes. An adjacent 1-, 2-, or 4-byte indexed-read sequence yields
+a static operand-width guess; absent, nonadjacent, conditional, or repeated
+reads retain width 0 with an explanation. This is not a runtime layout proof.
+Computed property names stay unknown. Selectors must be a direct indexed byte
+read, literal, or a bounded chain of preceding immutable `const` aliases to one; transformed,
+position-dependent, saved-state, and unresolved selectors do not establish a
+fixed opcode mapping. The analyzer retains at most 1024 distinct handlers and
+reports `handler-limit` when additional candidates are omitted.
 
 ## VM Lab UI
 

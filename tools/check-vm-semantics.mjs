@@ -336,6 +336,9 @@ console.log('PASS production VM Findings refresh/mode interleaving: stable actua
 // Numerical contrast checks cover the actual VM theme tokens. Rendered QA also
 // checks computed colors so selector regressions cannot pass on token math alone.
 const vmCss=await readFile(new URL('../apps/research-ui/app.css',import.meta.url),'utf8');
+// The workbench must inherit the same Moon shell palette as all other screens.
+assert(!vmCss.includes('body:has(#screen-vm:not([hidden]))'), 'VM must not override the shared application palette');
+assert(!vmCss.includes('#83b8ff'), 'Neutral-blue VM override must not return');
 const vmPaletteBlocks=[...vmCss.matchAll(/(?:^|\n)(?:\:root\[data-theme="light"\] )?#screen-vm \{([^}]*--vm-action-bg[^}]*)\}/g)];
 assert.equal(vmPaletteBlocks.length,2);
 const luminance=hex=>{const rgb=hex.match(/[a-f0-9]{2}/gi).map(v=>parseInt(v,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;};

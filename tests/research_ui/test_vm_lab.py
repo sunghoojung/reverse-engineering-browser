@@ -26,6 +26,56 @@ class VmLabTests(unittest.TestCase):
         )
         return json.loads(completed.stdout)
 
+    def test_browser_startup_readiness_is_bounded_and_failures_are_visible(self) -> None:
+        harness = (UI_DIRECTORY.parents[1] / "tools/check-vm-opcode-workspace-ui.mjs").read_text(encoding="utf-8")
+        wait = harness[harness.index("  const until = async"):harness.index("  const send = ")]
+        startup = harness[harness.index("    let port;"):harness.index("    const pages = ")]
+        result = self.run_evidence_model(f"""
+const {{runInNewContext}} = require('node:vm');
+const waitSource = {json.dumps(wait)}, startupSource = {json.dumps(startup)};
+async function exercise(options) {{
+  let now = 0;
+  const browser = {{exitCode:null,signalCode:null}};
+  const startup = {{spawn_error:options.spawnError ?? null,port_file:'not checked',elapsed_ms:0}};
+  const context = {{startup,browser,closed:false,diagnostics:'',startupStarted:0,profile:'owned-profile',
+    Date:{{now:()=>now}},console:{{log:()=>{{}}}},join:()=>'',
+    pause:async ms=>{{now+=ms;if(options.exitAt !== undefined && now>=options.exitAt) browser.exitCode=1;}},
+    readFile:async()=>{{
+      if(options.readError) throw Object.assign(new Error(options.readError),{{code:options.readError}});
+      if(now<(options.readyAt ?? Infinity)) throw Object.assign(new Error('not ready'),{{code:'ENOENT'}});
+      return options.port ?? '9222\\n/devtools/browser/owned';
+    }} }};
+  try {{
+    await runInNewContext(waitSource+';(async()=>{{'+startupSource+'}})()',context);
+    return {{ready:true,now,startup}};
+  }} catch(error) {{return {{ready:false,now,startup,error:String(error)}};}}
+}}
+(async()=>{{
+  const delayed = await exercise({{readyAt:12000}}), absent = await exercise({{}});
+  const exited = await exercise({{exitAt:4000}}), failed = await exercise({{spawnError:'ENOENT: browser unavailable'}});
+  const unreadable = await exercise({{readError:'EACCES'}}), invalid = await exercise({{readyAt:0,port:'65536'}});
+  let now=0, uiError='';
+  try {{await runInNewContext(waitSource+';until(()=>false,"UI assertion")',
+    {{Date:{{now:()=>now}},pause:async ms=>{{now+=ms;}}}});}} catch(error) {{uiError=String(error);}}
+  process.stdout.write(JSON.stringify({{delayed,absent,exited,failed,unreadable,invalid,ui:{{now,error:uiError}}}}));
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+""")
+        self.assertTrue(result["delayed"]["ready"])
+        self.assertEqual(result["delayed"]["now"], 12000)
+        self.assertEqual(result["delayed"]["startup"]["port_file"], "ready")
+        for name in ("absent", "invalid"):
+            self.assertFalse(result[name]["ready"])
+            self.assertEqual(result[name]["now"], 30000)
+            self.assertIn("Timed out: sandboxed Chromium startup", result[name]["error"])
+        self.assertEqual(result["exited"]["now"], 4000)
+        self.assertIn("Sandboxed Chromium startup failed", result["exited"]["error"])
+        self.assertEqual(result["failed"]["now"], 0)
+        self.assertIn("ENOENT: browser unavailable", result["failed"]["error"])
+        self.assertEqual(result["unreadable"]["startup"]["port_file"], "EACCES")
+        self.assertEqual(result["unreadable"]["now"], 0)
+        self.assertEqual(result["ui"]["now"], 10000)
+        self.assertIn("Timed out: UI assertion", result["ui"]["error"])
+
     def test_fixture_workspace_projects_rendered_handler_rows(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         result = self.run_evidence_model(

@@ -65,9 +65,11 @@ render();`;
   });
   const profile = await mkdtemp(join(tmpdir(), 'reb-vm-workspace-'));
   let browser, socket, closed = false, diagnostics = '', sequence = 0;
+  const startup = {executable: process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', pid: null,
+    elapsed_ms: 0, exit_code: null, signal: null, spawn_error: null, port_file: 'not checked'};
   const pending = new Map(), errors = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const until = async (test, label) => {
-    const end = Date.now() + 10000;
+  const until = async (test, label, timeoutMs = 10000) => {
+    const end = Date.now() + timeoutMs;
     while (Date.now() < end) { if (await test()) return; await pause(40); }
     throw Error(`Timed out: ${label}`);
   };
@@ -83,17 +85,33 @@ render();`;
   await mkdir(output, {recursive: true});
   try {
     await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
-    browser = spawn(process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', ['--headless=new', '--remote-debugging-port=0',
+    const startupStarted = Date.now();
+    browser = spawn(startup.executable, ['--headless=new', '--remote-debugging-port=0',
       `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
       '--disable-component-update', '--disable-sync', 'about:blank'], {detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe']});
-    browser.once('close', () => { closed = true; }); browser.on('error', error => { diagnostics += String(error); });
+    startup.pid = browser.pid ?? null;
+    browser.once('close', () => { closed = true; });
+    browser.once('exit', (code, signal) => { startup.exit_code = code; startup.signal = signal; });
+    browser.on('error', error => { startup.spawn_error = String(error).slice(0, 2048); });
     browser.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8192); });
     let port;
     await until(async () => {
-      if (closed) throw Error(`Sandboxed Chromium startup failed: ${diagnostics}`);
-      try { port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; return !!port; }
-      catch { return false; }
-    }, 'sandboxed Chromium startup');
+      startup.elapsed_ms = Date.now() - startupStarted;
+      if (startup.spawn_error || closed || browser.exitCode !== null || browser.signalCode !== null) {
+        throw Error(`Sandboxed Chromium startup failed: ${JSON.stringify(startup)}; ${diagnostics}`);
+      }
+      try {
+        port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
+        const ready = /^[1-9][0-9]{0,4}$/.test(port) && Number(port) <= 65535;
+        startup.port_file = ready ? 'ready' : 'incomplete or invalid port';
+        return ready;
+      } catch (error) {
+        startup.port_file = String(error.code ?? error.message).slice(0, 256);
+        if (error.code !== 'ENOENT') throw error;
+        return false;
+      }
+    }, 'sandboxed Chromium startup', 30000);
+    console.log(`Sandboxed Chromium ready after ${startup.elapsed_ms} ms`);
     const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
     await new Promise((ready, reject) => { socket.addEventListener('open', ready, {once: true}); socket.addEventListener('error', reject, {once: true}); });
@@ -198,12 +216,12 @@ render();`;
     assert.equal(await evaluate("document.querySelectorAll('.vm-handler-row').length"), 0);
     assert((await evaluate('document.body.textContent')).includes('Workspace unavailable for this finding'));
     assert.deepEqual(errors, []);
-    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440, 390],
+    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', startup, viewports: [1440, 390],
       cases: ['wasm', 'capture-mode', 'host-links', ...Object.keys(workspaceCases), 'owned-experiment'],
       scope: 'Shipped workspace rendering and authored experiment HTTP failures; no native execution, browser capture or full-app polling acceptance'}, null, 2));
     console.log(`PASS rendered VM workspace states, authored experiment failure, keyboard selection, inert text, narrow layout, retained error and empty states: ${output}`);
   } catch (error) {
-    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'failed', error: String(error.stack || error), diagnostics, errors}, null, 2));
+    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'failed', error: String(error.stack || error), diagnostics, startup, errors}, null, 2));
     throw error;
   } finally {
     for (const request of pending.values()) clearTimeout(request.timer);

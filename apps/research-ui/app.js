@@ -1567,7 +1567,7 @@
         heading.append(textElement('h4', '', 'Coverage'), textElement('span', '', workspace.coverage.complete ? 'complete' : 'partial'));
         const coverage = workspace.coverage;
         const percent = coverage.retained_snapshot_bytes > 0
-          ? Math.max(0, Math.min(100, Math.round(coverage.characterized_bytes * 100 / coverage.retained_snapshot_bytes)))
+          ? Math.max(0, Math.min(100, coverage.characterized_bytes * 100 / coverage.retained_snapshot_bytes))
           : 0;
         const panel = document.createElement('div'); panel.className = 'vm-coverage';
         const line = document.createElement('div'); line.className = 'vm-coverage-line';
@@ -1579,7 +1579,8 @@
         bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuemin', '0');
         bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-valuenow', String(percent));
         const fill = document.createElement('span'); fill.style.width = `${percent}%`; bar.append(fill);
-        panel.append(line, bar);
+        panel.append(line, bar, textElement('div', 'vm-coverage-counts',
+          `${coverage.uncharacterized_bytes} uncharacterized bytes · ${coverage.handler_count} handler candidates`));
         const omissions = document.createElement('ul'); omissions.className = 'vm-coverage-omissions';
         if (coverage.omissions.length === 0) {
           omissions.append(textElement('li', '', coverage.complete ? 'No named omissions.' : 'Partial coverage has no named omission.'));

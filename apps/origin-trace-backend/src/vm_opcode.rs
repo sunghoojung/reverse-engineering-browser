@@ -871,16 +871,8 @@ pub(crate) fn workspace(
             "detail": "Only the first 256 residual unknowns are retained."
         }));
     }
-    let snapshot_bytes = snapshots
-        .iter()
-        .filter_map(|snapshot| snapshot["preview_hex"].as_str())
-        .map(|preview| preview.len() / 2)
-        .sum::<usize>();
-    if snapshot_bytes > 0 {
-        omissions.push(json!({"reason":"byte-attribution-unavailable", "detail":"Dispatch positions alone do not establish byte-level opcode or operand attribution."}));
-    }
-    // No byte attribution is established by observing an instruction-index PC.
-    let complete = false;
+    let coverage =
+        crate::vm_byte_coverage::coverage(&snapshots, handlers.len(), &[], &unknowns, omissions);
     let mut workspace = json!({
         "interpreter_artifact_id": artifact["artifact_id"],
         "source_artifact_sha256": artifact["sha256"],
@@ -892,15 +884,7 @@ pub(crate) fn workspace(
         "model": model,
         "handlers": handlers,
         "snapshots": snapshots,
-        "coverage": {
-            "complete": complete,
-            "handler_count": handlers.len(),
-            "retained_snapshot_bytes": snapshot_bytes,
-            "characterized_bytes": 0,
-            "uncharacterized_bytes": snapshot_bytes,
-            "attributions": [],
-            "omissions": omissions,
-        },
+        "coverage": coverage,
         "unknowns": unknowns,
         "traversal": {"entry_offsets":[],"instructions":[],"edges":[],
             "frontier":[{"artifact_id":null,"byte_offset":null,"reason":"entry-unavailable"}],

@@ -149,7 +149,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   }
 
   const bool artifact_capture_enabled =
-      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) != 0;
+      (category_mask & (NativeProbeCategoryMask(NativeProbeCategory::kArtifact) |
+                        NativeProbeCategoryMask(NativeProbeCategory::kVm))) != 0;
   const bool has_artifact_socket = command_line.HasSwitch(kArtifactSocketSwitch);
   if (artifact_capture_enabled &&
       (!has_artifact_socket || !NativeArtifactSocketClient::Get().StartFromCommandLine(

@@ -641,7 +641,7 @@ assert.equal(completionQuery("a".repeat(129) + ".", 130), null);
 console.log("PASS bounded local console completions, lexical exclusions, property chains and UTF-16 replacement");
 const ui = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
-    ";({isDebuggerResponse,isRequestInterception,isActionScope,isObjectExperiment,isRuntimeHooks,isAutomationRecipes,isRepeater,isWasmInspection})",
+    ";({isBrokerEvent,isDebuggerResponse,isRequestInterception,isActionScope,isObjectExperiment,isRuntimeHooks,isAutomationRecipes,isRepeater,isWasmInspection})",
   { TextEncoder, URL },
 );
 // Reject foreign, malformed and unbounded binary listings before rendering them.
@@ -3267,6 +3267,19 @@ fieldHandoff.setup(field, [{ ...candidateStep(1, "x"), output_base64: "/w==" }],
 assert.match(fieldHandoff.decodedFieldCandidate().error, /Binary/);
 fieldHandoff.clearDecoderFieldOrigin();
 assert.match(fieldHandoff.decodedFieldCandidate().error, /Start from/);
+const vmDispatchSample = {
+  protocol_version: 2,
+  session_id: "1", sequence_number: "1", monotonic_time_ns: "1",
+  navigation_id: "1", frame_id: "1", artifact_id: "1", parent_event_id: "0",
+  request_id: "0", browser_context_id_high: "0", browser_context_id_low: "0",
+  process_id: 1, thread_id: 1, initiator_request_id: 0, initiator_process_id: 0,
+  resource_type: 0, flags: 0, status_code: 0, error_code: 0,
+  encoded_data_length: "0", decoded_body_length: "0",
+  category: "vm", type: "vm_dispatch_sample",
+  payload_size: 128, payload_encoding: "hex", payload: "0100800000000000500000000000000000000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  payload_truncated: false,
+};
+assert.equal(ui.isBrokerEvent(vmDispatchSample), true);
 const matches = fieldHandoff.fieldSourceMatches("雪\nfixture-origin", "fixture-origin", {
   script_id: "fixture", target_id: "target", hash: "hash", url: "http://127.0.0.1/source.js?redact=yes",
 });

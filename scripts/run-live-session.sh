@@ -232,7 +232,7 @@ if [[ ! -S "${socket_path}" ]]; then
   exit 1
 fi
 
-if ((category_mask & 1024)); then
+if ((category_mask & (512 | 1024))); then
   artifact_receiver_arguments=(
     --store "${artifact_store_path}"
     --socket "${artifact_socket_path}"

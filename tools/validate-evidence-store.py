@@ -104,6 +104,7 @@ EVENT_TYPES = {
     "response_completed",
     "response_started",
     "vm_finding",
+    "vm_dispatch_sample",
 }
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)
@@ -176,6 +177,21 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: payload is not valid hex") from exception
     if len(payload) != event["payload_size"]:
         raise ValueError(f"line {line_number}: payload size does not match encoded data")
+    if event["type"] == "vm_dispatch_sample" and (
+        event["category"] != "vm"
+        or len(payload) != 128
+        or int.from_bytes(payload[0:2], "little") != 1
+        or int.from_bytes(payload[2:4], "little") != 128
+        or int.from_bytes(payload[20:24], "little") != 0
+        or int.from_bytes(payload[24:32], "little") == 0
+        or int.from_bytes(payload[32:40], "little") == 0
+        or payload[56] != 0
+        or int.from_bytes(payload[58:60], "little") != 0
+        or int.from_bytes(payload[60:64], "little") != 0
+        or int.from_bytes(payload[64:72], "little") != 0
+        or any(payload[72:])
+    ):
+        raise ValueError(f"line {line_number}: VM dispatch sample payload is invalid")
     lowered_payload = payload.lower()
     if any(marker in lowered_payload for marker in SENSITIVE_PAYLOAD_MARKERS):
         raise ValueError(f"line {line_number}: payload contains sensitive HTTP metadata")

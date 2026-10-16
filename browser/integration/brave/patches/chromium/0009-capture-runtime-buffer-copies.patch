@@ -1,0 +1,48 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 6ae616e..451e3df 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -252,6 +252,34 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+                          UNSAFE_BUFFERS(base::span(bytes, size)));
+ }
+ 
++void CaptureRuntimeBuffer(v8::Local<v8::Context> context,
++                          const v8::RuntimeBufferKind kind,
++                          const std::uint8_t* bytes,
++                          const std::size_t size) {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
++  if (!sink.IsVmCaptureEnabled()) {
++    return;
++  }
++  if (kind != v8::RuntimeBufferKind::kArrayBuffer &&
++      kind != v8::RuntimeBufferKind::kUint8Array &&
++      kind != v8::RuntimeBufferKind::kUint16Array &&
++      kind != v8::RuntimeBufferKind::kUint32Array) {
++    return;
++  }
++  ExecutionContext* execution_context = ToExecutionContext(context);
++  if (!execution_context) {
++    return;
++  }
++  const std::string source_url = execution_context->Url().GetString().Utf8();
++  if (source_url.empty()) {
++    return;
++  }
++  sink.CaptureRuntimeTypedArray(
++      StableExecutionContextId(*execution_context), StableFrameId(*execution_context),
++      std::string_view(source_url.data(), source_url.length()),
++      UNSAFE_BUFFERS(base::span(bytes, size)));
++}
++
+ // NOTE: when editing this, please also edit the error messages we throw when
+ // the size is exceeded (see uses of the constant), which use the human-friendly
+ // "8MB" text.
+@@ -999,6 +1027,7 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+   isolate->SetWasmModuleCallback(WasmModuleOverride);
+   isolate->SetWasmInstanceCallback(WasmInstanceOverride);
+   isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
++  isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);
+   isolate->SetWasmCustomDescriptorsEnabledCallback(
+       WasmCustomDescriptorsEnabledCallback);
+   isolate->SetSharedArrayBufferConstructorEnabledCallback(
+

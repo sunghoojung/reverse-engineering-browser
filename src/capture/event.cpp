@@ -58,6 +58,7 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kVmFinding:
     case EventType::kArtifactCaptured:
     case EventType::kArtifactCaptureFailed:
+    case EventType::kVmDispatchSample:
       return true;
     case EventType::kUnknown:
       return false;
@@ -269,6 +270,8 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "artifact_captured";
     case EventType::kArtifactCaptureFailed:
       return "artifact_capture_failed";
+    case EventType::kVmDispatchSample:
+      return "vm_dispatch_sample";
     case EventType::kUnknown:
       return "unknown";
   }

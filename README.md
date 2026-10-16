@@ -135,6 +135,10 @@ boundaries and the [capture policy](SAFETY.md) before starting a session.
   are capped at 128 KiB; native queues and artifact transfers have explicit limits.
 - **Native quiet mode:** run native evidence capture without attaching DevTools
   when request and response content is not required.
+- **Stealth VM capture:** combine `REB_NATIVE_QUIET_MODE=1` with the VM category
+  to capture bounded runtime byte buffers without enabling `Runtime` or
+  `Debugger`. This avoids the `Runtime.enable` signal used by obfuscator.io
+  `vmDebugProtection.inspectorDetection`.
 
 ## How to use it
 

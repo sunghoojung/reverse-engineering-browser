@@ -30,6 +30,8 @@ namespace {
 
 constexpr std::size_t kMaxArtifactBytes = kNativeArtifactMaxContentBytes;
 constexpr std::size_t kMaxActiveCaptureBytes = 32U * 1024U * 1024U;
+constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
+constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 // Synced with blink.mojom.ResourceType.kScript. MIME classification below also
 // covers module and worker script requests that use another resource type.
 constexpr int kScriptResourceType = 3;
@@ -88,10 +90,13 @@ NativeArtifactCaptureSink::NativeArtifactCaptureSink() = default;
 NativeArtifactCaptureSink::~NativeArtifactCaptureSink() = default;
 
 bool NativeArtifactCaptureSink::IsEnabled() const noexcept {
+  return IsEnabledFor(NativeProbeCategory::kArtifact);
+}
+
+bool NativeArtifactCaptureSink::IsEnabledFor(const NativeProbeCategory category) const noexcept {
   if (emitter_.load(std::memory_order_acquire) == nullptr ||
       !NativeArtifactSocketClient::Get().IsConnected() ||
-      (category_mask_.load(std::memory_order_relaxed) &
-       NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) == 0) {
+      (category_mask_.load(std::memory_order_relaxed) & NativeProbeCategoryMask(category)) == 0) {
     return false;
   }
   const std::uint64_t now =
@@ -110,6 +115,7 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   if (!emitter) {
     pending_.clear();
   }
+  runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_release);
 }
 
@@ -188,7 +194,12 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
     const std::uint64_t frame_id,
     const std::string_view source_url,
     mojo_base::BigBuffer content) {
-  if (!IsEnabled()) {
+  const bool is_runtime_typed_array =
+      kind == NativeArtifactKind::kBytecodeBuffer &&
+      capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray;
+  const NativeProbeCategory result_category =
+      is_runtime_typed_array ? NativeProbeCategory::kVm : NativeProbeCategory::kArtifact;
+  if (!IsEnabledFor(result_category)) {
     return;
   }
   const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
@@ -201,23 +212,34 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
         capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyInstantiate)) ||
       (kind == NativeArtifactKind::kCanvasDataUrl &&
        capture_origin == NativeArtifactCaptureOrigin::kCanvasToDataUrl && creator_event_id != 0 &&
-       execution_context_id == 0);
+       execution_context_id == 0) ||
+      is_runtime_typed_array;
   if (!valid_kind_and_origin ||
       (kind != NativeArtifactKind::kCanvasDataUrl && execution_context_id == 0) ||
-      content.size() == 0 || content.size() > kMaxArtifactBytes || source_url.empty() ||
-      source_url.size() > kNativeArtifactMaxUrlBytes) {
+      content.size() == 0 || content.size() > kMaxArtifactBytes ||
+      (is_runtime_typed_array && content.size() < kRuntimeTypedArrayMinBytes) ||
+      source_url.empty() || source_url.size() > kNativeArtifactMaxUrlBytes) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
-               "generated_metadata_or_size_limit");
+               "generated_metadata_or_size_limit", result_category);
+    return;
+  }
+  if (is_runtime_typed_array &&
+      runtime_typed_array_count_.fetch_add(1, std::memory_order_relaxed) >=
+          kRuntimeTypedArrayMaxSnapshots) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "runtime_typed_array_session_limit", result_category);
     return;
   }
 
   const std::string captured_url(source_url);
   const std::string mime_type = kind == NativeArtifactKind::kJavaScript ? "text/javascript"
                                 : kind == NativeArtifactKind::kWasm     ? "application/wasm"
-                                                                        : "text/plain";
+                                : kind == NativeArtifactKind::kBytecodeBuffer
+                                    ? "application/octet-stream"
+                                    : "text/plain";
   if (captured_url.empty() || captured_url.size() > kNativeArtifactMaxUrlBytes) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
-               "generated_url_invalid");
+               "generated_url_invalid", result_category);
     return;
   }
 
@@ -243,10 +265,10 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   transfer->content.assign(received.begin(), received.end());
   if (!NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
-               "transfer_queue_full_or_disconnected");
+               "transfer_queue_full_or_disconnected", result_category);
     return;
   }
-  pending_.emplace(artifact_id, PendingContext{0, frame_id});
+  pending_.emplace(artifact_id, PendingContext{0, frame_id, result_category});
 }
 
 void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> context,
@@ -294,14 +316,16 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   EmitResult(status == NativeArtifactReceiveStatus::kAccepted
                  ? NativeProbeType::kArtifactCaptured
                  : NativeProbeType::kArtifactCaptureFailed,
-             artifact_id, context.request_id, context.frame_id, StatusName(status));
+             artifact_id, context.request_id, context.frame_id, StatusName(status),
+             context.result_category);
 }
 
 void NativeArtifactCaptureSink::EmitResult(const NativeProbeType type,
                                            const std::uint64_t artifact_id,
                                            const std::uint64_t request_id,
                                            const std::uint64_t frame_id,
-                                           const std::string& detail) noexcept {
+                                           const std::string& detail,
+                                           const NativeProbeCategory category) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) {
     return;
@@ -312,7 +336,7 @@ void NativeArtifactCaptureSink::EmitResult(const NativeProbeType type,
     return;
   }
   NativeProbeEvent event;
-  event.header.category = NativeProbeCategory::kArtifact;
+  event.header.category = category;
   event.header.type = type;
   event.header.sequence_number = NativeProbeSession::Get().NextBrowserSequence();
   event.header.monotonic_time_ns = now;

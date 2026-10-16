@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reverse-engineering-browser.local/protocol/vm-opcode-workspace-v1.schema.json",
+  "title": "Reverse Engineering Browser VM opcode workspace v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "document_kind",
+    "producer",
+    "profile_digest",
+    "analysis_digest",
+    "document_digest",
+    "inputs",
+    "workspaces",
+    "summary"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "document_kind": {"const": "vm-opcode-workspace"},
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"const": "origin-trace-vm-opcode"},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "profile_digest": {"$ref": "#/$defs/digest"},
+    "analysis_digest": {"$ref": "#/$defs/digest"},
+    "document_digest": {"$ref": "#/$defs/digest"},
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_manifest_digest", "event_store_digest"],
+      "properties": {
+        "artifact_manifest_digest": {"$ref": "#/$defs/nullableDigest"},
+        "event_store_digest": {"$ref": "#/$defs/nullableDigest"}
+      }
+    },
+    "workspaces": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/workspace"}
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_count",
+        "handler_count",
+        "snapshot_count",
+        "sample_count",
+        "unknown_count"
+      ],
+      "properties": {
+        "workspace_count": {"type": "integer", "minimum": 0},
+        "handler_count": {"type": "integer", "minimum": 0},
+        "snapshot_count": {"type": "integer", "minimum": 0},
+        "sample_count": {"type": "integer", "minimum": 0},
+        "unknown_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullableDigest": {
+      "anyOf": [
+        {"$ref": "#/$defs/digest"},
+        {"type": "null"}
+      ]
+    },
+    "uint64": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)$"
+    },
+    "findingId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{24}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byte_offset", "byte_size"],
+      "properties": {
+        "byte_offset": {"type": "integer", "minimum": 0},
+        "byte_size": {"type": "integer", "minimum": 1}
+      }
+    },
+    "handler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opcode",
+        "state",
+        "source",
+        "operand_width",
+        "sample_count",
+        "notes"
+      ],
+      "properties": {
+        "opcode": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "handler_index": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "state": {"enum": ["observed", "inferred", "correlated", "unknown"]},
+        "source": {"$ref": "#/$defs/source"},
+        "label": {"type": "string", "maxLength": 80},
+        "operand_width": {"type": "integer", "minimum": 0, "maximum": 8},
+        "sample_count": {"type": "integer", "minimum": 0},
+        "notes": {"type": "string", "maxLength": 240}
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "origin",
+        "byte_count",
+        "preview_hex",
+        "truncated",
+        "unavailable_reason"
+      ],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/uint64"},
+        "origin": {"const": "runtime-typed-array"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "byte_count": {"type": "integer", "minimum": 0},
+        "preview_hex": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})*$"
+            },
+            {"type": "null"}
+          ]
+        },
+        "truncated": {"type": "boolean"},
+        "unavailable_reason": {
+          "anyOf": [
+            {"type": "string", "minLength": 1, "maxLength": 240},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "omission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": {"type": "string", "minLength": 1, "maxLength": 80},
+        "detail": {"type": "string", "minLength": 1, "maxLength": 240}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "characterized_opcodes", "snapshot_bytes", "omissions"],
+      "properties": {
+        "complete": {"type": "boolean"},
+        "characterized_opcodes": {"type": "integer", "minimum": 0},
+        "snapshot_bytes": {"type": "integer", "minimum": 0},
+        "omissions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/omission"}
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interpreter_artifact_id",
+        "finding_id",
+        "model",
+        "handlers",
+        "snapshots",
+        "coverage",
+        "unknowns"
+      ],
+      "properties": {
+        "interpreter_artifact_id": {"$ref": "#/$defs/uint64"},
+        "bytecode_artifact_id": {"$ref": "#/$defs/uint64"},
+        "finding_id": {"$ref": "#/$defs/findingId"},
+        "model": {"enum": ["stack", "register", "unknown"]},
+        "handlers": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/handler"}
+        },
+        "snapshots": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/snapshot"}
+        },
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "unknowns": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 240}
+        }
+      }
+    }
+  }
+}

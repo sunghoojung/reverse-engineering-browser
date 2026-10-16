@@ -20,6 +20,7 @@
           'module_instantiated', 'request_started', 'response_completed', 'gap',
           'request_initiated', 'request_redirected', 'response_started',
           'request_completed', 'request_failed', 'vm_finding',
+          'vm_dispatch_sample',
           'artifact_captured', 'artifact_capture_failed'
         ]),
         3: new Set([
@@ -27,6 +28,7 @@
           'module_instantiated', 'request_started', 'response_completed', 'gap',
           'request_initiated', 'request_redirected', 'response_started',
           'request_completed', 'request_failed', 'vm_finding',
+          'vm_dispatch_sample',
           'artifact_captured', 'artifact_capture_failed'
         ])
       };

@@ -1,0 +1,186 @@
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 456af07..8bbea4f 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -6,6 +6,7 @@
+ #define INCLUDE_V8_ISOLATE_CALLBACKS_H_
+ 
+ #include <stddef.h>
++#include <stdint.h>
+ 
+ #include <functional>
+ #include <string>
+@@ -324,6 +325,20 @@ using ApiImplementationCallback = void (*)(const FunctionCallbackInfo<Value>&);
+ // --- Callback for WebAssembly.compileStreaming ---
+ using WasmStreamingCallback = void (*)(const FunctionCallbackInfo<Value>&);
+ 
++enum class RuntimeBufferKind {
++  kArrayBuffer,
++  kUint8Array,
++  kUint16Array,
++  kUint32Array,
++};
++
++// Called synchronously after a supported JavaScript runtime buffer has been
++// initialized. Embedders that retain the bytes must copy them before return.
++using RuntimeBufferCallback = void (*)(Local<Context> context,
++                                       RuntimeBufferKind kind,
++                                       const uint8_t* bytes,
++                                       size_t size);
++
+ enum class WasmAsyncSuccess { kSuccess, kFail };
+ 
+ // --- Callback called when async WebAssembly operations finish ---
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index f8395c9..6cc95c2 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -1735,6 +1735,8 @@ class V8_EXPORT Isolate {
+ 
+   void SetWasmStreamingCallback(WasmStreamingCallback callback);
+ 
++  void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
++
+   void SetWasmAsyncResolvePromiseCallback(
+       WasmAsyncResolvePromiseCallback callback);
+ 
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 9ba67d3..eaa9562 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -11007,6 +11007,9 @@ CALLBACK_SETTER(WasmInstanceCallback, ExtensionCallback, wasm_instance_callback)
+ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
+                 wasm_streaming_callback)
+ 
++CALLBACK_SETTER(RuntimeBufferCallback, RuntimeBufferCallback,
++                runtime_buffer_callback)
++
+ CALLBACK_SETTER(WasmAsyncResolvePromiseCallback,
+                 WasmAsyncResolvePromiseCallback,
+                 wasm_async_resolve_promise_callback)
+diff --git a/src/builtins/builtins-arraybuffer.cc b/src/builtins/builtins-arraybuffer.cc
+index 7561ffd..3412bce 100644
+--- a/src/builtins/builtins-arraybuffer.cc
++++ b/src/builtins/builtins-arraybuffer.cc
+@@ -15,6 +15,24 @@
+ namespace v8 {
+ namespace internal {
+ 
++namespace {
++
++void NotifyRuntimeArrayBuffer(Isolate* isolate, Tagged<Object> value) {
++  RuntimeBufferCallback callback = isolate->runtime_buffer_callback();
++  if (!callback || !IsJSArrayBuffer(value)) {
++    return;
++  }
++  Tagged<JSArrayBuffer> buffer = Cast<JSArrayBuffer>(value);
++  if (buffer->is_shared() || buffer->is_resizable_by_js() || buffer->was_detached()) {
++    return;
++  }
++  callback(reinterpret_cast<v8::Isolate*>(isolate)->GetCurrentContext(),
++           RuntimeBufferKind::kArrayBuffer,
++           static_cast<const uint8_t*>(buffer->backing_store()), buffer->GetByteLength());
++}
++
++}  // namespace
++
+ #define CHECK_SHARED(expected, name, method)                                \
+   if (name->is_shared() != expected) {                                      \
+     THROW_NEW_ERROR_RETURN_FAILURE(                                         \
+@@ -181,8 +199,11 @@ BUILTIN(ArrayBufferConstructor) {
+           NewRangeError(MessageTemplate::kInvalidArrayBufferMaxLength));
+     }
+   }
+-  return ConstructBuffer(isolate, target, new_target, number_length,
+-                         number_max_length, InitializedFlag::kZeroInitialized);
++  Tagged<Object> result =
++      ConstructBuffer(isolate, target, new_target, number_length, number_max_length,
++                      InitializedFlag::kZeroInitialized);
++  NotifyRuntimeArrayBuffer(isolate, result);
++  return result;
+ }
+ 
+ // This is a helper to construct an ArrayBuffer with uinitialized memory.
+diff --git a/src/builtins/builtins-typed-array-gen.cc b/src/builtins/builtins-typed-array-gen.cc
+index 6828322..17d2e4b 100644
+--- a/src/builtins/builtins-typed-array-gen.cc
++++ b/src/builtins/builtins-typed-array-gen.cc
+@@ -123,6 +123,7 @@ TF_BUILTIN(TypedArrayConstructor, TypedArrayBuiltinsAssembler) {
+   TNode<JSAny> result =
+       CallBuiltin<JSAny>(Builtin::kCreateTypedArray, context, target,
+                          new_target, arg1, arg2, arg3);
++  CallRuntime(Runtime::kRebCaptureRuntimeBuffer, context, result);
+   args.PopAndReturn(result);
+ 
+   BIND(&throwtypeerror);
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 536cea9..530d497 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -506,6 +506,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+   V(SharedArrayBufferConstructorEnabledCallback,                            \
+     sharedarraybuffer_constructor_enabled_callback, nullptr)                \
+   V(WasmStreamingCallback, wasm_streaming_callback, nullptr)                \
++  V(RuntimeBufferCallback, runtime_buffer_callback, nullptr)                \
+   V(WasmAsyncResolvePromiseCallback, wasm_async_resolve_promise_callback,   \
+     DefaultWasmAsyncResolvePromiseCallback)                                 \
+   V(WasmLoadSourceMapCallback, wasm_load_source_map_callback, nullptr)      \
+diff --git a/src/runtime/runtime-typedarray.cc b/src/runtime/runtime-typedarray.cc
+index 2725e04..a24466b 100644
+--- a/src/runtime/runtime-typedarray.cc
++++ b/src/runtime/runtime-typedarray.cc
+@@ -66,6 +66,41 @@ RUNTIME_FUNCTION(Runtime_TypedArrayGetBuffer) {
+   return *holder->GetBuffer(isolate);
+ }
+ 
++RUNTIME_FUNCTION(Runtime_RebCaptureRuntimeBuffer) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  RuntimeBufferCallback callback = isolate->runtime_buffer_callback();
++  if (!callback || !IsJSTypedArray(args[0])) {
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++
++  DirectHandle<JSTypedArray> typed_array = args.at<JSTypedArray>(0);
++  if (typed_array->buffer()->is_shared() || typed_array->buffer()->is_resizable_by_js() ||
++      typed_array->WasDetached()) {
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++
++  RuntimeBufferKind kind;
++  switch (typed_array->GetElementsKind()) {
++    case UINT8_ELEMENTS:
++      kind = RuntimeBufferKind::kUint8Array;
++      break;
++    case UINT16_ELEMENTS:
++      kind = RuntimeBufferKind::kUint16Array;
++      break;
++    case UINT32_ELEMENTS:
++      kind = RuntimeBufferKind::kUint32Array;
++      break;
++    default:
++      return ReadOnlyRoots(isolate).undefined_value();
++  }
++
++  const size_t byte_length = typed_array->GetByteLength();
++  callback(reinterpret_cast<v8::Isolate*>(isolate)->GetCurrentContext(), kind,
++           static_cast<const uint8_t*>(typed_array->DataPtr()), byte_length);
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
+ RUNTIME_FUNCTION(Runtime_GrowableSharedArrayBufferByteLength) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 2d7628d..c3195fb 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -700,6 +700,7 @@ constexpr bool CanTriggerGC(T... properties) {
+   F(ArrayBufferDetach, -1, 1)                  \
+   F(ArrayBufferSetDetachKey, 2, 1)             \
+   F(GrowableSharedArrayBufferByteLength, 1, 1) \
++  F(RebCaptureRuntimeBuffer, 1, 1)              \
+   F(TypedArrayCopyElements, 3, 1)              \
+   F(TypedArrayGetBuffer, 1, 1)                 \
+   F(TypedArraySet, 2, 1)                       \
+

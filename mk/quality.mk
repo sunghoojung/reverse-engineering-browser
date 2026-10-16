@@ -9,7 +9,10 @@ MAGIC_DECODER_EXECUTABLE ?= $(DECODER_BINARY)
 magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decoder-limits
 	node tools/check-magic-decoder.mjs $(MAGIC_DECODER_EXECUTABLE) $(MAGIC_DECODER_CHECK_FLAGS) --limits=$(BUILD_DIR)/check-magic-decoder-limits
 
-check: all wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test workspace-check deob-benchmark
+native-tests: $(NATIVE_TEST_BINARIES)
+	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
+
+check: all wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
@@ -53,7 +56,7 @@ sanitize:
 		OPT_CXXFLAGS="-O1 -g" \
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
-		all wire-decoder-check magic-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check
+		all wire-decoder-check magic-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check native-tests
 
 format:
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \

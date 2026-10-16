@@ -47,6 +47,8 @@ bool IsFingerprintSurfaceCategory(const NativeProbeCategory category) noexcept {
 // complete enough to validate and display instead of becoming a partial base64
 // preview. Other generated artifact kinds retain their 16 MiB transport cap.
 constexpr std::size_t kCanvasDataUrlMaxBytes = 2U * 1024U * 1024U;
+constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
+constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 
 void SetPayload(NativeProbeEvent& event,
                 const std::string_view first,
@@ -109,6 +111,7 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   category_mask_.store(active ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_canvas_images_.store(active && capture_canvas_images, std::memory_order_relaxed);
+  runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
@@ -154,6 +157,76 @@ bool NativeProbeSink::IsArtifactCaptureEnabled() const noexcept {
          MonotonicTimeNs() < expires_at;
 }
 
+bool NativeProbeSink::IsVmCaptureEnabled() const noexcept {
+  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return false;
+  }
+  const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
+  if ((generation & 1U) != 0) {
+    return false;
+  }
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at = expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const NativeGeneratedArtifactEmitter artifact_emitter =
+      artifact_emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return config_generation_.load(std::memory_order_acquire) == generation && artifact_emitter &&
+         (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) != 0 &&
+         MonotonicTimeNs() < expires_at;
+}
+
+void NativeProbeSink::CaptureRuntimeTypedArray(
+    const std::uint64_t execution_context_id,
+    const std::uint64_t frame_id,
+    const std::string_view source_url,
+    const std::span<const std::uint8_t> content) noexcept {
+  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return;
+  }
+  if (execution_context_id == 0 || source_url.empty() ||
+      source_url.size() > kNativeArtifactMaxUrlBytes ||
+      content.size() < kRuntimeTypedArrayMinBytes ||
+      content.size() > kNativeArtifactMaxContentBytes) {
+    return;
+  }
+  const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
+  if ((generation & 1U) != 0) {
+    return;
+  }
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at = expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const NativeGeneratedArtifactEmitter artifact_emitter =
+      artifact_emitter_.load(std::memory_order_relaxed);
+  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != generation || !artifact_emitter ||
+      !emitter || (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
+      MonotonicTimeNs() >= expires_at) {
+    return;
+  }
+  const std::size_t snapshot_index =
+      runtime_typed_array_count_.fetch_add(1, std::memory_order_relaxed);
+  if (snapshot_index >= kRuntimeTypedArrayMaxSnapshots) {
+    if (snapshot_index == kRuntimeTypedArrayMaxSnapshots) {
+      NativeProbeEvent event;
+      event.header.category = NativeProbeCategory::kVm;
+      event.header.type = NativeProbeType::kArtifactCaptureFailed;
+      event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+      event.header.monotonic_time_ns = MonotonicTimeNs();
+      event.header.session_id = session_id_.load(std::memory_order_relaxed);
+      event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+      event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+      event.header.frame_id = frame_id;
+      SetPayload(event, "runtime_typed_array_session_limit");
+      emitter(event);
+    }
+    return;
+  }
+  artifact_emitter(NativeArtifactKind::kBytecodeBuffer,
+                   NativeArtifactCaptureOrigin::kRuntimeTypedArray, 0, execution_context_id,
+                   frame_id, source_url, content);
+}
+
 void NativeProbeSink::CaptureGeneratedArtifact(
     const NativeArtifactKind kind,
     const NativeArtifactCaptureOrigin capture_origin,
@@ -176,7 +249,9 @@ void NativeProbeSink::CaptureGeneratedArtifact(
         capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyInstantiate)) ||
       (kind == NativeArtifactKind::kCanvasDataUrl &&
        capture_origin == NativeArtifactCaptureOrigin::kCanvasToDataUrl && creator_event_id != 0 &&
-       execution_context_id == 0);
+       execution_context_id == 0) ||
+      (kind == NativeArtifactKind::kBytecodeBuffer &&
+       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray);
   if (!valid_kind_and_origin ||
       (kind != NativeArtifactKind::kCanvasDataUrl && execution_context_id == 0)) {
     return;
@@ -191,7 +266,9 @@ void NativeProbeSink::CaptureGeneratedArtifact(
       artifact_emitter_.load(std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != generation || !artifact_emitter ||
-      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) == 0 ||
+      (category_mask & NativeProbeCategoryMask(kind == NativeArtifactKind::kBytecodeBuffer
+                                                   ? NativeProbeCategory::kVm
+                                                   : NativeProbeCategory::kArtifact)) == 0 ||
       MonotonicTimeNs() >= expires_at) {
     return;
   }

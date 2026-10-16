@@ -22,6 +22,10 @@ NATIVE_WORKER_AUTHORITY_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay
 NATIVE_WORKER_TRANSFER_GATE_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/browser/native_worker_transfer_gate.o
 NATIVE_PROXY_POLICY_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/browser/native_proxy_policy.o
 NATIVE_PROXY_POLICY_TEST := $(BUILD_DIR)/check-native-proxy-policy
+EVENT_TEST_BINARY := $(BUILD_DIR)/tests/event-test
+VM_DISPATCH_TEST_BINARY := $(BUILD_DIR)/tests/vm-dispatch-test
+ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -45,6 +49,13 @@ $(PRODUCER_BINARY): $(BUILD_DIR)/apps/reb-event-producer/main.o \
 	$(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/transport/local_ipc.o \
 	$(BUILD_DIR)/src/capture/vm_finding.o
+$(EVENT_TEST_BINARY): $(BUILD_DIR)/tests/event_test.o \
+	$(BUILD_DIR)/src/capture/event.o
+$(ARTIFACT_TEST_BINARY): $(BUILD_DIR)/tests/artifact_test.o \
+	$(BUILD_DIR)/src/evidence/artifact.o
+$(VM_DISPATCH_TEST_BINARY): $(BUILD_DIR)/tests/vm_dispatch_test.o \
+	$(BUILD_DIR)/src/capture/event.o \
+	$(BUILD_DIR)/src/capture/vm_dispatch.o
 $(BROKER_BINARY): $(BUILD_DIR)/services/event-broker/main.o \
 	$(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/evidence/event_broker.o \
@@ -79,7 +90,7 @@ $(NATIVE_PROXY_POLICY_TEST): $(BUILD_DIR)/tools/check-native-proxy-policy.o $(NA
 
 $(BUILD_DIR)/tools/check-native-proxy-policy.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 
-$(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST):
+$(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST) $(NATIVE_TEST_BINARIES):
 	@mkdir -p $(@D)
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 
@@ -96,13 +107,13 @@ $(BUILD_DIR)/%.o: %.cc
 # sccache replays cached dependency files with the original output path. Generate
 # these separately, without cache, so each build directory has correct targets.
 # Discover dependency files without adding sources to any link target implicitly.
-NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp)
+NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp tests/*.cpp)
 NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \
 	$(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT) \
 	$(NATIVE_PROXY_POLICY_OBJECT) $(BUILD_DIR)/tools/check-native-proxy-policy.o $(BUILD_DIR)/tools/decoder-test-driver.o $(BUILD_DIR)/tools/check-owned-vm-fixture.o
 
 $(NATIVE_OBJECTS) $(BUILD_DIR)/tools/check-magic-decoder-limits.o: mk/config.mk mk/native.mk
-$(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST): mk/native.mk
+$(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST) $(NATIVE_TEST_BINARIES): mk/native.mk
 
 -include $(NATIVE_OBJECTS:.o=.d)
 

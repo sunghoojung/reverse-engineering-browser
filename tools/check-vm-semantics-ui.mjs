@@ -175,12 +175,14 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  await evaluate(`(${installVmFindingsFixture.toString()})()`);
  await visibleClick('#vm-detail button');assert.equal(await evaluate('state.selectedArtifactId'),'9876');assert.equal(await evaluate(`document.querySelector('#screen-sources').hidden`),false);
  await evaluate(`showScreen('vm',elements.requestVmCandidates)`);assert.equal(await evaluate(`document.querySelector('#vm-findings-workspace').hidden`),false);
- await evaluate(`window.vmFindingNodes={list:document.querySelector('#vm-list').firstChild,detail:document.querySelector('#vm-detail').firstChild};document.querySelector('#vm-detail').scrollTop=150;window.vmFindingScroll=document.querySelector('#vm-detail').scrollTop;`);
- assert.equal(await evaluate('vmFindingScroll'),150,'Owned Findings detail must have a nonzero retained scroll offset');
+ // Provenance is the bounded evidence scroll pane in the desktop workbench.
+ await visibleClick('#vm-detail .vm-finding-provenance > summary');
+ await evaluate(`window.vmFindingNodes={list:document.querySelector('#vm-list').firstChild,detail:document.querySelector('#vm-detail').firstChild,provenance:document.querySelector('#vm-detail .vm-finding-provenance')};vmFindingNodes.provenance.scrollTop=150;window.vmFindingScroll=vmFindingNodes.provenance.scrollTop;`);
+ assert.equal(await evaluate('vmFindingScroll'),150,'Owned Findings provenance must have a nonzero retained scroll offset');
  // Settle the ordinary failing analyzer poll while Findings is hidden. This
  // deterministic interleaving preserves the original exact DOM/scroll assertion.
  await click('#vm-show-execution');await evaluate('refreshVmAnalysis()');await click('#vm-show-findings');
- assert.equal(await evaluate(`vmFindingNodes.list===document.querySelector('#vm-list').firstChild&&vmFindingNodes.detail===document.querySelector('#vm-detail').firstChild&&document.querySelector('#vm-detail').scrollTop===vmFindingScroll&&state.selectedVmFindingId==='analysis:000000000000000000009876:artifact:9876'`),true,'Findings mode switch preserves DOM, exact identity and scroll');
+ assert.equal(await evaluate(`vmFindingNodes.list===document.querySelector('#vm-list').firstChild&&vmFindingNodes.detail===document.querySelector('#vm-detail').firstChild&&vmFindingNodes.provenance===document.querySelector('#vm-detail .vm-finding-provenance')&&vmFindingNodes.provenance.open&&vmFindingNodes.provenance.scrollTop===vmFindingScroll&&state.selectedVmFindingId==='analysis:000000000000000000009876:artifact:9876'`),true,'Findings mode switch preserves DOM, exact identity, open provenance and scroll');
  assert.equal(await evaluate("state.vmAnalysisStatus"),'unavailable');
  assert.match(await evaluate("document.querySelector('#vm-notice').textContent"),/Last valid VM evidence remains visible/);
  assert.equal(await evaluate('document.activeElement.id'),'vm-show-findings');

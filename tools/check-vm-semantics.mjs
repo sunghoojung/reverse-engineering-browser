@@ -234,7 +234,7 @@ console.log('PASS VM-local Findings/Execution round trip preserves both DOM owne
 // rendered fixture populated. Reproduce the old projection-only admission too.
 const vmAppSource=await readFile(new URL('../apps/research-ui/app.js',import.meta.url),'utf8');
 const vmEvidenceSource=await readFile(new URL('../apps/research-ui/evidence_models.js',import.meta.url),'utf8');
-const vmRefreshSource=vmAppSource.slice(vmAppSource.indexOf('      async function refreshVmAnalysis('),vmAppSource.indexOf('      function setNetworkNotice('));
+const vmRefreshSource=vmAppSource.slice(vmAppSource.indexOf('      function acceptVmOpcodeWorkspace('),vmAppSource.indexOf('      function setNetworkNotice('));
 const vmFixtureState={vmFindings:[],lastValidAnalysisFindings:[],eventVmFindings:[],vmAnalysisRequestId:null};
 let vmFixtureRenders=0;
 const vmFixtureApi=runInNewContext(`${vmEvidenceSource}\n${vmRefreshSource}\n;({install:${installVmFindingsFixture.toString()},refreshVmAnalysis})`,{state:vmFixtureState,location:{protocol:'http:'},TextEncoder,crypto:webcrypto,fetch:async()=>({ok:false,status:503}),renderVmLab:()=>{vmFixtureRenders++;}});
@@ -280,7 +280,7 @@ let finishVmPoll;
 const vmLabSource=vmAppSource.slice(vmAppSource.indexOf('      function vmField('),vmAppSource.indexOf('      function requestDomain('));
 const vmTextSource=vmAppSource.slice(vmAppSource.indexOf('      function textElement('),vmAppSource.indexOf('      function requestOriginLabel('));
 const vmShellSource=source.slice(source.indexOf('// Keep both workspaces mounted:'));
-const vmFindingApi=runInNewContext(`${vmEvidenceSource}\n${vmRefreshSource}\n${vmTextSource}\n${vmLabSource}\n${vmShellSource}\n;({install:${installVmFindingsFixture.toString()},refreshVmAnalysis,renderVmLab,vmFindingsFromEvents,shell:vmExecutionWorkspace})`,{state:vmFindingState,elements:vmFindingElements,document:vmFindingDocument,location:{protocol:'http:'},TextEncoder,crypto:webcrypto,mountVmSemantics:()=>({}),fetch:()=>new Promise(resolve=>{finishVmPoll=resolve;}),showScreen:()=>{},selectArtifact:()=>{}});
+const vmFindingApi=runInNewContext(`${vmEvidenceSource}\n${vmRefreshSource}\n${vmTextSource}\n${vmLabSource}\n${vmShellSource}\n;({install:${installVmFindingsFixture.toString()},refreshVmAnalysis,renderVmLab,vmFindingsFromEvents,shell:vmExecutionWorkspace})`,{state:vmFindingState,elements:vmFindingElements,document:vmFindingDocument,location:{protocol:'http:'},TextEncoder,crypto:webcrypto,mountVmSemantics:()=>({}),fetch:(url)=>String(url).includes('/opcodes')?Promise.resolve({ok:false,status:404,headers:{get:()=>null}}):new Promise(resolve=>{finishVmPoll=resolve;}),showScreen:()=>{},selectArtifact:()=>{}});
 await vmFindingApi.install();
 vmFindingElements.vmList.children[0].focus();vmFindingElements.vmList.scrollTop=57;vmFindingElements.vmDetail.scrollTop=150;
 const vmRetained={list:vmFindingElements.vmList.children[0],detail:vmFindingElements.vmDetail.children[0],focus:vmFindingDocument.activeElement};

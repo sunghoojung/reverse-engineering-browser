@@ -111,6 +111,60 @@
         }
       });
 
+      function acceptVmOpcodeWorkspace(document, requestId, etag = null, embedded = false) {
+        if (!isVmOpcodeWorkspaceDocument(document)) {
+          retainVmOpcodeWorkspaceOnFailure(state, 'malformed', 'Malformed opcode workspace response');
+          return false;
+        }
+        state.vmOpcodeWorkspace = document;
+        state.lastValidVmOpcodeWorkspace = document;
+        state.vmOpcodeWorkspaceStatus = 'ready';
+        state.vmOpcodeWorkspaceError = null;
+        state.vmOpcodeWorkspaceRequestId = requestId;
+        state.vmOpcodeWorkspaceEtag = etag;
+        state.vmOpcodeWorkspaceEmbedded = embedded;
+        return true;
+      }
+
+      async function refreshVmOpcodeWorkspace(analysisDocument, requestId) {
+        const embedded = analysisDocument?.opcode_workspace;
+        if (embedded !== undefined) {
+          state.vmOpcodeWorkspaceRequestId = requestId;
+          state.vmOpcodeWorkspaceEmbedded = true;
+          acceptVmOpcodeWorkspace(embedded, requestId, null, true);
+          return;
+        }
+        if (analysisDocument === null && requestId === state.vmOpcodeWorkspaceRequestId &&
+            state.vmOpcodeWorkspaceEmbedded) return;
+        const query = requestId ? `?request_id=${encodeURIComponent(requestId)}` : '';
+        const sameSelection = requestId === state.vmOpcodeWorkspaceRequestId;
+        const headers = sameSelection && state.vmOpcodeWorkspaceEtag
+          ? { 'If-None-Match': state.vmOpcodeWorkspaceEtag }
+          : {};
+        if (!sameSelection) state.vmOpcodeWorkspaceEtag = null;
+        state.vmOpcodeWorkspaceEmbedded = false;
+        state.vmOpcodeWorkspaceStatus = 'loading';
+        try {
+          const response = await fetch(`/api/analysis/vm/opcodes${query}`, { cache: 'no-store', headers });
+          if (response.status === 304) {
+            state.vmOpcodeWorkspaceStatus = 'ready';
+            state.vmOpcodeWorkspaceError = null;
+            return;
+          }
+          if (!response.ok) throw new Error(`Opcode workspace returned ${response.status}`);
+          const document = await response.json();
+          acceptVmOpcodeWorkspace(document, requestId, response.headers.get('ETag'));
+        } catch (error) {
+          retainVmOpcodeWorkspaceOnFailure(
+            state,
+            error instanceof SyntaxError ? 'malformed' : 'unavailable',
+            error.message
+          );
+          state.vmOpcodeWorkspaceRequestId = requestId;
+          if (state.vmOpcodeWorkspaceStatus === 'unavailable') state.vmOpcodeWorkspaceEtag = null;
+        }
+      }
+
       async function refreshVmAnalysis(requestId = state.vmAnalysisRequestId) {
         if (location.protocol === 'file:') return;
         const normalizedRequestId = requestId || null;
@@ -123,6 +177,7 @@
           if (response.status === 304) {
             state.vmAnalysisStatus = 'ready';
             state.vmAnalysisError = null;
+            await refreshVmOpcodeWorkspace(null, normalizedRequestId);
             renderVmLab();
             return;
           }
@@ -135,6 +190,7 @@
           state.vmAnalysisError = null;
           state.lastValidAnalysisFindings = vmFindingsFromAnalysis(document);
           state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
+          await refreshVmOpcodeWorkspace(document, normalizedRequestId);
         } catch (error) {
           retainVmAnalysisOnFailure(
             state,
@@ -1337,6 +1393,266 @@
         return field;
       }
 
+      function vmSessionPresentation(targetState) {
+        const debuggerState = targetState.debuggerSession?.state;
+        const explicitStealth = targetState.vmStealthSession === true ||
+          targetState.debuggerSession?.stealth_session === true ||
+          targetState.debuggerSession?.native_stealth === true ||
+          targetState.debuggerSession?.quiet_mode === true;
+        const nativeCaptureUp = targetState.sessionMode === 'live' &&
+          targetState.broker === 'connected' && !targetState.captureStopped;
+        const debuggerAttached = Boolean(targetState.debuggerSession?.target) &&
+          ['running', 'paused', 'crashed'].includes(debuggerState);
+        if (explicitStealth || (nativeCaptureUp && !debuggerAttached)) {
+          return {
+            mode: 'stealth',
+            label: 'Native stealth',
+            copy: 'Inspector domains are off, so VM debug protection that watches Runtime.enable does not see a debugger. Breakpoints, watches, and console stay unavailable in this mode.'
+          };
+        }
+        if (debuggerAttached) {
+          return {
+            mode: 'cdp',
+            label: 'CDP attached',
+            copy: 'Runtime and Debugger domains are active. VM protection that watches Runtime.enable can detect this debugger connection.'
+          };
+        }
+        if (targetState.sessionMode !== 'live') {
+          return {
+            mode: 'recorded',
+            label: 'Recorded evidence',
+            copy: 'Stored findings do not prove which live session mode produced them.'
+          };
+        }
+        return {
+          mode: 'unavailable',
+          label: 'CDP unavailable',
+          copy: 'Neither an attached debugger nor an active native stealth capture is currently observable.'
+        };
+      }
+
+      function renderVmSessionStatus() {
+        if (!elements.vmSessionStatus) return;
+        const presentation = vmSessionPresentation(state);
+        const chip = textElement('span', 'vm-session-chip', presentation.label);
+        chip.dataset.mode = presentation.mode;
+        elements.vmSessionStatus.replaceChildren(
+          chip,
+          textElement('span', 'vm-session-copy', presentation.copy)
+        );
+      }
+
+      function vmWorkspaceNotice(workspace) {
+        const notice = document.createElement('div');
+        notice.className = 'vm-workspace-notice';
+        let kind = state.vmOpcodeWorkspaceStatus;
+        let message = '';
+        if (kind === 'malformed') {
+          message = `Malformed opcode workspace was rejected. Detection findings remain visible.${workspace ? ' The last valid workspace is retained.' : ''}`;
+        } else if (kind === 'unavailable') {
+          message = `Opcode workspace unavailable. Detection findings remain visible.${workspace ? ' The last valid workspace is retained.' : ''}`;
+        } else if (kind === 'loading') {
+          message = workspace ? 'Refreshing opcode workspace. The last valid workspace remains visible.'
+            : 'Loading opcode workspace.';
+        } else if (!workspace) {
+          kind = 'empty';
+          message = 'Workspace unavailable for this finding. Detection evidence remains visible without synthesized VM semantics.';
+        }
+        if (!message) return null;
+        notice.dataset.kind = kind;
+        notice.setAttribute('role', 'status');
+        notice.textContent = message;
+        return notice;
+      }
+
+      function formatVmHexPreview(hex) {
+        if (!hex) return '';
+        const bytes = hex.match(/.{2}/g) ?? [];
+        const lines = [];
+        for (let offset = 0; offset < bytes.length; offset += 16) {
+          lines.push(bytes.slice(offset, offset + 16).join(' '));
+        }
+        return lines.join('\n');
+      }
+
+      function renderVmHandlers(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
+        heading.append(
+          textElement('h4', '', 'Handlers'),
+          textElement('span', '', `${workspace.handlers.length} characterized ${workspace.handlers.length === 1 ? 'opcode' : 'opcodes'}`)
+        );
+        section.append(heading);
+        const rows = vmOpcodeRows(workspace);
+        if (!rows.some(row => row.key === state.selectedVmHandlerKey)) {
+          state.selectedVmHandlerKey = rows[0]?.key ?? null;
+        }
+        if (rows.length === 0) {
+          section.append(textElement('div', 'vm-workspace-empty', 'No handler candidates were characterized. Missing samples do not suppress inferred handlers.'));
+          return section;
+        }
+        const header = document.createElement('div'); header.className = 'vm-handler-head';
+        header.setAttribute('aria-hidden', 'true');
+        ['opcode', 'label', 'state', 'samples', 'notes'].forEach(label => header.append(textElement('span', '', label)));
+        const list = document.createElement('div'); list.className = 'vm-handler-list';
+        list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Opcode handlers');
+        const selectRow = (row, focus = true) => {
+          state.selectedVmHandlerKey = row.dataset.handlerKey;
+          [...list.querySelectorAll('.vm-handler-row')].forEach(candidate => {
+            const selected = candidate === row;
+            candidate.setAttribute('aria-selected', String(selected));
+            candidate.tabIndex = selected ? 0 : -1;
+          });
+          if (focus) row.focus({ preventScroll: true });
+        };
+        rows.forEach(rowData => {
+          const row = document.createElement('button'); row.className = 'vm-handler-row'; row.type = 'button';
+          row.dataset.handlerKey = rowData.key;
+          row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(rowData.key === state.selectedVmHandlerKey));
+          row.tabIndex = rowData.key === state.selectedVmHandlerKey ? 0 : -1;
+          const label = document.createElement('span'); label.className = 'vm-handler-label';
+          label.append(textElement('strong', '', rowData.label), textElement('small', '', `source ${rowData.source}`));
+          const epistemic = textElement('span', 'vm-handler-state', rowData.state);
+          epistemic.dataset.state = rowData.state;
+          row.append(
+            textElement('strong', 'vm-handler-opcode', rowData.opcode),
+            label,
+            epistemic,
+            textElement('span', 'vm-handler-samples', String(rowData.samples)),
+            textElement('span', 'vm-handler-notes', rowData.notes)
+          );
+          row.addEventListener('click', () => selectRow(row));
+          row.addEventListener('keydown', event => {
+            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const options = [...list.querySelectorAll('.vm-handler-row')];
+            const current = options.indexOf(row);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+              : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+            selectRow(options[next]);
+          });
+          list.append(row);
+        });
+        section.append(header, list);
+        return section;
+      }
+
+      function renderVmBytecode(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
+        heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded snapshot preview'));
+        section.append(heading);
+        const snapshot = workspace.snapshots.find(candidate =>
+          candidate.artifact_id === workspace.bytecode_artifact_id) ?? workspace.snapshots[0] ?? null;
+        const fields = document.createElement('div'); fields.className = 'vm-fields vm-bytecode-fields';
+        fields.append(
+          vmField('artifact', snapshot?.artifact_id ?? workspace.bytecode_artifact_id ?? 'not captured'),
+          vmField('digest', snapshot?.sha256 ?? 'not recorded'),
+          vmField('origin', snapshot?.origin ?? 'unavailable'),
+          vmField('snapshot bytes', snapshot?.byte_count ?? 0),
+          vmField('truncation', snapshot?.truncated === true ? 'preview truncated' : snapshot?.truncated === false ? 'complete preview' : 'not recorded'),
+          vmField('unavailable reason', snapshot?.unavailable_reason ?? 'none')
+        );
+        section.append(fields);
+        const preview = formatVmHexPreview(snapshot?.preview_hex);
+        if (preview) {
+          const bytes = textElement('pre', 'vm-bytecode-preview', preview);
+          bytes.setAttribute('aria-label', 'Bytecode hex preview');
+          section.append(bytes);
+        } else {
+          section.append(textElement('div', 'vm-workspace-empty', snapshot?.unavailable_reason || 'No bytecode preview was retained.'));
+        }
+        return section;
+      }
+
+      function renderVmWorkspaceCoverage(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
+        heading.append(textElement('h4', '', 'Coverage'), textElement('span', '', workspace.coverage.complete ? 'complete' : 'partial'));
+        const coverage = workspace.coverage;
+        const percent = coverage.snapshot_bytes > 0
+          ? Math.max(0, Math.min(100, Math.round(coverage.characterized_opcodes * 100 / coverage.snapshot_bytes)))
+          : 0;
+        const panel = document.createElement('div'); panel.className = 'vm-coverage';
+        const line = document.createElement('div'); line.className = 'vm-coverage-line';
+        line.append(
+          textElement('span', '', 'characterized opcodes vs snapshot bytes'),
+          textElement('strong', '', `${coverage.characterized_opcodes} / ${coverage.snapshot_bytes}`)
+        );
+        const bar = document.createElement('div'); bar.className = 'vm-coverage-bar';
+        bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuemin', '0');
+        bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-valuenow', String(percent));
+        const fill = document.createElement('span'); fill.style.width = `${percent}%`; bar.append(fill);
+        panel.append(line, bar);
+        const omissions = document.createElement('ul'); omissions.className = 'vm-coverage-omissions';
+        if (coverage.omissions.length === 0) {
+          omissions.append(textElement('li', '', coverage.complete ? 'No named omissions.' : 'Partial coverage has no named omission.'));
+        } else {
+          coverage.omissions.forEach(omission => {
+            const item = document.createElement('li');
+            item.append(textElement('strong', '', omission.reason));
+            if (omission.detail) item.append(document.createTextNode(`: ${omission.detail}`));
+            omissions.append(item);
+          });
+        }
+        section.append(heading, panel, omissions);
+        return section;
+      }
+
+      function renderVmWorkspaceUnknowns(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
+        heading.append(textElement('h4', '', 'Residual unknowns'), textElement('span', '', `${workspace.unknowns.length} unresolved`));
+        const evidence = document.createElement('div'); evidence.className = 'vm-analysis-evidence vm-workspace-unknowns';
+        if (workspace.unknowns.length === 0) {
+          const row = document.createElement('div'); row.className = 'vm-analysis-rule';
+          row.append(textElement('strong', '', 'unknowns'), textElement('span', '', 'No residual unknowns were reported.'), textElement('b', '', '0'));
+          evidence.append(row);
+        } else {
+          workspace.unknowns.forEach(unknown => {
+            const row = document.createElement('div'); row.className = 'vm-analysis-rule';
+            row.append(textElement('strong', '', 'unknown'), textElement('span', '', unknown), textElement('b', '', '?'));
+            evidence.append(row);
+          });
+        }
+        section.append(heading, evidence);
+        return section;
+      }
+
+      function renderVmOpcodeWorkspace(selected) {
+        const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
+        const container = document.createElement('section'); container.className = 'vm-workspace';
+        container.setAttribute('aria-label', 'Opcode workspace');
+        const notice = vmWorkspaceNotice(workspace);
+        if (notice) container.append(notice);
+        if (!workspace) return container;
+        const head = document.createElement('div'); head.className = 'vm-workspace-title';
+        head.append(
+          textElement('div', '', 'Opcode workspace'),
+          textElement('span', '', `${workspace.model ?? 'unknown'} model · interpreter artifact ${workspace.interpreter_artifact_id}`)
+        );
+        container.append(
+          head,
+          renderVmHandlers(workspace),
+          renderVmBytecode(workspace),
+          renderVmWorkspaceCoverage(workspace),
+          renderVmWorkspaceUnknowns(workspace)
+        );
+        return container;
+      }
+
+      function renderVmOpcodeWorkspaceInPlace(selected) {
+        const host = [...elements.vmDetail.querySelectorAll('.vm-workspace-host')][0]
+          ?? (() => {
+            const node = document.createElement('div');
+            node.className = 'vm-workspace-host';
+            elements.vmDetail.append(node);
+            return node;
+          })();
+        host.replaceChildren(...(selected ? [renderVmOpcodeWorkspace(selected)] : []));
+      }
+
       function renderVmDetail() {
         const selected = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
         if (!selected) {
@@ -1400,6 +1716,7 @@
           });
           card.append(head, fields, evidence);
           elements.vmDetail.replaceChildren(summary, card);
+          renderVmOpcodeWorkspaceInPlace(selected);
           return;
         }
         const investigation = state.vmFindings.filter(finding => finding.investigationId === selected.investigationId);
@@ -1455,13 +1772,19 @@
           coveragePanel.append(line, bar); card.append(coveragePanel);
         }
         elements.vmDetail.replaceChildren(summary, card);
+        renderVmOpcodeWorkspaceInPlace(selected);
       }
 
       let renderedVmFindings = null;
+      let renderedVmWorkspace = null;
       function renderVmLab() {
         const focusedFindingId = document.activeElement?.classList.contains('vm-row')
           ? document.activeElement.dataset.findingId
           : null;
+        const focusedHandlerKey = document.activeElement?.classList.contains('vm-handler-row')
+          ? document.activeElement.dataset.handlerKey
+          : null;
+        renderVmSessionStatus();
         elements.vmCount.textContent = String(state.vmFindings.length);
         if (!state.vmFindings.some(finding => finding.findingId === state.selectedVmFindingId)) {
           state.selectedVmFindingId = state.vmFindings[0]?.findingId ?? null;
@@ -1490,7 +1813,12 @@
         const selectedSourceId = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId)?.sourceArtifactId;
         const renderKey = JSON.stringify([state.vmFindings, state.selectedVmFindingId,
           state.artifacts.some(artifact => artifact.artifact_id === selectedSourceId)]);
-        if (renderKey === renderedVmFindings) return;
+        const workspaceKey = JSON.stringify([
+          state.vmOpcodeWorkspaceStatus, state.vmOpcodeWorkspace?.document_digest ?? null,
+          state.selectedVmHandlerKey
+        ]);
+        if (renderKey === renderedVmFindings && workspaceKey === renderedVmWorkspace) return;
+        if (renderKey !== renderedVmFindings) {
         const selectedExists = state.vmFindings.some(finding => finding.findingId === state.selectedVmFindingId);
         elements.vmList.replaceChildren(...state.vmFindings.map((finding, index) => {
           const row = document.createElement('button'); row.className = 'vm-row'; row.type = 'button';
@@ -1526,7 +1854,15 @@
             .find(row => row.dataset.findingId === focusedFindingId)?.focus({ preventScroll: true });
         }
         renderVmDetail();
+        } else {
+          renderVmOpcodeWorkspaceInPlace(state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId));
+        }
+        if (focusedHandlerKey) {
+          [...elements.vmDetail.querySelectorAll('.vm-handler-row')]
+            .find(row => row.dataset.handlerKey === focusedHandlerKey)?.focus({ preventScroll: true });
+        }
         renderedVmFindings = renderKey;
+        renderedVmWorkspace = workspaceKey;
       }
 
       function requestDomain(request) {
@@ -10513,6 +10849,7 @@
       }
 
       function renderDebugger() {
+        renderVmSessionStatus();
         if (typeof elementScreenshotPanel !== 'undefined') elementScreenshotPanel.refresh();
         const session = state.debuggerSession;
         const paused = session?.state === 'paused';
@@ -10927,6 +11264,8 @@
           state.captureControlsAvailable = body.capture_controls_available === true;
           state.sessionMode = ['demo', 'idle'].includes(body.capture_mode)
             ? body.capture_mode : 'live';
+          state.vmStealthSession = body.stealth_session === true ||
+            body.native_stealth === true || body.quiet_mode === true;
           state.canvasRenderCaptures = body.canvas_render_captures ?? [];
           state.events = body.events;
           const currentSignalKeys = new Set(fingerprintEventsFromEvents(state.events).map(signalEventKey));

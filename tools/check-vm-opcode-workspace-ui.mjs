@@ -114,7 +114,7 @@ render();`;
       assert.equal(await evaluate("document.activeElement === document.querySelectorAll('.vm-handler-row')[1]"), true);
       assert.equal(await evaluate("document.activeElement.getAttribute('aria-selected')"), 'true');
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      for (const panel of ['bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'effects']) {
+      for (const panel of ['bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'effects']) {
         await evaluate(`document.querySelector('[data-vm-panel="${panel}"]').click()`);
         assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
         assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
@@ -136,7 +136,8 @@ render();`;
       await evaluate("state.vmAnalysisDocument={document_digest:fixture.analysis_digest,capture_mode:'unknown'};renderVmSessionStatus()");
 
     }
-    await evaluate("state.vmOpcodeWorkspace=hostWorkspace;state.vmHostLinks=hostLinks;state.vmHostLinksStatus='ready';render()");
+    await evaluate("state.vmOpcodeWorkspace=hostWorkspace;state.vmHostLinks=hostLinks;state.vmHostLinksStatus='ready';state.vmWorkspacePanel='host-links';render()");
+    assert.equal(await evaluate("document.querySelector('[data-vm-panel-content=\"host-links\"]').hidden"), false);
     assert((await evaluate('document.body.textContent')).includes('event 1:1:50'));
     assert((await evaluate('document.body.textContent')).includes('exact request-value provenance'));
     for (const width of [1440, 390]) {

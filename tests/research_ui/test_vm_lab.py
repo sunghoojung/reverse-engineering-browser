@@ -239,6 +239,46 @@ process.stdout.write(JSON.stringify({{
             if not complete:
                 self.assertIn("uncharacterized-bytecode", result["copy"])
 
+    def test_declarative_effects_render_unknowns_and_preserve_contradictions(self) -> None:
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        start = app.index("      function vmEffectCellText")
+        end = app.index("      function renderVmBytecode", start)
+        fixture = json.loads((FIXTURE.parent / "vm-effects-contradicted-v2.json").read_text(encoding="utf-8"))
+        result = self.run_evidence_model(
+            """
+class Element {
+  constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  setAttribute(key, value) { this.attributes[key] = value; }
+}
+const document = {createElement: tag => new Element(tag)};
+const textElement = (tag, cls, text) => { const node = new Element(tag); node.className = cls; node.textContent = text; return node; };
+const vmField = (key, value) => textElement('div', '', `${key}: ${value}`);
+const flatten = node => [node, ...node.children.flatMap(flatten)];
+""" + app[start:end] + f"""
+const fixture = {json.dumps(fixture)};
+const copy = flatten(renderVmEffects(fixture.workspaces[0])).map(row => row.textContent).join(' ');
+const malicious = structuredClone(fixture);
+malicious.workspaces[0].handlers[0].effects[0].expression = 'import("untrusted")';
+const empty = structuredClone(fixture.workspaces[0]); empty.handlers.forEach(row => row.effects = []);
+process.stdout.write(JSON.stringify({{
+  accepted: isVmOpcodeWorkspaceDocument(fixture), malformedAccepted: isVmOpcodeWorkspaceDocument(malicious),
+  selected: vmUniqueWorkspaceEffect(fixture.workspaces[0].handlers[0]), copy,
+  unknownCell: vmEffectCellText({{space:'register',index:null,operand:null,value:null}}),
+  emptyCopy: flatten(renderVmEffects(empty)).map(row => row.textContent).join(' ')
+}}));
+"""
+        )
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["malformedAccepted"])
+        self.assertIsNone(result["selected"])
+        self.assertIn("conflicting effects", result["copy"])
+        self.assertIn("inferred", result["copy"])
+        self.assertIn("contradicted", result["copy"])
+        self.assertIn("little-endian", result["copy"])
+        self.assertEqual(result["unknownCell"], "register[unknown] = unknown")
+        self.assertIn("No source-bound declarative effects", result["emptyCopy"])
+
     def session_presentation(self, state: dict) -> dict:
         app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
         start = app.index("      function vmSessionPresentation")

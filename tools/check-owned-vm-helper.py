@@ -2,6 +2,7 @@
 """Verify the real owned native helper against independent transition goldens."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -325,6 +326,42 @@ def invalid_arguments(binary):
         assert result.stderr == b"Invalid owned fixture control arguments\n"
 
 
+def workspace_effect_declarations(goldens):
+    """Compare workspace declarations with the same independent native goldens."""
+    fixtures = Path(__file__).parent / "fixtures"
+    manifest_bytes = (fixtures.parent.parent / "protocol" / "owned-vm-programs-v1.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
+    for architecture in ("register", "stack"):
+        declaration = json.loads((fixtures / "vm-workspace-effects" /
+                                  f"native-{architecture}.json").read_text(encoding="utf-8"))
+        reference = fixtures / "native-vm-dispatch" / f"{architecture}-reference.js"
+        assert declaration["source_sha256"] == hashlib.sha256(reference.read_bytes()).hexdigest()
+        assert declaration["program_manifest_sha256"] == hashlib.sha256(manifest_bytes).hexdigest()
+        assert declaration["entry_offset"] is None
+        assert declaration["pc_units"] == "instruction-index"
+        effects = {row["opcode"]: row["effects"][0] for row in declaration["handlers"]}
+        program = next(program for program in manifest["programs"]
+                       if program["fixture"] == architecture)
+        for instruction in program["instructions"]:
+            assert effects[instruction["opcode"]]["operation"] == instruction["declared_operation"]
+        for transition in goldens[architecture]["transitions"]:
+            effect = effects[transition["opcode"]]
+            assert effect["evidence_class"] == "inferred"
+            assert effect["instruction_size"] is None
+            assert all(operand["byte_offset"] is None and operand["byte_size"] is None
+                       for operand in effect["operand_layout"])
+            for access in ("read", "write"):
+                observed = [cell for cell in transition["effects"] if cell["access"] == access]
+                declared = effect[f"{access}s"]
+                assert len(observed) == len(declared), (architecture, transition["opcode"], access)
+                for cell, reference_cell in zip(declared, observed):
+                    assert cell["space"] == reference_cell["location"]
+                    assert cell["index"] == reference_cell["index"] or (
+                        cell["index"] is None and cell["operand"] is not None)
+                    # Native zero-filled unknown slots are not declared zero values.
+                    assert cell["value"] is None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
@@ -332,6 +369,7 @@ def main():
     golden_path = Path(__file__).parent / "fixtures" / "owned-vm-golden-transitions-v1.json"
     goldens = json.loads(golden_path.read_text(encoding="utf-8"))
     assert goldens["schema"] == "reb-owned-fixture-independent-goldens-v1"
+    workspace_effect_declarations(goldens)
     failed_initialization_cleanup(args.binary)
     peak = golden_runs(args.binary, goldens)
     guard_and_transport(args.binary)

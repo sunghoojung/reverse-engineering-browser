@@ -1,0 +1,309 @@
+{
+  "format": "reb-owned-workspace-effects-v1",
+  "source_sha256": "e757c3029fdbf8ef0c77845e99c9270ad70d533c76a5625fb4d64129543c0812",
+  "model": "stack",
+  "entry_offset": null,
+  "operand_endianness": null,
+  "handlers": [
+    {
+      "opcode": 1,
+      "effects": [
+        {
+          "effect_id": "native-stack-constant-v1",
+          "evidence_class": "inferred",
+          "operation": "constant",
+          "instruction_size": null,
+          "operand_layout": [
+            {
+              "name": "destination",
+              "kind": "stack",
+              "byte_offset": null,
+              "byte_size": null
+            },
+            {
+              "name": "value",
+              "kind": "immediate",
+              "byte_offset": null,
+              "byte_size": null
+            }
+          ],
+          "reads": [],
+          "writes": [
+            {
+              "space": "stack",
+              "index": null,
+              "operand": "destination",
+              "value": null
+            }
+          ],
+          "flow": {
+            "kind": "next",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 2,
+      "effects": [
+        {
+          "effect_id": "native-stack-add_modulo_2_64-v1",
+          "evidence_class": "inferred",
+          "operation": "add_modulo_2_64",
+          "instruction_size": null,
+          "operand_layout": [],
+          "reads": [
+            {
+              "space": "stack",
+              "index": "0",
+              "operand": null,
+              "value": null
+            },
+            {
+              "space": "stack",
+              "index": "1",
+              "operand": null,
+              "value": null
+            }
+          ],
+          "writes": [
+            {
+              "space": "stack",
+              "index": "0",
+              "operand": null,
+              "value": null
+            },
+            {
+              "space": "stack",
+              "index": "1",
+              "operand": null,
+              "value": null
+            }
+          ],
+          "flow": {
+            "kind": "next",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 3,
+      "effects": [
+        {
+          "effect_id": "native-stack-store-v1",
+          "evidence_class": "inferred",
+          "operation": "store",
+          "instruction_size": null,
+          "operand_layout": [
+            {
+              "name": "address",
+              "kind": "address",
+              "byte_offset": null,
+              "byte_size": null
+            }
+          ],
+          "reads": [
+            {
+              "space": "stack",
+              "index": "0",
+              "operand": null,
+              "value": null
+            }
+          ],
+          "writes": [
+            {
+              "space": "memory",
+              "index": "16",
+              "operand": null,
+              "value": null
+            },
+            {
+              "space": "stack",
+              "index": "0",
+              "operand": null,
+              "value": null
+            }
+          ],
+          "flow": {
+            "kind": "next",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 4,
+      "effects": [
+        {
+          "effect_id": "native-stack-load-v1",
+          "evidence_class": "inferred",
+          "operation": "load",
+          "instruction_size": null,
+          "operand_layout": [
+            {
+              "name": "address",
+              "kind": "address",
+              "byte_offset": null,
+              "byte_size": null
+            }
+          ],
+          "reads": [
+            {
+              "space": "memory",
+              "index": "16",
+              "operand": null,
+              "value": null
+            }
+          ],
+          "writes": [
+            {
+              "space": "stack",
+              "index": "0",
+              "operand": null,
+              "value": null
+            }
+          ],
+          "flow": {
+            "kind": "next",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 5,
+      "effects": [
+        {
+          "effect_id": "native-stack-branch_zero-v1",
+          "evidence_class": "inferred",
+          "operation": "branch_zero",
+          "instruction_size": null,
+          "operand_layout": [
+            {
+              "name": "target",
+              "kind": "target",
+              "byte_offset": null,
+              "byte_size": null
+            }
+          ],
+          "reads": [
+            {
+              "space": "stack",
+              "index": "0",
+              "operand": null,
+              "value": null
+            }
+          ],
+          "writes": [],
+          "flow": {
+            "kind": "branch",
+            "target_operand": "target",
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 6,
+      "effects": [
+        {
+          "effect_id": "native-stack-jump-v1",
+          "evidence_class": "inferred",
+          "operation": "jump",
+          "instruction_size": null,
+          "operand_layout": [
+            {
+              "name": "target",
+              "kind": "target",
+              "byte_offset": null,
+              "byte_size": null
+            }
+          ],
+          "reads": [],
+          "writes": [],
+          "flow": {
+            "kind": "jump",
+            "target_operand": "target",
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 7,
+      "effects": [
+        {
+          "effect_id": "native-stack-branch_nonzero-v1",
+          "evidence_class": "inferred",
+          "operation": "branch_nonzero",
+          "instruction_size": null,
+          "operand_layout": [
+            {
+              "name": "target",
+              "kind": "target",
+              "byte_offset": null,
+              "byte_size": null
+            }
+          ],
+          "reads": [
+            {
+              "space": "stack",
+              "index": "0",
+              "operand": null,
+              "value": null
+            }
+          ],
+          "writes": [],
+          "flow": {
+            "kind": "branch",
+            "target_operand": "target",
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    },
+    {
+      "opcode": 8,
+      "effects": [
+        {
+          "effect_id": "native-stack-halt-v1",
+          "evidence_class": "inferred",
+          "operation": "halt",
+          "instruction_size": null,
+          "operand_layout": [],
+          "reads": [],
+          "writes": [],
+          "flow": {
+            "kind": "halt",
+            "target_operand": null,
+            "target_offset": null
+          },
+          "atomic_group": null,
+          "superoperator": null
+        }
+      ]
+    }
+  ],
+  "program_manifest_sha256": "2e9f20bb3380e518db160b5da89e9a1530b03e31fb2bf094591b7ee5e0e1e778",
+  "binding": "declared-reference-not-captured-runtime-source",
+  "pc_units": "instruction-index"
+}

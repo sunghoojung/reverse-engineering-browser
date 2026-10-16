@@ -21,6 +21,7 @@ mod validation;
 pub mod vm;
 mod vm_byte_coverage;
 mod vm_bytecode;
+mod vm_effects;
 mod vm_opcode;
 pub mod wasm;
 mod worker;

@@ -4259,3 +4259,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-contextual-workspace :is(p, pre, li) { overflow-wrap: anywhere; white-space: pre-wrap; }
 .vm-contextual-workspace :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 760px) { .vm-contextual-panes { grid-template-columns: minmax(0, 1fr); } }
+
+.vm-effect-row { border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.vm-effect-row summary { padding: 10px; cursor: pointer; }
+.vm-effect-row summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.vm-effect-detail { padding: 10px; line-height: 1.6; overflow-wrap: anywhere; }

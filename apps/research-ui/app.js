@@ -1,5 +1,16 @@
       const passiveSecurityPanel = installPassiveSecurityReport({getRequest: () => apiCatalogResolveSource(state.selectedCaptureIdentity,state.requests).record});
 
+      const localOverrideManager = RebLocalOverrideManager.install({
+        root: document.querySelector('#local-override-manager'),
+        getSession: () => state.debuggerSession,
+        contextKey: () => experimentContextKey(),
+        busy: () => Boolean(state.experimentPending || state.debuggerActionPending || state.experimentNeedsRefresh ||
+          (requestInterception()?.pending_requests ?? 0) > 0 ||
+          ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state) ||
+          automationRecipesState()?.auto_armed || ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state)),
+        run: async request => currentExperimentReceipt(await runExperimentAction(request))
+      });
+
       const elementScreenshotPanel = RebElementScreenshot.install({getState: () => state.debuggerSession});
       const trafficCaptureExport = installTrafficCaptureExport(
         document.querySelector('#traffic-capture-export'),
@@ -3930,6 +3941,7 @@
       }
 
       function renderExperiment() {
+        localOverrideManager.render();
         if (typeof elementScreenshotPanel !== 'undefined') elementScreenshotPanel.setVisible(state.experimentMode === 'screenshot' && document.querySelector('#screen-experiments')?.hidden === false);
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === state.experimentMode;
@@ -10486,7 +10498,9 @@
       async function debuggerAction(request, memoryOwner = null, experimentOwner = null) {
         const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
         if ((state.debuggerActionPending && !parallelControl) || (memoryOriginTraceActive() && request.action !== 'stop_memory_origin_trace')) return null;
-        const deadline = memoryOwner ? memoryActionDeadline(request.action) : 0;
+        const localOverrideAction = experimentOwner && request.action === 'configure_request_interception' &&
+          (request.local_override || request.expected_local_override);
+        const deadline = memoryOwner ? memoryActionDeadline(request.action) : localOverrideAction ? 10000 : 0;
         if (memoryOwner && (!deadline || memoryOwner.action !== request.action)) return null;
         const owner = {memoryOwner, experimentOwner, request, retire: null};
         if (experimentOwner) experimentOwner.transport = owner;
@@ -10511,7 +10525,7 @@
                 reject(new Error(message));
                 controller.abort();
               };
-              if (memoryOwner) timer = setTimeout(() => owner.retire?.(`Memory action acknowledgement exceeded ${deadline / 1000} seconds. Native completion is unknown; no cancellation or retry was requested.`), deadline);
+              if (deadline) timer = setTimeout(() => owner.retire?.(`${localOverrideAction ? 'Local override' : 'Memory action'} acknowledgement exceeded ${deadline / 1000} seconds. Native completion is unknown; no cancellation or retry was requested.`), deadline);
             });
           }
           const transport = (async () => {

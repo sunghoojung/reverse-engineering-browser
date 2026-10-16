@@ -578,6 +578,30 @@
                   </div>
                   </details>
                 </article>
+                <article class="experiment-card" id="local-override-manager">
+                  <header><div><h2>Local file override</h2><p>One reviewed response snapshot, one exact disposable target.</p></div></header>
+                  <div class="experiment-body experiment-form">
+                    <p class="experiment-privacy">Choose a UTF-8 file up to 64 KiB. Preview stays local and inert. Arm replaces the single interception rule; later matching requests may execute replacement JavaScript. Only use code and targets you are authorized to test.</p>
+                    <label>Replacement file<input data-override-file type="file" /></label>
+                    <p data-override-facts class="experiment-privacy" style="overflow-wrap:anywhere"></p>
+                    <label>Exact snapshot preview<textarea data-override-preview readonly spellcheck="false" rows="8" aria-label="Inert replacement file preview"></textarea></label>
+                    <label>Exact request URL (including query)<input data-override-url type="url" maxlength="2048" autocomplete="off" placeholder="http://127.0.0.1:17777/fixture.js" /></label>
+                    <div class="experiment-form-row">
+                      <label>Method<select data-override-method><option>GET</option><option>HEAD</option></select></label>
+                      <label>Lifetime from preparation (seconds)<input data-override-ttl type="number" value="60" min="1" max="300" step="1" /></label>
+                    </div>
+                    <label>Response content type<select data-override-type><option value="text/plain; charset=utf-8">UTF-8 plain text</option><option value="text/javascript; charset=utf-8">UTF-8 JavaScript</option><option value="application/json; charset=utf-8">UTF-8 JSON</option><option value="text/css; charset=utf-8">UTF-8 CSS</option></select></label>
+                    <label><input data-override-review type="checkbox" /> I reviewed these exact bytes, digest, URL and settings for this authorized disposable target.</label>
+                    <div class="experiment-actions">
+                      <button data-override-prepare class="secondary-button" type="button" disabled>Prepare snapshot</button>
+                      <button data-override-arm class="trace-button" type="button" disabled>Arm prepared override</button>
+                      <button data-override-disarm class="secondary-button" type="button" disabled>Disarm exact override</button>
+                      <button data-override-clear class="secondary-button" type="button">Clear preview</button>
+                    </div>
+                    <p data-override-status class="experiment-privacy" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere"></p>
+                    <p class="experiment-privacy">No file paths are inferred. The browser supplies selected bytes, not filesystem metadata. No watcher, automatic request, persistence or third-party upload. Closing this panel does not disarm. Keep it open for guarded Disarm, or use the CLI with its original prepared action. Expiry blocks new fulfillment admission, not in-flight completion.</p>
+                  </div>
+                </article>
                 <article class="experiment-card">
                   <header><div><h2>Interception rule</h2><p>Choose which requests to match and what to change.</p></div><span id="experiment-rule-badge" class="experiment-card-badge" data-kind="offline">Unarmed</span></header>
                   <div class="experiment-body">
@@ -1448,6 +1472,7 @@
     <script src="investigation_navigation.js"></script>
     <script src="investigation_notebook.js"></script>
     <script src="element_screenshot.js"></script>
+    <script src="local_override_manager.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

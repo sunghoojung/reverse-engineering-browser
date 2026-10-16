@@ -10,6 +10,34 @@ Project-wide authorization, capture, and privacy policy is in
 [SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
 and limits.
 
+## Local file override manager
+
+In **Experiments → Interceptor**, create an isolated context and apply **Target**
+scope to its primary page. **Local file override** chooses a single browser File,
+validates at most 64 KiB of exact UTF-8, and shows inert preview text and SHA-256.
+Set the exact canonical URL (including query), GET/HEAD, content type and 1–300
+second lifetime. Review the bytes and settings, then **Prepare snapshot** and
+**Arm prepared override** separately. Preparation sends nothing; Arm sends only
+to the existing local debugger and never requests the target URL. Later matching
+requests may execute replacement JavaScript in that disposable target.
+
+Edits invalidate preparation. The snapshot is frozen; later on-disk edits never
+change armed bytes. The panel shows exact target, experiment, URL, digest and
+absolute expiry. Arm replaces the single existing rule slot. **Disarm exact
+override** uses the original identity guard, including after expiry or an unknown
+receipt, and cannot remove a different rule. A failed receipt is explicitly
+unknown and is never retried automatically. Public rule summaries omit URL
+queries, so a matching summary alone never confirms an unknown arm operation.
+
+The browser grants bytes, not a trusted OS path or symlink metadata. The CLI's
+strict regular-file and symlink checks are a separate workflow. This UI neither
+watches files nor saves them; clear drops preview bytes but retains the attempted
+identity for guarded disarm. Reloading loses that identity and never rearms;
+original expiry still applies. Arm transfers the selected bytes to the local
+backend and serves them only to matching disposable-target requests; it performs
+no third-party/provider upload. Native macOS file-picker behavior requires native
+validation. See [Scoped local overrides v1](../../protocol/local-overrides-v1.md).
+
 ## Connected investigations
 
 **Advanced** is a manually opened workspace chooser. Completed workspace

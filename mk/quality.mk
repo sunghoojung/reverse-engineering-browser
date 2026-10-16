@@ -105,6 +105,7 @@ javascript-check:
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
 	node tools/check-local-overrides.mjs
+	node tools/check-local-override-manager.mjs
 	node tools/check-graphql-sdl.mjs
 	node tools/check-passive-security.mjs
 	node tools/check-marker-fuzz.mjs

@@ -990,17 +990,17 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 .unwrap()
                 .extend(omissions.clone());
         }
-        if let Some(source) = source {
-            if let Some(workspace) = crate::vm_opcode::workspace(
+        if let Some(source) = source
+            && let Some(workspace) = crate::vm_opcode::workspace(
                 root,
                 artifact,
                 &source,
                 &result,
                 &snapshot_artifacts,
                 &events,
-            ) {
-                opcode_workspaces.push(workspace);
-            }
+            )
+        {
+            opcode_workspaces.push(workspace);
         }
         results.push(result);
     }

@@ -15,6 +15,7 @@ const PRODUCER_VERSION: &str = "1.0.0";
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_WORKSPACES: usize = 256;
+const MAX_UNKNOWNS: usize = 256;
 const SNAPSHOT_PREVIEW_BYTES: usize = 4096;
 
 static FUNCTION_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
@@ -484,6 +485,13 @@ pub(crate) fn workspace(
     }
     unknowns.sort();
     unknowns.dedup();
+    if unknowns.len() > MAX_UNKNOWNS {
+        unknowns.truncate(MAX_UNKNOWNS);
+        omissions.push(json!({
+            "reason": "unknown-limit",
+            "detail": "Only the first 256 residual unknowns are retained."
+        }));
+    }
     let snapshot_bytes = snapshots
         .iter()
         .filter_map(|snapshot| snapshot["preview_hex"].as_str())

@@ -2254,7 +2254,7 @@
         return workspace.handlers.map(handler => ({
           key: `${handler.opcode}:${handler.handler_index ?? ''}:${handler.source.byte_offset}`,
           opcode: handler.opcode === null ? 'unknown' : `0x${handler.opcode.toString(16).padStart(2, '0')}`,
-          label: handler.label || `handler ${handler.handler_index ?? handler.opcode}`,
+          label: handler.label || (handler.opcode === null ? 'Unbound dispatch arm' : `handler ${handler.handler_index ?? handler.opcode}`),
           state: handler.state,
           samples: handler.sample_count,
           positions: workspace.samples.filter(sample => sample.opcode === handler.opcode).slice(0, 4).map(sample =>

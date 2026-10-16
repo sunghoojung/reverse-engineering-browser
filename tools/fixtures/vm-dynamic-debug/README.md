@@ -14,3 +14,9 @@ JavaScript as inert bytes and never execute it.
 The `bytecode_buffer` record in the fake manifest uses the native artifact
 kind and `runtime_typed_array` capture origin. Workspace snapshot origin
 labels stay `runtime-typed-array` in `vm-opcode-workspace-v2`.
+
+`wasm-dispatch.json` contains authored WASM modules as hex: single and repeated
+`br_table` loops, a `call_indirect` loop, and a non-VM constant/drop function.
+These are decoded statically, never instantiated. Dispatch source ranges identify
+the instruction, not a recovered guest handler body. Dynamic/default arms retain
+unknown opcodes. Repeated selectors remain scoped to their dispatch source site.

@@ -11,6 +11,9 @@ use std::{
     sync::LazyLock,
 };
 
+#[path = "vm_opcode_wasm.rs"]
+mod wasm;
+
 const PRODUCER_VERSION: &str = "2.0.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
@@ -761,28 +764,42 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
 pub(crate) fn workspace(
     root: &Path,
     artifact: &Value,
-    source: &str,
+    bytes: &[u8],
     result: &Value,
     snapshot_artifacts: &[Value],
     events: &[Value],
 ) -> Option<Value> {
-    if result["tier"] != "likely-vm" || result["runtime"] != "javascript" {
+    if result["tier"] != "likely-vm" {
         return None;
     }
-    let region = result["observations"]
-        .as_array()?
-        .iter()
-        .find_map(|observation| {
-            (observation["rule_id"] == "js.dispatch-loop").then_some((
-                observation["function_region"]["byte_offset"].as_u64()? as usize,
-                observation["function_region"]["byte_size"].as_u64()? as usize,
-            ))
-        })?;
-    let end = region.0.checked_add(region.1)?;
-    if end > source.len() || !source.is_char_boundary(region.0) || !source.is_char_boundary(end) {
-        return None;
-    }
-    let (mut handlers, model, mut unknowns, mut omissions) = static_handlers(source, region.0, end);
+    let runtime = result["runtime"].as_str()?;
+    let (mut handlers, model, mut unknowns, mut omissions) = match runtime {
+        "javascript" => {
+            let source = std::str::from_utf8(bytes).ok()?;
+            let region = result["observations"]
+                .as_array()?
+                .iter()
+                .find_map(|observation| {
+                    (observation["rule_id"] == "js.dispatch-loop").then_some((
+                        observation["function_region"]["byte_offset"].as_u64()? as usize,
+                        observation["function_region"]["byte_size"].as_u64()? as usize,
+                    ))
+                })?;
+            let end = region.0.checked_add(region.1)?;
+            if end > source.len()
+                || !source.is_char_boundary(region.0)
+                || !source.is_char_boundary(end)
+            {
+                return None;
+            }
+            static_handlers(source, region.0, end)
+        }
+        "webassembly" => {
+            let (handlers, unknowns, omissions) = wasm::handlers(bytes, result)?;
+            (handlers, "unknown".into(), unknowns, omissions)
+        }
+        _ => return None,
+    };
     if handlers.is_empty() {
         omissions.push(json!({"reason":"handler-unavailable","detail":"No static integer handler candidate was visible in the dispatch region."}));
     }
@@ -795,7 +812,9 @@ pub(crate) fn workspace(
     let mut retained_samples = Vec::new();
     let mut sample_count = 0u64;
     for event in events {
-        if let Some(value) = sample(event, artifact, &invocations) {
+        if runtime == "javascript"
+            && let Some(value) = sample(event, artifact, &invocations)
+        {
             let opcode = value["opcode"].as_u64().expect("sample opcode") as u32;
             *samples.entry(opcode).or_default() += 1;
             sample_count += 1;
@@ -810,7 +829,9 @@ pub(crate) fn workspace(
         omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
     }
     for handler in &mut handlers {
-        let opcode = handler["opcode"].as_u64().expect("handler opcode") as u32;
+        let Some(opcode) = handler["opcode"].as_u64().map(|value| value as u32) else {
+            continue;
+        };
         if let Some(count) = samples.get(&opcode) {
             handler["sample_count"] = json!(count);
             handler["state"] = json!("observed");
@@ -987,10 +1008,18 @@ mod tests {
     }
 
     fn analyze(source: &str, events: &[Value]) -> (tempfile::TempDir, Value, Value) {
+        analyze_artifact(source.as_bytes(), "javascript", events)
+    }
+
+    fn analyze_artifact(
+        bytes: &[u8],
+        kind: &str,
+        events: &[Value],
+    ) -> (tempfile::TempDir, Value, Value) {
         let root = tempfile::tempdir().expect("artifact store");
         fs::create_dir_all(root.path().join("blobs")).expect("blob directory");
-        let hash = hex::encode(Sha256::digest(source.as_bytes()));
-        fs::write(root.path().join(format!("blobs/{hash}.bin")), source).expect("source blob");
+        let hash = hex::encode(Sha256::digest(bytes));
+        fs::write(root.path().join(format!("blobs/{hash}.bin")), bytes).expect("source blob");
         let artifact = json!({
             "protocol_version":1,
             "artifact_id":"1",
@@ -1000,11 +1029,11 @@ mod tests {
             "parent_artifact_id":"0",
             "creator_event_id":"0",
             "execution_context_id":"1",
-            "capture_origin":"dynamic_javascript",
-            "kind":"javascript",
-            "url":"fixture://vm-dynamic-debug/source.js",
-            "mime_type":"text/javascript",
-            "byte_size":source.len(),
+            "capture_origin": if kind == "wasm" { "webassembly_compile" } else { "dynamic_javascript" },
+            "kind":kind,
+            "url":"fixture://vm-dynamic-debug/source",
+            "mime_type": if kind == "wasm" { "application/wasm" } else { "text/javascript" },
+            "byte_size":bytes.len(),
             "sha256":hash,
             "sensitive":false,
             "content_path":format!("blobs/{hash}.bin"),
@@ -1049,6 +1078,155 @@ mod tests {
             .expect("workspace object")
             .remove("document_digest");
         assert_eq!(expected, vm::digest(&unsigned).expect("workspace digest"));
+    }
+
+    fn wasm_fixture(name: &str) -> Vec<u8> {
+        let fixtures: Value = serde_json::from_str(&fixture("wasm-dispatch.json")).unwrap();
+        hex::decode(fixtures[name].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn wasm_dispatch_workspaces_preserve_inferred_and_unknown_arms() {
+        for name in ["br_table", "call_indirect"] {
+            let bytes = wasm_fixture(name);
+            // Validation and analysis are inert; no WebAssembly instance is created.
+            wasmparser::Validator::new().validate_all(&bytes).unwrap();
+            let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+            assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+            assert_eq!(document["summary"]["workspace_count"], 1);
+            let workspace = &document["workspaces"][0];
+            assert_eq!(workspace["runtime"], "webassembly");
+            assert_eq!(workspace["model"], "unknown");
+            let handlers = workspace["handlers"].as_array().unwrap();
+            assert_eq!(handlers.len(), if name == "br_table" { 3 } else { 1 });
+            let unknown = handlers.last().unwrap();
+            assert!(unknown["opcode"].is_null());
+            assert_eq!(unknown["state"], "unknown");
+            assert!(unknown.get("handler_index").is_none());
+            assert_eq!(unknown["sample_count"], 0);
+            for handler in handlers {
+                let offset = handler["source"]["byte_offset"].as_u64().unwrap() as usize;
+                assert_eq!(bytes[offset], if name == "br_table" { 0x0e } else { 0x11 });
+            }
+            if name == "br_table" {
+                assert_eq!(handlers[0]["opcode"], 0);
+                assert_eq!(handlers[1]["opcode"], 1);
+                assert_eq!(handlers[0]["state"], "inferred");
+            }
+            assert_eq!(workspace["coverage"]["complete"], false);
+            assert_schema(&document);
+        }
+        let (_, analysis, document) = analyze_artifact(&wasm_fixture("non_vm"), "wasm", &[]);
+        assert_eq!(analysis["summary"]["likely_vm_count"], 0);
+        assert_eq!(document["summary"]["workspace_count"], 0);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn wasm_selectors_are_scoped_to_each_dispatch_site() {
+        let bytes = wasm_fixture("two_br_tables");
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let handlers = document["workspaces"][0]["handlers"].as_array().unwrap();
+        assert_eq!(handlers.len(), 6);
+        assert_eq!(handlers[0]["opcode"], 0);
+        assert_eq!(handlers[3]["opcode"], 0);
+        assert_ne!(handlers[0]["source"], handlers[3]["source"]);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn wasm_handler_cap_and_selected_function_boundary() {
+        let mut bytes = wasm_fixture("br_table");
+        let code = bytes.iter().position(|byte| *byte == 0x0a).unwrap();
+        let body_start = code + 4;
+        let dispatch = bytes[body_start..]
+            .iter()
+            .position(|byte| *byte == 0x0e)
+            .unwrap()
+            + body_start;
+        let mut body = bytes[body_start..dispatch].to_vec();
+        // 1025 targets, all loop label 0, followed by default label 0.
+        body.extend_from_slice(&[0x0e, 0x81, 0x08]);
+        body.extend(std::iter::repeat_n(0, 1026));
+        body.extend_from_slice(&[0x0b, 0x0b]);
+        fn leb(mut value: usize) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            loop {
+                let byte = (value & 0x7f) as u8;
+                value >>= 7;
+                bytes.push(byte | if value > 0 { 0x80 } else { 0 });
+                if value == 0 {
+                    return bytes;
+                }
+            }
+        }
+        let mut section = vec![1];
+        section.extend(leb(body.len()));
+        section.extend(body);
+        bytes.truncate(code + 1);
+        bytes.extend(leb(section.len()));
+        bytes.extend(section);
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let workspace = &document["workspaces"][0];
+        assert_eq!(
+            workspace["handlers"].as_array().unwrap().len(),
+            MAX_HANDLERS
+        );
+        assert!(
+            workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "handler-limit")
+        );
+        assert_schema(&document);
+
+        // A detector-selected body must match the exact module coordinates.
+        let result = json!({"observations":[{"rule_id":"wasm.dispatch-loop",
+            "coordinate":{"function_body_offset":0,"function_body_size":1}}]});
+        assert!(wasm::handlers(&bytes, &result).is_none());
+    }
+
+    #[test]
+    fn wasm_snapshot_cap_is_shared_with_javascript() {
+        let bytes = wasm_fixture("br_table");
+        let (root, analysis, _) = analyze_artifact(&bytes, "wasm", &[]);
+        let interpreter: Value =
+            serde_json::from_str(&fs::read_to_string(root.path().join("manifest.jsonl")).unwrap())
+                .unwrap();
+        let hash = hex::encode(Sha256::digest([1u8]));
+        fs::write(root.path().join(format!("blobs/{hash}.bin")), [1u8]).unwrap();
+        let snapshots = (0..17)
+            .map(|index| {
+                json!({
+                    "artifact_id": (index + 2).to_string(), "parent_artifact_id":"1",
+                    "session_id":"1", "navigation_id":"1", "frame_id":"1",
+                    "sha256":hash, "byte_size":1, "content_path":format!("blobs/{hash}.bin")
+                })
+            })
+            .collect::<Vec<_>>();
+        let workspace = workspace(
+            root.path(),
+            &interpreter,
+            &bytes,
+            &analysis["results"][0],
+            &snapshots,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            workspace["snapshots"].as_array().unwrap().len(),
+            MAX_SNAPSHOTS
+        );
+        assert!(
+            workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "snapshot-limit")
+        );
     }
 
     #[test]

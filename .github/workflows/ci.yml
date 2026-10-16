@@ -327,6 +327,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  vm-workspace-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Render authored VM workspace states
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-vm-opcode-workspace-ui.mjs --browser
+
+      - name: Upload rendered VM workspace QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vm-workspace-ui-${{ github.run_id }}
+          path: build/vm-workspace-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   sources-history-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 10

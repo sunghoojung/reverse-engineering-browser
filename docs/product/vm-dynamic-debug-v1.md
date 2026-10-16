@@ -310,3 +310,17 @@ combination as the supported way to study inspector-detecting VMs.
 Owned cooperative dispatch emission and exact v2 retention are specified in
 [VM opcode workspace v2](../../protocol/vm-opcode-workspace-v2.md). This does not
 implement arbitrary-site guest dispatch or confirm opcode effects.
+
+## WebAssembly dispatch workspaces
+
+A `likely-vm` WebAssembly finding gets one workspace for the same selected
+function as the detector. Decoding remains static and never instantiates the
+module. `runtime: webassembly` distinguishes this view from JavaScript handlers.
+`br_table` selector indices are inferred dispatch candidates; they do not prove
+an identity mapping to guest opcodes. Source byte ranges cite the dispatch
+instruction, not a recovered handler body. Default arms and dynamic
+`call_indirect` targets have null opcode, unknown state and zero samples. Label
+depths and table identifiers are never presented as known handler indices.
+Guest semantics and the stack/register model remain explicit residual unknowns.
+The same 1024-candidate and 16-snapshot caps apply. Non-VM modules have no
+workspace, and unrelated functions cannot contribute candidates.

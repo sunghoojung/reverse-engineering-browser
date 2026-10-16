@@ -604,7 +604,7 @@ impl App {
                 value
             }
             "/api/analysis/vm/host-links" => {
-                self.vm_documents().await?;
+                let _ = self.vm_documents().await?;
                 let value = self
                     .analysis
                     .lock()

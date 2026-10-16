@@ -471,7 +471,15 @@ impl Experiments {
         tokio::spawn(async move {
             let _permit = permit;
             let lease = crate::workspace_lease::Lease::acquire(&path(&root))?;
-            let mut document = decode(lease.read(MAX_BYTES)?, true)?;
+            let previous = lease.read(MAX_BYTES)?;
+            let unresolved = decode(previous.clone(), false)?
+                .records
+                .iter()
+                .any(|r| r.status == "pending");
+            let mut document = decode(previous, true)?;
+            if unresolved {
+                lease.write(&encode(&document)?)?;
+            }
             if let Some(previous) = document
                 .records
                 .iter()
@@ -674,6 +682,51 @@ mod tests {
         assert_eq!(
             peer.list().unwrap()["records"][0]["reason"],
             "completion-unverified"
+        );
+    }
+    #[tokio::test]
+    async fn owned_experiment_recovery_persists_before_duplicate_and_full_store_returns() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Experiments::new(root.path().into(), PathBuf::from("/no-helper"));
+        let r = request("register", 2);
+        let pending = Record {
+            request: r.clone(),
+            effect_digest: bind(&r, &workspace(&r)).unwrap(),
+            fixture_revision: 1,
+            status: "pending".into(),
+            independent: predict(&r),
+            observed: None,
+            reason: "execution-not-yet-complete".into(),
+        };
+        let mut doc = empty();
+        doc.records.push(pending.clone());
+        durable::write_private(&path(root.path()), &encode(&doc).unwrap()).unwrap();
+        let response = service
+            .run(&serde_json::to_vec(&r).unwrap(), workspace(&r))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "unknown");
+        assert_eq!(service.list().unwrap()["records"][0]["status"], "unknown");
+        doc.records = (0..MAX_RECORDS)
+            .map(|index| {
+                let mut row = pending.clone();
+                row.request.command_id = format!("stored-{index}");
+                row
+            })
+            .collect();
+        durable::write_private(&path(root.path()), &encode(&doc).unwrap()).unwrap();
+        assert!(
+            service
+                .run(&serde_json::to_vec(&r).unwrap(), workspace(&r))
+                .await
+                .is_err()
+        );
+        assert!(
+            service.list().unwrap()["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["status"] == "unknown")
         );
     }
     #[tokio::test]

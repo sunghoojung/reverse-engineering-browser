@@ -593,7 +593,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 34, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 36, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -775,7 +775,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 34);
+    assert_eq!(operation_count, 36);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -6737,5 +6737,41 @@ async fn owned_opcode_experiment_real_http_native_effect_binding() {
             .await
             .unwrap()["session"]
             .is_null()
+    );
+}
+
+#[test]
+fn owned_opcode_experiment_cli_read_only_rejects_before_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = root.path().join("endpoint");
+    std::fs::write(
+        &endpoint,
+        format!("http://{}", listener.local_addr().unwrap()),
+    )
+    .unwrap();
+    let body = root.path().join("request.json");
+    std::fs::write(&body, b"{}").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "run_owned_opcode_experiment",
+            "--read-only",
+            "--endpoint-file",
+        ])
+        .arg(endpoint)
+        .arg("--body-file")
+        .arg(body)
+        .args(["--timeout", "0.1"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("--read-only rejects operation"));
+    assert!(error.contains("No request was sent"));
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
     );
 }

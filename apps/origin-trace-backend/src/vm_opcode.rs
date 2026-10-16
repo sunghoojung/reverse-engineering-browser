@@ -28,7 +28,7 @@ static CASE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bcase\s+(0x[0-9a-f]+|\d+)\s*:").expect("integer case"));
 static INDEXED_HANDLER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(?:handlers?|opcodes?)\s*\[\s*(0x[0-9a-f]+|\d+)\s*\]\s*=\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
+        r"(?i)\b(handlers?|opcodes?)\s*\[\s*(0x[0-9a-f]+|\d+)\s*\]\s*=\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
     )
     .expect("indexed handler")
 });
@@ -39,15 +39,17 @@ static COMPUTED_HANDLER: LazyLock<Regex> = LazyLock::new(|| {
     .expect("computed handler")
 });
 static INDEXED_DISPATCH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(")
+    Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\[((?:[^\[\]]+|\[[^\[\]]*\])+)\]\s*\(")
         .expect("indexed dispatch")
 });
 static NUMERIC_OBJECT_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?im)(0x[0-9a-f]+|\d+)\s*:\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)")
-        .expect("numeric object handler")
+    Regex::new(
+        r"(?im)\b(0x[0-9a-f]+|\d+)\s*:\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
+    )
+    .expect("numeric object handler")
 });
 static NUMERIC_METHOD_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?im)(0x[0-9a-f]+|\d+)\s*\([^)]*\)\s*\{").expect("numeric object method")
+    Regex::new(r"(?im)\b(0x[0-9a-f]+|\d+)\s*\([^)]*\)\s*\{").expect("numeric object method")
 });
 static COMPUTED_OBJECT_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?im)\[[^\]]+\]\s*:\s*(?:function\b|\([^)]*\)\s*=>)")
@@ -57,9 +59,16 @@ static STACK_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bstack\b").expect("stack identifier"));
 static REGISTER_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:regs|registers?)\b").expect("register identifier"));
-static STATEFUL_MAPPING: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:stateful[\s_-]*opcode|position[\s_-]*dependent[\s_-]*mapping)\b")
-        .expect("stateful mapping")
+static CASE_BOUNDARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bcase\b[^:;{}]*:|\bdefault\s*:").expect("case boundary"));
+static BYTE_READ: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(program|bytecode|code|instructions|bytes)\s*\[\s*(pc|ip|instructionPointer|offset|cursor)\s*(?:(\+\+)|\+\s*([0-9]+))?\s*\]")
+        .expect("adjacent byte read")
+});
+static IDENTIFIER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z_$][\w$]*$").expect("identifier"));
+static CONDITIONAL_READ: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:if|for|while|switch|try|catch)\b|\?|&&|\|\|").expect("conditional read")
 });
 
 pub(crate) fn is_snapshot_candidate(value: &Value) -> bool {
@@ -143,25 +152,140 @@ fn without_nested_functions(region: &str) -> String {
     String::from_utf8(masked).expect("nested function masking")
 }
 
+// These are deliberately syntactic checks, not an evaluator or a data-flow
+// proof. An unrecognized selector cannot establish a fixed opcode mapping.
+fn direct_selector(expression: &str, region: &str, depth: usize) -> bool {
+    let expression = expression.trim();
+    if integer(expression).is_some()
+        || BYTE_READ
+            .find(expression)
+            .is_some_and(|m| m.start() == 0 && m.end() == expression.len())
+    {
+        return true;
+    }
+    if depth == 8 || !IDENTIFIER.is_match(expression) {
+        return false;
+    }
+    let name = regex::escape(expression);
+    let mutation = Regex::new(&format!(
+        r"(?:\b{name}\s*(?:\+\+|--|[+\-^|&*/%<>=]+=)|(?:\+\+|--)\s*\b{name}\b)"
+    ))
+    .expect("selector mutation");
+    if mutation.is_match(region) {
+        return false;
+    }
+    let assignment =
+        Regex::new(&format!(r"\bconst\s+{name}\s*=\s*([^;{{}}\n]+)")).expect("selector binding");
+    let mut assignments = assignment.captures_iter(region);
+    let Some(binding) = assignments.next() else {
+        return false;
+    };
+    // Multiple writes and alias cycles are ambiguous, not a data-flow proof.
+    assignments.next().is_none()
+        && direct_selector(
+            &binding[1],
+            &region[..binding.get(0).expect("const binding").start()],
+            depth + 1,
+        )
+}
+
+fn operand_width(body: &str) -> (usize, &'static str) {
+    let body = without_nested_functions(body);
+    let reads = BYTE_READ.captures_iter(&body).take(5).collect::<Vec<_>>();
+    if reads.is_empty() {
+        return (
+            0,
+            "Operand width is unknown: no adjacent bytecode indexed read is visible.",
+        );
+    }
+    if CONDITIONAL_READ.is_match(&body) {
+        return (
+            0,
+            "Operand width is unknown: indexed reads are conditional or repeated.",
+        );
+    }
+    let first = &reads[0];
+    let mut remainder = body.as_bytes().to_vec();
+    for read in &reads {
+        let matched = read.get(0).expect("byte read");
+        remainder[matched.start()..matched.end()].fill(b' ');
+    }
+    let pointer_write = Regex::new(&format!(
+        r"(?:\b{0}\s*(?:\+\+|--|[+\-*/^|&%<>=]*=)|(?:\+\+|--)\s*\b{0}\b)",
+        regex::escape(&first[2])
+    ))
+    .expect("operand pointer write");
+    if reads.len() > 1
+        && pointer_write.is_match(std::str::from_utf8(&remainder).expect("masked reads"))
+    {
+        return (
+            0,
+            "Operand width is unknown: the instruction pointer changes between indexed reads.",
+        );
+    }
+    let incrementing = first.get(3).is_some();
+    let mut offsets = BTreeSet::new();
+    for (index, read) in reads.iter().enumerate() {
+        let matched = read.get(0).expect("indexed read");
+        let tail = body[matched.end()..].trim_start();
+        static INDEXED_WRITE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^(?:=[^=]|=$|[+\-*/%&|^<>=]+=|\+\+|--)").expect("indexed write")
+        });
+        let prefix = body[..matched.start()].trim_end();
+        if INDEXED_WRITE.is_match(tail) || prefix.ends_with("++") || prefix.ends_with("--") {
+            return (
+                0,
+                "Operand width is unknown: an indexed access writes bytecode.",
+            );
+        }
+        if read[1] != first[1] || read[2] != first[2] || read.get(3).is_some() != incrementing {
+            return (
+                0,
+                "Operand width is unknown: indexed reads do not form one adjacent sequence.",
+            );
+        }
+        let offset = if incrementing {
+            index
+        } else {
+            read.get(4)
+                .map_or(Some(0), |m| m.as_str().parse::<usize>().ok())
+                .unwrap_or(usize::MAX)
+        };
+        offsets.insert(offset);
+    }
+    let width = offsets.len();
+    if !matches!(width, 1 | 2 | 4) || offsets.iter().copied().ne(0..width) {
+        return (
+            0,
+            "Operand width is unknown: no bounded 1, 2, or 4 byte sequence is visible.",
+        );
+    }
+    (
+        width,
+        "Operand width is a static guess from adjacent bytecode indexed reads.",
+    )
+}
+
 fn add_handler(
     handlers: &mut BTreeMap<u32, Value>,
     opcode: u32,
     handler_index: Option<u32>,
-    offset: usize,
-    size: usize,
+    range: (usize, usize),
+    body: &str,
     note: &str,
 ) -> bool {
     if handlers.len() >= MAX_HANDLERS && !handlers.contains_key(&opcode) {
         return false;
     }
     handlers.entry(opcode).or_insert_with(|| {
+        let (width, width_note) = operand_width(body);
         let mut value = json!({
             "opcode": opcode,
             "state": "inferred",
-            "source": {"byte_offset": offset, "byte_size": size.max(1)},
-            "operand_width": 0,
+            "source": {"byte_offset": range.0, "byte_size": (range.1 - range.0).max(1)},
+            "operand_width": width,
             "sample_count": 0,
-            "notes": note,
+            "notes": format!("{note} {width_note}"),
             "effects": [],
         });
         if let Some(index) = handler_index {
@@ -172,9 +296,51 @@ fn add_handler(
     true
 }
 
+fn function_body(region: &str, header: regex::Match<'_>) -> Option<(usize, usize)> {
+    let opening = if header.as_str().ends_with('{') {
+        header.end() - 1
+    } else {
+        let opening = region[header.end()..].find('{')? + header.end();
+        let tail = region[header.end()..opening].trim();
+        if header.as_str().ends_with("function") {
+            static PARAMETERS: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r"^(?:[A-Za-z_$][\w$]*\s*)?\([^(){};]*\)$").expect("function parameters")
+            });
+            if !PARAMETERS.is_match(tail) {
+                return None;
+            }
+        } else if !tail.is_empty() {
+            return None;
+        }
+        opening
+    };
+    Some((opening, matching(region.as_bytes(), opening, b'{', b'}')?))
+}
+
+fn shallow_braces(region: &str) -> String {
+    let mut bytes = region.as_bytes().to_vec();
+    let mut depth = 0usize;
+    for byte in &mut bytes {
+        match *byte {
+            b'{' => {
+                depth += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ if depth > 0 => {
+                *byte = b' ';
+            }
+            _ => (),
+        }
+    }
+    String::from_utf8(bytes).expect("masked object members")
+}
+
 fn object_handlers(
     region: &str,
     base: usize,
+    blocked_tables: &BTreeSet<String>,
     handlers: &mut BTreeMap<u32, Value>,
     unknowns: &mut Vec<String>,
     handler_limit_hit: &mut bool,
@@ -190,6 +356,9 @@ fn object_handlers(
         "opcodes".into(),
     ]);
     for name in names {
+        if blocked_tables.contains(&name) {
+            continue;
+        }
         let assignment = Regex::new(&format!(r"\b{}\s*=\s*\{{", regex::escape(&name)))
             .expect("object assignment");
         for candidate in assignment.find_iter(region) {
@@ -198,25 +367,32 @@ fn object_handlers(
                 continue;
             };
             let object = &region[opening + 1..closing];
+            // Nested helper bodies remain available for the source citation,
+            // but numbers inside them are not object-map entries.
+            let entries = shallow_braces(object);
             for pattern in [&*NUMERIC_OBJECT_ENTRY, &*NUMERIC_METHOD_ENTRY] {
-                for captures in pattern.captures_iter(object) {
+                for captures in pattern.captures_iter(&entries) {
                     let Some(opcode) = integer(&captures[1]) else {
                         continue;
                     };
                     let matched = captures.get(0).expect("object handler match");
+                    let Some((body_start, body_end)) = function_body(object, matched) else {
+                        continue;
+                    };
+                    let offset = base + opening + 1;
                     if !add_handler(
                         handlers,
                         opcode,
                         Some(opcode),
-                        base + opening + 1 + matched.start(),
-                        matched.len(),
+                        (offset + matched.start(), offset + body_end + 1),
+                        &object[body_start + 1..body_end],
                         "A numeric object-map handler is statically visible.",
                     ) {
                         *handler_limit_hit = true;
                     }
                 }
             }
-            if COMPUTED_OBJECT_ENTRY.is_match(object) {
+            if COMPUTED_OBJECT_ENTRY.is_match(&entries) {
                 unknowns.push(
                     "A computed object-map property cannot be assigned a static opcode.".into(),
                 );
@@ -230,12 +406,28 @@ fn static_handlers(
     start: usize,
     end: usize,
 ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
-    let region = without_nested_functions(&source[start..end]);
+    let region = vm::mask(&source[start..end]);
+    let outer = without_nested_functions(&region);
     let mut handlers = BTreeMap::new();
     let mut unknowns = Vec::new();
     let mut omissions = Vec::new();
     let mut handler_limit_hit = false;
-    for switch_match in SWITCH.find_iter(&region) {
+    let mut blocked_tables = BTreeSet::new();
+    for captures in INDEXED_DISPATCH.captures_iter(&outer) {
+        if !direct_selector(
+            &captures[2],
+            &outer[..captures.get(0).expect("dispatch match").start()],
+            0,
+        ) {
+            blocked_tables.insert(captures[1].to_owned());
+            unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
+        }
+    }
+    let mut previous_switch_end = 0;
+    for switch_match in SWITCH.find_iter(&outer) {
+        if switch_match.start() < previous_switch_end {
+            continue;
+        }
         let opening_paren = switch_match.end() - 1;
         let Some(closing_paren) = matching(region.as_bytes(), opening_paren, b'(', b')') else {
             continue;
@@ -249,35 +441,82 @@ fn static_handlers(
         let Some(closing_brace) = matching(region.as_bytes(), opening_brace, b'{', b'}') else {
             continue;
         };
+        previous_switch_end = closing_brace + 1;
+        if !direct_selector(
+            &region[opening_paren + 1..closing_paren],
+            &outer[..switch_match.start()],
+            0,
+        ) {
+            unknowns.push("A computed, position-dependent, or saved-state switch selector has no proven fixed opcode mapping.".into());
+            continue;
+        }
         let body = &region[opening_brace + 1..closing_brace];
-        for captures in CASE.captures_iter(body) {
+        let mut depth = 0usize;
+        let mut cursor = 0;
+        let labels = CASE_BOUNDARY
+            .find_iter(body)
+            .filter(|label| {
+                for byte in body.as_bytes()[cursor..label.start()].iter() {
+                    match byte {
+                        b'{' => depth += 1,
+                        b'}' => depth = depth.saturating_sub(1),
+                        _ => (),
+                    }
+                }
+                cursor = label.start();
+                depth == 0
+            })
+            .collect::<Vec<_>>();
+        for (index, label) in labels.iter().enumerate() {
+            let Some(captures) = CASE.captures(label.as_str()) else {
+                continue;
+            };
             let Some(opcode) = integer(&captures[1]) else {
                 continue;
             };
-            let matched = captures.get(0).expect("case match");
+            let mut last_label = index;
+            while let Some(next) = labels.get(last_label + 1) {
+                if !body[labels[last_label].end()..next.start()]
+                    .trim()
+                    .is_empty()
+                {
+                    break;
+                }
+                last_label += 1;
+            }
+            let case_end = labels
+                .get(last_label + 1)
+                .map_or(body.len(), |next| next.start());
+            let offset = start + opening_brace + 1;
             if !add_handler(
                 &mut handlers,
                 opcode,
                 None,
-                start + opening_brace + 1 + matched.start(),
-                matched.len(),
-                "An integer switch case is statically visible in the dispatch region.",
+                (offset + label.start(), offset + case_end),
+                &body[label.end()..case_end],
+                "An integer switch handler is statically visible.",
             ) {
                 handler_limit_hit = true;
             }
         }
     }
     for captures in INDEXED_HANDLER.captures_iter(&region) {
-        let Some(opcode) = integer(&captures[1]) else {
+        if blocked_tables.contains(&captures[1]) {
+            continue;
+        }
+        let Some(opcode) = integer(&captures[2]) else {
             continue;
         };
         let matched = captures.get(0).expect("indexed handler match");
+        let Some((body_start, body_end)) = function_body(&region, matched) else {
+            continue;
+        };
         if !add_handler(
             &mut handlers,
             opcode,
             Some(opcode),
-            start + matched.start(),
-            matched.len(),
+            (start + matched.start(), start + body_end + 1),
+            &region[body_start + 1..body_end],
             "A numeric indexed handler assignment is statically visible.",
         ) {
             handler_limit_hit = true;
@@ -291,6 +530,7 @@ fn static_handlers(
     object_handlers(
         &region,
         start,
+        &blocked_tables,
         &mut handlers,
         &mut unknowns,
         &mut handler_limit_hit,
@@ -315,12 +555,6 @@ fn static_handlers(
             "unknown"
         }
     };
-    if STATEFUL_MAPPING.is_match(&region) {
-        unknowns.push(
-            "The source mentions a stateful opcode or position-dependent mapping; no fixed mapping is inferred."
-                .into(),
-        );
-    }
     unknowns.sort();
     unknowns.dedup();
     (
@@ -837,12 +1071,37 @@ mod tests {
         assert_eq!(push["sample_count"], 1);
         let start = push["source"]["byte_offset"].as_u64().unwrap() as usize;
         let size = push["source"]["byte_size"].as_u64().unwrap() as usize;
-        assert!(fixture("stack-vm.js")[start..start + size].starts_with("case 80:"));
+        let cited = &fixture("stack-vm.js")[start..start + size];
+        assert!(cited.starts_with("case 80:"));
+        assert!(cited.contains("stack.push(program[pc++] - 48)"));
+        assert!(!cited.contains("case 81:"));
+        assert_eq!(push["operand_width"], 1);
+        assert_eq!(
+            stack["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["opcode"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [80, 81, 82, 83]
+        );
         assert_schema(&stack);
 
         let (_, register_analysis, register) = analyze(&fixture("register-vm.js"), &[]);
         assert_eq!(register_analysis["summary"]["likely_vm_count"], 1);
         assert_eq!(register["workspaces"][0]["model"], "register");
+        assert_eq!(
+            register["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| (
+                    h["opcode"].as_u64().unwrap(),
+                    h["operand_width"].as_u64().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [(16, 2), (17, 2), (18, 1), (19, 0)]
+        );
         assert!(
             register["workspaces"][0]["handlers"]
                 .as_array()
@@ -1174,5 +1433,161 @@ mod tests {
                 .iter()
                 .all(|handler| handler["handler_index"] == handler["opcode"])
         );
+    }
+    #[test]
+    fn handler_ranges_include_nested_helpers_and_exclude_neighbor_cases() {
+        let source = "/*é*/ function setup(){handlers[7]=function(){function helper(){return 5;}stack.push(program[pc++]);};} while(pc<program.length){handlers[program[pc++]]();}";
+        let start = source.find("function setup").unwrap();
+        let (handlers, _, _, _) = static_handlers(source, start, source.len());
+        assert_eq!(handlers.len(), 1);
+        let handler = &handlers[0];
+        let offset = handler["source"]["byte_offset"].as_u64().unwrap() as usize;
+        let size = handler["source"]["byte_size"].as_u64().unwrap() as usize;
+        assert_eq!(
+            &source[offset..offset + size],
+            "handlers[7]=function(){function helper(){return 5;}stack.push(program[pc++]);}"
+        );
+        assert_eq!(handler["operand_width"], 1);
+
+        let source = "switch(program[pc++]){case 1: switch(state){case 99: break;} break; case 2: return; default: throw 0;}";
+        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        assert_eq!(
+            handlers
+                .iter()
+                .map(|h| h["opcode"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let end = handlers[0]["source"]["byte_offset"].as_u64().unwrap()
+            + handlers[0]["source"]["byte_size"].as_u64().unwrap();
+        assert_eq!(end as usize, source.find("case 2:").unwrap());
+    }
+
+    #[test]
+    fn operand_guesses_are_bounded_adjacent_and_explicit_when_unknown() {
+        for (body, expected) in [
+            ("stack.push(program[pc++]);", 1),
+            ("stack.push(program[pc++] | program[pc++] << 8);", 2),
+            (
+                "return bytes[ip] | bytes[ip+1] << 8 | bytes[ip+2] << 16 | bytes[ip+3] << 24;",
+                4,
+            ),
+            ("return bytes[ip] + bytes[ip+2];", 0),
+            ("return bytes[ip++] + bytes[ip++] + bytes[ip++];", 0),
+            ("if(state) return bytes[ip++];", 0),
+            ("let a=bytes[ip++]; ip+=8; return a+bytes[ip++];", 0),
+            ("return stack.pop();", 0),
+            ("program[pc++] = 1;", 0),
+            ("bytes[ip] += 1;", 0),
+            ("++bytes[ip];", 0),
+            ("let a=bytes[ip++]; ++ip; return a+bytes[ip++];", 0),
+            ("function helper(){return bytes[ip++];} return helper();", 0),
+        ] {
+            let source = format!("handlers[1]=function(){{{body}}};");
+            let (handlers, _, _, _) = static_handlers(&source, 0, source.len());
+            assert_eq!(handlers[0]["operand_width"], expected, "{body}");
+            assert!(
+                handlers[0]["notes"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if expected == 0 {
+                        "unknown"
+                    } else {
+                        "static guess"
+                    })
+            );
+        }
+    }
+
+    #[test]
+    fn position_and_saved_state_selectors_do_not_invent_opcodes() {
+        for expression in [
+            "program[pc++] ^ pc",
+            "program[pc++] + state",
+            "decode(program[pc++])",
+            "mapping[program[pc++]]",
+        ] {
+            for dispatch in [
+                "switch(selector){case 7:stack.push(1);break;}",
+                "handlers[selector]();",
+            ] {
+                let source =
+                    format!("handlers[7]=function(){{}}; const selector={expression}; {dispatch}");
+                let (handlers, _, unknowns, _) = static_handlers(&source, 0, source.len());
+                if dispatch.starts_with("switch") {
+                    // An unrelated literal table assignment remains independent.
+                    assert_eq!(handlers.len(), 1);
+                    assert!(handlers[0].get("handler_index").is_some());
+                } else {
+                    assert!(handlers.is_empty(), "{source}");
+                }
+                assert!(
+                    unknowns
+                        .iter()
+                        .any(|s| s.contains("no proven fixed opcode mapping"))
+                );
+            }
+        }
+        let source = "let opcode=program[pc++]; opcode ^= saved; switch(opcode){case 9:break;}";
+        assert!(static_handlers(source, 0, source.len()).0.is_empty());
+        let source = "const opcode=program[pc++];const alias=opcode;switch(alias){case 9:break;}";
+        assert_eq!(static_handlers(source, 0, source.len()).0[0]["opcode"], 9);
+    }
+
+    #[test]
+    fn computed_objects_and_expression_arrows_do_not_borrow_other_bodies() {
+        let source = "const handlers={[key]:()=>{},7(){return program[pc++];},a8:()=>{},9:()=>{const nested={99:()=>{}};}};handlers[program[pc++]]();";
+        let (handlers, _, unknowns, _) = static_handlers(source, 0, source.len());
+        assert_eq!(
+            handlers
+                .iter()
+                .map(|h| h["opcode"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [7, 9]
+        );
+        assert!(unknowns.iter().any(|s| s.contains("computed")));
+        let source = "handlers[1]=x=>x,handlers[2]=()=>{};";
+        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0]["opcode"], 2);
+    }
+
+    #[test]
+    fn handler_cap_preserves_named_omission() {
+        let source = (0..1025)
+            .map(|i| format!("handlers[{i}]=function(){{}};"))
+            .collect::<String>();
+        let (handlers, _, _, omissions) = static_handlers(&source, 0, source.len());
+        assert_eq!(handlers.len(), MAX_HANDLERS);
+        assert_eq!(handlers.last().unwrap()["opcode"], 1023);
+        assert_eq!(
+            omissions,
+            vec![
+                json!({"reason":"handler-limit","detail":"Only the first 1024 distinct opcode candidates are retained."})
+            ]
+        );
+    }
+    #[test]
+    fn mutable_and_late_selectors_stay_unknown_and_fallthrough_cites_shared_body() {
+        for source in [
+            "let opcode=program[pc++]; ++opcode; switch(opcode){case 9:break;}",
+            "let opcode=program[pc++]; opcode <<= 1; switch(opcode){case 9:break;}",
+            "switch(opcode){case 9:break;} const opcode=program[pc++];",
+            "const alias=opcode;const opcode=program[pc++];switch(alias){case 9:break;}",
+        ] {
+            assert!(
+                static_handlers(source, 0, source.len()).0.is_empty(),
+                "{source}"
+            );
+        }
+        let source = "switch(program[pc++]){case 1: case 2: stack.push(program[pc++]);break;default:return;}";
+        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        assert_eq!(handlers.len(), 2);
+        for handler in handlers {
+            let offset = handler["source"]["byte_offset"].as_u64().unwrap() as usize;
+            let size = handler["source"]["byte_size"].as_u64().unwrap() as usize;
+            assert!(source[offset..offset + size].contains("stack.push"));
+            assert_eq!(handler["operand_width"], 1);
+        }
     }
 }

@@ -217,3 +217,37 @@ are part of both renderer cache and browser registry keys, preventing a reused
 V8 script ID or frame token from selecting a previous document's source. Offline
 nonzero-navigation mismatch tests verify the workspace join contract, not a
 live navigation-ID producer.
+
+
+### Runtime byte-buffer admission
+
+The renderer keeps a buffer only when its exact allocating script has a trusted
+captured `candidate`/`likely-vm` observation, is captured eval/Function source, or
+has a static dispatch-loop observation and the buffer is at least 256 bytes.
+The independent 32-byte floor, 16-snapshot session cap, and VM opt-in remain.
+Rejected unrelated allocations do not consume the cap. Their
+`runtime_buffer_no_vm_signal` reason is coalesced once per configuration/thread;
+a full event ring does not mark the reason sent, so later rejections can retry. Source metadata drops
+credentials, query strings and fragments. Only hierarchical HTTP, HTTPS and
+owned-fixture URLs are supported; opaque, scheme-relative and other schemes
+fail closed. Missing/unsafe URLs produce
+`allocating_script_url_unavailable` rather than a document-URL guess.
+
+`RegisterRuntimeScriptObservation` is a bounded (64 entries), thread-local native
+integration seam keyed by configuration generation, execution context and V8
+script ID. Callers must retain the observation-time generation and register only
+trusted detector outputs for that exact captured source. A URL or a large buffer
+is never classification evidence. Stale observations and context mismatches fail
+closed. Native V8 eval/Function provenance remains a keep-list row. When the
+allocating script's source is copied, the renderer classifies that source on
+the same thread before the keep-list read: a non-executing scan of at most
+256 KiB and 256 functions, using the offline detector's structural weights
+(dispatch-loop 20, instruction pointer 20, indexed bytecode 20, state 15,
+handlers 15, exit 5). Only the winning function region sets flags. A dispatch
+loop scores 20, so it is a candidate and is admitted from 32 bytes; likely-VM
+still requires that same region to contain the dispatch loop, at least 60
+points, and at least 3 rule families. The URL and the buffer length are not
+classification evidence. An unterminated function in a fully visible source,
+or more than 256 functions, fails closed. Source past the 256 KiB prefix is
+not classified. Anti-bot lexical rules stay offline and do not admit buffers.
+The registration API is not page-facing.

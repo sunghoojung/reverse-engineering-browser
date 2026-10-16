@@ -25,6 +25,13 @@ using NativeRendererProbeEmitter = bool (*)(const NativeProbeEvent& event,
 
 using NativeProbeFrameIdProvider = std::uint64_t (*)() noexcept;
 
+// Trusted native detector output only. Registration is not exposed to page JS.
+enum class NativeRuntimeScriptObservation : std::uint8_t {
+  kCapturedVmCandidate,
+  kCapturedLikelyVm,
+  kStaticDispatchLoop,
+};
+
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
  public:
   static NativeProbeSink& Get();
@@ -50,6 +57,14 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] bool IsCanvasImageCaptureEnabled() const noexcept;
   [[nodiscard]] bool RuntimeScriptSourceNeeded(std::uint64_t execution_context_id,
                                                std::uint64_t script_id) const noexcept;
+  [[nodiscard]] std::uint64_t RuntimeCaptureGeneration() const noexcept;
+  // Caller must preserve the generation at observation time. No URL matching,
+  // cross-thread transfer, or inference of VM classification occurs here.
+  [[nodiscard]] bool RegisterRuntimeScriptObservation(
+      std::uint64_t generation,
+      std::uint64_t execution_context_id,
+      std::uint64_t script_id,
+      NativeRuntimeScriptObservation observation) noexcept;
   void CaptureRuntimeTypedArray(std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 std::string_view source_url,

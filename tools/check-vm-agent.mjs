@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {spawn, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {mkdtemp, writeFile, readFile, rm, symlink, mkdir} from 'node:fs/promises';
+import {mkdtemp, writeFile, readFile, rm, symlink, mkdir, stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import vm from '../apps/research-ui/vm_semantics.js';
@@ -73,6 +73,21 @@ try {
   assert.equal(calls.length, 0, 'Invalid commands/endpoints must not connect');
 
   const inspected = await good('inspect', '--input', traceFile); assert.deepEqual(inspected.result, vm.inspect(trace)); assert.equal(inspected.source_sha256, hash(await readFile(traceFile))); assert.notEqual(inspected.source_sha256, trace.identity.artifact_sha256);
+  const path = await good('observed-path', '--input', traceFile); assert.deepEqual(path.result, vm.observedPath(trace));assert.equal(path.source_sha256, inspected.source_sha256);
+  const occurrenceArgs=(location='registers:1',page='0',size='16',file=traceFile)=>['occurrences','--input',file,'--location',location,'--page',page,'--page-size',size];
+  for(const location of ['pc','halted','registers:0','registers:1','stack:0','memory:65535']) {
+    const occurrences=await good(...occurrenceArgs(location));assert.deepEqual(occurrences.result,vm.occurrences(trace,location));
+    assert.equal(occurrences.source_sha256,inspected.source_sha256);assert.equal(occurrences.result.reads,'unknown');
+  }
+  const pagedTrace={...trace,steps:[trace.steps[0],{...copy(trace.steps[0]),sequence:9}]},pagedFile=await input('paged.json',pagedTrace);
+  const secondPage=await good(...occurrenceArgs('registers:1','1','1',pagedFile));assert.deepEqual(secondPage.result,vm.occurrences(pagedTrace,'registers:1',1,1));assert.equal(secondPage.result.items[0].sequence,9);
+  assert.deepEqual((await good(...occurrenceArgs('registers:1','2','1',pagedFile))).result.items,[]);
+  for(const location of ['registers:64','stack:128','memory:65536','registers:01','memory:-0','registers:1\n','__proto__'])await bad(occurrenceArgs(location));
+  for(const value of ['-1','-0','+1','01','1.0','1e0','9007199254740992']){await bad(occurrenceArgs('pc',value));await bad(occurrenceArgs('pc','0',value));}
+  for(const size of ['0','65'])await bad(occurrenceArgs('pc','0',size));
+  await bad(occurrenceArgs('pc','9007199254740991','64'));
+  for(const args of [['observed-path','--input',traceFile,'--base-url',base],occurrenceArgs().slice(0,-2),[...occurrenceArgs(),'--output','unused.json']])await bad(args,2,'usage');
+  assert(capabilities().offline.commands.includes('observed-path'));assert(capabilities().offline.commands.includes('occurrences'));assert.equal(capabilities().writes_files,false);
   const selected = await good('select-step', '--input', traceFile, '--sequence', '7'); assert.deepEqual(selected.result.step, trace.steps[0]); assert.deepEqual(selected.result.coverage, trace.coverage); assert.equal(selected.result.executes_code, false); assert.equal(selected.result.reads, 'unknown');
   const hypotheses = {format: 'reb-vm-hypothesis-v1', trace_id: trace.identity.trace_id, mappings: []}, hypothesesFile = await input('hypotheses.json', hypotheses);
   const validated = await good('validate', '--input', traceFile, '--hypotheses', hypothesesFile); assert.deepEqual(validated.result, vm.validate(trace, hypotheses)); assert.equal(validated.hypotheses_sha256, hash(await readFile(hypothesesFile)));
@@ -165,12 +180,22 @@ try {
     globalThis.fetch = deny;
     require('node:module').syncBuiltinESMExports();
   `);
-  for (const args of [['capabilities'], ['validate-definition', '--definition', definitionFile],
+  for (const args of [['capabilities'], ['observed-path','--input',traceFile], occurrenceArgs(), ['create-opcode-ledger','--definition',definitionFile], ['validate-definition', '--definition', definitionFile],
     staticArgs('decode-bytecode'), staticArgs('analyze-static'), [...staticArgs('select-instruction'), '--pc', '0']]) {
     const offline = spawnSync(process.execPath, ['--require', blockedNetwork, cli, ...args], {encoding: 'utf8', timeout: 10000});
     assert.equal(offline.status, 0, offline.stderr); assert.equal(offline.stderr, '');
     assert.equal(typeof JSON.parse(offline.stdout), 'object');
   }
+  const occurrenceOutput=join(directory,'occurrences.json');
+  const semantics=(...args)=>spawnSync(process.execPath,['--require',blockedNetwork,'tools/vm-semantics.mjs',...args],{encoding:'utf8',timeout:10000});
+  const occurrenceFile=semantics('occurrences',pagedFile,'registers:1','1','1',occurrenceOutput);assert.equal(occurrenceFile.status,0,occurrenceFile.stderr);
+  const occurrenceReport=JSON.parse(await readFile(occurrenceOutput,'utf8'));assert.deepEqual(occurrenceReport.result,secondPage.result);assert.equal(occurrenceReport.source_sha256,hash(await readFile(pagedFile)));assert.equal(occurrenceReport.hypotheses_sha256,null);
+  assert.equal((await stat(occurrenceOutput)).mode&0o777,0o600);
+  const preserved=await readFile(occurrenceOutput,'utf8');assert.equal(semantics('occurrences',pagedFile,'pc','0','1',occurrenceOutput).status,1);assert.equal(await readFile(occurrenceOutput,'utf8'),preserved);
+  const outputLink=join(directory,'occurrences-link.json');await symlink(occurrenceOutput,outputLink);assert.equal(semantics('occurrences',pagedFile,'pc','0','1',outputLink).status,1);assert.equal(await readFile(occurrenceOutput,'utf8'),preserved);
+  const refusedOutput=join(directory,'refused-occurrences.json');
+  for(const args of [['occurrences',pagedFile,'pc','01','16',refusedOutput],['occurrences',pagedFile,'memory:65536','0','16',refusedOutput],['occurrences',pagedFile,'pc','0','65',refusedOutput],['occurrences',link,'pc','0','1',refusedOutput]])assert.equal(semantics(...args).status,1);
+  await assert.rejects(stat(refusedOutput),{code:'ENOENT'});
   const denseDefinition = {...definition, opcodes: [{code: '00', mnemonic: 'UNSPECIFIED',
     operands: Array.from({length: 8}, (_, index) => ({name: `arg${index}`, width: 1, signed: false, kind: 'immediate'})),
     semantics: {operation: 'unknown', args: []}, flow: {kind: 'next'}}]};

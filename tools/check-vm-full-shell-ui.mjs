@@ -269,15 +269,25 @@ if (process.argv.includes('--fixture-only')) {
       const listing = rootSelector + ' ' + scrollSelector;
       await evaluate(`document.querySelector(${JSON.stringify(listing + ' table')}).scrollIntoView({block:'center',inline:'nearest'})`);
       await evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-      const point = await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(listing)}),r=n.getBoundingClientRect(),h=n.querySelector('thead th').getBoundingClientRect(),x=(Math.max(0,r.left+n.clientLeft)+Math.min(innerWidth,r.left+n.clientLeft+n.clientWidth))/2,y=h.y+h.height/2;return {x,y,hit:y>=0&&y<innerHeight&&n.contains(document.elementFromPoint(x,y)),overflow:n.scrollWidth-n.clientWidth};})()`);
-      assert(point.hit && point.overflow > 0, name + ' exposes its local horizontal scroll owner');
-      await send('Input.dispatchMouseEvent', {type:'mouseMoved', x:point.x, y:point.y});
-      await send('Input.dispatchMouseEvent', {type:'mouseWheel', x:point.x, y:point.y, deltaX:-10000, deltaY:0});
-      await until(() => evaluate(`document.querySelector(${JSON.stringify(listing)}).scrollLeft<=1`), name + ' native horizontal start');
-      await send('Input.dispatchMouseEvent', {type:'mouseWheel', x:point.x, y:point.y, deltaX:10000, deltaY:0});
-      await until(() => evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(listing)});return n.scrollLeft>0&&n.scrollLeft>=n.scrollWidth-n.clientWidth-1;})()`), name + ' native horizontal end');
-      await assertReachable(listing + ' thead th:last-child', name + ' rightmost header');
-      await assertReachable(listing + ' tbody tr:first-child td:last-child', name + ' rightmost retained cell');
+      const readPoint = () => evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(listing)}),r=n.getBoundingClientRect(),h=n.querySelector('thead th').getBoundingClientRect(),x=(Math.max(0,r.left+n.clientLeft)+Math.min(innerWidth,r.left+n.clientLeft+n.clientWidth))/2,y=h.y+h.height/2,target=document.elementFromPoint(x,y);return {x,y,hit:y>=0&&y<innerHeight&&n.contains(target),hitTag:target?.tagName,overflow:n.scrollWidth-n.clientWidth,scrollLeft:n.scrollLeft,scrollWidth:n.scrollWidth,clientWidth:n.clientWidth};})()`);
+      const initialPoint = await readPoint(); let point = initialPoint;
+      const scroll = xDistance => send('Input.synthesizeScrollGesture', {x:point.x, y:point.y, xDistance, yDistance:0, gestureSourceType:'mouse', preventFling:true, speed:800});
+      try {
+        assert(point.hit && point.overflow > 0, name + ' exposes its local horizontal scroll owner');
+        // An already-zero predicate cannot acknowledge a no-op wheel. Await
+        // complete, bounded native gestures before changing scroll direction.
+        if (point.scrollLeft > 1) await scroll(Math.ceil(point.scrollLeft));
+        await until(() => evaluate(`document.querySelector(${JSON.stringify(listing)}).scrollLeft<=1`), name + ' native horizontal start');
+        point = await readPoint();
+        assert(point.hit && point.overflow > 0, name + ' scroll owner remains under the pointer');
+        await scroll(-Math.ceil(point.overflow + 1));
+        await until(() => evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(listing)});return n.scrollLeft>0&&n.scrollLeft>=n.scrollWidth-n.clientWidth-1;})()`), name + ' native horizontal end');
+        await assertReachable(listing + ' thead th:last-child', name + ' rightmost header');
+        await assertReachable(listing + ' tbody tr:first-child td:last-child', name + ' rightmost retained cell');
+      } catch (error) {
+        const currentPoint = await readPoint().catch(failure => ({diagnosticError: String(failure)}));
+        throw Error(error.message + '; scroll diagnostics: ' + JSON.stringify({initialPoint, currentPoint}), {cause:error});
+      }
       await screenshot(name + '-right-edge-390');
     };
     const assertLiveStateLabels = async (selector, label) => {

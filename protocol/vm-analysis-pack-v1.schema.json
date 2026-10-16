@@ -1,0 +1,92 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "document_kind",
+    "pack_id",
+    "version",
+    "rules",
+    "families"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 1
+    },
+    "document_kind": {
+      "const": "vm-analysis-pack"
+    },
+    "pack_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "maxLength": 64,
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "maxLength": 32,
+      "minLength": 1
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule_id",
+          "weight",
+          "label"
+        ],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "pattern": "^antibot\\.[a-z][a-z0-9-]*$",
+            "maxLength": 80,
+            "minLength": 1
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        }
+      }
+    },
+    "families": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_artifact_sha256",
+          "program_family"
+        ],
+        "properties": {
+          "source_artifact_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "program_family": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "maxLength": 64,
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reverse-engineering-browser.local/protocol/vm-analysis-pack-v1.schema.json",
+  "title": "Declarative VM analysis pack v1"
+}

@@ -1,0 +1,232 @@
+{
+  "contract_version": 2,
+  "document_kind": "vm-opcode-workspace",
+  "producer": {
+    "id": "origin-trace-vm-opcode",
+    "version": "2.0.0"
+  },
+  "profile_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "analysis_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "inputs": {
+    "artifact_manifest_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "event_store_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "capture_provenance_digest": null
+  },
+  "workspaces": [
+    {
+      "interpreter_artifact_id": "1",
+      "finding_id": "c5e529342af22aafd3d7ddbc",
+      "model": "stack",
+      "handlers": [
+        {
+          "opcode": 1,
+          "state": "inferred",
+          "source": {
+            "byte_offset": 146,
+            "byte_size": 39
+          },
+          "operand_width": 0,
+          "sample_count": 0,
+          "notes": "Owned fixture declaration; unexecuted source.",
+          "effects": [
+            {
+              "effect_id": "fixture_constant",
+              "evidence_class": "inferred",
+              "operation": "constant",
+              "instruction_size": 1,
+              "operand_layout": [],
+              "reads": [],
+              "writes": [
+                {
+                  "space": "stack",
+                  "index": "0",
+                  "operand": null,
+                  "value": "7"
+                }
+              ],
+              "flow": {
+                "kind": "next",
+                "target_operand": null,
+                "target_offset": null
+              },
+              "atomic_group": null,
+              "superoperator": null
+            }
+          ]
+        },
+        {
+          "opcode": 2,
+          "state": "inferred",
+          "source": {
+            "byte_offset": 186,
+            "byte_size": 19
+          },
+          "operand_width": 0,
+          "sample_count": 0,
+          "notes": "Owned fixture declaration; unexecuted source.",
+          "effects": [
+            {
+              "effect_id": "fixture_halt",
+              "evidence_class": "inferred",
+              "operation": "halt",
+              "instruction_size": 1,
+              "operand_layout": [],
+              "reads": [],
+              "writes": [],
+              "flow": {
+                "kind": "halt",
+                "target_operand": null,
+                "target_offset": null
+              },
+              "atomic_group": null,
+              "superoperator": null
+            }
+          ]
+        },
+        {
+          "opcode": 4,
+          "state": "inferred",
+          "source": {
+            "byte_offset": 206,
+            "byte_size": 60
+          },
+          "operand_width": 0,
+          "sample_count": 0,
+          "notes": "Owned fixture declaration; unexecuted source.",
+          "effects": [
+            {
+              "effect_id": "fixture_add",
+              "evidence_class": "inferred",
+              "operation": "add",
+              "instruction_size": 1,
+              "operand_layout": [],
+              "reads": [
+                {
+                  "space": "register",
+                  "index": "0",
+                  "operand": null,
+                  "value": null
+                },
+                {
+                  "space": "register",
+                  "index": "1",
+                  "operand": null,
+                  "value": null
+                }
+              ],
+              "writes": [
+                {
+                  "space": "register",
+                  "index": "0",
+                  "operand": null,
+                  "value": null
+                }
+              ],
+              "flow": {
+                "kind": "next",
+                "target_operand": null,
+                "target_offset": null
+              },
+              "atomic_group": null,
+              "superoperator": null
+            }
+          ]
+        },
+        {
+          "opcode": 7,
+          "state": "unknown",
+          "source": {
+            "byte_offset": 267,
+            "byte_size": 41
+          },
+          "operand_width": 0,
+          "sample_count": 0,
+          "notes": "Owned fixture declaration; unexecuted source.",
+          "effects": []
+        },
+        {
+          "opcode": 8,
+          "state": "inferred",
+          "source": {
+            "byte_offset": 309,
+            "byte_size": 39
+          },
+          "operand_width": 0,
+          "sample_count": 0,
+          "notes": "Owned fixture declaration; unexecuted source.",
+          "effects": [
+            {
+              "effect_id": "fixture_constant",
+              "evidence_class": "contradicted",
+              "operation": "constant",
+              "instruction_size": 1,
+              "operand_layout": [],
+              "reads": [],
+              "writes": [
+                {
+                  "space": "stack",
+                  "index": "0",
+                  "operand": null,
+                  "value": "99"
+                }
+              ],
+              "flow": {
+                "kind": "next",
+                "target_operand": null,
+                "target_offset": null
+              },
+              "atomic_group": null,
+              "superoperator": null
+            }
+          ]
+        }
+      ],
+      "snapshots": [],
+      "coverage": {
+        "complete": false,
+        "handler_count": 5,
+        "retained_snapshot_bytes": 0,
+        "characterized_bytes": 0,
+        "uncharacterized_bytes": 0,
+        "attributions": [],
+        "omissions": [
+          {
+            "reason": "byte-attribution-unavailable",
+            "detail": "Source-only owned comparison fixture."
+          }
+        ]
+      },
+      "unknowns": [
+        "Dynamic opcode 7 remains unknown.",
+        "Opcode 8 fixture effect is contradicted."
+      ],
+      "runtime": "javascript",
+      "source_artifact_sha256": "438cc488f75da8fcea4075b5e1bd1a319dfac8acbf3dc8ce9c40a0154a332754",
+      "capture_mode": "unknown",
+      "sample_count": 0,
+      "samples": [],
+      "traversal": {
+        "entry_offsets": [],
+        "instructions": [],
+        "edges": [],
+        "frontier": [
+          {
+            "artifact_id": null,
+            "byte_offset": null,
+            "reason": "entry-unavailable"
+          }
+        ],
+        "complete": false
+      }
+    }
+  ],
+  "summary": {
+    "workspace_count": 1,
+    "handler_count": 5,
+    "snapshot_count": 0,
+    "sample_count": 0,
+    "unknown_count": 2
+  },
+  "capture_mode": "unknown",
+  "document_digest": "daadb1db2df61d7f41ed99526d94d575920e1137ad5be1b6110087e9ec0e55ca"
+}

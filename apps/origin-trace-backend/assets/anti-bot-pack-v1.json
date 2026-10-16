@@ -1,0 +1,49 @@
+{
+  "contract_version": 1,
+  "document_kind": "vm-analysis-pack",
+  "pack_id": "generic-anti-bot",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "rule_id": "antibot.canvas-webgl",
+      "weight": 25,
+      "label": "Canvas and WebGL"
+    },
+    {
+      "rule_id": "antibot.navigator-device",
+      "weight": 25,
+      "label": "Navigator and device"
+    },
+    {
+      "rule_id": "antibot.automation",
+      "weight": 20,
+      "label": "Automation indicators"
+    },
+    {
+      "rule_id": "antibot.encoding-crypto",
+      "weight": 15,
+      "label": "Encoding and cryptography"
+    },
+    {
+      "rule_id": "antibot.request",
+      "weight": 15,
+      "label": "Host requests"
+    },
+    {
+      "rule_id": "antibot.runtime-canvas-webgl",
+      "weight": 25,
+      "label": "Observed Canvas and WebGL"
+    },
+    {
+      "rule_id": "antibot.runtime-navigator-device",
+      "weight": 25,
+      "label": "Observed navigator and device"
+    },
+    {
+      "rule_id": "antibot.runtime-web-audio",
+      "weight": 25,
+      "label": "Observed Web Audio"
+    }
+  ],
+  "families": []
+}

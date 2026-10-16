@@ -2347,3 +2347,10 @@
             o.pc_before!==(r.opcode===2?'2':'8') || o.instruction_pointer_units!=='instruction-index' || !inputs(o.inputs) || !effect(o.effect))) return false;
         return row.status !== 'confirmed' || Boolean(o && same(r.expected,prediction) && same(o.effect,prediction) && o.inputs.left===r.inputs.left && o.inputs.right===r.inputs.right);
       }
+
+      function sameVmOwnedExperimentRequest(left, right) {
+        const fields=['command_id','fixture','workspace_digest','source_artifact_sha256','interpreter_artifact_id','finding_id','opcode','effect_id'];
+        return Boolean(left && right && fields.every(key=>left[key]===right[key]) && left.inputs && right.inputs &&
+          ['left','right'].every(key=>left.inputs[key]===right.inputs[key]) && left.expected && right.expected &&
+          ['operation','value','next_pc','branch_taken'].every(key=>left.expected[key]===right.expected[key]));
+      }

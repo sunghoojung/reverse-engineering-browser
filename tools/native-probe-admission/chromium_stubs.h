@@ -15,11 +15,15 @@
 
 namespace base {
 inline std::atomic<std::int64_t> test_now_ns{100};
+inline std::atomic<unsigned> test_clock_reads{0};
 struct TestDelta {
   std::int64_t InNanoseconds() const { return test_now_ns.load(); }
 };
 struct TimeTicks {
-  static TimeTicks Now() { return {}; }
+  static TimeTicks Now() {
+    ++test_clock_reads;
+    return {};
+  }
   TestDelta since_origin() const { return {}; }
 };
 inline int GetCurrentProcId() {

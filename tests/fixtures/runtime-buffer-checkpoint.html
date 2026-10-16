@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Owned native runtime-buffer checkpoint fixture</title>
+<p id="status">running</p>
+<script>
+// Only the owned fixture is cooperative; browser capture remains native.
+// Script A is the allocator. Its eval provenance admits these small buffers.
+eval(`
+  globalThis.ownedIndexed = new Uint8Array(32);
+  globalThis.ownedSet = new Uint8Array(32);
+  globalThis.ownedDataView = new ArrayBuffer(32);
+  globalThis.ownedDetached = new ArrayBuffer(32);
+  globalThis.ownedResizable = new ArrayBuffer(32, {maxByteLength: 64});
+  if (typeof SharedArrayBuffer === "function") globalThis.ownedShared = new SharedArrayBuffer(32);
+  //# sourceURL=fixture://owned/allocator-a.js
+`);
+</script>
+<script>
+// Script B initializes without changing the allocator parent.
+for (let i = 0; i < 32; ++i) ownedIndexed[i] = i ^ 0x5a;
+ownedSet.set(ownedIndexed);
+const view = new DataView(ownedDataView);
+for (let i = 0; i < 32; ++i) view.setUint8(i, ownedIndexed[i]);
+structuredClone(ownedDetached, {transfer: [ownedDetached]});
+document.getElementById('status').textContent = 'initialized; await native task checkpoint';
+</script>

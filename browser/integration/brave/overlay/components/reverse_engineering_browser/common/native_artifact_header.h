@@ -54,6 +54,8 @@ struct NativeRuntimeScript final {
   bool is_eval = false;
   std::span<const std::uint8_t> source;
   std::uint64_t session_id = 0;
+  // Original deferred producer generation; zero is an immediate submission.
+  std::uint64_t capture_generation = 0;
 };
 
 using NativeGeneratedArtifactEmitter = void (*)(NativeArtifactKind kind,

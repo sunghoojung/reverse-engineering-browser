@@ -163,6 +163,7 @@ source_set("browser") {
     "browser/native_worker_transfer_gate.cc",
     "browser/native_worker_transfer_gate.h",
     "common/native_artifact_header.h",
+    "common/native_runtime_snapshot_queue.h",
     "common/native_console_io.cc",
     "common/native_console_io.h",
     "common/native_probe_event.h",

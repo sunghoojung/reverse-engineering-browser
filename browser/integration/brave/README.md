@@ -251,3 +251,34 @@ classification evidence. An unterminated function in a fully visible source,
 or more than 256 functions, fails closed. Source past the 256 KiB prefix is
 not classified. Anti-bot lexical rules stay offline and do not admit buffers.
 The registration API is not page-facing.
+
+
+### Runtime buffer task-checkpoint timing
+
+Runtime constructors now enqueue safe V8 object/source/context handles instead
+of copying zero-filled allocation bytes. A posted native task samples eligible
+buffers after the current JavaScript turn, including synchronous indexed stores,
+`set`, `fill` and DataView writes. The event is named
+`runtime_typed_array_task_checkpoint_snapshot`: this is a bounded checkpoint,
+**not proof initialization finished**. Later-task initialization may occur after
+it, and no arbitrary write/guest tracing or page API wrappers are installed.
+The allocator identity is captured at allocation and survives writes by another
+script. The currently executing mutator never becomes the source parent.
+
+Pending storage is separately capped at 16 objects and 32 MiB including whole
+backing-buffer lengths and source UTF-8 sizes (a tiny view cannot retain a giant
+backing buffer). Rejected pending entries name `runtime_buffer_checkpoint_limit`.
+Disable, expiry or generation changes stop the drain before retained handle
+access or byte copying. Context destruction, detach, shared/resizable backing,
+and changed lengths fail closed at the checkpoint with named omissions. Isolate
+teardown releases V8 globals before disposal; a surviving weak posted task sees
+a null isolate. A missing task/checkpoint before teardown is explicitly
+`runtime_buffer_checkpoint_unavailable`. No persisted allocation bytes are
+claimed for that case. VM-off retains no handles and performs no byte copy.
+
+The compiled component test exercises the actual bounded native queue and sink
+with an owned buffer, allocator A/mutator B, session changes, detach rejection
+and teardown. `tests/fixtures/runtime-buffer-checkpoint.html` is the owned browser
+runtime regression for indexed/set/DataView initialization and cross-script
+identity. It requires a rebuilt patched browser; component tests and pinned
+patch applicability do not substitute for running that fixture in Chromium.

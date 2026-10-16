@@ -65,6 +65,15 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       std::uint64_t execution_context_id,
       std::uint64_t script_id,
       NativeRuntimeScriptObservation observation) noexcept;
+  [[nodiscard]] bool RuntimeBufferHasSignal(std::uint64_t generation,
+                                            std::uint64_t execution_context_id,
+                                            std::uint64_t frame_id,
+                                            std::size_t bytes,
+                                            std::uint64_t script_id,
+                                            bool is_eval) noexcept;
+  void RecordRuntimeBufferOmission(std::uint64_t generation,
+                                   std::uint64_t frame_id,
+                                   std::string_view reason) noexcept;
   void CaptureRuntimeTypedArray(std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 std::string_view source_url,

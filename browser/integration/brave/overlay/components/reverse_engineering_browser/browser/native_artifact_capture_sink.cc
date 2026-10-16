@@ -116,6 +116,7 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
     pending_.clear();
   }
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
+  allocating_scripts_.clear();
   emitter_.store(emitter, std::memory_order_release);
 }
 
@@ -186,21 +187,77 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
   return body;
 }
 
-void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
+void NativeArtifactCaptureSink::CaptureRuntimeTypedArray(const int renderer_process_id,
+                                                         const std::uint64_t capture_session_id,
+                                                         const std::uint64_t script_id,
+                                                         const bool is_eval,
+                                                         const std::uint64_t creator_event_id,
+                                                         const std::uint64_t execution_context_id,
+                                                         const std::uint64_t frame_id,
+                                                         const std::string_view source_url,
+                                                         mojo_base::BigBuffer script_source,
+                                                         mojo_base::BigBuffer content) {
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || capture_session_id == 0 ||
+      capture_session_id != session_id_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  if (script_id == 0 || execution_context_id == 0 || script_source.size() > kMaxArtifactBytes) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, 0, 0, frame_id,
+               "allocating_script_unavailable", NativeProbeCategory::kVm);
+    return;
+  }
+  const ScriptKey key{renderer_process_id, execution_context_id, frame_id, script_id};
+  auto parent = allocating_scripts_.find(key);
+  if (parent == allocating_scripts_.end()) {
+    if (script_source.size() == 0) {
+      EmitResult(NativeProbeType::kArtifactCaptureFailed, 0, 0, frame_id,
+                 "allocating_script_unavailable", NativeProbeCategory::kVm);
+      return;
+    }
+    if (allocating_scripts_.size() >= kRuntimeTypedArrayMaxSnapshots) {
+      EmitResult(NativeProbeType::kArtifactCaptureFailed, 0, 0, frame_id,
+                 "allocating_script_registry_limit", NativeProbeCategory::kVm);
+      return;
+    }
+    // Eval source uses the same exact-script capture path. is_eval is kept on
+    // the submission for admission; it never changes the identity relation.
+    static_cast<void>(is_eval);
+    const std::uint64_t artifact_id = CaptureGeneratedArtifact(
+        NativeArtifactKind::kJavaScript, NativeArtifactCaptureOrigin::kRuntimeAllocatingScript, 0,
+        execution_context_id, frame_id, source_url, std::move(script_source));
+    if (artifact_id == 0) {
+      EmitResult(NativeProbeType::kArtifactCaptureFailed, 0, 0, frame_id,
+                 "allocating_script_unavailable", NativeProbeCategory::kVm);
+      return;
+    }
+    parent = allocating_scripts_.emplace(key, artifact_id).first;
+  }
+  CaptureGeneratedArtifact(NativeArtifactKind::kBytecodeBuffer,
+                           NativeArtifactCaptureOrigin::kRuntimeTypedArray, creator_event_id,
+                           execution_context_id, frame_id, source_url, std::move(content),
+                           parent->second);
+}
+
+std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
     const NativeArtifactKind kind,
     const NativeArtifactCaptureOrigin capture_origin,
     const std::uint64_t creator_event_id,
     const std::uint64_t execution_context_id,
     const std::uint64_t frame_id,
     const std::string_view source_url,
-    mojo_base::BigBuffer content) {
+    mojo_base::BigBuffer content,
+    const std::uint64_t parent_artifact_id) {
   const bool is_runtime_typed_array =
       kind == NativeArtifactKind::kBytecodeBuffer &&
       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray;
-  const NativeProbeCategory result_category =
-      is_runtime_typed_array ? NativeProbeCategory::kVm : NativeProbeCategory::kArtifact;
+  const bool is_allocating_script =
+      kind == NativeArtifactKind::kJavaScript &&
+      capture_origin == NativeArtifactCaptureOrigin::kRuntimeAllocatingScript;
+  const NativeProbeCategory result_category = (is_runtime_typed_array || is_allocating_script)
+                                                  ? NativeProbeCategory::kVm
+                                                  : NativeProbeCategory::kArtifact;
   if (!IsEnabledFor(result_category)) {
-    return;
+    return 0;
   }
   const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
   const bool valid_kind_and_origin =
@@ -213,7 +270,7 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
       (kind == NativeArtifactKind::kCanvasDataUrl &&
        capture_origin == NativeArtifactCaptureOrigin::kCanvasToDataUrl && creator_event_id != 0 &&
        execution_context_id == 0) ||
-      is_runtime_typed_array;
+      is_runtime_typed_array || is_allocating_script;
   if (!valid_kind_and_origin ||
       (kind != NativeArtifactKind::kCanvasDataUrl && execution_context_id == 0) ||
       content.size() == 0 || content.size() > kMaxArtifactBytes ||
@@ -221,14 +278,14 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
       source_url.empty() || source_url.size() > kNativeArtifactMaxUrlBytes) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
                "generated_metadata_or_size_limit", result_category);
-    return;
+    return 0;
   }
   if (is_runtime_typed_array &&
       runtime_typed_array_count_.fetch_add(1, std::memory_order_relaxed) >=
           kRuntimeTypedArrayMaxSnapshots) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
                "runtime_typed_array_session_limit", result_category);
-    return;
+    return 0;
   }
 
   const std::string captured_url(source_url);
@@ -240,7 +297,7 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   if (captured_url.empty() || captured_url.size() > kNativeArtifactMaxUrlBytes) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
                "generated_url_invalid", result_category);
-    return;
+    return 0;
   }
 
   // BigBuffer may be shared writable memory owned by the renderer. Copy once
@@ -252,6 +309,7 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   transfer->header.frame_id = frame_id;
   transfer->header.artifact_id = artifact_id;
   transfer->header.creator_event_id = creator_event_id;
+  transfer->header.parent_artifact_id = parent_artifact_id;
   if (kind == NativeArtifactKind::kCanvasDataUrl) {
     transfer->header.flags |= kNativeArtifactFlagSensitive;
   }
@@ -266,9 +324,10 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   if (!NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
                "transfer_queue_full_or_disconnected", result_category);
-    return;
+    return 0;
   }
   pending_.emplace(artifact_id, PendingContext{0, frame_id, result_category});
+  return artifact_id;
 }
 
 void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> context,

@@ -369,7 +369,8 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
     let linked = artifacts
         .iter()
         .filter(|artifact| {
-            artifact["parent_artifact_id"] == interpreter["artifact_id"]
+            artifact["parent_artifact_id"] != "0"
+                && artifact["parent_artifact_id"] == interpreter["artifact_id"]
                 && artifact["session_id"] == interpreter["session_id"]
                 && artifact["navigation_id"] == interpreter["navigation_id"]
                 && artifact["frame_id"] == interpreter["frame_id"]
@@ -477,10 +478,11 @@ pub(crate) fn workspace(
         {
             omissions.push(json!({
                 "reason": "static-initializer-only",
-                "detail": "A bounded static initializer exists in vm-analysis-v1, but no runtime-typed-array origin was observed."
+                "detail": "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot names this allocating script in the same session, navigation, and frame."
             }));
         } else {
-            omissions.push(json!({"reason":"runtime-snapshot-unavailable"}));
+            omissions.push(json!({"reason":"runtime-snapshot-unavailable", "detail":
+                "No runtime snapshot names this captured allocating script in the same session, navigation, and frame. The allocating script may not have been captured."}));
         }
     }
     unknowns.sort();
@@ -760,6 +762,50 @@ mod tests {
                 .contains("5c783061")
         );
         assert_schema(&workspace);
+    }
+
+    #[test]
+    fn snapshot_parent_and_scope_are_exact_and_metadata_is_validated() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/fixtures/vm-dynamic-debug/xor-decoded");
+        let records = fs::read_to_string(fixture_root.join("manifest.jsonl")).unwrap();
+        let artifacts: Vec<Value> = records
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let interpreter = &artifacts[0];
+        let snapshot = &artifacts[1];
+        validate_snapshot_artifact(snapshot).unwrap();
+        assert_eq!(
+            snapshots(&fixture_root, interpreter, &[snapshot.clone()])
+                .0
+                .len(),
+            1
+        );
+        for field in [
+            "parent_artifact_id",
+            "session_id",
+            "navigation_id",
+            "frame_id",
+        ] {
+            let mut mismatch = snapshot.clone();
+            mismatch[field] = json!("0");
+            assert!(
+                snapshots(&fixture_root, interpreter, &[mismatch])
+                    .0
+                    .is_empty(),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("execution_context_id", "0"),
+            ("kind", "javascript"),
+            ("capture_origin", "dynamic_javascript"),
+        ] {
+            let mut invalid = snapshot.clone();
+            invalid[field] = json!(value);
+            assert!(validate_snapshot_artifact(&invalid).is_err(), "{field}");
+        }
     }
 
     #[test]

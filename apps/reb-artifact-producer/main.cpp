@@ -25,6 +25,7 @@ struct Options final {
   std::uint64_t session_id = kSessionId;
   std::uint64_t frame_session_id = 0;
   std::uint64_t artifact_id_base = 300;
+  bool vm_snapshot_fixture = false;
 };
 
 bool ParseSessionId(const std::string_view value, std::uint64_t& session_id) {
@@ -35,7 +36,9 @@ bool ParseSessionId(const std::string_view value, std::uint64_t& session_id) {
 bool ParseOptions(const int argc, char* argv[], Options& options) {
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
-    if (argument == "--socket" && index + 1 < argc) {
+    if (argument == "--vm-snapshot-fixture") {
+      options.vm_snapshot_fixture = true;
+    } else if (argument == "--socket" && index + 1 < argc) {
       options.socket_path = argv[++index];
     } else if (argument == "--token-file" && index + 1 < argc) {
       options.token_path = argv[++index];
@@ -127,7 +130,7 @@ int main(const int argc, char* argv[]) {
   Options options;
   if (!ParseOptions(argc, argv, options)) {
     std::cerr << "Usage: " << argv[0]
-              << " [--socket PATH --token-file PATH --session-id ID"
+              << " [--vm-snapshot-fixture] [--socket PATH --token-file PATH --session-id ID"
                  " [--frame-session-id ID] [--artifact-id-base ID]]\n";
     return 2;
   }
@@ -186,6 +189,33 @@ export function runGuest(host, program = guestProgram) {
     return 1;
   }
   const bool expect_ack = !options.socket_path.empty();
+  if (options.vm_snapshot_fixture) {
+    // An owned XOR-shaped producer. Parent identity comes from this source's
+    // allocated artifact ID before transfer, never from editing a manifest.
+    std::array<std::byte, 32> ciphertext{};
+    constexpr std::array<unsigned char, 5> program{1, 7, 2, 3, 0};
+    for (std::size_t index = 0; index < ciphertext.size(); ++index) {
+      const unsigned char value = index < program.size() ? program[index] : 0;
+      ciphertext[index] = static_cast<std::byte>(value ^ 0x5aU);
+    }
+    std::array<std::byte, 32> initialized{};
+    std::transform(ciphertext.begin(), ciphertext.end(), initialized.begin(),
+                   [](std::byte byte) { return byte ^ std::byte{0x5a}; });
+    const auto interpreter_artifact_id = options.artifact_id_base;
+    const bool complete =
+        WriteArtifact(
+            descriptor, expect_ack, frame_session_id, interpreter_artifact_id, 0, 0, 2200,
+            reb::ArtifactKind::kJavaScript, reb::ArtifactCaptureOrigin::kRuntimeAllocatingScript,
+            "fixture://owned-xor/interpreter.js", "text/javascript", javascript_vm_bytes) &&
+        WriteArtifact(descriptor, expect_ack, frame_session_id, interpreter_artifact_id + 1,
+                      interpreter_artifact_id, 1, 2200, reb::ArtifactKind::kBytecodeBuffer,
+                      reb::ArtifactCaptureOrigin::kRuntimeTypedArray,
+                      "fixture://owned-xor/interpreter.js", "application/octet-stream",
+                      initialized);
+    if (expect_ack && close(descriptor) != 0)
+      return 1;
+    return complete ? 0 : 1;
+  }
   const bool written =
       WriteArtifact(descriptor, expect_ack, frame_session_id, options.artifact_id_base, 0, 4, 0,
                     reb::ArtifactKind::kJavaScript, reb::ArtifactCaptureOrigin::kNetworkResponse,

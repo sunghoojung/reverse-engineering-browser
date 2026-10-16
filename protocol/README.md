@@ -272,3 +272,12 @@ pages and the local HTTP/CLI contract.
 [Local overrides v1](local-overrides-v1.md) defines the optional exact URL,
 method, target, experiment, digest and expiry guard on existing fulfillment,
 with explicit offline preparation and local CLI arming/disarming.
+
+Runtime allocating-script provenance adds artifact capture origin 8,
+`runtime_allocating_script`, valid only for JavaScript with a nonzero execution
+context. The fixed 128-byte artifact ABI remains version 1. A runtime buffer's
+`parent_artifact_id` is assigned from the browser's exact native script registry,
+scoped by renderer, execution context and frame in the active session. Source
+URLs never determine this identity. `creator_event_id` names the admitted native
+snapshot observation when available, otherwise zero. The manifest preserves both
+IDs. Missing source, source URL and registry capacity are visible capture failures.

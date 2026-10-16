@@ -57,7 +57,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                            std::uint64_t execution_context_id,
                            std::uint64_t frame_id,
                            std::string_view source_url,
-                           std::span<const std::uint8_t> content) noexcept;
+                           std::span<const std::uint8_t> content,
+                           const NativeRuntimeScript& script) noexcept;
   bool EmitEvent(const NativeProbeEvent& event, std::uint64_t config_generation) noexcept;
   void EmitGeneratedArtifact(NativeArtifactKind kind,
                              NativeArtifactCaptureOrigin capture_origin,
@@ -65,7 +66,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                              std::uint64_t execution_context_id,
                              std::uint64_t frame_id,
                              std::string_view source_url,
-                             std::span<const std::uint8_t> content) noexcept;
+                             std::span<const std::uint8_t> content,
+                             const NativeRuntimeScript& script) noexcept;
   mojo::SharedRemote<mojom::NativeProbeHost>* HostForCurrentSequence();
 
   mojo::SharedRemote<mojom::NativeProbeHost> host_;

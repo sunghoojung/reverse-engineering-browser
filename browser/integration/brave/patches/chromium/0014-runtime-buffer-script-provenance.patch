@@ -1,0 +1,57 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index ed3154a..ecf090c 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -266,7 +266,7 @@ void CaptureRuntimeBuffer(v8::Local<v8::Context> context,
+       kind != v8::RuntimeBufferKind::kUint32Array) {
+     return;
+   }
+-  if (bytes == nullptr || size == 0) {
++  if (bytes == nullptr || size < 32 || size > reb::kNativeArtifactMaxContentBytes) {
+     return;
+   }
+   // Copy before Blink URL conversion. On-heap typed arrays can move if
+@@ -277,14 +277,39 @@ void CaptureRuntimeBuffer(v8::Local<v8::Context> context,
+   if (!execution_context) {
+     return;
+   }
+-  const std::string source_url = execution_context->Url().GetString().Utf8();
+-  if (source_url.empty()) {
+-    return;
++  v8::Isolate* isolate = context->GetIsolate();
++  v8::RuntimeBufferScript allocator;
++  reb::NativeRuntimeScript script;
++  std::string source_url;
++  std::vector<std::uint8_t> script_source;
++  if (isolate->GetRuntimeBufferAllocatingScript(&allocator)) {
++    // Cross-realm constructors retain the allocating frame's context, not the
++    // realm which owns the borrowed TypedArray constructor.
++    execution_context = ToExecutionContext(allocator.context);
++    if (!execution_context) return;
++    script.script_id = static_cast<std::uint64_t>(allocator.script_id);
++    script.is_eval = allocator.is_eval;
++    if (!allocator.name.IsEmpty()) {
++      v8::String::Utf8Value name(isolate, allocator.name);
++      if (*name) source_url.assign(*name, static_cast<std::size_t>(name.length()));
++    }
++    if (sink.RuntimeScriptSourceNeeded(StableExecutionContextId(*execution_context),
++                                      script.script_id)) {
++      const std::size_t source_size = allocator.source->Utf8Length(isolate);
++      if (source_size > 0 && source_size <= reb::kNativeArtifactMaxContentBytes) {
++        script_source.resize(source_size);
++        const std::size_t written = allocator.source->WriteUtf8(
++            isolate, reinterpret_cast<char*>(script_source.data()), source_size,
++            v8::String::WriteFlags::kReplaceInvalidUtf8);
++        if (written != source_size) script_source.clear();
++      }
++    }
++    script.source = script_source;
+   }
+   sink.CaptureRuntimeTypedArray(
+       StableExecutionContextId(*execution_context), StableFrameId(*execution_context),
+       std::string_view(source_url.data(), source_url.length()),
+-      base::span<const std::uint8_t>(retained));
++      base::span<const std::uint8_t>(retained), script);
+ }
+ 
+ // NOTE: when editing this, please also edit the error messages we throw when

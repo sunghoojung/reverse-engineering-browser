@@ -60,7 +60,8 @@
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
         'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url',
-        'runtime_typed_array'
+        'runtime_typed_array',
+        'runtime_allocating_script'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -258,7 +259,7 @@
         if (Object.hasOwn(artifact, 'execution_context_id')) {
           if (!isCanonicalInteger(artifact.execution_context_id, 0n, uint64Max) ||
             !artifactCaptureOrigins.has(artifact.capture_origin) ||
-            (artifact.capture_origin === 'dynamic_javascript' &&
+            (['dynamic_javascript', 'runtime_allocating_script'].includes(artifact.capture_origin) &&
               (artifact.kind !== 'javascript' || artifact.execution_context_id === '0')) ||
             (artifact.capture_origin.startsWith('webassembly_') &&
               (artifact.kind !== 'wasm' || artifact.execution_context_id === '0')) ||

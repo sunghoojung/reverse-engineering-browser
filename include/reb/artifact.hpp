@@ -44,6 +44,7 @@ enum class ArtifactCaptureOrigin : std::uint16_t {
   kWebAssemblyInstantiate = 5,
   kCanvasToDataUrl = 6,
   kRuntimeTypedArray = 7,
+  kRuntimeAllocatingScript = 8,
 };
 
 struct ArtifactHeader final {

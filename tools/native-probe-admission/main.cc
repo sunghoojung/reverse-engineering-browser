@@ -235,6 +235,40 @@ void CanvasCreatorAdmission() {
   std::cout << "PASS Canvas artifact requires admitted creator metadata\n";
 }
 
+void RuntimeScriptProvenance() {
+  NativeProbeQueue queue;
+  Configure(queue);
+  std::array<std::uint8_t, 32> bytes{};
+  constexpr std::array<std::uint8_t, 4> source{'v', 'm', '(', ')'};
+  const auto before = reb::mojom::NativeProbeHost::artifacts.load();
+  sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", bytes, {});
+  const auto failed = One(queue);
+  assert(failed.header.type == reb::NativeProbeType::kArtifactCaptureFailed);
+  const std::string reason(reinterpret_cast<const char*>(failed.inline_payload.data()),
+                           failed.header.payload_size);
+  assert(reason == "allocating_script_unavailable");
+  assert(reb::mojom::NativeProbeHost::artifacts == before);
+  reb::NativeRuntimeScript script{9, false, source};
+  assert(sink.RuntimeScriptSourceNeeded(7, 9));
+  sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", bytes, script);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 1);
+  assert(!sink.RuntimeScriptSourceNeeded(7, 9));
+  assert(sink.RuntimeScriptSourceNeeded(10, 9));
+  script.source = {};
+  sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", bytes, script);
+  One(queue);
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 2);
+  Configure(queue, 43);
+  assert(sink.RuntimeScriptSourceNeeded(7, 9));
+  transport.Disable();
+  const auto allocation_count = allocations.load();
+  sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", bytes, script);
+  assert(allocations == allocation_count && Drain(queue) == 0);
+  std::cout << "PASS runtime script provenance, missing source, context/session isolation and "
+               "inactive path\n";
+}
+
 void DisabledExpiredAndMalformed() {
   transport.Disable();
   std::atomic<std::uint64_t> observed{0};
@@ -293,5 +327,6 @@ int main() {
   ConfigurationRaces();
   DisabledExpiredAndMalformed();
   CanvasCreatorAdmission();
+  RuntimeScriptProvenance();
   std::cout << "Renderer ring admission only; no full Chromium/Mojo/runtime validation.\n";
 }

@@ -319,9 +319,10 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 "webassembly_instantiate",
                 "canvas_to_data_url",
                 "runtime_typed_array",
+                "runtime_allocating_script",
             ]
             .contains(&origin)
-            || (origin == "dynamic_javascript"
+            || (matches!(origin, "dynamic_javascript" | "runtime_allocating_script")
                 && (artifact["kind"] != "javascript" || artifact["execution_context_id"] == "0"))
             || (origin.starts_with("webassembly_")
                 && (artifact["kind"] != "wasm" || artifact["execution_context_id"] == "0"))

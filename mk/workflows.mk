@@ -52,6 +52,7 @@ e2e: origin-trace-backend producer broker artifact-producer artifact-receiver de
 	$(RM) -r "$(BUILD_DIR)/sessions/artifacts"
 	$(ARTIFACT_PRODUCER_BINARY) | $(ARTIFACT_RECEIVER_BINARY) --store $(BUILD_DIR)/sessions/artifacts
 	$(VM_ANALYZER) --artifacts $(BUILD_DIR)/sessions/artifacts --events $(BUILD_DIR)/sessions/demo.jsonl
+	python3 tools/check-runtime-snapshot-producer.py --producer $(ARTIFACT_PRODUCER_BINARY) --receiver $(ARTIFACT_RECEIVER_BINARY) --analyzer $(VM_ANALYZER)
 	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "14"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/origin-trace.jsonl | tr -d ' ')" = "12"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/request-signals.jsonl | tr -d ' ')" = "2"

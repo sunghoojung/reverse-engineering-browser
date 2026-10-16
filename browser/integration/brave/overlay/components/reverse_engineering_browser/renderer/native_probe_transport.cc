@@ -100,9 +100,10 @@ void NativeProbeTransport::EmitArtifact(const NativeArtifactKind kind,
                                         const std::uint64_t execution_context_id,
                                         const std::uint64_t frame_id,
                                         const std::string_view source_url,
-                                        const std::span<const std::uint8_t> content) noexcept {
+                                        const std::span<const std::uint8_t> content,
+                                        const NativeRuntimeScript& script) noexcept {
   Get().EmitGeneratedArtifact(kind, capture_origin, creator_event_id, execution_context_id,
-                              frame_id, source_url, content);
+                              frame_id, source_url, content, script);
 }
 
 bool NativeProbeTransport::EmitEvent(const NativeProbeEvent& event,
@@ -129,21 +130,22 @@ bool NativeProbeTransport::EmitEvent(const NativeProbeEvent& event,
   return true;
 }
 
-void NativeProbeTransport::EmitGeneratedArtifact(
-    const NativeArtifactKind kind,
-    const NativeArtifactCaptureOrigin capture_origin,
-    const std::uint64_t creator_event_id,
-    const std::uint64_t execution_context_id,
-    const std::uint64_t frame_id,
-    const std::string_view source_url,
-    const std::span<const std::uint8_t> content) noexcept {
+void NativeProbeTransport::EmitGeneratedArtifact(const NativeArtifactKind kind,
+                                                 const NativeArtifactCaptureOrigin capture_origin,
+                                                 const std::uint64_t creator_event_id,
+                                                 const std::uint64_t execution_context_id,
+                                                 const std::uint64_t frame_id,
+                                                 const std::string_view source_url,
+                                                 const std::span<const std::uint8_t> content,
+                                                 const NativeRuntimeScript& script) noexcept {
   auto* const thread_host = HostForCurrentSequence();
   if (*thread_host) {
     (*thread_host)
         ->CaptureGeneratedArtifact(static_cast<std::uint16_t>(kind),
                                    static_cast<std::uint16_t>(capture_origin), creator_event_id,
                                    execution_context_id, frame_id, std::string(source_url),
-                                   mojo_base::BigBuffer(content));
+                                   mojo_base::BigBuffer(content), script.script_id, script.is_eval,
+                                   mojo_base::BigBuffer(script.source), script.session_id);
   }
 }
 

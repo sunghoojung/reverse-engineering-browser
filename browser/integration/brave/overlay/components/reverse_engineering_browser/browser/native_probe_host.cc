@@ -80,7 +80,20 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
                                                const std::uint64_t execution_context_id,
                                                const std::uint64_t frame_id,
                                                const std::string& source_url,
-                                               mojo_base::BigBuffer content) {
+                                               mojo_base::BigBuffer content,
+                                               std::uint64_t allocating_script_id,
+                                               bool allocating_script_is_eval,
+                                               mojo_base::BigBuffer allocating_script_source,
+                                               std::uint64_t allocating_script_session_id) {
+  if (kind == static_cast<std::uint16_t>(NativeArtifactKind::kBytecodeBuffer) &&
+      capture_origin ==
+          static_cast<std::uint16_t>(NativeArtifactCaptureOrigin::kRuntimeTypedArray)) {
+    NativeArtifactCaptureSink::Get().CaptureRuntimeTypedArray(
+        renderer_process_id_, allocating_script_session_id, allocating_script_id,
+        allocating_script_is_eval, creator_event_id, execution_context_id, frame_id, source_url,
+        std::move(allocating_script_source), std::move(content));
+    return;
+  }
   NativeArtifactCaptureSink::Get().CaptureGeneratedArtifact(
       static_cast<NativeArtifactKind>(kind),
       static_cast<NativeArtifactCaptureOrigin>(capture_origin), creator_event_id,

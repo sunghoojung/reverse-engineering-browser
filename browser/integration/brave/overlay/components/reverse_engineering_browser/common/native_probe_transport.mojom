@@ -28,5 +28,9 @@ interface NativeProbeHost {
                            uint64 execution_context_id,
                            uint64 frame_id,
                            string source_url,
-                           mojo_base.mojom.BigBuffer content);
+                           mojo_base.mojom.BigBuffer content,
+                           uint64 allocating_script_id,
+                           bool allocating_script_is_eval,
+                           mojo_base.mojom.BigBuffer allocating_script_source,
+                           uint64 allocating_script_session_id);
 };

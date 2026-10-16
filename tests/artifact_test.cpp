@@ -25,5 +25,17 @@ int main() {
     std::cerr << "mismatched runtime typed-array origin accepted\n";
     return 1;
   }
+  header.capture_origin = reb::ArtifactCaptureOrigin::kRuntimeAllocatingScript;
+  if (!reb::IsValidArtifactHeader(header) ||
+      std::string_view(reb::ArtifactCaptureOriginName(header.capture_origin)) !=
+          "runtime_allocating_script") {
+    std::cerr << "allocating-script origin rejected\n";
+    return 1;
+  }
+  header.execution_context_id = 0;
+  if (reb::IsValidArtifactHeader(header)) {
+    std::cerr << "allocating-script origin accepted without execution context\n";
+    return 1;
+  }
   return 0;
 }

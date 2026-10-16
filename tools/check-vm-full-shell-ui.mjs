@@ -180,6 +180,7 @@ if (process.argv.includes('--fixture-only')) {
         assert(Math.abs(columns.listWidth - columns.rowWidth) <= 1, 'Handler rows fill the listing width');
         assert(columns.offsets.every(offset => offset <= 1), 'Handler cells align with their column headers');
       }
+      assert.equal(await evaluate("document.querySelector('.vm-row').getBoundingClientRect().height < 100"), true, 'Program tree rows remain compact instead of stretching to fill the dock');
       await click('.vm-handler-row');
       await key('ArrowDown', 'ArrowDown', 40);
       assert.equal(await evaluate("document.querySelector('.vm-selection-inspector h3').textContent"),

@@ -4661,7 +4661,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-list-pane { display: grid; grid-template-rows: 25px minmax(90px, 1fr) minmax(140px, 1fr); overflow: hidden; }
 #screen-vm .vm-list-head { min-height: 25px; box-sizing: border-box; padding: 4px 7px; background: var(--panel-2); border-bottom: 1px solid var(--line); color: var(--text); font: 600 11px var(--sans); text-transform: none; letter-spacing: 0; }
 #screen-vm .vm-list-head > span { color: var(--muted); font-size: 10px; font-weight: 400; }
-#screen-vm .vm-list { min-height: 0; overflow: auto; }
+#screen-vm .vm-list { min-height: 0; overflow: auto; align-content: start; }
 #screen-vm .vm-row { padding: 5px 7px 5px 20px; gap: 2px; border-left: 1px solid var(--line-soft); margin-left: 8px; }
 #screen-vm .vm-row::before { top: 5px; left: 6px; }
 #screen-vm .vm-symbol-dock { display: flex; min-height: 0; flex-direction: column; border-top: 4px solid var(--line); }

@@ -1583,6 +1583,7 @@
           if (selected) selected.tabIndex = 0;
           count.textContent = `${visible.length} / ${rows.length} handlers`;
           [...toolbar.querySelectorAll('button')].forEach(button => { button.disabled = !visible.length; });
+          updateVmNavigationMenus();
         });
         toolbar.append(search, count);
         section.append(toolbar, header, list);
@@ -1897,6 +1898,16 @@
         return container;
       }
 
+      function updateVmNavigationMenus() {
+        const menuBar = document.querySelector('.vm-menu-bar');
+        if (!menuBar) return;
+        menuBar.querySelectorAll('[data-vm-command^="vm-handler-"]').forEach(button => {
+          const label = button.dataset.vmCommand === 'vm-handler-filter' ? 'Filter retained handlers' : button.dataset.vmCommand === 'vm-handler-next' ? 'Next handler' : 'Previous handler';
+          const target = document.querySelector(`[aria-label="${label}"]`);
+          button.disabled = !target || target.disabled;
+        });
+      }
+
       function renderVmOpcodeWorkspaceInPlace(selected) {
         const host = [...elements.vmDetail.querySelectorAll('.vm-workspace-host')][0]
           ?? (() => {
@@ -1906,6 +1917,7 @@
             return node;
           })();
         host.replaceChildren(...(selected ? [renderVmOpcodeWorkspace(selected)] : []));
+        updateVmNavigationMenus();
         const symbols = document.querySelector('#vm-symbol-list');
         if (symbols) {
           const workspace = selected && vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
@@ -12763,11 +12775,7 @@
         menu.addEventListener('toggle', () => {
           if (menu.open) {
             vmMenus.forEach(other => { if (other !== menu) other.open = false; });
-            menu.querySelectorAll('[data-vm-command^="vm-handler-"]').forEach(button => {
-              const label = button.dataset.vmCommand === 'vm-handler-filter' ? 'Filter retained handlers' : button.dataset.vmCommand === 'vm-handler-next' ? 'Next handler' : 'Previous handler';
-              const target = document.querySelector(`[aria-label="${label}"]`);
-              button.disabled = !target || target.disabled;
-            });
+            updateVmNavigationMenus();
           }
         });
         menu.addEventListener('keydown', event => {

@@ -77,4 +77,5 @@ for(const native of [false,true]){
 }
 const html=await readFile(new URL('../apps/research-ui/index.html',import.meta.url),'utf8');
 for(const token of ['data-export-open="capture"','data-export-open="run"','data-export-format','data-export-policy','data-export-file','captured_export_formats.js'])assert(html.includes(token));
+assert.match(html,/<button id="open-captured-export" type="button" data-export-open="capture"/,'Traffic export uses the compact toolbar button, not inspector exchange-button height');
 console.log('PASS compact export dialog: redacted default, explicit modes and destinations, runtime/capture/run parity, local file preparation without automatic output, exact-source invalidation, strict timing/schema/size bounds, cancel and focus return, native handoff and clipboard failure');

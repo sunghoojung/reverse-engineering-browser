@@ -420,7 +420,7 @@ async function checkBrowser() {
       return {ledger:Math.min(rows.bottom,pane.bottom,table.bottom)-Math.max(rows.top,pane.top,table.top),
         controls:[...document.querySelectorAll('.request-window button:not([hidden])')].map(button=>{const r=button.getBoundingClientRect();
           return {id:button.id,visible:r.width>0&&r.left>=0&&r.right<=innerWidth&&r.top>=pane.top&&r.bottom<=Math.min(pane.bottom,table.bottom,innerHeight)};})};})()`);
-    assert(footer.ledger>=56,JSON.stringify(footer));assert.equal(footer.controls.length,5);
+    assert(footer.ledger>=56,JSON.stringify(footer));assert.deepEqual(footer.controls.map(control=>control.id),['request-window-prev','request-window-next','request-latest','request-order','open-api-catalog','open-captured-export']);
     assert(footer.controls.every(control=>control.visible),JSON.stringify(footer));await shot('catalog-traffic-footer-360');
     // The catalog source opens the same retained capture used by the client workflow.
     await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});

@@ -120,6 +120,7 @@ javascript-check:
 	node tools/check-vm-analysis-packs.mjs
 	node tools/check-vm-agent.mjs
 	node tools/check-vm-opcode-ledger.mjs
+	node tools/check-vm-opcode-ledger-ui.mjs
 	node tools/check-vm-workspace-contract.mjs
 	node tools/check-vm-opcode-workspace-ui.mjs
 	node tools/check-owned-opcode-experiments.mjs

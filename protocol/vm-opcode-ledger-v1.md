@@ -9,6 +9,14 @@ a target. Use only authorized, reviewed local material under [SAFETY](../SAFETY.
 
 ## Import, inspect and export
 
+The VM **Opcode ledger** UI imports exact definition and ledger JSON, offers a
+local JSON editor, validates the draft and exports the validated ledger. Its
+shared portable validator is `apps/research-ui/vm_opcode_ledger.js`; the CLI
+wrapper preserves the synchronous agent contract. Input edits invalidate export;
+failed validation retains the previous coverage with an explicit stale notice.
+Creating an empty ledger is deliberate and never overwrites a nonempty draft.
+
+
 `node tools/vm-agent.mjs opcode-ledger --definition VM.json --input LEDGER.json`
 validates both files and emits `reb-vm-opcode-ledger-analysis-v1` JSON to stdout.
 Its `ledger` property is the validated, round-trippable import/export document.
@@ -53,8 +61,8 @@ identity/hash and duplicate references within each reference list are refused.
 There are at most 256 entries, 16 refs in each list, and 16 questions per entry.
 Text is limited to 1024 Unicode code points; controls, bidirectional overrides
 and lone surrogates are refused. Identifiers use the existing bounded ASCII
-identifier vocabulary. Text containing markup remains inert JSON data; any
-future view must render it as text, never HTML or instructions. Nothing is
+identifier vocabulary. Text containing markup remains inert JSON data; the
+UI renders it as text, never HTML or instructions. Nothing is
 redacted: review before sharing an export or putting it in an agent's context.
 
 Coverage counts only the explicitly declared opcode table. Every missing ledger

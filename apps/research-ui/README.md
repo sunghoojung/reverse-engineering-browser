@@ -1956,3 +1956,21 @@ are available. The local Rust HTTP backend is required; native stored-evidence
 mode explains how to use the backend or CLI. See the
 [versioned pack contract](../../protocol/vm-analysis-pack-v1.md) for limits and
 agent-facing `vm_pack_apply`/`vm_pack_compare` routes.
+
+## Opcode evidence ledger
+
+The VM **Opcode ledger** workspace imports exact definition JSON and a bounded
+ledger JSON locally. The JSON editor exposes all researcher fields, including
+handler byte locations, operand notes, source/test citations and unresolved
+questions. **Create empty ledger** binds a new draft to the exact definition
+source SHA-256 without inventing entries. It refuses to replace nonempty work.
+**Validate ledger** uses the same schema and identity checks as the agent's
+`opcode-ledger` command. **Export validated ledger JSON** downloads only the
+validated ledger, with no extra analysis envelope; edits invalidate export.
+Previous coverage remains visible but is explicitly stale after edits or errors.
+
+Coverage counts declared opcodes, never runtime execution or verified meanings.
+Observed/inferred labels, citations and test outcomes remain supplied assertions.
+Nothing executes imported code, fetches references, runs tests, promotes VM
+semantics, persists inputs automatically or uploads data. Review private data
+before exporting. See [ledger v1](../../protocol/vm-opcode-ledger-v1.md).

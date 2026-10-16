@@ -77,11 +77,28 @@ const RebVmOpcodeLedgerView = (() => {
       } catch (error) { if (serial === revision) notice.textContent = `Creation refused: ${error.message}`; }
     }
     function exportText() { return current ? JSON.stringify(report.ledger, null, 2) + '\n' : null; }
-    const download = button('Export validated ledger JSON', () => {
-      const text = exportText(); if (text === null) return;
-      const url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
-      const link = node('a'); link.href = url; link.download = 'opcode-ledger.json'; root.append(link); link.click(); link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const nativeShell = document.documentElement?.classList.contains('native-shell') === true;
+    let copying = false;
+    const download = button(nativeShell ? 'Copy validated ledger JSON' : 'Export validated ledger JSON', async () => {
+      const text = exportText(); if (text === null || copying) return;
+      if (nativeShell) {
+        const serial = revision; copying = true;
+        try {
+          if (!globalThis.navigator?.clipboard?.writeText) throw new Error('Clipboard unavailable');
+          await globalThis.navigator.clipboard.writeText(text);
+          if (serial === revision) notice.textContent = 'Validated ledger JSON copied to the clipboard. Review private data before sharing.';
+        } catch {
+          if (serial === revision) notice.textContent = 'Could not copy validated ledger JSON. Clipboard access is unavailable or denied; the local draft is unchanged.';
+        } finally { copying = false; }
+        return;
+      }
+      let url;
+      try {
+        url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+        const link = node('a'); link.href = url; link.download = 'opcode-ledger.json'; root.append(link);
+        try { link.click(); } finally { link.remove(); }
+      } catch { notice.textContent = 'Could not download validated ledger JSON. The local draft is unchanged.'; }
+      finally { if (url) setTimeout(() => URL.revokeObjectURL(url), 1000); }
     }); download.disabled = true;
     const validateButton = button('Validate ledger', () => void validate());
     const createButton = button('Create empty ledger', () => void create());

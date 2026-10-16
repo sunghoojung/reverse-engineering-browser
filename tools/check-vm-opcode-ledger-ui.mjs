@@ -62,4 +62,32 @@ const hash = deferred(); const slow = api.mount(new Element('section'), {...mode
 slow.editors.definition.value = definition; slow.editors.ledger.value = text;
 const validating = slow.validate(); slow.clear.events.click(); hash.resolve(await model.inspectLedger(text, definition)); await validating;
 assert.equal(slow.getReport(), null); assert.equal(slow.exportText(), null);
+// Native HTTP WKWebView deliberately copies on click; it must never use Blob downloads.
+let copied = [], rejectCopy = false, clipboardWait = null, nativeBlobCalls = 0;
+const nativeDocument = {...document, documentElement: {classList: {contains: value => value === 'native-shell'}}};
+const nativeAPI = runInNewContext(source + ';RebVmOpcodeLedgerView', {
+  document: nativeDocument, TextEncoder, TextDecoder, vmOpcodeLedger: model,
+  Blob: function () { nativeBlobCalls++; throw Error('Native Blob path must not run'); },
+  navigator: {clipboard: {writeText: async value => {
+    copied.push(value); if (rejectCopy) throw Error('denied'); if (clipboardWait) await clipboardWait.promise;
+  }}}
+});
+const native = nativeAPI.mount(new Element('section'));
+native.editors.definition.value = definition; native.editors.ledger.value = text;
+await native.validate(); assert.equal(copied.length, 0, 'Validation must not write the clipboard');
+assert.equal(native.download.textContent, 'Copy validated ledger JSON');
+await native.download.events.click(); assert.deepEqual(JSON.parse(copied[0]), ledger);
+assert.match(native.notice.textContent, /copied to the clipboard/);
+rejectCopy = true; await native.download.events.click(); assert.match(native.notice.textContent, /Could not copy/);
+assert(native.exportText(), 'Copy denial preserves the valid local draft'); rejectCopy = false;
+clipboardWait = deferred(); const copyPending = native.download.events.click();
+const count = copied.length; await native.download.events.click(); assert.equal(copied.length, count, 'Repeated clicks cannot overlap clipboard writes');
+native.clear.events.click(); clipboardWait.resolve(); await copyPending;
+assert.match(native.notice.textContent, /cleared/, 'Old clipboard completion cannot overwrite newer state');
+await native.download.events.click(); assert.equal(copied.length, count, 'Cleared/stale drafts cannot be copied');
+assert.equal(nativeBlobCalls, 0, 'Native clipboard paths never attempt Blob downloads');
+const noClipboardAPI = runInNewContext(source + ';RebVmOpcodeLedgerView', {document: nativeDocument, TextEncoder, TextDecoder, vmOpcodeLedger: model});
+const unavailable = noClipboardAPI.mount(new Element('section'));
+unavailable.editors.definition.value = definition; unavailable.editors.ledger.value = text; await unavailable.validate();
+await unavailable.download.events.click(); assert.match(unavailable.notice.textContent, /unavailable or denied/);
 console.log('Opcode ledger browser model/CLI parity and editor controller passed: exact identity, inert markup, malformed imports, stale export guard, cancelled and interrupted reads/validation.');

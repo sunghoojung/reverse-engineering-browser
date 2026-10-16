@@ -1967,6 +1967,9 @@ source SHA-256 without inventing entries. It refuses to replace nonempty work.
 **Validate ledger** uses the same schema and identity checks as the agent's
 `opcode-ledger` command. **Export validated ledger JSON** downloads only the
 validated ledger, with no extra analysis envelope; edits invalidate export.
+In the native shell, **Copy validated ledger JSON** explicitly copies that same
+validated document to the clipboard instead. Clipboard refusal leaves the draft
+intact and displays an error; native Blob downloads are not attempted.
 Previous coverage remains visible but is explicitly stale after edits or errors.
 
 Coverage counts declared opcodes, never runtime execution or verified meanings.

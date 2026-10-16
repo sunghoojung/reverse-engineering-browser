@@ -78,6 +78,7 @@ function mountVmAnalysisPacks(root) {
     const selected = node('span', 'No file selected'); pickers[key] = picker; statuses[key] = selected; epochs[key] = 0;
     picker.addEventListener('change', async () => {
       const epoch = ++epochs[key], file = picker.files?.[0]; invalidate(); inputs[key] = null;
+      if (key !== 'pack') selectAction(key === 'analysis' ? 'apply' : 'compare');
       selected.textContent = file ? 'Reading selected file…' : 'No file selected';
       status.textContent = file ? 'Reading input. Previous report cleared.' : 'Input selection cleared. Previous report cleared.';
       if (!file) return;
@@ -94,13 +95,14 @@ function mountVmAnalysisPacks(root) {
   const ids = {};
   for (const side of ['left', 'right']) {
     const label = node('label', `${side === 'left' ? 'Left' : 'Right'} interpreter artifact ID`, 'vm-tool-import-card'), input = node('input'); input.type = 'text'; input.setAttribute('aria-label', `${side} interpreter artifact ID`); input.inputMode = 'numeric'; input.maxLength = 20;
-    input.addEventListener('input', () => { invalidate(); status.textContent = 'Interpreter selection changed. Run comparison again.'; });
+    input.addEventListener('input', () => { selectAction('compare'); invalidate(); status.textContent = 'Interpreter selection changed. Run comparison again.'; });
     ids[side] = input; label.append(input); compareInputs.append(label);
   }
   fields.append(applyInputs, compareInputs);
   const button = (text, callback) => { const element = node('button', text, 'secondary-button'); element.type = 'button'; element.addEventListener('click', callback); actions.append(element); return element; };
   const run = async mode => {
     if (pending) return;
+    selectAction(mode);
     invalidate(); const current = generation;
     let timer;
     try {
@@ -131,8 +133,16 @@ function mountVmAnalysisPacks(root) {
   };
   const apply = button('Apply ranking pack', () => run('apply'));
   const compare = button('Compare builds', () => run('compare'));
-  button('Cancel', () => { invalidate(); status.textContent = 'Cancelled. No report accepted. Inputs retained.'; });
-  button('Clear', () => { invalidate(); for (const key of Object.keys(pickers)) { epochs[key]++; inputs[key] = null; pickers[key].value = ''; statuses[key].textContent = 'No file selected'; } ids.left.value = ''; ids.right.value = ''; status.textContent = 'Inputs and report cleared.'; });
+  const selectAction = mode => {
+    apply.className = `secondary-button${mode === 'apply' ? ' vm-tool-primary' : ''}`;
+    compare.className = `secondary-button${mode === 'compare' ? ' vm-tool-primary' : ''}`;
+  };
+  selectAction('apply');
+  applyInputs.addEventListener('toggle', () => { if (applyInputs.open) selectAction('apply'); });
+  compareInputs.addEventListener('toggle', () => { if (compareInputs.open) selectAction('compare'); });
+  const cancel = button('Cancel', () => { invalidate(); status.textContent = 'Cancelled. No report accepted. Inputs retained.'; });
+  const clear = button('Clear', () => { invalidate(); for (const key of Object.keys(pickers)) { epochs[key]++; inputs[key] = null; pickers[key].value = ''; statuses[key].textContent = 'No file selected'; } ids.left.value = ''; ids.right.value = ''; status.textContent = 'Inputs and report cleared.'; });
+  cancel.className += ' vm-tool-tertiary'; clear.className += ' vm-tool-tertiary';
   const nativeShell = document.documentElement.classList.contains('native-shell');
   const download = button(nativeShell ? 'Copy complete report JSON' : 'Download complete report', async () => {
     if (!reportText) return;

@@ -113,3 +113,11 @@ assert.match(ui.root.textContent, /130 rows · first 128 shown/);
 assert.equal(all(ui.root).filter(element => element.tagName === 'tbody')[0].children.length, 128);
 assert.match(ui.root.textContent, /130 moved/);
 await ui.button('Copy complete report JSON').click(); assert.equal(JSON.parse(copied).rows.length, 130, 'Structured preview bounds do not truncate exact export');
+
+assert(ui.button('Compare builds').className.includes('vm-tool-primary'));
+assert(!ui.button('Apply ranking pack').className.includes('vm-tool-primary'));
+const applyDisclosure = all(ui.root).find(element => element.attributes['data-pack-inputs'] === 'apply');
+applyDisclosure.open = true; applyDisclosure.events.toggle();
+assert(ui.button('Apply ranking pack').className.includes('vm-tool-primary'));
+assert(!ui.button('Compare builds').className.includes('vm-tool-primary'));
+for (const title of ['Cancel', 'Clear']) assert(ui.button(title).className.includes('vm-tool-tertiary'));

@@ -125,11 +125,13 @@ const RebVmOpcodeLedgerView = (() => {
       finally { if (url) setTimeout(() => URL.revokeObjectURL(url), 1000); }
     }); download.disabled = true;
     const validateButton = button('Validate ledger', () => void validate());
+    validateButton.className += ' vm-tool-primary';
     const createButton = button('Create empty ledger', () => void create());
     const clear = button('Clear all ledger inputs', () => {
       reads.definition++; reads.ledger++; pending.definition = false; pending.ledger = false; editors.definition.value = ''; editors.ledger.value = ''; report = null;
       invalidate(); empty(); for (const kind of ['definition', 'ledger']) { inputSummaries[kind].textContent = 'No file selected'; disclosures[kind].open = false; } notice.textContent = 'Local inputs and coverage cleared.'; files.definition.focus();
     });
+    clear.className += ' vm-tool-tertiary';
     controls.append(createButton, validateButton, download, clear);
     const help = node('details', '', 'vm-tool-editor'); help.append(node('summary', 'Entry schema and research boundaries'));
     help.append(node('p', 'Edit entries in the JSON editor. Each opcode must exist in the definition. Observed/inferred require meaning and source_refs. Unmodeled requires null meaning. Passed/failed/inconclusive tests require test_refs; not_run requires none. Handler offsets are byte offsets. Nothing is fetched, verified, executed, uploaded or automatically saved.'));

@@ -98,3 +98,7 @@ assert(descendants(presentationRoot).filter(element => element.attributes['data-
 assert.equal(presentation.editors.ledger.rows, 10);
 await presentation.importFile('definition', file(definition)); await presentation.importFile('ledger', file(text)); await presentation.validate();
 assert(descendants(presentation.results).some(element => element.tagName === 'table' && element.className === 'vm-tool-table'));
+
+const presentationButtons = descendants(presentationRoot).filter(element => element.tagName === 'button');
+assert(presentationButtons.find(element => element.textContent === 'Validate ledger').className.includes('vm-tool-primary'));
+assert(presentationButtons.find(element => element.textContent === 'Clear all ledger inputs').className.includes('vm-tool-tertiary'));

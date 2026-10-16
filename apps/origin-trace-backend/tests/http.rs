@@ -5985,14 +5985,17 @@ async fn workspace_http_held_lease_rejects_without_wait_or_changes() {
             200,
             "Atomic reads stay available"
         );
+        // Parallel subprocess startup can retain this file description until
+        // exec closes it. Keep an alias alive to exercise that lifetime without
+        // relying on fork timing; closing only `lock` would leave the lease held.
+        let inherited = lock.try_clone().unwrap();
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(lock);
-        assert_eq!(
-            server
-                .action(&action, workspace_change(kind, 1, 1))
-                .await
-                .status(),
-            200
-        );
+        let response = server.action(&action, workspace_change(kind, 1, 1)).await;
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(status, 200, "{kind} after release: {body}");
+        drop(inherited);
     }
 }
 #[cfg(unix)]

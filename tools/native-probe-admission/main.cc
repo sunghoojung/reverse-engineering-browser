@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <span>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -376,6 +379,73 @@ void RuntimeKeepList() {
                "sanitized URL\n";
 }
 
+void RuntimeSourceFeed() {
+  NativeProbeQueue queue;
+  Configure(queue, 77);
+  std::array<std::uint8_t, 256> buffer{};
+  const auto before = reb::mojom::NativeProbeHost::artifacts.load();
+  std::uint64_t script_id = 30;
+  const auto capture = [&](const std::string_view source, const std::size_t size) {
+    const std::vector<std::uint8_t> owned(source.begin(), source.end());
+    const reb::NativeRuntimeScript script{script_id, false, owned};
+    sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", std::span(buffer).first(size),
+                                  script);
+    ++script_id;
+  };
+  const auto payload = [](const NativeProbeEvent& event) {
+    return std::string(reinterpret_cast<const char*>(event.inline_payload.data()),
+                       event.header.payload_size);
+  };
+
+  capture("var hidden=\"while(i<n){switch(op){}}\";", 256);
+  const auto rejected = One(queue);
+  assert(rejected.header.type == reb::NativeProbeType::kArtifactCaptureFailed);
+  assert(payload(rejected) == "runtime_buffer_no_vm_signal");
+  assert(reb::mojom::NativeProbeHost::artifacts == before);
+
+  std::string overflow =
+      "function vm(){var pc=0;while(pc<program.length){switch(program[pc++]){case "
+      "1:stack.push(1);return;}}}";
+  for (unsigned index = 0; index < 256; ++index) {
+    overflow += "function p(){return 1;}";
+  }
+  capture(overflow, 32);
+  assert(Drain(queue) == 0);
+  capture("function broken(){while(i<n){switch(op){}}", 32);
+  capture("function add(a,b){return a+b;}", 256);
+  capture("function a(){while(false){}} function b(){switch(0){default:break;}}", 256);
+  capture("function commented(){/* while(i<n){switch(op){}} */ return 1;}", 256);
+  assert(Drain(queue) == 0);
+  assert(reb::mojom::NativeProbeHost::artifacts == before);
+
+  capture("while(i<n){switch(op){}}", 32);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  capture(
+      "function vm(){var pc=0;while(pc<program.length){switch(program[pc++]){case "
+      "1:stack.push(1);return;}}}",
+      32);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  const auto likely_id = script_id - 1U;
+  reb::NativeRuntimeScript again{likely_id, false, {}};
+  sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", std::span(buffer).first(32),
+                                again);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  capture("var vm=(pc)=>{while(pc<program.length){switch(program[pc++]){case 1:stack.push(1);return;}}};",
+          32);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  capture("var vm=pc=>{while(pc<program.length){switch(program[pc++]){case 1:stack.push(1);return;}}};",
+          32);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  const std::string_view unrelated{"function add(a,b){return a+b;}"};
+  const std::vector<std::uint8_t> unrelated_bytes(unrelated.begin(), unrelated.end());
+  const reb::NativeRuntimeScript other_context{likely_id, false, unrelated_bytes};
+  sink.CaptureRuntimeTypedArray(99, 8, "fixture://owned/script.js", std::span(buffer).first(32),
+                                other_context);
+  assert(Drain(queue) == 0);
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 5);
+  std::cout << "PASS runtime source feed for candidate, likely-VM, dispatch and closed failures\n";
+}
+
 void DisabledExpiredAndMalformed() {
   transport.Disable();
   std::atomic<std::uint64_t> observed{0};
@@ -436,5 +506,6 @@ int main() {
   CanvasCreatorAdmission();
   RuntimeScriptProvenance();
   RuntimeKeepList();
+  RuntimeSourceFeed();
   std::cout << "Renderer ring admission only; no full Chromium/Mojo/runtime validation.\n";
 }

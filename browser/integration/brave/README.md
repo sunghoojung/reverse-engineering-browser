@@ -238,8 +238,16 @@ integration seam keyed by configuration generation, execution context and V8
 script ID. Callers must retain the observation-time generation and register only
 trusted detector outputs for that exact captured source. A URL or a large buffer
 is never classification evidence. Stale observations and context mismatches fail
-closed. Native V8 eval/Function provenance is currently the live keep-list feed.
-The offline Rust detector has **no live renderer feedback path yet**; candidate
-and dispatch-observation rows are policy-tested, but no production caller feeds
-those rows. This is partial issue #200 integration, not a claim that ordinary
-script candidates are already admitted. The registration API is not page-facing.
+closed. Native V8 eval/Function provenance remains a keep-list row. When the
+allocating script's source is copied, the renderer classifies that source on
+the same thread before the keep-list read: a non-executing scan of at most
+256 KiB and 256 functions, using the offline detector's structural weights
+(dispatch-loop 20, instruction pointer 20, indexed bytecode 20, state 15,
+handlers 15, exit 5). Only the winning function region sets flags. A dispatch
+loop scores 20, so it is a candidate and is admitted from 32 bytes; likely-VM
+still requires that same region to contain the dispatch loop, at least 60
+points, and at least 3 rule families. The URL and the buffer length are not
+classification evidence. An unterminated function in a fully visible source,
+or more than 256 functions, fails closed. Source past the 256 KiB prefix is
+not classified. Anti-bot lexical rules stay offline and do not admit buffers.
+The registration API is not page-facing.

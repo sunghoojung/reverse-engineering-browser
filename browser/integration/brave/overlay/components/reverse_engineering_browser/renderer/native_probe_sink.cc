@@ -6,7 +6,12 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <span>
 #include <string_view>
 
 #include "base/process/process_handle.h"
@@ -114,6 +119,708 @@ std::string_view SanitizeRuntimeSourceUrl(
     output[length++] = input[index];
   }
   return {output.data(), length};
+}
+
+// Same structural weights as the offline JavaScript detector. Anti-bot lexical
+// rules are relevance only and do not admit a buffer. The scan never executes
+// source. One malloc/free pair keeps this path noexcept under -fno-exceptions.
+constexpr std::size_t kRuntimeSourceScanBytes = 256U * 1024U;
+constexpr std::size_t kRuntimeSourceMaxFunctions = 256;
+constexpr int kRuntimeCandidateScore = 20;
+constexpr int kRuntimeLikelyScore = 60;
+constexpr int kRuntimeLikelyFamilies = 3;
+
+struct RuntimeSourceTier final {
+  bool likely = false;
+  bool candidate = false;
+  bool dispatch = false;
+};
+
+struct RuntimeRegion final {
+  std::size_t start = 0;
+  std::size_t end = 0;
+  std::uint16_t id = 0;
+};
+
+constexpr bool IsAsciiWord(const unsigned char c) noexcept {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+constexpr bool IsIdentStart(const unsigned char c) noexcept {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '$';
+}
+
+constexpr bool IsIdentCont(const unsigned char c) noexcept {
+  return IsIdentStart(c) || (c >= '0' && c <= '9');
+}
+
+constexpr bool IsAsciiSpace(const unsigned char c) noexcept {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+constexpr char AsciiLower(const unsigned char c) noexcept {
+  return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : static_cast<char>(c);
+}
+
+constexpr std::size_t AlignUp(const std::size_t value, const std::size_t alignment) noexcept {
+  return (value + alignment - 1U) & ~(alignment - 1U);
+}
+
+void MaskScriptSource(char* const text, const std::size_t length) noexcept {
+  bool line = false;
+  bool block = false;
+  bool escaped = false;
+  char quote = 0;
+  for (std::size_t index = 0; index < length; ++index) {
+    const char current = text[index];
+    const char next = index + 1 < length ? text[index + 1] : '\0';
+    if (line) {
+      if (current == '\n') {
+        line = false;
+      } else {
+        text[index] = ' ';
+      }
+    } else if (block) {
+      text[index] = ' ';
+      if (current == '*' && next == '/') {
+        text[index + 1] = ' ';
+        ++index;
+        block = false;
+      }
+    } else if (quote != 0) {
+      text[index] = ' ';
+      if (escaped) {
+        escaped = false;
+      } else if (current == '\\') {
+        escaped = true;
+      } else if (current == quote) {
+        quote = 0;
+      }
+    } else if (current == '/' && (next == '/' || next == '*')) {
+      text[index] = ' ';
+      text[index + 1] = ' ';
+      ++index;
+      line = next == '/';
+      block = next == '*';
+    } else if (current == '"' || current == '\'' || current == '`') {
+      text[index] = ' ';
+      quote = current;
+    }
+  }
+}
+
+std::size_t MatchFunctionBrace(const char* const text,
+                               const std::size_t length,
+                               const std::size_t index) noexcept {
+  constexpr char kWord[] = "function";
+  constexpr std::size_t kLen = sizeof(kWord) - 1U;
+  if (index + kLen > length ||
+      (index > 0 && IsAsciiWord(static_cast<unsigned char>(text[index - 1]))) ||
+      std::memcmp(text + index, kWord, kLen) != 0 ||
+      (index + kLen < length && IsAsciiWord(static_cast<unsigned char>(text[index + kLen])))) {
+    return length;
+  }
+  std::size_t cursor = index + kLen;
+  const std::size_t limit = std::min(length, index + kLen + 1024U + 1U);
+  while (cursor < limit && text[cursor] != '{' && text[cursor] != '}') {
+    ++cursor;
+  }
+  if (cursor <= index + kLen + 1024U && cursor < length && text[cursor] == '{') {
+    return cursor;
+  }
+  return length;
+}
+
+std::size_t MatchParenArrowBrace(const char* const text,
+                                 const std::size_t length,
+                                 const std::size_t index) noexcept {
+  if (index >= length || text[index] != '(') {
+    return length;
+  }
+  std::size_t cursor = index + 1U;
+  const std::size_t limit = std::min(length, index + 1U + 1024U);
+  while (cursor < limit && text[cursor] != '(' && text[cursor] != ')' && text[cursor] != '{' &&
+         text[cursor] != '}') {
+    ++cursor;
+  }
+  if (cursor >= length || text[cursor] != ')') {
+    return length;
+  }
+  ++cursor;
+  while (cursor < length && IsAsciiSpace(static_cast<unsigned char>(text[cursor]))) {
+    ++cursor;
+  }
+  if (cursor + 1U >= length || text[cursor] != '=' || text[cursor + 1U] != '>') {
+    return length;
+  }
+  cursor += 2U;
+  while (cursor < length && IsAsciiSpace(static_cast<unsigned char>(text[cursor]))) {
+    ++cursor;
+  }
+  return cursor < length && text[cursor] == '{' ? cursor : length;
+}
+
+std::size_t MatchIdentArrowBrace(const char* const text,
+                                 const std::size_t length,
+                                 const std::size_t index) noexcept {
+  if (index >= length || !IsIdentStart(static_cast<unsigned char>(text[index])) ||
+      (index > 0 && IsIdentCont(static_cast<unsigned char>(text[index - 1])))) {
+    return length;
+  }
+  std::size_t cursor = index + 1U;
+  while (cursor < length && IsIdentCont(static_cast<unsigned char>(text[cursor]))) {
+    ++cursor;
+  }
+  while (cursor < length && IsAsciiSpace(static_cast<unsigned char>(text[cursor]))) {
+    ++cursor;
+  }
+  if (cursor + 1U >= length || text[cursor] != '=' || text[cursor + 1U] != '>') {
+    return length;
+  }
+  cursor += 2U;
+  while (cursor < length && IsAsciiSpace(static_cast<unsigned char>(text[cursor]))) {
+    ++cursor;
+  }
+  return cursor < length && text[cursor] == '{' ? cursor : length;
+}
+
+std::size_t MatchSignatureBrace(const char* const text,
+                                const std::size_t length,
+                                const std::size_t index) noexcept {
+  const std::size_t function_brace = MatchFunctionBrace(text, length, index);
+  if (function_brace < length) {
+    return function_brace;
+  }
+  const std::size_t paren_brace = MatchParenArrowBrace(text, length, index);
+  if (paren_brace < length) {
+    return paren_brace;
+  }
+  return MatchIdentArrowBrace(text, length, index);
+}
+
+struct RegionScan final {
+  const char* text = nullptr;
+  const std::uint16_t* owner = nullptr;
+  std::uint16_t id = 0;
+  std::size_t begin = 0;
+  std::size_t end = 0;
+
+  [[nodiscard]] char At(const std::size_t index) const noexcept {
+    if (index >= end || owner[index] != id) {
+      return ' ';
+    }
+    return text[index];
+  }
+
+  [[nodiscard]] bool WordBefore(const std::size_t index) const noexcept {
+    return index > begin && IsAsciiWord(static_cast<unsigned char>(At(index - 1U)));
+  }
+
+  [[nodiscard]] bool WordAfter(const std::size_t index) const noexcept {
+    return index < end && IsAsciiWord(static_cast<unsigned char>(At(index)));
+  }
+};
+
+bool EqualsAt(const RegionScan& scan,
+              const std::size_t index,
+              const char* const word,
+              const std::size_t length,
+              const bool ignore_case) noexcept {
+  if (index + length > scan.end) {
+    return false;
+  }
+  for (std::size_t offset = 0; offset < length; ++offset) {
+    const char current = scan.At(index + offset);
+    const char expected = ignore_case ? AsciiLower(static_cast<unsigned char>(word[offset]))
+                                      : word[offset];
+    const char actual = ignore_case ? AsciiLower(static_cast<unsigned char>(current)) : current;
+    if (actual != expected) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ContainsBoundedWord(const RegionScan& scan,
+                         const char* const word,
+                         const std::size_t length,
+                         const bool ignore_case) noexcept {
+  if (length == 0 || scan.end - scan.begin < length) {
+    return false;
+  }
+  for (std::size_t index = scan.begin; index + length <= scan.end; ++index) {
+    if (!scan.WordBefore(index) && EqualsAt(scan, index, word, length, ignore_case) &&
+        !scan.WordAfter(index + length)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsLoop(const RegionScan& scan) noexcept {
+  constexpr char kWhile[] = "while";
+  constexpr char kFor[] = "for";
+  constexpr std::size_t kWhileLen = sizeof(kWhile) - 1U;
+  constexpr std::size_t kForLen = sizeof(kFor) - 1U;
+  for (std::size_t index = scan.begin; index < scan.end; ++index) {
+    const std::size_t length =
+        EqualsAt(scan, index, kWhile, kWhileLen, false) ? kWhileLen
+        : EqualsAt(scan, index, kFor, kForLen, false)   ? kForLen
+                                                         : 0U;
+    if (length == 0 || scan.WordBefore(index) || scan.WordAfter(index + length)) {
+      continue;
+    }
+    std::size_t cursor = index + length;
+    while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    if (cursor < scan.end && scan.At(cursor) == '(') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsIndexedCall(const RegionScan& scan) noexcept {
+  for (std::size_t index = scan.begin; index < scan.end; ++index) {
+    if (scan.WordBefore(index) || !IsIdentStart(static_cast<unsigned char>(scan.At(index)))) {
+      continue;
+    }
+    std::size_t cursor = index + 1U;
+    while (cursor < scan.end && IsIdentCont(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    if (cursor >= scan.end || scan.At(cursor) != '[') {
+      continue;
+    }
+    ++cursor;
+    bool any = false;
+    bool bad = false;
+    while (cursor < scan.end && scan.At(cursor) != ']') {
+      any = true;
+      if (scan.At(cursor) == '[') {
+        ++cursor;
+        while (cursor < scan.end && scan.At(cursor) != ']' && scan.At(cursor) != '[') {
+          ++cursor;
+        }
+        if (cursor >= scan.end || scan.At(cursor) != ']') {
+          bad = true;
+          break;
+        }
+      }
+      ++cursor;
+    }
+    if (bad || !any || cursor >= scan.end || scan.At(cursor) != ']') {
+      continue;
+    }
+    ++cursor;
+    while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    if (cursor < scan.end && scan.At(cursor) == '(') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsSwitch(const RegionScan& scan) noexcept {
+  constexpr char kSwitch[] = "switch";
+  constexpr std::size_t kLen = sizeof(kSwitch) - 1U;
+  for (std::size_t index = scan.begin; index + kLen <= scan.end; ++index) {
+    if (scan.WordBefore(index) || !EqualsAt(scan, index, kSwitch, kLen, false) ||
+        scan.WordAfter(index + kLen)) {
+      continue;
+    }
+    std::size_t cursor = index + kLen;
+    while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    if (cursor < scan.end && scan.At(cursor) == '(') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsIpUpdate(const RegionScan& scan) noexcept {
+  constexpr const char* kWords[] = {"instructionPointer", "offset", "cursor", "pc", "ip"};
+  constexpr std::size_t kLens[] = {19U, 6U, 6U, 2U, 2U};
+  for (std::size_t index = scan.begin; index < scan.end; ++index) {
+    if (scan.WordBefore(index)) {
+      continue;
+    }
+    std::size_t matched = 0;
+    for (std::size_t word = 0; word < 5U; ++word) {
+      if (EqualsAt(scan, index, kWords[word], kLens[word], false) &&
+          !scan.WordAfter(index + kLens[word])) {
+        matched = kLens[word];
+        break;
+      }
+    }
+    if (matched == 0) {
+      continue;
+    }
+    std::size_t cursor = index + matched;
+    while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    if (cursor + 1U < scan.end &&
+        ((scan.At(cursor) == '+' && scan.At(cursor + 1U) == '+') ||
+         (scan.At(cursor) == '-' && scan.At(cursor + 1U) == '-'))) {
+      return true;
+    }
+    if (cursor < scan.end && (scan.At(cursor) == '+' || scan.At(cursor) == '-')) {
+      ++cursor;
+    }
+    if (cursor < scan.end && scan.At(cursor) == '=') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsNamedBracket(const RegionScan& scan,
+                          const char* const* words,
+                          const std::size_t* lengths,
+                          const std::size_t count) noexcept {
+  for (std::size_t index = scan.begin; index < scan.end; ++index) {
+    if (scan.WordBefore(index)) {
+      continue;
+    }
+    for (std::size_t word = 0; word < count; ++word) {
+      if (!EqualsAt(scan, index, words[word], lengths[word], true) ||
+          scan.WordAfter(index + lengths[word])) {
+        continue;
+      }
+      std::size_t cursor = index + lengths[word];
+      while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+        ++cursor;
+      }
+      if (cursor >= scan.end || scan.At(cursor) != '[') {
+        continue;
+      }
+      ++cursor;
+      const std::size_t content = cursor;
+      while (cursor < scan.end && scan.At(cursor) != ']') {
+        ++cursor;
+      }
+      if (cursor > content && cursor < scan.end && scan.At(cursor) == ']') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool ContainsBytecodeRead(const RegionScan& scan) noexcept {
+  constexpr const char* kWords[] = {"instructions", "bytecode", "opcodes", "program", "bytes",
+                                    "code"};
+  constexpr std::size_t kLens[] = {12U, 8U, 7U, 7U, 5U, 4U};
+  if (ContainsNamedBracket(scan, kWords, kLens, 6U) ||
+      ContainsBoundedWord(scan, "Uint8Array", 10U, false) ||
+      ContainsBoundedWord(scan, "DataView", 8U, false)) {
+    return true;
+  }
+  return false;
+}
+
+bool ContainsDotMutation(const RegionScan& scan) noexcept {
+  constexpr const char* kNames[] = {".unshift", ".shift", ".push", ".pop"};
+  constexpr std::size_t kLens[] = {8U, 6U, 5U, 4U};
+  for (std::size_t index = scan.begin; index < scan.end; ++index) {
+    for (std::size_t name = 0; name < 4U; ++name) {
+      if (!EqualsAt(scan, index, kNames[name], kLens[name], false)) {
+        continue;
+      }
+      std::size_t cursor = index + kLens[name];
+      while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+        ++cursor;
+      }
+      if (cursor < scan.end && scan.At(cursor) == '(') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool ContainsStateWord(const RegionScan& scan) noexcept {
+  constexpr const char* kWords[] = {"accumulator", "registers", "register", "memory", "stack"};
+  constexpr std::size_t kLens[] = {11U, 9U, 8U, 6U, 5U};
+  for (std::size_t index = scan.begin; index < scan.end; ++index) {
+    if (scan.WordBefore(index)) {
+      continue;
+    }
+    std::size_t matched = 0;
+    for (std::size_t word = 0; word < 5U; ++word) {
+      if (EqualsAt(scan, index, kWords[word], kLens[word], true) &&
+          !scan.WordAfter(index + kLens[word])) {
+        matched = kLens[word];
+        break;
+      }
+    }
+    if (matched == 0) {
+      continue;
+    }
+    std::size_t cursor = index + matched;
+    while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    if (cursor < scan.end && scan.At(cursor) == '[') {
+      return true;
+    }
+    if (cursor < scan.end && (scan.At(cursor) == '+' || scan.At(cursor) == '-' ||
+                              scan.At(cursor) == '^' || scan.At(cursor) == '|' ||
+                              scan.At(cursor) == '&')) {
+      ++cursor;
+    }
+    if (cursor < scan.end && scan.At(cursor) == '=') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsCaseLabel(const RegionScan& scan) noexcept {
+  constexpr char kCase[] = "case";
+  constexpr std::size_t kLen = sizeof(kCase) - 1U;
+  for (std::size_t index = scan.begin; index + kLen <= scan.end; ++index) {
+    if (scan.WordBefore(index) || !EqualsAt(scan, index, kCase, kLen, true) ||
+        scan.WordAfter(index + kLen)) {
+      continue;
+    }
+    std::size_t cursor = index + kLen;
+    if (cursor >= scan.end || !IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      continue;
+    }
+    while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    if (cursor + 1U < scan.end && scan.At(cursor) == '0' &&
+        (scan.At(cursor + 1U) == 'x' || scan.At(cursor + 1U) == 'X')) {
+      std::size_t hex = cursor + 2U;
+      const auto hex_digit = [](const char character) noexcept {
+        const auto value = static_cast<unsigned char>(character);
+        return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
+               (value >= 'A' && value <= 'F');
+      };
+      if (hex < scan.end && hex_digit(scan.At(hex))) {
+        while (hex < scan.end && hex_digit(scan.At(hex))) {
+          ++hex;
+        }
+        cursor = hex;
+      }
+    } else {
+      const auto digit = [](const char character) noexcept {
+        const auto value = static_cast<unsigned char>(character);
+        return value >= '0' && value <= '9';
+      };
+      if (cursor < scan.end && digit(scan.At(cursor))) {
+        while (cursor < scan.end && digit(scan.At(cursor))) {
+          ++cursor;
+        }
+      }
+    }
+    while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
+      ++cursor;
+    }
+    if (cursor < scan.end && scan.At(cursor) == ':') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsHandler(const RegionScan& scan) noexcept {
+  constexpr const char* kWords[] = {"handlers", "handler", "opcodes", "opcode"};
+  constexpr std::size_t kLens[] = {8U, 7U, 7U, 6U};
+  return ContainsCaseLabel(scan) || ContainsNamedBracket(scan, kWords, kLens, 4U);
+}
+
+bool ContainsExit(const RegionScan& scan) noexcept {
+  return ContainsBoundedWord(scan, "return", 6U, false) ||
+         ContainsBoundedWord(scan, "break", 5U, false) ||
+         ContainsBoundedWord(scan, "throw", 5U, false);
+}
+
+struct RegionScore final {
+  int score = 0;
+  int families = 0;
+  bool dispatch = false;
+};
+
+RegionScore ScoreRegion(const RegionScan& scan) noexcept {
+  const bool dispatch = ContainsLoop(scan) && (ContainsSwitch(scan) || ContainsIndexedCall(scan));
+  const bool ip = ContainsIpUpdate(scan);
+  const bool bytecode = ContainsBytecodeRead(scan);
+  const bool state = ContainsDotMutation(scan) || ContainsStateWord(scan);
+  const bool handler = ContainsHandler(scan);
+  const bool exit = ContainsExit(scan);
+  RegionScore scored;
+  scored.dispatch = dispatch;
+  if (dispatch) {
+    scored.score += 20;
+    ++scored.families;
+  }
+  if (ip) {
+    scored.score += 20;
+    ++scored.families;
+  }
+  if (bytecode) {
+    scored.score += 20;
+    ++scored.families;
+  }
+  if (state) {
+    scored.score += 15;
+    ++scored.families;
+  }
+  if (handler) {
+    scored.score += 15;
+    ++scored.families;
+  }
+  if (exit) {
+    scored.score += 5;
+    ++scored.families;
+  }
+  return scored;
+}
+
+[[nodiscard]] RuntimeSourceTier ClassifyRuntimeSource(
+    const std::span<const std::uint8_t> source) noexcept {
+  if (source.empty()) {
+    return {};
+  }
+  const bool truncated = source.size() > kRuntimeSourceScanBytes;
+  const std::size_t length = truncated ? kRuntimeSourceScanBytes : source.size();
+  const std::size_t owner_off = AlignUp(length, alignof(std::uint16_t));
+  const std::size_t marks_off = owner_off + length * sizeof(std::uint16_t);
+  const std::size_t stack_off = AlignUp(marks_off + length, alignof(std::size_t));
+  const std::size_t total = stack_off + length * sizeof(std::size_t);
+  void* const block = std::malloc(total);
+  if (block == nullptr) {
+    return {};
+  }
+  std::memset(block, 0, total);
+  char* const text = static_cast<char*>(block);
+  auto* const owner = reinterpret_cast<std::uint16_t*>(text + owner_off);
+  auto* const marks = reinterpret_cast<unsigned char*>(text + marks_off);
+  auto* const brace_stack = reinterpret_cast<std::size_t*>(text + stack_off);
+  std::memcpy(text, source.data(), length);
+  MaskScriptSource(text, length);
+
+  std::size_t opening_count = 0;
+  std::size_t cursor = 0;
+  bool too_many_functions = false;
+  while (cursor < length) {
+    const std::size_t brace = [&]() {
+      for (std::size_t index = cursor; index < length; ++index) {
+        const std::size_t found = MatchSignatureBrace(text, length, index);
+        if (found < length) {
+          return found;
+        }
+      }
+      return length;
+    }();
+    if (brace >= length) {
+      break;
+    }
+    if (opening_count == kRuntimeSourceMaxFunctions) {
+      too_many_functions = true;
+      break;
+    }
+    marks[brace] = 1U;
+    ++opening_count;
+    cursor = brace + 1U;
+  }
+  if (too_many_functions) {
+    std::free(block);
+    return {};
+  }
+
+  RuntimeRegion regions[kRuntimeSourceMaxFunctions + 1U];
+  regions[0] = {0U, length, 0U};
+  std::size_t region_count = 1;
+  std::size_t depth = 0;
+  std::size_t closed = 0;
+  std::size_t earliest_unclosed = length;
+  for (std::size_t index = 0; index < length; ++index) {
+    if (text[index] == '{') {
+      brace_stack[depth++] = index;
+    } else if (text[index] == '}' && depth > 0) {
+      const std::size_t start = brace_stack[--depth];
+      if (marks[start] != 0U) {
+        const auto id = static_cast<std::uint16_t>(region_count);
+        regions[region_count] = {start + 1U, index, id};
+        ++region_count;
+        ++closed;
+      }
+    }
+  }
+  if (closed != opening_count) {
+    if (!truncated) {
+      std::free(block);
+      return {};
+    }
+    for (std::size_t index = 0; index < depth; ++index) {
+      if (marks[brace_stack[index]] != 0U && brace_stack[index] < earliest_unclosed) {
+        earliest_unclosed = brace_stack[index];
+      }
+    }
+  }
+
+  // Larger function bodies first so an inner function overwrites its parent.
+  for (std::size_t start = 1; start < region_count; ++start) {
+    std::size_t largest = start;
+    for (std::size_t index = start + 1U; index < region_count; ++index) {
+      const std::size_t largest_size = regions[largest].end - regions[largest].start;
+      const std::size_t index_size = regions[index].end - regions[index].start;
+      if (index_size > largest_size) {
+        largest = index;
+      }
+    }
+    const RuntimeRegion swap = regions[start];
+    regions[start] = regions[largest];
+    regions[largest] = swap;
+  }
+  for (std::size_t index = 1; index < region_count; ++index) {
+    const RuntimeRegion& region = regions[index];
+    for (std::size_t byte = region.start; byte < region.end; ++byte) {
+      owner[byte] = region.id;
+    }
+  }
+  if (earliest_unclosed < length) {
+    for (std::size_t byte = earliest_unclosed; byte < length; ++byte) {
+      owner[byte] = static_cast<std::uint16_t>(0xFFFFU);
+    }
+  }
+
+  RuntimeSourceTier best_tier;
+  int best_score = -1;
+  int best_families = -1;
+  std::size_t best_start = 0;
+  for (std::size_t index = 0; index < region_count; ++index) {
+    const RegionScan scan{text, owner, regions[index].id, regions[index].start,
+                          regions[index].end};
+    const RegionScore scored = ScoreRegion(scan);
+    if (scored.score > best_score ||
+        (scored.score == best_score && (scored.families > best_families ||
+                                        (scored.families == best_families &&
+                                         regions[index].start < best_start)))) {
+      best_score = scored.score;
+      best_families = scored.families;
+      best_start = regions[index].start;
+      best_tier.dispatch = scored.dispatch;
+      best_tier.candidate = scored.score >= kRuntimeCandidateScore;
+      best_tier.likely = scored.dispatch && scored.score >= kRuntimeLikelyScore &&
+                         scored.families >= kRuntimeLikelyFamilies;
+    }
+  }
+  std::free(block);
+  return best_tier;
 }
 
 void SetPayload(NativeProbeEvent& event,
@@ -340,6 +1047,23 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
                              "allocating_script_url_unavailable", generation);
     return;
+  }
+  // Source is present only on the first observed copy of this script. Register
+  // that structural result before the keep-list read so later empty copies of
+  // the same script still match. The winning region supplies every flag.
+  if (!script.source.empty()) {
+    const RuntimeSourceTier tier = ClassifyRuntimeSource(script.source);
+    if (tier.likely) {
+      (void)RegisterRuntimeScriptObservation(generation, execution_context_id, script.script_id,
+                                             NativeRuntimeScriptObservation::kCapturedLikelyVm);
+    } else if (tier.candidate) {
+      (void)RegisterRuntimeScriptObservation(generation, execution_context_id, script.script_id,
+                                             NativeRuntimeScriptObservation::kCapturedVmCandidate);
+    }
+    if (tier.dispatch) {
+      (void)RegisterRuntimeScriptObservation(generation, execution_context_id, script.script_id,
+                                             NativeRuntimeScriptObservation::kStaticDispatchLoop);
+    }
   }
   bool candidate = false;
   bool dispatch = false;

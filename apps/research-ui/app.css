@@ -4267,3 +4267,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-experiment-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .vm-experiment-form label { display: flex; flex-direction: column; gap: 4px; min-width: 150px; max-width: 100%; }
 .vm-experiment-form input, .vm-experiment-form select { box-sizing: border-box; max-width: 100%; }
+
+/* Bounded inert pack output; long source identities never widen the workspace. */
+.vm-pack-output { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#vm-packs-workspace .vm-static-toolbar label { display: grid; gap: 0.35rem; min-width: 0; max-width: 100%; }
+#vm-packs-workspace input { max-width: 100%; min-width: 0; }

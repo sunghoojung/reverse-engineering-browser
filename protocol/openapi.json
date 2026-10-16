@@ -5075,6 +5075,304 @@
           "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
+    },
+    "/api/analysis/vm/packs/apply": {
+      "post": {
+        "operationId": "vm_pack_apply",
+        "summary": "Apply a declarative VM ranking pack",
+        "tags": [
+          "vm-analysis"
+        ],
+        "responses": {
+          "200": {
+            "description": "Complete data-only report; original evidence and limitations retained.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "contract_version",
+                    "document_kind",
+                    "document_digest"
+                  ],
+                  "properties": {
+                    "contract_version": {
+                      "const": 1
+                    },
+                    "document_kind": {
+                      "const": "vm-pack-application"
+                    },
+                    "document_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed, oversized, duplicate-key, schema-invalid or digest/source-identity mismatched input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Bounded pack-analysis capacity unavailable; retry explicitly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Controls require application/json with optional UTF-8 charset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired before control admission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/vm_pack.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-max-body-bytes": 16777216,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pack",
+                  "analysis"
+                ],
+                "properties": {
+                  "pack": {
+                    "type": "object"
+                  },
+                  "analysis": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm_pack.rs",
+              "symbol": "request"
+            }
+          ]
+        }
+      }
+    },
+    "/api/analysis/vm/packs/compare": {
+      "post": {
+        "operationId": "vm_pack_compare",
+        "summary": "Compare exact source-bound VM workspace instructions",
+        "tags": [
+          "vm-analysis"
+        ],
+        "responses": {
+          "200": {
+            "description": "Complete data-only report; original evidence and limitations retained.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "contract_version",
+                    "document_kind",
+                    "document_digest"
+                  ],
+                  "properties": {
+                    "contract_version": {
+                      "const": 1
+                    },
+                    "document_kind": {
+                      "const": "vm-instruction-set-comparison"
+                    },
+                    "document_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed, oversized, duplicate-key, schema-invalid or digest/source-identity mismatched input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Bounded pack-analysis capacity unavailable; retry explicitly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Controls require application/json with optional UTF-8 charset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired before control admission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/vm_pack.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-max-body-bytes": 16777216,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pack",
+                  "left",
+                  "left_artifact",
+                  "right",
+                  "right_artifact"
+                ],
+                "properties": {
+                  "pack": {
+                    "type": "object"
+                  },
+                  "left": {
+                    "type": "object"
+                  },
+                  "left_artifact": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,19}$"
+                  },
+                  "right": {
+                    "type": "object"
+                  },
+                  "right_artifact": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,19}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm_pack.rs",
+              "symbol": "request"
+            }
+          ]
+        }
+      }
     }
   },
   "components": {

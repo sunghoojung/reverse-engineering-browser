@@ -131,3 +131,32 @@ directory. The command uses no network or browser connection. It prints only
 the output digest and `network_requests: 0` after successful publication.
 Reports can retain sensitive local evidence. Review any report before sharing;
 this command is not an export redactor and never uploads a report.
+
+## Local UI and agent HTTP parity
+
+**VM → Analysis packs** imports a pack plus a VM analysis document for **Apply
+ranking pack**, or a pack plus two opcode workspace documents and exact
+interpreter artifact IDs for **Compare builds**. It sends only an explicit
+request to the local Rust backend; files remain inert. The browser retains the
+original JSON text to avoid rounding u64 identities. Changes and Clear invalidate
+the previous report; Cancel ignores outstanding results. A bounded preview and
+explicit complete-report download (or a clearly labeled copy action in native
+live mode) preserve the report's limitations and original
+evidence. Downloads use normal browser file permissions. Review before sharing.
+Stored-evidence native mode has no pack backend and shows an explicit unavailable
+message; use the live local backend/browser-development mode or the offline CLI.
+
+The same operations are discoverable as `vm_pack_apply` and `vm_pack_compare` in
+`reb-api`. POST `/api/analysis/vm/packs/apply` accepts exactly `{pack, analysis}`;
+POST `/api/analysis/vm/packs/compare` accepts exactly
+`{pack, left, left_artifact, right, right_artifact}`. Documents are nested JSON
+objects; artifact IDs are canonical positive u64 strings. The implementation
+calls the exact offline `apply`/`compare` functions, preserving schema, digest,
+source-family and conservative comparison semantics. Unknown request fields,
+duplicate keys, noninteger numbers and malformed UTF-8 are refused. The combined
+HTTP body is bounded at 16 MiB/depth 32 and receives the existing local-origin,
+content-length, JSON-media-type and body-deadline checks. At most two package/pack
+requests are admitted before body ingestion; capacity errors require explicit
+retry. Pack analysis writes no files, launches no process and sends no outgoing
+network requests. The existing 32 MiB report cap applies. Use the offline CLI
+when separate inputs fit its individual file limits but not the HTTP total.

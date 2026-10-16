@@ -418,7 +418,7 @@
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
               <div><h1>VM investigation</h1></div>
-              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live owned fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace">Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace">Contextual build</button></nav>
+              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live owned fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace">Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace">Contextual build</button><button id="vm-show-packs" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-packs-workspace">Analysis packs</button><button id="vm-show-ledger" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-ledger-workspace">Opcode ledger</button></nav>
               <div id="vm-session-status" class="vm-session-status" role="status" aria-live="polite"></div>
             </header>
             <div id="vm-owned-controls" hidden></div>
@@ -434,6 +434,8 @@
             </div>
             <section id="vm-owned-debugger" aria-label="Live owned native fixture" hidden></section>
             <section id="vm-contextual-workspace" class="vm-contextual-workspace" aria-label="Per-build contextual VM analysis" hidden></section>
+            <section id="vm-packs-workspace" class="vm-static-workspace" aria-label="Analysis packs" hidden></section>
+            <section id="vm-ledger-workspace" class="vm-static-workspace" aria-label="Opcode ledger" hidden></section>
             <section id="vm-static-workspace" class="vm-static-workspace" aria-label="Static bytecode analysis" hidden></section>
             <section id="vm-semantics-workflow" class="vm-semantics-workflow" aria-label="VM execution workspace" hidden></section>
           </section>
@@ -1468,6 +1470,9 @@
     <script src="vm_contextual.js"></script>
     <script src="vm_contextual_evidence.js"></script>
     <script src="vm_contextual_view.js"></script>
+    <script src="vm_analysis_packs.js"></script>
+    <script src="vm_opcode_ledger.js"></script>
+    <script src="vm_opcode_ledger_view.js"></script>
     <script src="vm_semantics.js"></script>
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>

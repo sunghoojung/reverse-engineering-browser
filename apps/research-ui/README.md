@@ -1944,3 +1944,15 @@ and the expected selected value/next PC, then choose Run isolated native
 experiment. Read saved results does not execute. Results show tested inputs and
 do not generalize; unsupported inputs are retained without execution. See
 [the strict contract](../../protocol/owned-opcode-experiments-v1.md).
+
+## VM analysis packs
+
+**VM → Analysis packs** exposes the same data-only ranking and build-comparison
+functions as the offline `origin-trace-vm-pack` CLI. Import local JSON, specify
+exact interpreter artifact IDs for comparison, then explicitly apply or compare.
+No imported code executes. Invalid schema, stale digests and undeclared source
+families are rejected. Cancel, Clear, bounded preview and complete report download
+are available. The local Rust HTTP backend is required; native stored-evidence
+mode explains how to use the backend or CLI. See the
+[versioned pack contract](../../protocol/vm-analysis-pack-v1.md) for limits and
+agent-facing `vm_pack_apply`/`vm_pack_compare` routes.

@@ -122,6 +122,39 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
     Ok(value)
 }
 
+/// Bounded HTTP adapter for the exact offline library operations. No files or code run.
+pub fn request(bytes: &[u8], comparison: bool) -> Result<Value> {
+    let request = parse(bytes)?;
+    let expected: &[&str] = if comparison {
+        &["pack", "left", "left_artifact", "right", "right_artifact"]
+    } else {
+        &["pack", "analysis"]
+    };
+    crate::validation::fields(&request, expected, "VM pack request")?;
+    if comparison {
+        let left =
+            crate::validation::text(&request["left_artifact"], "left artifact", 20, false, false)?;
+        let right = crate::validation::text(
+            &request["right_artifact"],
+            "right artifact",
+            20,
+            false,
+            false,
+        )?;
+        crate::validation::canonical(&request["left_artifact"], 64, true, "left artifact")?;
+        crate::validation::canonical(&request["right_artifact"], 64, true, "right artifact")?;
+        compare(
+            &request["pack"],
+            &request["left"],
+            left,
+            &request["right"],
+            right,
+        )
+    } else {
+        apply(&request["pack"], &request["analysis"])
+    }
+}
+
 pub fn read(path: &Path) -> Result<Value> {
     let bytes = durable::read_private(path, MAX_INPUT_BYTES)?
         .ok_or_else(|| Error::bad("VM document does not exist"))?;
@@ -636,6 +669,51 @@ mod tests {
         let events = root.path().join("events.jsonl");
         std::fs::write(&events, "").unwrap();
         vm::store(root.path(), &events).unwrap()
+    }
+
+    #[test]
+    fn vm_pack_http_adapter_matches_cli_and_refuses_malformed_identity() {
+        let pack = fixture("pack.json");
+        let left = fixture("build-a.workspace.json");
+        let right = fixture("build-b.workspace.json");
+        let body =
+            json!({"pack":pack,"left":left,"left_artifact":"1","right":right,"right_artifact":"1"});
+        let encoded = serde_json::to_vec(&body).unwrap();
+        assert_eq!(
+            request(&encoded, true).unwrap(),
+            compare_fixture(&left, &right)
+        );
+        assert!(request(&encoded, false).is_err());
+        for (field, value) in [
+            ("left_artifact", json!("2")),
+            ("right_artifact", json!("01")),
+            ("left_artifact", json!(1)),
+            ("right_artifact", json!("18446744073709551616")),
+        ] {
+            let mut bad = body.clone();
+            bad[field] = value;
+            assert!(request(&serde_json::to_vec(&bad).unwrap(), true).is_err());
+        }
+        let mut tampered = body.clone();
+        tampered["left"]["document_digest"] = json!("0".repeat(64));
+        assert!(request(&serde_json::to_vec(&tampered).unwrap(), true).is_err());
+        let mut extra = body.clone();
+        extra["execute"] = json!(true);
+        assert!(request(&serde_json::to_vec(&extra).unwrap(), true).is_err());
+        assert!(request(br#"{"pack":{},"pack":{},"analysis":{}}"#, false).is_err());
+        assert!(request(&vec![b' '; MAX_INPUT_BYTES + 1], false).is_err());
+        let mut oversized = body.clone();
+        oversized["pack"]["rules"] =
+            json!([{"rule_id":"antibot.test","weight":1,"label":"x".repeat(65537)}]);
+        assert!(request(&serde_json::to_vec(&oversized).unwrap(), true).is_err());
+        let generic = analysis("function owned(x) { return x + 1; }");
+        let defaults: Value =
+            serde_json::from_str(include_str!("../assets/anti-bot-pack-v1.json")).unwrap();
+        let apply_body = json!({"pack":defaults,"analysis":generic});
+        assert_eq!(
+            request(&serde_json::to_vec(&apply_body).unwrap(), false).unwrap(),
+            apply(&defaults, &generic).unwrap()
+        );
     }
 
     #[test]

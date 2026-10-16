@@ -32,7 +32,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 31] = [
+const UI_ASSETS: [&str; 34] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -51,6 +51,9 @@ const UI_ASSETS: [&str; 31] = [
     "vm_semantics.js",
     "vm_static.js",
     "vm_static_view.js",
+    "vm_analysis_packs.js",
+    "vm_opcode_ledger.js",
+    "vm_opcode_ledger_view.js",
     "vm_contextual.js",
     "vm_contextual_evidence.js",
     "vm_contextual_view.js",
@@ -864,7 +867,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             // existing package permit before ingesting them, with no body queue.
             // Keep this permit through blocking work; body timeout/disconnect or
             // dispatch admission failure releases it without starting comparison.
-            let comparison_permit = if path == "/api/evidence/packages/compare" {
+            let comparison_permit = if matches!(
+                path,
+                "/api/evidence/packages/compare"
+                    | "/api/analysis/vm/packs/apply"
+                    | "/api/analysis/vm/packs/compare"
+            ) {
                 Some(
                     app.package_io
                         .clone()
@@ -912,7 +920,10 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             }
             if matches!(
                 path,
-                "/api/vm-debugger/actions" | "/api/analysis/vm/experiments"
+                "/api/vm-debugger/actions"
+                    | "/api/analysis/vm/experiments"
+                    | "/api/analysis/vm/packs/apply"
+                    | "/api/analysis/vm/packs/compare"
             ) {
                 let content_type = parts
                     .headers
@@ -934,6 +945,20 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                         415,
                         "Owned VM controls require application/json with optional UTF-8 charset",
                     ));
+                }
+                if matches!(
+                    path,
+                    "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
+                ) {
+                    let comparison = path.ends_with("/compare");
+                    let bytes = bytes.to_vec();
+                    return tokio::task::spawn_blocking(move || {
+                        let _permit = comparison_permit;
+                        crate::vm_pack::request(&bytes, comparison)
+                    })
+                    .await
+                    .map_err(|_| Error::new(500, "VM pack analysis failed"))?
+                    .map(|value| axum::Json(value).into_response());
                 }
                 if path == "/api/analysis/vm/experiments" {
                     let (_, workspace) = app.vm_documents().await?;

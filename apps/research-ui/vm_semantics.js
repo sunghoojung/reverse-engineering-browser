@@ -498,15 +498,21 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
   const staticAnalysis=staticRoot&&typeof mountVmStatic==='function'?mountVmStatic(staticRoot):null;
   const contextualButton=document.querySelector('#vm-show-contextual'),contextualRoot=document.querySelector('#vm-contextual-workspace');
   const contextualAnalysis=contextualRoot&&typeof mountVmContextual==='function'?mountVmContextual(contextualRoot):null;
+  const packsButton=document.querySelector('#vm-show-packs'),packsRoot=document.querySelector('#vm-packs-workspace');
+  const packAnalysis=packsRoot&&typeof mountVmAnalysisPacks==='function'?mountVmAnalysisPacks(packsRoot):null;
+  const ledgerButton=document.querySelector('#vm-show-ledger'),ledgerRoot=document.querySelector('#vm-ledger-workspace');
+  const opcodeLedger=ledgerRoot&&typeof RebVmOpcodeLedgerView!=='undefined'?RebVmOpcodeLedgerView.mount(ledgerRoot):null;
   let mode='findings',screenVisible=false,hasSession=false,owned=null;
   const sync=()=>{
     root.hidden=mode!=='execution';if(findings)findings.hidden=mode!=='findings';
     if(ownedRoot)ownedRoot.hidden=mode!=='owned';
     if(staticRoot)staticRoot.hidden=mode!=='static';
     if(contextualRoot)contextualRoot.hidden=mode!=='contextual';
+    if(packsRoot)packsRoot.hidden=mode!=='packs';
+    if(ledgerRoot)ledgerRoot.hidden=mode!=='ledger';
     if(controls){
       const hide=mode!=='owned'&&!hasSession;
-      if(hide&&controls.contains(document.activeElement))(mode==='contextual'?contextualButton:mode==='static'?staticButton:mode==='execution'?executionButton:findingsButton)?.focus({preventScroll:true});
+      if(hide&&controls.contains(document.activeElement))(mode==='packs'?packsButton:mode==='ledger'?ledgerButton:mode==='contextual'?contextualButton:mode==='static'?staticButton:mode==='execution'?executionButton:findingsButton)?.focus({preventScroll:true});
       controls.hidden=hide;
     }
     findingsButton?.setAttribute('aria-pressed',String(mode==='findings'));
@@ -514,6 +520,8 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
     ownedButton?.setAttribute('aria-pressed',String(mode==='owned'));
     staticButton?.setAttribute('aria-pressed',String(mode==='static'));
     contextualButton?.setAttribute('aria-pressed',String(mode==='contextual'));
+    packsButton?.setAttribute('aria-pressed',String(mode==='packs'));
+    ledgerButton?.setAttribute('aria-pressed',String(mode==='ledger'));
     owned?.setVisible(screenVisible&&(mode==='owned'||hasSession));
     if(owned)owned.panes.hidden=mode!=='owned';
   };
@@ -521,10 +529,12 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
     owned=mountOwnedVmDebugger(ownedRoot,{onState:view=>{hasSession=!!view.session;if(navigationEntry){navigationEntry.textContent='VM';const label=view.session?'VM workspace · '+view.session.state:'VM workspace';navigationEntry.setAttribute('aria-label',label);navigationEntry.setAttribute('title',label);}sync();}});
     if(controls)controls.append(owned.toolbar);
   }
-  const showWorkspace=next=>{mode=['findings','execution','owned',...(staticAnalysis?['static']:[]),...(contextualAnalysis?['contextual']:[])].includes(next)?next:'findings';sync();};
+  const showWorkspace=next=>{mode=['findings','execution','owned',...(staticAnalysis?['static']:[]),...(contextualAnalysis?['contextual']:[]),...(packAnalysis?['packs']:[]),...(opcodeLedger?['ledger']:[])].includes(next)?next:'findings';sync();};
   findingsButton?.addEventListener('click',()=>showWorkspace('findings'));executionButton?.addEventListener('click',()=>showWorkspace('execution'));ownedButton?.addEventListener('click',()=>showWorkspace('owned'));
   staticButton?.addEventListener('click',()=>showWorkspace('static'));
   contextualButton?.addEventListener('click',()=>showWorkspace('contextual'));
+  packsButton?.addEventListener('click',()=>showWorkspace('packs'));
+  ledgerButton?.addEventListener('click',()=>showWorkspace('ledger'));
   sync();
-  return {execution,owned,staticAnalysis,contextualAnalysis,showWorkspace,setVisible:visible=>{screenVisible=!!visible;sync();}};
+  return {execution,owned,staticAnalysis,contextualAnalysis,packAnalysis,opcodeLedger,showWorkspace,setVisible:visible=>{screenVisible=!!visible;sync();}};
 })();

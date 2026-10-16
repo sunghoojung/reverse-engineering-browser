@@ -117,6 +117,7 @@ javascript-check:
 	node tools/check-owned-vm-integration.mjs
 	node tools/check-owned-vm-debugger-ui.mjs
 	node tools/check-vm-semantics.mjs
+	node tools/check-vm-analysis-packs.mjs
 	node tools/check-vm-agent.mjs
 	node tools/check-vm-opcode-ledger.mjs
 	node tools/check-vm-workspace-contract.mjs

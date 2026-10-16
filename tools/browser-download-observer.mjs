@@ -46,4 +46,3 @@ export function trafficBrowserDownloadObserver({timeoutMs=5000,setTimer=setTimeo
     receipts:()=>events.map(event=>({...event}))
   };
 }
-

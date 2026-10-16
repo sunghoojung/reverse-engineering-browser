@@ -71,6 +71,13 @@ enum PackageOperation {
     Export,
     Compare,
 }
+struct VmDocumentsCache {
+    signature: String,
+    analysis: Value,
+    opcode_workspace: Result<Value>,
+    host_links: Result<Value>,
+}
+
 pub struct App {
     options: Options,
     port: u16,
@@ -88,7 +95,7 @@ pub struct App {
     capture: Mutex<()>,
     io: Arc<Semaphore>,
     package_io: Arc<Semaphore>,
-    analysis: Mutex<Option<(String, Value, Result<Value>)>>,
+    analysis: Mutex<Option<VmDocumentsCache>>,
 }
 impl App {
     pub async fn stop(&self) {
@@ -172,17 +179,22 @@ impl App {
         if !cfg!(unix)
             || cache
                 .as_ref()
-                .is_none_or(|(cached, _, _)| *cached != signature)
+                .is_none_or(|cached| cached.signature != signature)
         {
             let root = self.options.artifacts.clone();
             let store = self.options.store.clone();
             let documents = self
                 .blocking(move || vm::store_documents(&root, &store))
                 .await?;
-            *cache = Some((signature, documents.analysis, documents.opcode_workspace));
+            *cache = Some(VmDocumentsCache {
+                signature,
+                analysis: documents.analysis,
+                opcode_workspace: documents.opcode_workspace,
+                host_links: documents.host_links,
+            });
         }
-        let (_, analysis, opcode_workspace) = cache.as_ref().expect("VM analysis cache");
-        Ok((analysis.clone(), opcode_workspace.clone()))
+        let cached = cache.as_ref().expect("VM analysis cache");
+        Ok((cached.analysis.clone(), cached.opcode_workspace.clone()))
     }
     async fn package_operation(
         &self,
@@ -588,6 +600,22 @@ impl App {
                     "\"{}-{}\"",
                     value["document_digest"].as_str().unwrap(),
                     request.unwrap_or("all")
+                ));
+                value
+            }
+            "/api/analysis/vm/host-links" => {
+                self.vm_documents().await?;
+                let value = self
+                    .analysis
+                    .lock()
+                    .await
+                    .as_ref()
+                    .expect("VM analysis cache")
+                    .host_links
+                    .clone()?;
+                etag = Some(format!(
+                    "\"{}\"",
+                    value["document_digest"].as_str().unwrap()
                 ));
                 value
             }

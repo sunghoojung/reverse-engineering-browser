@@ -142,6 +142,65 @@ process.stdout.write(JSON.stringify({{rejected}}));
         )
         self.assertEqual(result["rejected"], [True] * 14)
 
+    def test_host_links_require_bound_source_and_retained_sample_identity(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        result = self.run_evidence_model(f"""
+const workspace = {json.dumps(fixture)};
+const source = workspace.workspaces[0], sample = source.samples[0];
+const host = {{...sample.event, sequence_number:'50'}};
+const position = {{sample_event:sample.event, invocation_event:sample.invocation_event,
+  invocation_id:sample.invocation_id, instruction_pointer:sample.instruction_pointer,
+  instruction_pointer_units:sample.instruction_pointer_units}};
+const valid = {{contract_version:1, document_kind:'vm-host-links', workspace_document_digest:workspace.document_digest,
+  document_digest:'e'.repeat(64), workspaces:[{{interpreter_artifact_id:source.interpreter_artifact_id,
+  source_artifact_sha256:source.source_artifact_sha256, omissions:[], links:[{{host_event:host, category:'runtime', type:'api_call',
+  state:'observed', reason:'direct-dispatch-parent', guest_position:position}}]}}]}};
+const accepted = isVmHostLinksDocument(valid, workspace);
+const mutations = [
+  row => row.workspace_document_digest = 'f'.repeat(64),
+  row => row.workspaces[0].source_artifact_sha256 = 'f'.repeat(64),
+  row => row.workspaces[0].links[0].payload = 'not allowed',
+  row => row.workspaces[0].links[0].host_event.sequence_number = '1',
+  row => row.workspaces[0].links[0].guest_position.instruction_pointer = 999,
+  row => row.workspaces[0].links[0].guest_position.invocation_id = '999',
+  row => row.workspaces[0].links[0].guest_position.invocation_event = null,
+  row => row.workspaces[0].links.push(row.workspaces[0].links[0])
+];
+const rejected = mutations.map(mutate => {{const copy=structuredClone(valid);mutate(copy);return !isVmHostLinksDocument(copy,workspace);}});
+valid.workspaces[0].links[0].state='unknown';valid.workspaces[0].links[0].reason='dispatch-samples-unavailable';
+valid.workspaces[0].links[0].guest_position=null;
+process.stdout.write(JSON.stringify({{accepted,rejected,unknown:isVmHostLinksDocument(valid,workspace)}}));
+""")
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["unknown"])
+        self.assertEqual(result["rejected"], [True] * 8)
+
+    def test_host_link_refresh_preserves_matching_evidence_and_rejects_late_reply(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        helper = app[app.index("      async function refreshVmHostLinks("):app.index("      async function refreshVmAnalysis(")]
+        result = self.run_evidence_model(helper + f"""
+const workspace = {json.dumps(fixture)};
+const retained = {{contract_version:1, document_kind:'vm-host-links', workspace_document_digest:workspace.document_digest,
+  workspaces:[], document_digest:'e'.repeat(64)}};
+const state = {{vmOpcodeWorkspace:workspace,vmHostLinks:retained,vmHostLinksGeneration:0,vmHostLinksStatus:'ready'}};
+let complete;
+let fetch = () => new Promise(resolve => complete=resolve);
+(async () => {{
+ const pending = refreshVmHostLinks();
+ state.vmOpcodeWorkspace = {{...workspace, document_digest:'f'.repeat(64)}};
+ complete({{ok:true,json:async()=>retained}});await pending;
+ const lateRejected = state.vmHostLinks === retained && state.vmHostLinksStatus === 'ready';
+ state.vmOpcodeWorkspace = workspace;
+ fetch = async () => ({{ok:false,status:500}});await refreshVmHostLinks();
+ const failedRetained = state.vmHostLinks === retained && state.vmHostLinksStatus === 'unavailable';
+ fetch = async () => ({{ok:true,json:async()=>({{...retained,workspace_document_digest:'f'.repeat(64)}})}});
+ await refreshVmHostLinks();
+ process.stdout.write(JSON.stringify({{lateRejected,failedRetained,staleRetained:state.vmHostLinks===retained}}));
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+""")
+        self.assertTrue(all(result.values()))
+
     def test_webassembly_workspace_projects_dispatch_arms_and_non_vm_is_empty(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         workspace = fixture["workspaces"][0]

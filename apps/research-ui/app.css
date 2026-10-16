@@ -4421,8 +4421,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-static-workspace[data-layout="narrow"] .vm-static-body { display: block; }
 .vm-static-workspace[data-layout="narrow"] .vm-static-listing, .vm-static-workspace[data-layout="narrow"] .vm-static-inspector { height: 100%; display: none; }
 .vm-static-workspace[data-layout="narrow"][data-panel="listing"] .vm-static-listing, .vm-static-workspace[data-layout="narrow"][data-panel="details"] .vm-static-inspector { display: grid; }
-.vm-static-workspace[data-layout="narrow"] .vm-static-panels { display: flex; flex: 1; }
-.vm-static-workspace[data-layout="narrow"] .vm-static-panels > button { flex: 1; }
+.vm-static-workspace[data-layout="narrow"] .vm-static-panels { display: flex; flex: 1 0 180px; }
+.vm-static-workspace[data-layout="narrow"] .vm-static-panels > button { flex: 1; white-space: nowrap; }
 /* Root width controls panes; short/narrow viewport flow gives both the live
    safety controls and static scrollers usable height, including real zoom. */
 @media (max-width: 1099px), (max-height: 600px) {

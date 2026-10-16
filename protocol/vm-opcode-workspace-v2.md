@@ -93,7 +93,7 @@ subsequent analyzers. Empty `effects` does not mean no state effects. Without a
 supported attribution, characterized bytes remain zero, all retained snapshot
 bytes remain uncharacterized, and coverage is partial. An instruction-index PC
 cannot characterize a byte without a separate verified mapping.
-`byte-attribution-unavailable` names this limitation when bytes are present.
+`uncharacterized-bytecode` names this limitation when bytes are present.
 Traversal defaults to an `entry-unavailable` frontier and `complete:false`.
 These fields never promote a handler to universally confirmed semantics.
 
@@ -114,3 +114,30 @@ byte coverage. Rust workspace tests exercise identity mismatch, malformed and
 truncated payloads, unknown opcodes, scoped marker mismatch, retention bounds,
 all-sample counts, content digest/schema validity and v1 rejection. UI contract
 tests cover sample projection, strict v2 validation and preserved failure state.
+
+## Retained guest-byte coverage
+
+`coverage.handler_count` remains a separate table count. The progress fraction is
+`characterized_bytes / retained_snapshot_bytes`, or zero without retained
+bytes. `uncharacterized_bytes` is the remainder. The denominator counts only
+verified snapshot previews, at most 4096 bytes per snapshot and 16 snapshots.
+It is not the original allocation size, opcode count, or runtime execution
+coverage.
+
+Attributions name their snapshot artifact, byte offset, byte size, opcode,
+opcode/operand role and evidence class. Byte counts are the union of retained
+ranges within each artifact; repeated ranges do not increase coverage. Ranges
+past the preview are rejected and named, never counted as retained bytes.
+The producer retains at most 4096 attribution records; `attribution-limit`
+names further omissions, while the v2 schema's larger envelope remains stable.
+The UI independently checks opcode bytes, nonoverlapping instruction spans,
+operand boundaries and union counts before accepting a document.
+
+Complete byte coverage requires nonempty retained bytes, zero uncharacterized
+bytes, no omissions, and no residual unknowns. A 100% retained-byte fraction
+can still be partial when the snapshot was truncated or an unknown remains.
+`uncharacterized-bytecode`, `snapshot-preview-truncated`,
+`snapshot-bytes-unavailable` and `attribution-outside-preview` make those gaps
+visible. A static-only initializer retains its distinct omission instead of
+also being described as an absent runtime snapshot. No source decoder, native
+instruction-index mapping or missing operand layout is invented for coverage.

@@ -1,0 +1,173 @@
+{
+  "contract_version": 2,
+  "document_kind": "vm-opcode-workspace",
+  "producer": {
+    "id": "origin-trace-vm-opcode",
+    "version": "2.0.0"
+  },
+  "profile_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "analysis_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "inputs": {
+    "artifact_manifest_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "event_store_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "capture_provenance_digest": null
+  },
+  "workspaces": [
+    {
+      "interpreter_artifact_id": "302",
+      "bytecode_artifact_id": "401",
+      "finding_id": "c5e529342af22aafd3d7ddbc",
+      "model": "stack",
+      "handlers": [
+        {
+          "opcode": 1,
+          "handler_index": 0,
+          "state": "inferred",
+          "source": {
+            "byte_offset": 144,
+            "byte_size": 28
+          },
+          "label": "constant",
+          "operand_width": 1,
+          "notes": "Reads one immediate byte.",
+          "sample_count": 0,
+          "effects": [
+            {
+              "effect_id": "constant",
+              "evidence_class": "inferred",
+              "operation": "constant",
+              "instruction_size": 2,
+              "operand_layout": [
+                {
+                  "name": "value",
+                  "kind": "immediate",
+                  "byte_offset": 1,
+                  "byte_size": 1
+                }
+              ],
+              "reads": [],
+              "writes": [],
+              "flow": {
+                "kind": "next",
+                "target_operand": null,
+                "target_offset": null
+              },
+              "atomic_group": null,
+              "superoperator": null
+            }
+          ]
+        },
+        {
+          "opcode": 8,
+          "handler_index": 0,
+          "state": "inferred",
+          "source": {
+            "byte_offset": 144,
+            "byte_size": 28
+          },
+          "label": "halt",
+          "operand_width": 1,
+          "notes": "Reads one immediate byte.",
+          "sample_count": 0,
+          "effects": [
+            {
+              "effect_id": "halt",
+              "evidence_class": "inferred",
+              "operation": "halt",
+              "instruction_size": 1,
+              "operand_layout": [],
+              "reads": [],
+              "writes": [],
+              "flow": {
+                "kind": "halt",
+                "target_operand": null,
+                "target_offset": null
+              },
+              "atomic_group": null,
+              "superoperator": null
+            }
+          ]
+        }
+      ],
+      "snapshots": [
+        {
+          "artifact_id": "401",
+          "origin": "runtime-typed-array",
+          "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "byte_count": 4,
+          "preview_hex": "010708ff",
+          "truncated": false,
+          "unavailable_reason": null
+        }
+      ],
+      "coverage": {
+        "complete": false,
+        "handler_count": 2,
+        "retained_snapshot_bytes": 4,
+        "characterized_bytes": 3,
+        "uncharacterized_bytes": 1,
+        "attributions": [
+          {
+            "artifact_id": "401",
+            "byte_offset": 0,
+            "byte_size": 1,
+            "opcode": 1,
+            "kind": "opcode",
+            "evidence_class": "inferred"
+          },
+          {
+            "artifact_id": "401",
+            "byte_offset": 1,
+            "byte_size": 1,
+            "opcode": 1,
+            "kind": "operand",
+            "evidence_class": "inferred"
+          },
+          {
+            "artifact_id": "401",
+            "byte_offset": 2,
+            "byte_size": 1,
+            "opcode": 8,
+            "kind": "opcode",
+            "evidence_class": "inferred"
+          }
+        ],
+        "omissions": [
+          {
+            "reason": "uncharacterized-bytecode"
+          }
+        ]
+      },
+      "unknowns": [
+        "Opcode 255 has no declared effect."
+      ],
+      "runtime": "javascript",
+      "source_artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "capture_mode": "unknown",
+      "sample_count": 0,
+      "samples": [],
+      "traversal": {
+        "entry_offsets": [],
+        "instructions": [],
+        "edges": [],
+        "frontier": [
+          {
+            "artifact_id": null,
+            "byte_offset": null,
+            "reason": "entry-unavailable"
+          }
+        ],
+        "complete": false
+      }
+    }
+  ],
+  "summary": {
+    "workspace_count": 1,
+    "handler_count": 2,
+    "snapshot_count": 1,
+    "sample_count": 0,
+    "unknown_count": 1
+  },
+  "capture_mode": "unknown",
+  "document_digest": "5ad016ebd0b37df6b8ac5ce83b7882c13693a1b9c1a1e1578d7a542ec56e7960"
+}

@@ -2318,6 +2318,7 @@
       .vm-field strong { display: block; margin-top: 5px; overflow-wrap: anywhere; font: 500 11px var(--mono); }
       .vm-coverage { padding: 12px 13px; }
       .vm-coverage-line { display: flex; justify-content: space-between; color: var(--muted); font: 11px var(--mono); }
+      .vm-coverage-counts { margin-top: 8px; color: var(--muted); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
       .vm-coverage-bar { height: 5px; margin-top: 8px; background: var(--panel-3); }
       .vm-coverage-bar span { display: block; height: 100%; background: var(--accent); }
       .vm-workspace-host { display: contents; }

@@ -199,6 +199,46 @@ process.stdout.write(JSON.stringify({{accepted, rows, absent, guessedIndexReject
         self.assertIn("'WebAssembly · '", app)
         self.assertIn("dispatch-arm candidates", app)
 
+    def test_byte_coverage_complete_and_partial_fixtures_render_exact_fraction(self) -> None:
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        start = app.index("      function renderVmWorkspaceCoverage")
+        end = app.index("      function renderVmWorkspaceUnknowns", start)
+        renderer = app[start:end]
+        for name, percent, uncharacterized, complete in [
+            ("complete", 100, 0, True), ("partial", 75, 1, False)
+        ]:
+            fixture = json.loads((FIXTURE.parent / f"vm-byte-coverage-{name}-v2.json").read_text(encoding="utf-8"))
+            result = self.run_evidence_model(
+                """
+class Element {
+  constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.style = {}; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  setAttribute(key, value) { this.attributes[key] = value; }
+}
+const document = {createElement: tag => new Element(tag), createTextNode: text => ({textContent: text, children: []})};
+const textElement = (tag, cls, text) => { const node = new Element(tag); node.className = cls; node.textContent = text; return node; };
+const flatten = node => [node, ...node.children.flatMap(flatten)];
+""" + renderer + f"""
+const fixture = {json.dumps(fixture)};
+const rows = flatten(renderVmWorkspaceCoverage(fixture.workspaces[0]));
+const bar = rows.find(row => row.attributes?.role === 'progressbar');
+const old = JSON.parse(JSON.stringify(fixture)); old.contract_version = 1;
+process.stdout.write(JSON.stringify({{
+  accepted: isVmOpcodeWorkspaceDocument(fixture), oldAccepted: isVmOpcodeWorkspaceDocument(old),
+  percent: Number(bar.attributes['aria-valuenow']),
+  copy: rows.map(row => row.textContent).join(' '), complete: fixture.workspaces[0].coverage.complete
+}}));
+"""
+            )
+            self.assertTrue(result["accepted"])
+            self.assertFalse(result["oldAccepted"])
+            self.assertEqual(result["percent"], percent)
+            self.assertEqual(result["complete"], complete)
+            self.assertIn(f"{uncharacterized} uncharacterized bytes", result["copy"])
+            self.assertIn("2 handler candidates", result["copy"])
+            if not complete:
+                self.assertIn("uncharacterized-bytecode", result["copy"])
+
     def session_presentation(self, state: dict) -> dict:
         app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
         start = app.index("      function vmSessionPresentation")

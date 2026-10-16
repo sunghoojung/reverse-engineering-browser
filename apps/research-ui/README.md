@@ -1977,3 +1977,20 @@ Observed/inferred labels, citations and test outcomes remain supplied assertions
 Nothing executes imported code, fetches references, runs tests, promotes VM
 semantics, persists inputs automatically or uploads data. Review private data
 before exporting. See [ledger v1](../../protocol/vm-opcode-ledger-v1.md).
+
+## VM findings workbench
+
+Findings opens retained evidence for the selected finding. The handler listing
+sits beside explicit Effects, Bytes, Reachability, Coverage, Unknowns, and
+Experiment panels. Panel switching only changes the view; the isolated
+experiment still requires its separate explicit run action. Handler highlighting
+does not establish an opcode binding or filter the finding-wide analysis.
+Execution workspace, Live owned fixture, Static bytecode, and Contextual build
+remain separate modes with their existing ownership and execution controls.
+
+The collapsed **Explore a deterministic owned VM example** is an authored
+fixture demonstration, not the active capture. Its replay only reveals fixed
+fixture transitions. Back/Forward, Go to PC, and arrow/Home/End listing navigation
+share the selected instruction with State and Evidence & source. PC units are
+instruction indexes; gaps, unknown bytes, unconfirmed effects, and refused
+source digests remain explicit. The example never supplies capture provenance.

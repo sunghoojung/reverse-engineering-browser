@@ -114,6 +114,11 @@ render();`;
       assert.equal(await evaluate("document.activeElement === document.querySelectorAll('.vm-handler-row')[1]"), true);
       assert.equal(await evaluate("document.activeElement.getAttribute('aria-selected')"), 'true');
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      for (const panel of ['bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'effects']) {
+        await evaluate(`document.querySelector('[data-vm-panel="${panel}"]').click()`);
+        assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
+        assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
+      }
       await evaluate('scrollTo(0,0)');
       const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
       await writeFile(join(output, `wasm-${width}.png`), Buffer.from(data, 'base64'));

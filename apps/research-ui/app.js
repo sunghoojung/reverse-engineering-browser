@@ -1806,17 +1806,39 @@
           textElement('div', '', 'Opcode workspace'),
           textElement('span', '', `${workspace.runtime === 'webassembly' ? 'WebAssembly · ' : ''}${workspace.model ?? 'unknown'} model · interpreter artifact ${workspace.interpreter_artifact_id}`)
         );
-        container.append(
-          head,
-          renderVmHandlers(workspace),
-          renderVmEffects(workspace),
-          renderVmBytecode(workspace),
-          renderVmReachability(workspace),
-          renderVmWorkspaceCoverage(workspace),
-          renderVmWorkspaceUnknowns(workspace),
-          renderVmOwnedExperiment(workspace),
-          renderVmHostLinks(workspace)
-        );
+        const body = document.createElement('div'); body.className = 'vm-workbench-body';
+        const handlers = renderVmHandlers(workspace); handlers.classList.add('vm-workbench-listing');
+        const inspector = document.createElement('section'); inspector.className = 'vm-workbench-inspector';
+        inspector.setAttribute('aria-label', 'Finding analysis tools');
+        const navigation = document.createElement('nav'); navigation.className = 'vm-workbench-tabs';
+        navigation.setAttribute('aria-label', 'Finding analysis panels');
+        const panels = document.createElement('div'); panels.className = 'vm-workbench-panels';
+        const definitions = [
+          ['effects', 'Effects', renderVmEffects],
+          ['bytecode', 'Bytes', renderVmBytecode],
+          ['reachability', 'Reachability', renderVmReachability],
+          ['coverage', 'Coverage', renderVmWorkspaceCoverage],
+          ['unknowns', 'Unknowns', renderVmWorkspaceUnknowns],
+          ['experiment', 'Experiment', renderVmOwnedExperiment],
+          ['host-links', 'Host links', renderVmHostLinks]
+        ];
+        const active = definitions.some(([key]) => key === state.vmWorkspacePanel) ? state.vmWorkspacePanel : 'effects';
+        const entries = definitions.map(([key, label, renderPanel]) => {
+          const button = textElement('button', 'secondary-button', label); button.type = 'button';
+          button.dataset.vmPanel = key;
+          button.setAttribute('aria-pressed', String(key === active));
+          const panel = renderPanel(workspace); panel.hidden = key !== active;
+          panel.dataset.vmPanelContent = key;
+          button.addEventListener('click', () => {
+            state.vmWorkspacePanel = key;
+            entries.forEach(entry => { entry.panel.hidden = entry.key !== key; entry.button.setAttribute('aria-pressed', String(entry.key === key)); });
+          });
+          navigation.append(button); panels.append(panel);
+          return {key, button, panel};
+        });
+        inspector.append(navigation, textElement('p', 'vm-workbench-scope', 'Panels describe this exact finding. Handler selection highlights a candidate; it does not prove an opcode or execute code.'), panels);
+        body.append(handlers, inspector);
+        container.append(head, body);
         return container;
       }
 

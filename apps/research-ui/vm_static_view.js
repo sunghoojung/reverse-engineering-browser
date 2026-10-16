@@ -321,6 +321,16 @@ function mountVmStatic(root, model = vmStatic) {
   root.setAttribute('data-layout', layout); setPanel('listing');
   for (const [key, control] of Object.entries(tabButtons)) { control.setAttribute('aria-selected', String(key === tab)); control.tabIndex = key === tab ? 0 : -1; }
   if (typeof ResizeObserver !== 'undefined') { const observer = new ResizeObserver(entries => { const width = entries[0]?.contentRect.width; if (width) changeLayout(width); }); observer.observe(root); }
+  const adjacent = direction => {
+    const visible = matches(), index = visible.findIndex(row => row.offset === selected);
+    return visible[index < 0 ? direction > 0 ? 0 : visible.length - 1 : index + direction];
+  };
+  root.addEventListener('vm-workspace-query', event => Object.assign(event.detail, {search: true, previous: !!adjacent(-1), next: !!adjacent(1)}));
+  root.addEventListener('vm-workspace-search', () => { setPanel('listing'); filter.focus(); });
+  for (const [action, direction] of [['previous', -1], ['next', 1]]) root.addEventListener(`vm-workspace-${action}`, () => {
+    const row = adjacent(direction); if (!row) return;
+    page = Math.floor(matches().indexOf(row) / pageSize); select(row.offset, {focus: true});
+  });
   update(); renderListing(); renderDetails();
   return {fileInputs, analyze, demo, clear, notice, sourceSummary, filter, reveal, listingRows, listingPager, detail, tabButtons, panelButtons,
     select, setTab, setPanel, changeLayout, importFile, analyzeInputs, getReport: () => report, getSelected: () => selected};

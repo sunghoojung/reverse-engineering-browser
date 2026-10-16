@@ -490,6 +490,17 @@ function mountOwnedVmDebugger(root, options = {}) {
     if (session.diagnostics.stderr_truncated) coverage.textContent += ' Native diagnostic stream was truncated.';
     auditText.textContent = JSON.stringify({view, selection: {mode: selection === 'live' || selection === 'initial' ? selection : 'retained', sequence: record?.sequence || null}, selected_record: record || null}, null, 2);
   }
+  const adjacent = direction => {
+    const retained = (controller.model().view?.session?.records || []).filter(record => opcodeFilter === null || record.opcode === opcodeFilter);
+    const index = retained.findIndex(record => record.sequence === selection);
+    return retained[index < 0 ? direction > 0 ? 0 : retained.length - 1 : index + direction];
+  };
+  root.addEventListener('vm-workspace-query', event => Object.assign(event.detail, {search: opcodeButtons.size > 0, previous: !!adjacent(-1), next: !!adjacent(1)}));
+  root.addEventListener('vm-workspace-search', () => { opcodeButtons.values().next().value?.focus(); });
+  for (const [action, direction] of [['previous', -1], ['next', 1]]) root.addEventListener(`vm-workspace-${action}`, () => {
+    const record = adjacent(direction); if (!record) return;
+    select(record.sequence); const target = rows.get(record.sequence)?.button; target?.focus(); target?.scrollIntoView?.({block: 'nearest'});
+  });
   controller = createOwnedVmController({...options, onChange: render});
   const visibility = () => { controller.setVisible(visible && doc.visibilityState !== 'hidden'); render(controller.model()); };
   doc.addEventListener?.('visibilitychange', visibility); render(controller.model()); visibility();

@@ -1590,6 +1590,25 @@
         return section;
       }
 
+      function appendVmPagedRows(target, items, label, renderRow, pageSize = 32) {
+        const controls = document.createElement('div'); controls.className = 'vm-evidence-pager';
+        controls.setAttribute('role', 'group'); controls.setAttribute('aria-label', `${label} pages`);
+        const previous = textElement('button', 'secondary-button', `Previous ${label}`); previous.type = 'button';
+        const next = textElement('button', 'secondary-button', `Next ${label}`); next.type = 'button';
+        const status = textElement('span', 'vm-listing-count', ''); status.setAttribute('role', 'status');
+        const rows = document.createElement('div'); rows.dataset.vmPagedRows = label;
+        let page = 0;
+        const draw = () => {
+          const start = page * pageSize;
+          rows.replaceChildren(...items.slice(start, start + pageSize).map(renderRow));
+          status.textContent = `${items.length ? start + 1 : 0}–${Math.min(items.length, start + pageSize)} of ${items.length} ${label}`;
+          previous.disabled = page === 0; next.disabled = start + pageSize >= items.length;
+        };
+        previous.addEventListener('click', () => { if (previous.disabled) return; page--; draw(); (previous.disabled ? next : previous).focus(); });
+        next.addEventListener('click', () => { if (next.disabled) return; page++; draw(); (next.disabled ? previous : next).focus(); });
+        controls.append(previous, status, next); target.append(controls, rows); draw();
+      }
+
       function vmEffectCellText(cell) {
         const location = cell.index ?? (cell.operand === null ? 'unknown' : `operand ${cell.operand}`);
         return `${cell.space}[${location}] = ${cell.value ?? 'unknown'}`;
@@ -1601,16 +1620,8 @@
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(textElement('h4', '', 'Declarative effects'), textElement('span', '', 'owned declarations · no execution'));
         section.append(heading);
-        let count = 0;
-        const total = workspace.handlers.reduce((sum, handler) => sum + handler.effects.length, 0);
-        for (const handler of workspace.handlers) {
-          const effects = handler.effects ?? [];
-          if (effects.length > 1 && !vmUniqueWorkspaceEffect(handler)) {
-            section.append(textElement('div', 'vm-workspace-notice', `Opcode ${handler.opcode ?? 'unknown'} has conflicting effects. Every declaration is retained; none is selected for traversal.`));
-          }
-          for (const effect of effects) {
-            if (count >= 256) break;
-            count++;
+        const effects = workspace.handlers.flatMap(handler => handler.effects.map(effect => ({handler, effect})));
+        appendVmPagedRows(section, effects, 'effects', ({handler, effect}) => {
             const row = document.createElement('details'); row.className = 'vm-effect-row';
             const summary = document.createElement('summary');
             summary.textContent = `Opcode ${handler.opcode ?? 'unknown'} · ${effect.operation} · ${effect.evidence_class}`;
@@ -1626,11 +1637,11 @@
             body.append(textElement('div', '', `Operands: ${effect.operand_layout.length ? effect.operand_layout.map(operand => `${operand.name} (${operand.kind}): ${operand.byte_offset === null ? 'byte location unknown' : `+${operand.byte_offset}, ${operand.byte_size} bytes, little-endian`}`).join('; ') : 'none declared'}`),
               textElement('div', '', `Reads: ${effect.reads.length ? effect.reads.map(vmEffectCellText).join('; ') : 'none declared'}`),
               textElement('div', '', `Writes: ${effect.writes.length ? effect.writes.map(vmEffectCellText).join('; ') : 'none declared'}`));
-            row.append(body); section.append(row);
-          }
-        }
-        if (total > count) section.append(textElement('div', 'vm-workspace-notice', `${total - count} additional effects retained in the document; display limited to 256 rows.`));
-        if (count === 0) section.append(textElement('div', 'vm-workspace-empty', 'No source-bound declarative effects are available. Observed changed cells do not establish reads or causes.'));
+            row.append(body);
+            if (handler.effects.length > 1 && !vmUniqueWorkspaceEffect(handler)) row.append(textElement('p', 'vm-workspace-notice', 'Conflicting declarations. None is selected for traversal.'));
+            return row;
+        });
+        if (effects.length === 0) section.append(textElement('div', 'vm-workspace-empty', 'No source-bound declarative effects are available. Observed changed cells do not establish reads or causes.'));
         return section;
       }
 
@@ -1649,16 +1660,15 @@
           if (!outgoing.has(key)) outgoing.set(key, []);
           outgoing.get(key).push(edge);
         }
-        for (const instruction of traversal.instructions.slice(0, 256)) {
+        appendVmPagedRows(rows, traversal.instructions, 'reachable instructions', instruction => {
           const row = document.createElement('details'); row.className = 'vm-effect-row';
           const title = document.createElement('summary');
           title.textContent = `Artifact ${instruction.artifact_id} · byte ${instruction.byte_offset} · opcode ${instruction.opcode} · ${instruction.byte_size} bytes`;
           const edges = outgoing.get(`${instruction.artifact_id}:${instruction.byte_offset}`) ?? [];
           row.append(title, textElement('div', 'vm-effect-detail', `${instruction.effect_id}: ${edges.length ? edges.map(edge => `${edge.kind} → ${edge.to_offset ?? 'unknown'}`).join('; ') : 'halt, no successor'}`));
-          rows.append(row);
-        }
+          return row;
+        });
         section.append(rows);
-        if (traversal.instructions.length > 256) section.append(textElement('div', 'vm-workspace-notice', `${traversal.instructions.length - 256} additional instruction positions retained in the document; display limited to 256.`));
         const frontier = document.createElement('ul'); frontier.className = 'vm-coverage-omissions';
         if (traversal.frontier.length === 0) frontier.append(textElement('li', '', 'No unresolved reachable edge. This does not prove runtime termination or semantics.'));
         for (const stop of traversal.frontier) frontier.append(textElement('li', '', `Artifact ${stop.artifact_id ?? 'unknown'} · byte ${stop.byte_offset ?? 'unknown'}: ${stop.reason}`));
@@ -1671,26 +1681,35 @@
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded snapshot preview'));
         section.append(heading);
-        const snapshot = workspace.snapshots.find(candidate =>
-          candidate.artifact_id === workspace.bytecode_artifact_id) ?? workspace.snapshots[0] ?? null;
-        const fields = document.createElement('div'); fields.className = 'vm-fields vm-bytecode-fields';
-        fields.append(
-          vmField('artifact', snapshot?.artifact_id ?? workspace.bytecode_artifact_id ?? 'not captured'),
-          vmField('digest', snapshot?.sha256 ?? 'not recorded'),
-          vmField('origin', snapshot?.origin ?? 'unavailable'),
-          vmField('snapshot bytes', snapshot?.byte_count ?? 0),
-          vmField('truncation', snapshot?.truncated === true ? 'preview truncated' : snapshot?.truncated === false ? 'complete preview' : 'not recorded'),
-          vmField('unavailable reason', snapshot?.unavailable_reason ?? 'none')
-        );
-        section.append(fields);
-        const preview = formatVmHexPreview(snapshot?.preview_hex);
-        if (preview) {
-          const bytes = textElement('pre', 'vm-bytecode-preview', preview);
-          bytes.setAttribute('aria-label', 'Bytecode hex preview');
-          section.append(bytes);
-        } else {
-          section.append(textElement('div', 'vm-workspace-empty', snapshot?.unavailable_reason || 'No bytecode preview was retained.'));
-        }
+        const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained bytecode snapshot');
+        workspace.snapshots.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.byte_count} bytes`; selector.append(option); });
+        const initial = Math.max(0, workspace.snapshots.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
+        selector.value = String(initial); selector.disabled = workspace.snapshots.length === 0;
+        const label = document.createElement('label'); label.append(document.createTextNode('Retained snapshot '), selector);
+        const previewPanel = document.createElement('div'); section.append(label, previewPanel);
+        const draw = () => {
+          const snapshot = workspace.snapshots[Number(selector.value)] ?? null;
+          previewPanel.replaceChildren();
+          const fields = document.createElement('div'); fields.className = 'vm-fields vm-bytecode-fields';
+          fields.append(
+            vmField('artifact', snapshot?.artifact_id ?? workspace.bytecode_artifact_id ?? 'not captured'),
+            vmField('digest', snapshot?.sha256 ?? 'not recorded'),
+            vmField('origin', snapshot?.origin ?? 'unavailable'),
+            vmField('snapshot bytes', snapshot?.byte_count ?? 0),
+            vmField('truncation', snapshot?.truncated === true ? 'preview truncated' : snapshot?.truncated === false ? 'complete preview' : 'not recorded'),
+            vmField('unavailable reason', snapshot?.unavailable_reason ?? 'none')
+          );
+          previewPanel.append(fields);
+          const preview = formatVmHexPreview(snapshot?.preview_hex);
+          if (preview) {
+            const bytes = textElement('pre', 'vm-bytecode-preview', preview);
+            bytes.setAttribute('aria-label', 'Bytecode hex preview');
+            previewPanel.append(bytes);
+          } else {
+            previewPanel.append(textElement('div', 'vm-workspace-empty', snapshot?.unavailable_reason || 'No bytecode preview was retained.'));
+          }
+        };
+        selector.addEventListener('change', draw); draw();
         return section;
       }
 
@@ -1726,6 +1745,9 @@
           });
         }
         section.append(heading, panel, omissions);
+        section.append(textElement('h4', '', 'Characterized byte ranges'), textElement('p', 'vm-effect-detail', 'Source-bound attributed bytes, not execution coverage. Ranges may overlap; totals count their union.'));
+        appendVmPagedRows(section, coverage.attributions, 'byte attributions', attribution =>
+          textElement('p', 'vm-effect-detail', `Artifact ${attribution.artifact_id} · bytes [${attribution.byte_offset}, ${attribution.byte_offset + attribution.byte_size}) · ${attribution.byte_size} bytes · opcode ${attribution.opcode} · ${attribution.kind} · ${attribution.evidence_class}`));
         return section;
       }
 
@@ -1819,12 +1841,13 @@
           section.append(textElement('p', 'vm-workspace-empty', 'Guest position unknown: no proven host-to-dispatch link is available.'));
         }
         if (row) {
-          for (const link of row.links.slice(0, 64)) {
+          appendVmPagedRows(section, row.links, 'host links', link => {
             const event = link.host_event, position = link.guest_position;
             const label = position ? `PC ${position.instruction_pointer} (${position.instruction_pointer_units})` : 'unknown';
-            section.append(textElement('p', '', `${link.category}/${link.type} · event ${event.session_id}:${event.process_id}:${event.sequence_number} · ${label} · ${link.state}`));
-          }
-          if (row.links.length > 64) section.append(textElement('p', '', `Showing 64 of ${row.links.length} retained links. The bounded report contains all retained rows.`));
+            const item = textElement('details', 'vm-effect-row', '');
+            item.append(textElement('summary', '', `${link.category}/${link.type} · event ${event.session_id}:${event.process_id}:${event.sequence_number} · ${label} · ${link.state}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(link, null, 2)));
+            return item;
+          });
           for (const omission of row.omissions) section.append(textElement('p', 'vm-workspace-empty', omission));
         }
         return section;
@@ -1851,13 +1874,18 @@
           if (!row) { selectedInspector.replaceChildren(heading, textElement('p', 'vm-selection-empty', 'Select a retained handler to inspect its evidence.')); return; }
           const title = textElement('h3', '', row.label);
           const identity = document.createElement('div'); identity.className = 'vm-selection-fields';
-          for (const [label, value] of [['Opcode', row.opcode], ['Source range', row.source], ['Evidence', row.state], ['Samples', String(row.samples)]]) {
+          for (const [label, value] of [['Opcode', row.opcode], ['Source byte range', row.source], ['Evidence', row.state], ['Samples', String(row.samples)], ['Operand width', row.operandWidth ? `${row.operandWidth} bytes (characterized)` : 'unknown']]) {
             identity.append(textElement('span', '', label), textElement('strong', '', value));
           }
           const observations = document.createElement('div'); observations.className = 'vm-selection-observations';
           observations.append(textElement('h4', '', 'Retained positions'));
-          for (const position of row.positions) observations.append(textElement('p', '', position));
-          if (!row.positions.length) observations.append(textElement('p', 'vm-selection-empty', 'No retained PC or guest-byte position.'));
+          appendVmPagedRows(observations, row.retainedSamples, 'retained samples', sample => {
+            const item = document.createElement('details'); item.className = 'vm-effect-row';
+            item.append(textElement('summary', '', `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(sample, null, 2)));
+            return item;
+          });
+          if (!row.retainedSamples.length) observations.append(textElement('p', 'vm-selection-empty', 'No retained PC or guest-byte position.'));
+          if (row.samples > row.retainedSamples.length) observations.append(textElement('p', 'vm-workspace-notice', `${row.samples - row.retainedSamples.length} accepted samples are not retained. Missing positions remain unknown.`));
           const notes = document.createElement('div'); notes.className = 'vm-selection-notes';
           notes.append(textElement('h4', '', 'Evidence notes'), textElement('p', '', row.notes));
           selectedInspector.replaceChildren(heading, title, identity, observations, notes);
@@ -1898,13 +1926,30 @@
         return container;
       }
 
+      function vmWorkspaceCommand(action, invoke = false) {
+        const active = document.querySelector('.vm-workspace-switch [aria-pressed="true"]');
+        const root = document.getElementById(active?.getAttribute('aria-controls') || 'vm-findings-workspace');
+        if (!root) return false;
+        if (root.id === 'vm-findings-workspace') {
+          const label = action === 'search' ? 'Filter retained handlers' : action === 'next' ? 'Next handler' : 'Previous handler';
+          const target = root.querySelector(`[aria-label="${label}"]`);
+          if (!target || target.disabled) return false;
+          if (invoke) { if (action === 'search') target.focus(); else target.click(); }
+          return true;
+        }
+        const capabilities = {search: false, previous: false, next: false};
+        root.dispatchEvent(new CustomEvent('vm-workspace-query', {detail: capabilities}));
+        if (!capabilities[action]) return false;
+        if (invoke) root.dispatchEvent(new CustomEvent(`vm-workspace-${action}`));
+        return true;
+      }
+
       function updateVmNavigationMenus() {
         const menuBar = document.querySelector('.vm-menu-bar');
         if (!menuBar) return;
         menuBar.querySelectorAll('[data-vm-command^="vm-handler-"]').forEach(button => {
-          const label = button.dataset.vmCommand === 'vm-handler-filter' ? 'Filter retained handlers' : button.dataset.vmCommand === 'vm-handler-next' ? 'Next handler' : 'Previous handler';
-          const target = document.querySelector(`[aria-label="${label}"]`);
-          button.disabled = !target || target.disabled;
+          const action = button.dataset.vmCommand === 'vm-handler-filter' ? 'search' : button.dataset.vmCommand === 'vm-handler-next' ? 'next' : 'previous';
+          button.disabled = !vmWorkspaceCommand(action);
         });
       }
 
@@ -12790,10 +12835,7 @@
           closeVmMenus(); summary.focus();
           if (command === 'vm-return-traffic') { document.querySelector('#screen-vm .back-button').click(); return; }
           if (command.startsWith('vm-handler-')) {
-            document.querySelector('#vm-show-findings').click();
-            const label = command === 'vm-handler-filter' ? 'Filter retained handlers' : command === 'vm-handler-next' ? 'Next handler' : 'Previous handler';
-            const target = document.querySelector(`[aria-label="${label}"]`);
-            if (target && !target.disabled) { if (command === 'vm-handler-filter') target.focus(); else target.click(); }
+            vmWorkspaceCommand(command === 'vm-handler-filter' ? 'search' : command === 'vm-handler-next' ? 'next' : 'previous', true);
             return;
           }
           const target = document.getElementById(command);

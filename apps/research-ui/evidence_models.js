@@ -2282,6 +2282,8 @@
           label: handler.label || (handler.opcode === null ? 'Unbound dispatch arm' : `handler ${handler.handler_index ?? handler.opcode}`),
           state: handler.state,
           samples: handler.sample_count,
+          operandWidth: handler.operand_width,
+          retainedSamples: workspace.samples.filter(sample => sample.opcode === handler.opcode),
           positions: workspace.samples.filter(sample => sample.opcode === handler.opcode).slice(0, 4).map(sample =>
             `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`),
           retainedPositions: workspace.samples.filter(sample => sample.opcode === handler.opcode).length,

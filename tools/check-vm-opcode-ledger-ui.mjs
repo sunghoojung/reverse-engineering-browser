@@ -102,3 +102,126 @@ assert(descendants(presentation.results).some(element => element.tagName === 'ta
 const presentationButtons = descendants(presentationRoot).filter(element => element.tagName === 'button');
 assert(presentationButtons.find(element => element.textContent === 'Validate ledger').className.includes('vm-tool-primary'));
 assert(presentationButtons.find(element => element.textContent === 'Clear all ledger inputs').className.includes('vm-tool-tertiary'));
+
+// Full bounded coverage remains reachable; the inspector preserves every field.
+const richDefinition = JSON.stringify({...JSON.parse(definition), definition_id: 'complete-ledger',
+  opcodes: Array.from({length: 256}, (_, index) => ({code: index.toString(16).padStart(2, '0'), mnemonic: 'UNKNOWN',
+    operands: [{name: 'value', width: 2, signed: true, kind: 'immediate'}], semantics: {operation: 'unknown', args: []}, flow: {kind: 'unknown'}}))});
+const richLedger = await model.createLedger(richDefinition);
+const richEntry = {opcode: 'ff', status: 'observed', meaning: 'Braces { } and "quoted" text remain inert <script>void 0</script>',
+  handler_location: {artifact_id: 'handler-full', byte_offset: Number.MAX_SAFE_INTEGER}, operand_format: 'Signed 16-bit researcher note',
+  source_refs: Array.from({length: 16}, (_, index) => ({artifact_id: `source-citation-${index}`, event_id: index % 2 ? `source-event-${index}` : null})),
+  test_status: 'failed', test_refs: Array.from({length: 16}, (_, index) => ({artifact_id: `test-citation-${index}`, event_id: `test-event-${index}`})),
+  unresolved_questions: Array.from({length: 16}, (_, index) => `Unresolved question ${index}?`)};
+richLedger.entries.push(ledger.entries[0], {opcode: 'fe', status: 'unmodeled', meaning: null, handler_location: null,
+  operand_format: null, source_refs: [], test_status: 'not_run', test_refs: [], unresolved_questions: []}, richEntry);
+const richRoot = new Element('section'), rich = api.mount(richRoot);
+const findElement = (root, predicate) => descendants(root).find(predicate);
+const richButton = title => findElement(richRoot, element => element.tagName === 'button' && element.textContent === title);
+const rowElements = () => descendants(rich.results).filter(element => element.attributes['data-ledger-opcode']);
+const inspectorElement = () => findElement(richRoot, element => element.className === 'vm-review-inspector');
+const search = () => findElement(richRoot, element => element.attributes['aria-label'] === 'Filter opcode coverage');
+const statusFilter = () => findElement(richRoot, element => element.attributes['aria-label'] === 'Filter evidence status');
+const query = () => { const detail = {search: false, previous: false, next: false}; richRoot.events['vm-workspace-query']({detail}); return detail; };
+assert.deepEqual(query(), {search: false, previous: false, next: false});
+assert(findElement(richRoot, element => Object.hasOwn(element.attributes, 'data-ledger-inputs')).open);
+rich.editors.definition.value = richDefinition;
+rich.editors.ledger.value = JSON.stringify(richLedger, null, 2).replace('"entries"', '"entr\\u0069es"');
+await rich.validate();
+assert.equal(findElement(richRoot, element => Object.hasOwn(element.attributes, 'data-ledger-inputs')).open, false);
+assert.equal(rowElements().length, 32, 'DOM rows are bounded to one coverage page');
+assert.deepEqual(query(), {search: true, previous: false, next: true});
+const seenOpcodes = new Set();
+for (let page = 0; page < 8; page++) {
+  for (const row of rowElements()) seenOpcodes.add(row.attributes['data-ledger-opcode']);
+  assert.equal(rowElements().length, 32);
+  if (page < 7) {
+    richButton('Next page').events.click();
+    assert.equal(document.activeElement.attributes['aria-label'], `Inspect opcode ${((page + 1) * 32).toString(16)}`, 'Paging focuses the selected row when the clicked pager becomes disabled');
+  }
+}
+assert.equal(seenOpcodes.size, 256, 'Every declared opcode is reachable, with no pagination truncation');
+assert(richButton('Next page').disabled);
+richButton('Previous page').events.click();
+assert.equal(rowElements()[0].attributes['data-ledger-opcode'], 'c0');
+richRoot.events['vm-workspace-search'](); assert.equal(document.activeElement, search());
+search().value = 'TEST-CITATION-15'; search().events.input();
+assert.equal(rowElements().length, 1); assert.equal(rowElements()[0].attributes['data-ledger-opcode'], 'ff');
+assert.match(inspectorElement().textContent, /9007199254740991/);
+assert.match(inspectorElement().textContent, /Signed 16-bit researcher note/);
+assert.match(inspectorElement().textContent, /"width": 2/);
+assert.match(inspectorElement().textContent, /failed.*tests were not executed/);
+assert.deepEqual(query(), {search: true, previous: false, next: false});
+richButton('References').events.click();
+for (const ref of [...richEntry.source_refs, ...richEntry.test_refs]) {
+  assert(inspectorElement().textContent.includes(ref.artifact_id));
+  if (ref.event_id) assert(inspectorElement().textContent.includes(ref.event_id));
+}
+assert.match(inspectorElement().textContent, /event null \(not supplied\)/);
+richButton('Questions').events.click();
+for (const question of richEntry.unresolved_questions) assert(inspectorElement().textContent.includes(question));
+richButton('Identity').events.click();
+for (const identity of [richLedger.format, richLedger.definition_id, richLedger.definition_source_sha256, rich.getReport().source_sha256]) assert(inspectorElement().textContent.includes(identity));
+richButton('Exact JSON').events.click();
+assert.deepEqual(JSON.parse(findElement(inspectorElement(), element => element.tagName === 'pre').textContent), richEntry);
+const beforeEditing = rich.editors.ledger.value;
+rich.editors.ledger.setSelectionRange = (start, end) => { rich.editors.ledger.selectionStart = start; rich.editors.ledger.selectionEnd = end; };
+richButton('Edit selected entry').events.click();
+assert.equal(document.activeElement, rich.editors.ledger);
+assert.deepEqual(JSON.parse(beforeEditing.slice(rich.editors.ledger.selectionStart, rich.editors.ledger.selectionEnd)), richEntry);
+assert.equal(rich.editors.ledger.value, beforeEditing, 'Opening an exact entry editor never rewrites the draft');
+assert.deepEqual(JSON.parse(rich.exportText()), richLedger, 'Coverage filters/selection do not change exported fields');
+rich.editors.ledger.value = '{}';
+const failedValidation = rich.validate();
+assert.match(inspectorElement().textContent, /Stale validated snapshot/, 'Revalidation marks retained inspector stale before awaiting');
+await failedValidation; assert.match(rich.notice.textContent, /Validation refused/); assert.equal(rich.exportText(), null);
+rich.editors.ledger.value = beforeEditing; await rich.validate();
+statusFilter().value = 'missing'; statusFilter().events.change();
+assert.equal(rowElements().length, 0); assert.match(inspectorElement().textContent, /No opcode selected/);
+assert.deepEqual(query(), {search: true, previous: false, next: false});
+richButton('Clear coverage filters').events.click();
+assert.equal(rowElements()[0].attributes['data-ledger-opcode'], '00');
+for (let index = 0; index < 32; index++) richRoot.events['vm-workspace-next']();
+assert.equal(rowElements()[0].attributes['data-ledger-opcode'], '20', 'Next selection crosses page boundaries');
+assert.equal(document.activeElement.attributes['aria-label'], 'Inspect opcode 20');
+richRoot.events['vm-workspace-previous']();
+assert.equal(rowElements()[0].attributes['data-ledger-opcode'], '00');
+assert.equal(document.activeElement.attributes['aria-label'], 'Inspect opcode 1f');
+let prevented = 0;
+for (const modifier of ['isComposing', 'altKey', 'ctrlKey', 'metaKey']) {
+  document.activeElement.events.keydown({key: 'End', [modifier]: true, preventDefault: () => prevented++});
+  assert.equal(document.activeElement.attributes['aria-label'], 'Inspect opcode 1f');
+}
+assert.equal(prevented, 0, 'Modified and IME row keys are not intercepted');
+document.activeElement.events.keydown({key: 'End', preventDefault: () => prevented++});
+assert.equal(prevented, 1); assert.equal(document.activeElement.attributes['aria-label'], 'Inspect opcode ff');
+assert.deepEqual(query(), {search: true, previous: true, next: false});
+richButton('Entry').events.click();
+for (const modifier of ['isComposing', 'altKey', 'ctrlKey', 'metaKey']) {
+  richButton('Entry').events.keydown({key: 'ArrowRight', [modifier]: true, preventDefault: () => assert.fail('Modified and IME tab keys are not intercepted')});
+  assert.equal(document.activeElement.textContent, 'Entry');
+}
+richButton('Entry').events.keydown({key: 'ArrowRight', preventDefault() {}});
+assert.equal(document.activeElement.textContent, 'References', 'Inspector tabs preserve keyboard focus');
+rich.editors.ledger.value += ' '; rich.editors.ledger.events.input();
+assert.equal(rich.exportText(), null); assert.match(inspectorElement().textContent, /Stale validated snapshot/);
+richButton('Edit selected entry').events.click(); assert.match(rich.notice.textContent, /stale snapshot/);
+await rich.validate(); assert(rich.exportText());
+statusFilter().value = 'missing'; statusFilter().events.change();
+richButton('Open JSON editor to add entry').events.click();
+assert.match(rich.notice.textContent, /No entry was inserted/);
+assert.equal(JSON.parse(rich.editors.ledger.value).entries.length, 3);
+rich.clear.events.click();
+assert.deepEqual(query(), {search: false, previous: false, next: false});
+assert.equal(rich.exportText(), null);
+console.log('Opcode ledger workbench passed: all 256 opcodes reachable with 32-row pages; full-field search, status filters, linked keyboard selection, all citations/questions/identity, exact JSON edit selection, stale guard, missing entries and unchanged exports.');
+
+const refusedRoot = new Element('section');
+const refusedCreation = api.mount(refusedRoot, {...model, createLedger: async () => { throw new TypeError('creation refused for test'); }});
+refusedCreation.editors.definition.value = definition; refusedCreation.editors.ledger.value = JSON.stringify(await model.createLedger(definition));
+await refusedCreation.validate(); assert(refusedCreation.exportText());
+refusedCreation.editors.ledger.value = '';
+const creating = refusedCreation.create();
+assert.match(refusedCreation.results.textContent, /Stale validated snapshot/);
+await creating; assert.match(refusedCreation.notice.textContent, /Creation refused/);
+assert.equal(refusedCreation.exportText(), null, 'Failed creation preserves the previous snapshot as stale and blocks export');

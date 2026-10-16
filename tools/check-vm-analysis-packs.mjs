@@ -39,6 +39,7 @@ function harness({native = false, fetcher, clipboard} = {}) {
     setAttribute(key, value) { this.attributes[key] = String(value); }
     addEventListener(key, callback) { this.events[key] = callback; }
     click() { return this.events.click?.(); }
+    focus() { document.activeElement = this; }
   }
   const document = {createElement: tag => new Element(tag), documentElement: {classList: {contains: () => native}}};
   const api = runInNewContext(readerSource + '\n' + source + ';({mountVmAnalysisPacks})', {
@@ -55,7 +56,7 @@ function harness({native = false, fetcher, clipboard} = {}) {
     files[index].files = [{name: 'owned.json', size: bytes.length, arrayBuffer: arrayBuffer || (async () => bytes.buffer)}];
     await files[index].events.change();
   };
-  return {root, ui, button, files, status, load};
+  return {root, ui, button, files, status, load, document};
 }
 const report = {contract_version: 1, document_kind: 'vm-pack-application', document_digest: 'a'.repeat(64), rankings: []};
 const response = (value = report, status = 200) => new Response(JSON.stringify(value), {status});
@@ -105,12 +106,65 @@ assert.match(ui.root.textContent, /See exact JSON/, 'Unsafe numeric IDs are neve
 assert.match(ui.root.textContent, /<script>inert<\/script>/);
 assert(!all(ui.root).some(element => element.tagName === 'script'));
 const comparison = {...report, document_kind: 'vm-instruction-set-comparison', behavioral_equivalence_proven: false,
-  rows: Array.from({length: 130}, (_, index) => ({status: 'moved', match_basis: 'unique-exact-effect-shape', left: {opcode: index}, right: {opcode: index + 1}}))};
+  pack_digest: 'c'.repeat(64), program_family: 'owned-fixture', family_binding: 'pack-declaration-not-authentication',
+  left: {workspace_digest: 'd'.repeat(64), interpreter_artifact_id: 1}, right: {workspace_digest: 'e'.repeat(64), interpreter_artifact_id: 2},
+  limitations: ['This comparison is an authored data-only hypothesis.'],
+  rows: Array.from({length: 130}, (_, index) => ({status: 'moved', match_basis: 'unique-exact-effect-shape', left: {opcode: index, notes: [`retained-evidence-${index}`]}, right: {opcode: index + 1}}))};
 next = response(comparison); await ui.load(2); await ui.load(3);
 for (const input of all(ui.root).filter(element => element.type === 'text')) input.value = '1';
 await ui.ui.run('compare');
-assert.match(ui.root.textContent, /130 rows · first 128 shown/);
-assert.equal(all(ui.root).filter(element => element.tagName === 'tbody')[0].children.length, 128);
+assert.match(ui.root.textContent, /130 rows · Comparison hypotheses/);
+const tbody = () => all(ui.root).find(element => element.tagName === 'tbody');
+const inspector = () => all(ui.root).find(element => element.className === 'vm-review-inspector');
+const selectedRow = () => tbody().children.find(element => element.attributes['aria-selected'] === 'true');
+const filter = all(ui.root).find(element => element.attributes['aria-label'] === 'Filter pack report rows');
+const query = () => { const detail = {search: false, previous: false, next: false}; ui.root.events['vm-workspace-query']({detail}); return detail; };
+assert.equal(tbody().children.length, 64, 'Render only a bounded page while retaining all rows');
+assert.equal(all(ui.root).find(element => element.attributes['data-pack-inputs'] === 'all').open, false, 'Accepted reports collapse imports');
+assert.deepEqual(query(), {search: true, previous: false, next: true});
+assert(ui.button('Previous page').disabled);
+ui.button('Next page').focus(); ui.button('Next page').click(); assert.match(inspector().textContent, /Report row 65 of 130/);
+assert.equal(ui.document.activeElement, ui.button('Next page'), 'Non-edge pager keeps keyboard focus');
+assert.match(ui.root.textContent, /Page 2 of 3/);
+ui.button('Next page').click(); assert.equal(tbody().children.length, 2); assert.match(ui.root.textContent, /Page 3 of 3/);
+assert(ui.button('Next page').disabled);
+assert.equal(ui.document.activeElement, ui.button('Previous page'), 'Last page restores focus to the enabled previous pager');
+ui.button('Previous page').click(); ui.button('Previous page').click();
+assert.equal(ui.document.activeElement, ui.button('Next page'), 'First page restores focus to the enabled next pager');
+assert(ui.button('Previous page').disabled);
+ui.button('Next page').click(); ui.button('Next page').click();
+tbody().children[1].click(); assert.match(inspector().textContent, /Report row 130 of 130/); assert.match(inspector().textContent, /retained-evidence-129/);
+assert.equal(ui.document.activeElement, selectedRow());
+assert.deepEqual(query(), {search: true, previous: true, next: false});
+ui.root.events['vm-workspace-previous'](); assert.match(inspector().textContent, /Report row 129 of 130/);
+ui.root.events['vm-workspace-next'](); assert.match(inspector().textContent, /Report row 130 of 130/);
+ui.root.events['vm-workspace-search'](); assert.equal(ui.document.activeElement, filter);
+filter.value = 'RETAINED-EVIDENCE-129'; filter.events.input();
+assert.equal(tbody().children.length, 1, 'Literal case-insensitive search covers retained evidence beyond the initial page');
+assert.equal(selectedRow().attributes['data-pack-row'], '129');
+assert.deepEqual(query(), {search: true, previous: false, next: false});
+filter.value = '<missing>'; filter.events.input(); assert.equal(tbody().children.length, 0);
+assert.match(inspector().textContent, /No selected row/); assert(ui.button('Next page').disabled); assert(ui.button('Previous page').disabled);
+ui.root.events['vm-workspace-next'](); assert.match(inspector().textContent, /No selected row/);
+filter.value = ''; filter.events.input(); assert.equal(tbody().children.length, 64);
+let prevented = 0;
+const beforeModifiedKey = selectedRow();
+for (const modifier of ['isComposing', 'altKey', 'ctrlKey', 'metaKey']) {
+  for (const key of ['ArrowDown', 'ArrowUp', 'Home', 'End']) selectedRow().events.keydown({key, [modifier]: true, preventDefault() { prevented++; }});
+}
+assert.equal(selectedRow(), beforeModifiedKey, 'Composition and modified keys preserve the current row and DOM');
+assert.equal(prevented, 0, 'Browser and input-method shortcuts are not intercepted');
+selectedRow().events.keydown({key: 'End', preventDefault() { prevented++; }});
+assert.equal(selectedRow().attributes['data-pack-row'], '129'); assert.equal(ui.document.activeElement, selectedRow());
+selectedRow().events.keydown({key: 'Home', preventDefault() { prevented++; }});
+assert.equal(selectedRow().attributes['data-pack-row'], '0');
+selectedRow().events.keydown({key: 'ArrowDown', preventDefault() { prevented++; }});
+assert.equal(selectedRow().attributes['data-pack-row'], '1');
+selectedRow().events.keydown({key: 'ArrowUp', preventDefault() { prevented++; }});
+assert.equal(selectedRow().attributes['data-pack-row'], '0'); assert.equal(prevented, 4);
+ui.button('Report provenance').click(); assert.match(inspector().textContent, /Report identity and limitations/);
+assert.match(inspector().textContent, new RegExp('d'.repeat(64))); assert.match(inspector().textContent, /data-only hypothesis/);
+ui.button('Selected row').click(); assert.match(inspector().textContent, /Report row 1 of 130/);
 assert.match(ui.root.textContent, /130 moved/);
 await ui.button('Copy complete report JSON').click(); assert.equal(JSON.parse(copied).rows.length, 130, 'Structured preview bounds do not truncate exact export');
 
@@ -121,3 +175,26 @@ applyDisclosure.open = true; applyDisclosure.events.toggle();
 assert(ui.button('Apply ranking pack').className.includes('vm-tool-primary'));
 assert(!ui.button('Compare builds').className.includes('vm-tool-primary'));
 for (const title of ['Cancel', 'Clear']) assert(ui.button(title).className.includes('vm-tool-tertiary'));
+
+// Ranking labels, oversized metadata and exact exports remain inert and bounded.
+const exactText = JSON.stringify({...report, rankings: Array.from({length: 131}, (_, index) => ({artifact_id: index === 130 ? '18446744073709551615' : index + 1,
+  anti_bot_score: 40, generic_anti_bot_score: 20, labels: [{rule_id: 'antibot.owned', label: index === 130 ? '<script>last-label</script>' : `label-${index}`}],
+  generic_weight_fallbacks: index === 130 ? ['fallback-after-initial-page'] : []}))});
+next = new Response(exactText); await ui.ui.run('apply');
+const rankingFilter = all(ui.root).find(element => element.type === 'search');
+rankingFilter.value = 'fallback-after-initial-page'; rankingFilter.events.input();
+assert.equal(tbody().children.length, 1); assert.match(inspector().textContent, /Report row 131 of 131/);
+assert.match(inspector().textContent, /antibot.owned: <script>last-label<\/script>/);
+assert.match(inspector().textContent, /18446744073709551615/);
+assert(!all(inspector()).some(element => element.tagName === 'script'));
+await ui.button('Copy complete report JSON').click(); assert.equal(copied, exactText, 'Filtering never changes the exact report export');
+next = new Response('{"contract_version":1,"document_kind":"vm-pack-application","document_digest":"' + 'a'.repeat(64) + '","rankings":[{"artifact_id":18446744073709551615,"labels":["' + 'x'.repeat(70000) + '"]}]}');
+await ui.ui.run('apply');
+assert.match(inspector().textContent, /See exact JSON/);
+assert(!inspector().textContent.includes('18446744073709552000'), 'Inspector never serializes a rounded identity');
+assert.match(inspector().textContent, /Row preview limited/);
+await ui.button('Copy complete report JSON').click(); assert(copied.includes('18446744073709551615'), 'Original unsafe integer survives export exactly');
+ui.button('Clear').click(); assert.deepEqual(query(), {search: false, previous: false, next: false});
+ui.root.events['vm-workspace-search'](); ui.root.events['vm-workspace-next']();
+assert(!all(ui.root).some(element => element.className === 'vm-review-workbench'), 'Clear removes linked review state');
+console.log('VM pack full-row paging, complete filtering, linked selection, keyboard, provenance, safe identity presentation and exact export passed.');

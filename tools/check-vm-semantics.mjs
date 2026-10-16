@@ -202,7 +202,13 @@ ui.input.files=[file(filteredPath)];await ui.input.events.change();ui.go(64,null
 ui.filter.value='aa';ui.filter.events.input();const sequences=listingRows().map(row=>Number(row.attributes['data-vm-sequence']));
 assert.equal(listingRows().length,64);assert.equal(pathEdges().length,0);assert(ui.listingBody.textContent.includes('retained rows hidden by filter'));
 for(const edge of pathEdges()){const [from,to]=edge.attributes['data-vm-path-edge'].split(':').map(Number);assert.equal(to,from+1);assert(sequences.includes(from)&&sequences.includes(to));}
-ui.filter.value='no-match';ui.filter.events.input();assert.equal(pathEdges().length,0);assert.equal(ui.selector.value,'64');ui.focusSelectedRow();assert.equal(ui.filter.value,'');
+const menuCapabilities={};mountedRoot.events['vm-workspace-query']({detail:menuCapabilities});assert(menuCapabilities.next&&menuCapabilities.previous&&menuCapabilities.search);
+mountedRoot.events['vm-workspace-next']();assert.equal(ui.selector.value,'66');assert.equal(ui.filter.value,'aa');
+mountedRoot.events['vm-workspace-previous']();assert.equal(ui.selector.value,'64');assert.equal(ui.filter.value,'aa');
+ui.filter.value='no-match';ui.filter.events.input();mountedRoot.events['vm-workspace-query']({detail:menuCapabilities});assert(!menuCapabilities.next&&!menuCapabilities.previous);
+mountedRoot.events['vm-workspace-next']();assert.equal(ui.selector.value,'64');assert.equal(ui.filter.value,'no-match');
+mountedRoot.events['vm-workspace-search']();assert.equal(document.activeElement,ui.filter);
+assert.equal(pathEdges().length,0);ui.focusSelectedRow();assert.equal(ui.filter.value,'');
 ui.input.files=[file(reg)];await ui.input.events.change();ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:reg.identity.trace_id,mappings:[{opcode:'03',operation:'register_const'}]})];await ui.hypothesis.events.change();
 assert(rowBySequence(0).attributes['aria-label'].includes('supplied operands 0, 7'));assert(rowBySequence(0).attributes['aria-label'].includes(reg.steps[0].evidence_refs[0]));assert(rowBySequence(0).attributes['aria-label'].includes('; matched;'));assert(rowBySequence(0).textContent.includes('matched'));
 ui.input.files=[file(runtimeOnly)];await ui.input.events.change();assert.equal(listingRows().length,2);assert.equal(pathEdges().length,0);assert(ui.listingBody.textContent.includes('Gap before '+Number.MAX_SAFE_INTEGER));assert(rowBySequence(Number.MAX_SAFE_INTEGER).attributes['aria-label'].includes('Gap before '+Number.MAX_SAFE_INTEGER));

@@ -1947,6 +1947,14 @@ No input is executed, fetched, uploaded, or automatically attached to findings.
 analysis. Invalid imports preserve previous valid inputs; valid replacements
 invalidate the previous report and any pending analysis.
 
+The linked workbench keeps a searchable, paged context listing beside an
+inspector with **Instruction**, **Pseudocode**, **Edges**, **Evidence**, and
+**Inputs and limits** tabs. Filtering does not change the selected context;
+**Reveal selected context** clears the filter and returns to its page.
+Resolved declared-edge buttons navigate only to an exact supplied PC/state
+context. Inputs collapse after successful analysis and remain available in the
+input disclosure. The application Search and Navigation menus target this mode.
+
 Contexts are keyed by byte-offset PC and decoder-state identity. The same opcode
 or PC can have different supplied meanings in different states. Missing mappings
 or state remain explicit unknowns and stop only that context. Select a context
@@ -2003,6 +2011,11 @@ mode explains how to use the backend or CLI. See the
 [versioned pack contract](../../protocol/vm-analysis-pack-v1.md) for limits and
 agent-facing `vm_pack_apply`/`vm_pack_compare` routes.
 
+Analysis-pack reports use a searchable, paged listing with a linked row and
+provenance inspector. All returned rows remain reachable; the complete report
+export preserves the exact backend response. UI filters and paging do not
+change the analysis or its original evidence.
+
 ## Opcode evidence ledger
 
 The VM **Opcode ledger** workspace imports exact definition JSON and a bounded
@@ -2016,6 +2029,11 @@ validated ledger, with no extra analysis envelope; edits invalidate export.
 In the native shell, **Copy validated ledger JSON** explicitly copies that same
 validated document to the clipboard instead. Clipboard refusal leaves the draft
 intact and displays an error; native Blob downloads are not attempted.
+The searchable coverage listing pages through every declared opcode and links
+the selected row to its full researcher entry and definition provenance.
+The inspector's edit action opens the existing JSON draft; it does not infer
+meaning, generate citations or change test outcomes. Filtering and selection
+do not modify the draft or the validated export.
 Previous coverage remains visible but is explicitly stale after edits or errors.
 
 Coverage counts declared opcodes, never runtime execution or verified meanings.
@@ -2025,6 +2043,12 @@ semantics, persists inputs automatically or uploads data. Review private data
 before exporting. See [ledger v1](../../protocol/vm-opcode-ledger-v1.md).
 
 ## VM findings workbench
+
+Effects, Reachability, Host links, byte attributions and selected retained samples
+page through all retained data in groups of 32. The Bytes view offers every
+retained snapshot; the compact handler listing keeps its four-sample preview.
+Operand width zero means unknown, matching the producer contract. Source locations
+show exact retained byte ranges without guessing a source line number.
 
 Findings opens retained evidence for the selected finding. The handler listing
 sits beside explicit Effects, Bytes, Reachability, Coverage, Unknowns, and

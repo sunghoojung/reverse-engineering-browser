@@ -22,7 +22,7 @@ const root = new URL('..',import.meta.url).pathname;
 const temporary = await mkdtemp(join(tmpdir(),'reb-pack-ui-'));
 const uiDirectory=join(temporary,'ui');await mkdir(uiDirectory);
 for(const name of ['evidence_package.js','vm_analysis_packs.js','app.css']) await copyFile(join(root,'apps/research-ui',name),join(uiDirectory,name));
-await writeFile(join(uiDirectory,'index.html'),`<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/app.css"><body style="overflow:auto"><main style="padding:16px;max-width:1000px;margin:auto"><section id="packs"></section></main><script src="evidence_package.js"></script><script src="vm_analysis_packs.js"></script><script>globalThis.ui=mountVmAnalysisPacks(document.querySelector('#packs'));</script>`);
+await writeFile(join(uiDirectory,'index.html'),`<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/app.css"><body style="overflow:auto"><main id="screen-vm" style="padding:16px;max-width:1000px;margin:auto"><section id="vm-packs-workspace"></section></main><script src="evidence_package.js"></script><script src="vm_analysis_packs.js"></script><script>globalThis.ui=mountVmAnalysisPacks(document.querySelector('#vm-packs-workspace'));</script>`);
 const binary=resolve(process.env.REB_PACK_BACKEND || join(process.env.CARGO_TARGET_DIR || 'apps/origin-trace-backend/target','debug/origin-trace-backend'));
 const endpointFile=join(temporary,'endpoint');
 const args=['--port','0','--endpoint-file',endpointFile,'--ui-directory',uiDirectory,'--analyst-runner',binary];
@@ -65,12 +65,24 @@ try {
  assert(!await evaluate(`document.querySelector('[role="status"]').textContent.includes('ready')`));
  for(const side of ['left','right']){await click(`input[aria-label="${side} interpreter artifact ID"]`);await command('Input.insertText',{text:'1'});}
  // Keyboard activates Compare after focusing Apply, without invoking its action.
- await click('h2');await evaluate(`document.querySelectorAll('#packs button')[0].focus()`);
+ await click('h2');await evaluate(`document.querySelectorAll('#vm-packs-workspace button')[0].focus()`);
  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
  assert.equal(await evaluate('document.activeElement.textContent'),'Compare builds');
  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
  await until(`document.querySelector('[role="status"]').textContent.includes('ready')`);
- const report=JSON.parse(await evaluate(`document.querySelector('pre').textContent`));assert.equal(report.document_kind,'vm-instruction-set-comparison');assert.equal(report.behavioral_equivalence_proven,false);assert(report.rows.some(row=>row.status==='moved'));
+ const report=JSON.parse(await evaluate(`document.querySelector('.vm-pack-output').textContent`));assert.equal(report.document_kind,'vm-instruction-set-comparison');assert.equal(report.behavioral_equivalence_proven,false);assert(report.rows.some(row=>row.status==='moved'));
+ assert.equal(await evaluate(`document.querySelector('[data-pack-inputs="all"]').open`),false,'Successful report collapses imports');
+ await click('.vm-tool-table tbody tr:first-child');
+ assert(await evaluate(`document.querySelector('.vm-review-inspector').textContent.includes('Report row 1 of')`));
+ await command('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowDown',code:'ArrowDown',windowsVirtualKeyCode:40});
+ assert.equal(await evaluate(`document.activeElement.getAttribute('data-pack-row')`),'1');
+ await click('.vm-review-tabs button:nth-child(2)');
+ assert(await evaluate(`document.querySelector('.vm-review-inspector').textContent.includes('Report identity and limitations')`));
+ await click('.vm-review-tabs button:first-child');
+ await click('input[aria-label="Filter pack report rows"]');await command('Input.insertText',{text:'contradicted'});
+ assert(await evaluate(`document.querySelector('.vm-review-listing').textContent.includes('of '+${report.rows.length}+' rows')`));
+ assert(await evaluate(`[...document.querySelectorAll('.vm-tool-table tbody tr')].every(row=>row.textContent.includes('contradicted'))`));
+ await evaluate(`document.querySelector('input[type="search"]').value='';document.querySelector('input[type="search"]').dispatchEvent(new Event('input'))`);
  for(const width of [1180,760,390]){
   await command('Emulation.setDeviceMetricsOverride',{width,height:790,deviceScaleFactor:1,mobile:false});
   assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),`no horizontal overflow at ${width}`);
@@ -78,11 +90,44 @@ try {
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('.vm-pack-inputs label')).display`),'grid');
   const {data}=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});await mkdir(join(root,'build/vm-pack-ui-qa'),{recursive:true});await writeFile(join(root,`build/vm-pack-ui-qa/packs-${width}.png`),Buffer.from(data,'base64'));
  }
+ await click('[data-pack-inputs="all"] > summary');
  await click('input[aria-label="right interpreter artifact ID"]');await command('Input.insertText',{text:'2'});
- assert(await evaluate(`document.querySelectorAll('#packs button')[4].disabled`));
- await click('#packs button:nth-child(2)');await until(`document.querySelector('[role="status"]').textContent.includes('refused')`);
- await click('#packs button:nth-child(4)');assert.equal(await evaluate(`document.querySelector('pre').textContent`),'');
- console.log('PASS rendered pack UI: real Rust comparison, exact file inputs, keyboard action, stale report invalidation, bad identity refusal, Clear and 1180/760/390 layouts.');
+ assert(await evaluate(`document.querySelectorAll('#vm-packs-workspace button')[4].disabled`));
+ await click('#vm-packs-workspace button:nth-child(2)');await until(`document.querySelector('[role="status"]').textContent.includes('refused')`);
+ await click('#vm-packs-workspace button:nth-child(4)');assert.equal(await evaluate(`document.querySelector('.vm-pack-output').textContent`),'');
+ // Explicitly authored presentation response exercises access beyond the real
+ // fixture's small report, without changing or making claims about the backend.
+ await evaluate(`(() => {
+   const root=document.querySelector('#vm-packs-workspace');root.innerHTML='';globalThis.ui=mountVmAnalysisPacks(root);
+   const original=globalThis.fetch;
+   globalThis.fetch=async (...args)=>args[0]==='/api/analysis/vm/packs/apply' ? new Response(JSON.stringify({
+     contract_version:1,document_kind:'vm-pack-application',document_digest:'a'.repeat(64),
+     rankings:Array.from({length:130},(_,index)=>({artifact_id:index+1,anti_bot_score:index%100,generic_anti_bot_score:20,
+       labels:[{rule_id:'antibot.authored',label:'authored-row-'+index}]})),limitations:['Synthetic presentation test only.']
+   })) : original(...args);
+ })()`);
+ for(const label of ['Analysis pack','VM analysis (apply)']) {
+   const {root:doc}=await command('DOM.getDocument');const {nodeId}=await command('DOM.querySelector',{nodeId:doc.nodeId,selector:`input[aria-label="${label}"]`});
+   await command('DOM.setFileInputFiles',{nodeId,files:[join(root,'tools/fixtures/vm-analysis-packs/pack.json')]});
+   await until(`document.querySelector('input[aria-label="${label}"]').parentElement.textContent.includes('bytes')`);
+ }
+ await click('#vm-packs-workspace > .vm-tool-toolbar button:first-child');await until(`document.querySelector('.vm-pack-status').textContent.includes('ready')`);
+ assert.equal(await evaluate(`document.querySelectorAll('.vm-tool-table tbody tr').length`),64);
+ await click('.vm-review-listing .vm-tool-toolbar button:last-child');
+ assert(await evaluate(`document.querySelector('.vm-review-inspector').textContent.includes('Report row 65 of 130')`));
+ await click('.vm-review-listing .vm-tool-toolbar button:last-child');
+ assert.equal(await evaluate(`document.querySelectorAll('.vm-tool-table tbody tr').length`),2);
+ await click('.vm-tool-table tbody tr:last-child');
+ assert(await evaluate(`document.querySelector('.vm-review-inspector').textContent.includes('authored-row-129')`));
+ await click('input[aria-label="Filter pack report rows"]');await command('Input.insertText',{text:'authored-row-129'});
+ assert.equal(await evaluate(`document.querySelectorAll('.vm-tool-table tbody tr').length`),1);
+ assert.equal(await evaluate(`document.querySelector('.vm-tool-table tbody tr').getAttribute('data-pack-row')`),'129');
+ for(const width of [1180,760,390]) {
+   await command('Emulation.setDeviceMetricsOverride',{width,height:790,deviceScaleFactor:1,mobile:false});
+   assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),`filtered workbench has no horizontal overflow at ${width}`);
+   const {data}=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});await writeFile(join(root,`build/vm-pack-ui-qa/packs-filtered-${width}.png`),Buffer.from(data,'base64'));
+ }
+ console.log('PASS rendered pack UI: real Rust comparison, exact file inputs, keyboard action, stale report invalidation, bad identity refusal, Clear, complete 130-row pagination, filtering, linked inspector and 1180/760/390 layouts.');
 } finally {
  socket?.close();
  const stopped = await Promise.allSettled([stop(browser), stop(backend)]);

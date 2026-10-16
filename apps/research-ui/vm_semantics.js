@@ -484,6 +484,15 @@ function mountVmSemantics(root) {
   };
   if(typeof ResizeObserver!=='undefined'){const observer=new ResizeObserver(entries=>{const width=entries[0]?.contentRect.width;if(width)changeLayout(width);});observer.observe(root);}
   root.addEventListener('keydown',event=>{if(event.key==='Escape'&&navigationOpen){event.preventDefault();setNavigation(false,true);}});
+  const adjacent = direction => {
+    const retained = matchingSteps(), index = retained.findIndex(step => step.sequence === Number(selector.value));
+    return retained[index < 0 ? direction > 0 ? 0 : retained.length - 1 : index + direction];
+  };
+  root.addEventListener('vm-workspace-query', event => Object.assign(event.detail, {search: true, previous: !!adjacent(-1), next: !!adjacent(1)}));
+  root.addEventListener('vm-workspace-search', () => { setPanel('listing'); filter.focus(); });
+  for (const [action, direction] of [['previous', -1], ['next', 1]]) root.addEventListener(`vm-workspace-${action}`, () => {
+    const step = adjacent(direction); if (step) chooseRow(step.sequence, true);
+  });
   invalidatePair();
   return {clear,selector,input,hypothesis,notice,details,map,validation,comparisonInput,comparisonSelector,comparisonView,compare,clearComparison,changesOnly,stateView,occurrences,previous,next,validationView,listingBody,listingStatus,listingPager,filter,clearFilter,stateButtons,contextButtons,panelButtons,go,changeLayout,openContext,closeContext,setPanel,focusSelectedRow,setExecutionView,viewButtons,context,inspector,navigator};
 }

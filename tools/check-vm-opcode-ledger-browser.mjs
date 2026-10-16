@@ -23,7 +23,7 @@ async function stop(child) {
 const root = new URL('..',import.meta.url).pathname;
 const temporary = await mkdtemp(join(tmpdir(),'reb-ledger-ui-'));
 const assets = ['captured_client.js','vm_static.js','vm_opcode_ledger.js','vm_opcode_ledger_view.js'];
-const harness = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/app.css"><body style="overflow:auto"><main style="padding:16px;max-width:900px;margin:auto"><section id="ledger"></section></main>${assets.map(name=>`<script src="/${name}"></script>`).join('')}<script>globalThis.ui=RebVmOpcodeLedgerView.mount(document.querySelector('#ledger'));</script>`;
+const harness = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/app.css"><body style="overflow:auto"><main id="screen-vm" style="padding:16px;max-width:1100px;margin:auto"><section id="ledger"></section></main>${assets.map(name=>`<script src="/${name}"></script>`).join('')}<script>globalThis.ui=RebVmOpcodeLedgerView.mount(document.querySelector('#ledger'));</script>`;
 const server=createServer(async(req,res)=>{
  if(req.url==='/'){res.setHeader('content-type','text/html');res.end(harness);return;}
  const name=req.url.slice(1);if(![...assets,'app.css'].includes(name)){res.writeHead(404).end();return;}
@@ -55,9 +55,10 @@ try {
   assert(box.visible,selector+' must be visibly clickable');await command('Input.dispatchMouseEvent',{type:'mousePressed',x:box.x,y:box.y,button:'left',clickCount:1});await command('Input.dispatchMouseEvent',{type:'mouseReleased',x:box.x,y:box.y,button:'left',clickCount:1});
  };
  const definition = JSON.stringify({format:'reb-vm-definition-v1',definition_id:'owned',architecture:'stack',opcode_bytes:1,operand_endianness:'little',register_count:0,
-  opcodes:[{code:'00',mnemonic:'UNKNOWN',operands:[],semantics:{operation:'unknown',args:[]},flow:{kind:'unknown'}}]});
+  opcodes:Array.from({length:40},(_,index)=>({code:index.toString(16).padStart(2,'0'),mnemonic:'UNKNOWN',operands:[],semantics:{operation:'unknown',args:[]},flow:{kind:'unknown'}}))});
  const ledger = await model.createLedger(definition);
  ledger.entries.push({opcode:'00',status:'inferred',meaning:'<img src=x onerror=alert(1)>',handler_location:null,operand_format:null,source_refs:[{artifact_id:'owned',event_id:null}],test_status:'not_run',test_refs:[],unresolved_questions:[]});
+ ledger.entries.push({opcode:'27',status:'observed',meaning:'Final declared opcode meaning',handler_location:{artifact_id:'last-handler',byte_offset:4096},operand_format:'Unsigned operand note',source_refs:[{artifact_id:'last-source',event_id:'last-source-event'}],test_status:'failed',test_refs:[{artifact_id:'last-test',event_id:null}],unresolved_questions:['Last unresolved question?']});
  for (const [kind, text] of [['definition',definition],['ledger',JSON.stringify(ledger)]]) {
   const path=join(temporary,kind+'.json');await writeFile(path,text);
   const {root:doc}=await command('DOM.getDocument');const {nodeId}=await command('DOM.querySelector',{nodeId:doc.nodeId,selector:`input[aria-label="Import ${kind} JSON"]`});
@@ -72,7 +73,37 @@ try {
  assert.deepEqual(JSON.parse(await evaluate('ui.exportText()')),ledger);
  assert(await evaluate('ui.results.textContent.includes("<img src=x onerror=alert(1)>")'));
  assert.equal(await evaluate('document.querySelectorAll("#ledger img").length'),0);
- await click('[data-ledger-editor="ledger"] > summary');
+ assert.equal(await evaluate('document.querySelector("[data-ledger-inputs]").open'),false);
+ assert.equal(await evaluate('document.querySelectorAll("[data-ledger-opcode]").length'),32);
+ await click('[aria-label="Next opcode coverage page"]');
+ assert.equal(await evaluate('document.querySelectorAll("[data-ledger-opcode]").length'),8);
+ assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Inspect opcode 20','Page change moves focus to its selected row');
+ await click('[aria-label="Inspect opcode 27"]');
+ assert(await evaluate('document.querySelector(".vm-review-inspector").textContent.includes("last-handler")'));
+ assert(await evaluate('document.querySelector(".vm-review-inspector").textContent.includes("Unsigned operand note")'));
+ await click('.vm-review-tabs [role="tab"]:nth-child(2)');
+ assert(await evaluate('document.querySelector(".vm-review-inspector").textContent.includes("last-source-event")'));
+ assert(await evaluate('document.querySelector(".vm-review-inspector").textContent.includes("last-test")'));
+ await command('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+ await command('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+ assert.equal(await evaluate('document.activeElement.textContent'),'Questions');
+ assert(await evaluate('document.querySelector(".vm-review-inspector").textContent.includes("Last unresolved question?")'));
+ await click('.vm-review-tabs [role="tab"]:nth-child(4)');
+ assert(await evaluate(`document.querySelector('.vm-review-inspector').textContent.includes(${JSON.stringify(ledger.definition_source_sha256)})`));
+ await evaluate('document.querySelector("#ledger").dispatchEvent(new CustomEvent("vm-workspace-search"))');
+ assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Filter opcode coverage');
+ await command('Input.insertText',{text:'last-test'});
+ assert.equal(await evaluate('document.querySelectorAll("[data-ledger-opcode]").length'),1);
+ assert.equal(await evaluate('document.querySelector("[data-ledger-opcode]").getAttribute("data-ledger-opcode")'),'27');
+ assert(await evaluate('ui.exportText()!==null'), 'Search does not invalidate the exact draft');
+ await click('.vm-review-filter > button');
+ await click('[aria-label="Inspect opcode 27"]');
+ await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Home',code:'Home',windowsVirtualKeyCode:36});
+ await command('Input.dispatchKeyEvent',{type:'keyUp',key:'Home',code:'Home',windowsVirtualKeyCode:36});
+ assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Inspect opcode 00');
+ await click('.vm-review-tabs [role="tab"]:nth-child(1)');
+ await click('[data-ledger-action="edit-selected"]');
+ assert.deepEqual(await evaluate('JSON.parse(ui.editors.ledger.value.slice(ui.editors.ledger.selectionStart,ui.editors.ledger.selectionEnd))'),ledger.entries[0]);
  await click('textarea[aria-label="Opcode ledger JSON editor"]');
  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'End',code:'End',windowsVirtualKeyCode:35,modifiers:2});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'End',code:'End',windowsVirtualKeyCode:35,modifiers:2});
  await command('Input.insertText',{text:' '});await until('ui.download.disabled');
@@ -86,7 +117,7 @@ try {
  }
  await click('#ledger button:nth-child(4)');
  assert(await evaluate('ui.getReport()===null && ui.exportText()===null && document.activeElement===ui.files.definition'));
- console.log('PASS rendered opcode ledger editor: browser File import, native pointer/keyboard validation, inert markup, stale export guard, clear focus, 1180/760/390 layouts.');
+ console.log('PASS rendered opcode ledger workbench: browser File import, native pointer/keyboard validation, paging focus, complete inspector, search, keyboard selection/tabs, exact entry editing, inert markup, stale export guard, clear focus, 1180/760/390 layouts.');
 } finally {
  socket?.close();
  try { await stop(browser); }

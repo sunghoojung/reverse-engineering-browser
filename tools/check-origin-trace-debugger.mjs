@@ -2009,7 +2009,7 @@ const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceI
   'closeSource', 'loadScriptContent', 'sourceRuntimeLine', 'sourceRuntimeColumn', 'prefillHookFromSource',
   'sourceDisplayName', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
   'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
-  'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
+  'discardStaticCleanup', 'toggleStaticCleanupComparison', 'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(
   appSection('      const nativeCanvasCaptureDisplayLimit =','      const nativeCanvasDrawingMethods')+
   appSection('      const canvasDataUrlPattern =','      function canvasReadbackName(')+
@@ -2407,6 +2407,57 @@ function ownedDerivedPayload(source, original, replacements) {
   const stale=control('retry');ctx.state.deobfuscationAssumeIntrinsics=true;const before=ctx.state.deobfuscationRequests.size;await stale.listeners.click[0]();assert.equal(ctx.state.deobfuscationRequests.size,before);
   api.releaseSourcePreview(source);ctx.state.selectedArtifactId=null;api.renderDeobfuscationReport(null);assert.equal(report.deobfuscationRender,null);assert.equal(report.querySelectorAll('pre').length,0);
   sourceOwnershipReceipt.push({test:'deob_changed_spans_unicode_paging_inert_reports_focus_retry_and_admission',status:'passed',changes:7,tables:5,corruptions:corruptions.length});
+}
+{
+  const {document,elements}=sourceReviewDOM();
+  const details=document.createElement('details'),screen=document.createElement('section');
+  document.querySelector=selector=>selector==='#deobfuscation-details'?details:screen;
+  elements.sourceSidebar=document.createElement('aside');elements.sourceSidebar.hidden=true;
+  elements.sourceSidebarToggle=document.createElement('button');
+  const state={sourceSidebarOpen:false,sourceDeobfuscated:false,debuggerSession:{state:'unavailable'}};
+  let renders=0,cancellations=0;
+  const context={document,elements,state,investigationPassiveSource:true,sourceFactsPanel:{cancel(){cancellations++;}},renderSources(){renders++;}};
+  runInNewContext(sourceProductionFunction('renderSourceSidebar')+appSection("      elements.sourceDeob.addEventListener('click'", "      elements.sourceWasm.addEventListener('click'"),context);
+  elements.sourceDeob.listeners.click[0]();
+  assert.equal(elements.sourceSidebar.hidden,true,'Cleanup must not overlay the code editor');
+  assert.equal(state.sourceSidebarOpen,false,'Cleanup preserves the explicit Details preference');
+  assert.equal(details.open,true);assert.equal(state.sourceDeobfuscated,true);
+  elements.sourceDeob.listeners.click[0]();assert.equal(state.sourceDeobfuscated,false);assert.equal(renders,2);assert.equal(cancellations,2);
+  state.sourceSidebarOpen=true;context.renderSourceSidebar();
+  elements.sourceDeob.listeners.click[0]();
+  assert.equal(elements.sourceSidebar.hidden,false,'Already open Details stays open');
+  assert.equal(state.sourceSidebarOpen,true);
+  sourceOwnershipReceipt.push({test:'static_cleanup_preserves_sidebar_visibility_and_original_toggle',status:'passed'});
+}
+{
+  const original='/*'+'x'.repeat(8189)+'😀'+'y'.repeat(200)+'*/ const result=1+2;';
+  const artifact=await ownedArtifact('cleanup-compare',original);artifact.content=original;
+  const payload=ownedDerivedPayload(artifact,original,[['1+2','(3)']]);
+  const dom=sourceReviewDOM();let api,gate=null,calls=0;
+  const ctx=ownedContext({...dom,state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id,sourceDeobfuscated:true},formatByteSize:String,
+    renderSources(){api?.renderDeobfuscationReport(api.selectedSource());},fetch:async()=>{calls++;if(gate)await gate.promise;return Response.json(payload);}});api=ctx.api;
+  await api.loadDeobfuscation(api.selectedSource());
+  const source=api.selectedSource(),good=source.deobfuscation,view=good.inspectorView,key=api.deobfuscationKey(source);
+  assert.equal(good.sourceInspection.derivedSha256,await ownershipHash(payload.representation.text));
+  assert.match(dom.elements.deobfuscationReport.textContent,/Recovery is partial in scope/);
+  api.toggleStaticCleanupComparison(source,view);
+  const previews=dom.elements.deobfuscationReport.querySelectorAll('pre').filter(n=>n.dataset.deobControl.startsWith('comparison-'));
+  assert.equal(previews.length,2);
+  for(const pre of previews){assert(pre.textContent.length<=8192);assert(!/[\uD800-\uDBFF]$/.test(pre.textContent));}
+  assert.match(dom.elements.deobfuscationReport.textContent,/prefix preview/);
+  assert.match(dom.elements.deobfuscationReport.textContent,/8191 of/);
+  api.toggleStaticCleanupComparison(source,view);assert.equal(view.compare,false);
+  gate=ownedDeferred();const pending=api.loadDeobfuscation(api.selectedSource(),{retry:true});
+  const request=ctx.state.deobfuscationRequests.get(key),signal=request.controller.signal;
+  api.discardStaticCleanup(source,view);
+  assert(signal.aborted);assert.equal(request.status,'cancelled');assert.equal(ctx.state.deobfuscationCache.size,0);
+  assert.equal(ctx.state.sourceDeobfuscated,false);assert.equal(artifact.content,original);assert.equal(artifact.sha256,await ownershipHash(original));
+  gate.resolve();await pending;assert.equal(ctx.state.deobfuscationCache.size,0);
+  await api.loadDeobfuscation(api.selectedSource());assert.equal(calls,2,'Discard requires explicit retry');
+  gate=null;await api.loadDeobfuscation(api.selectedSource(),{retry:true});assert.equal(calls,3);
+  const fresh=api.selectedSource().deobfuscation;
+  api.discardStaticCleanup(source,view);assert.equal(ctx.state.deobfuscationCache.get(key),fresh,'Stale discard cannot delete replacement result');
+  sourceOwnershipReceipt.push({test:'static_cleanup_hash_bounded_comparison_unicode_discard_late_reply_retry_stale_controls',status:'passed'});
 }
 {
   const original='const result=1+2;',artifact=await ownedArtifact('deob-cancel',original);artifact.content=original;
@@ -4138,6 +4189,14 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await sourceClick('[data-deob-control="disclosure-transformations"]');await sourceClick('[data-deob-control="transformations-next"]');
   assert(await evaluate("elements.deobfuscationReport.textContent.includes('fixture-family-6')"),'Transformation summaries were silently truncated');
   await sourceClick('[data-deob-control="change-previous"]');await screenshot('deobfuscation-inspector-wide');
+  await sourceClick('[data-deob-control="compare"]');
+  assert.equal(await evaluate("elements.deobfuscationReport.querySelectorAll('.static-cleanup-comparison pre').length"),2);
+  assert.match(await evaluate("elements.deobfuscationReport.textContent"),/Cleaned SHA-256/);
+  await screenshot('static-cleanup-comparison-wide');
+  await viewport(360,740);await screenshot('static-cleanup-comparison-narrow');
+  assert(await evaluate("(()=>{const node=document.querySelector('.static-cleanup-comparison');return node.scrollWidth<=node.clientWidth+1;})()"),'Comparison overflows narrow sidebar');
+  await sourceClick('[data-deob-control="compare"]');await viewport(1440,900);
+
   fixture.deobMode='error';await sourceClick('[data-deob-control="reanalyze"]');
   await until("elements.deobfuscationReport.textContent.includes('Authored analyzer retry failure')",'Retry error did not remain visible');
   assert.equal(await evaluate("elements.deobfuscationReport.querySelectorAll('pre').length"),2,'Retry failure hid the previous snippets');

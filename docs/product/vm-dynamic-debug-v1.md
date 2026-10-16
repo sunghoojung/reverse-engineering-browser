@@ -291,7 +291,7 @@ combination as the supported way to study inspector-detecting VMs.
   Traffic (existing request capture already stores the response if
   authorized; this milestone only snapshots the decoded buffer).
 - Automatic lifting of guest bytecode to JavaScript.
-- Isolated-experiment opcode confirmation (VM Lab v2.1).
+- Generalized opcode confirmation beyond the explicitly tested owned inputs.
 - Target-specific vendor packs.
 - MCP.
 
@@ -309,7 +309,8 @@ combination as the supported way to study inspector-detecting VMs.
 
 Owned cooperative dispatch emission and exact v2 retention are specified in
 [VM opcode workspace v2](../../protocol/vm-opcode-workspace-v2.md). This does not
-implement arbitrary-site guest dispatch or confirm opcode effects.
+implement arbitrary-site guest dispatch. Input-specific owned confirmation is
+provided separately below.
 
 ## WebAssembly dispatch workspaces
 

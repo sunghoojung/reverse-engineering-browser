@@ -2331,7 +2331,7 @@
         if (!exact(row,['request','effect_digest','fixture_revision','status','independent','observed','reason']) ||
             !digest(row.effect_digest) || row.fixture_revision !== 1 ||
             !['pending','confirmed','mismatch','unsupported','unknown'].includes(row.status) ||
-            !['execution-not-yet-complete','interrupted-execution','fixed-owned-inputs-only','agreement-for-listed-inputs-only',
+            !['execution-not-yet-complete','completion-unverified','fixed-owned-inputs-only','agreement-for-listed-inputs-only',
               'expected-or-observed-effect-differs','native-execution-or-disposal-unconfirmed'].includes(row.reason)) return false;
         const r=row.request;
         if (!exact(r,['command_id','fixture','workspace_digest','source_artifact_sha256','interpreter_artifact_id','finding_id','opcode','effect_id','inputs','expected']) ||

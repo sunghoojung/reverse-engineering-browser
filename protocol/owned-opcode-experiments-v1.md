@@ -48,13 +48,15 @@ execution. POST requires JSON, at most 4 KiB, and the existing exact loopback
 request trust boundary. Unknown and duplicate request keys are rejected before
 conversion to generic JSON. Native values remain canonical uint64 strings.
 
-At most one experiment is admitted and at most 64 results/1 MiB are retained.
+A cross-process store lease is held through pending persistence, execution,
+disposal and final persistence. At most one experiment per store is admitted,
+and at most 64 results/1 MiB are retained.
 At capacity the next action is refused, without eviction. The exact command ID
 is retained: the same request returns its stored result, while changed content
 with the same ID is refused. A pending receipt is written before execution;
-HTTP cancellation does not cancel native cleanup or persistence. A pending
-receipt read after interruption is shown as unknown and never automatically
-replayed. The helper enforces the existing 60-second lifetime and bounded
+HTTP cancellation does not cancel native cleanup or persistence. GET preserves a pending receipt without claiming that its owner is still
+running. After a later explicit action acquires the store lease, an older pending
+receipt becomes unknown/completion-unverified and is never automatically replayed. The helper enforces the existing 60-second lifetime and bounded
 exchange deadlines. Disk failures or a lost HTTP reply mean the result is
 unknown to the caller; use Read saved results, not an automatic retry.
 

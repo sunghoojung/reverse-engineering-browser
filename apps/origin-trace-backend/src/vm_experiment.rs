@@ -137,8 +137,11 @@ fn empty() -> Document {
 fn path(root: &Path) -> PathBuf {
     root.join("analysis/owned-opcode-experiments-v1.json")
 }
-fn load(root: &Path, executing: bool) -> Result<Document> {
-    let Some(bytes) = durable::read_private(&path(root), MAX_BYTES)? else {
+fn load(root: &Path) -> Result<Document> {
+    decode(durable::read_private(&path(root), MAX_BYTES)?, false)
+}
+fn decode(bytes: Option<Vec<u8>>, recover: bool) -> Result<Document> {
+    let Some(bytes) = bytes else {
         return Ok(empty());
     };
     let mut document: Document = serde_json::from_slice(&bytes)
@@ -199,14 +202,14 @@ fn load(root: &Path, executing: bool) -> Result<Document> {
     }
     // A process restart cannot turn an interrupted experiment into a success.
     for record in &mut document.records {
-        if record.status == "pending" && !executing {
+        if record.status == "pending" && recover {
             record.status = "unknown".into();
-            record.reason = "interrupted-execution".into();
+            record.reason = "completion-unverified".into();
         }
     }
     Ok(document)
 }
-fn save(root: &Path, document: &Document) -> Result<()> {
+fn encode(document: &Document) -> Result<Vec<u8>> {
     crate::validation::schema(
         "OwnedOpcodeExperiments",
         &serde_json::to_value(document)?,
@@ -216,7 +219,7 @@ fn save(root: &Path, document: &Document) -> Result<()> {
     if bytes.len() > MAX_BYTES {
         return Err(Error::bad("Owned experiment store exceeds 1 MiB"));
     }
-    durable::write_private(&path(root), &bytes)
+    Ok(bytes)
 }
 fn canonical_effect(fixture: &str, opcode: u32) -> Result<Value> {
     let source = if fixture == "register" {
@@ -452,10 +455,7 @@ impl Experiments {
         }
     }
     pub fn list(&self) -> Result<Value> {
-        Ok(serde_json::to_value(load(
-            &self.root,
-            self.permit.available_permits() == 0,
-        )?)?)
+        Ok(serde_json::to_value(load(&self.root)?)?)
     }
     pub async fn run(&self, bytes: &[u8], workspace: Value) -> Result<Value> {
         let request = Request::parse(bytes)?;
@@ -470,7 +470,8 @@ impl Experiments {
         // Once admitted, HTTP cancellation does not cancel disposal or persistence.
         tokio::spawn(async move {
             let _permit = permit;
-            let mut document = load(&root, false)?;
+            let lease = crate::workspace_lease::Lease::acquire(&path(&root))?;
+            let mut document = decode(lease.read(MAX_BYTES)?, true)?;
             if let Some(previous) = document
                 .records
                 .iter()
@@ -497,7 +498,7 @@ impl Experiments {
                 reason: "execution-not-yet-complete".into(),
             };
             document.records.push(record.clone());
-            save(&root, &document)?;
+            lease.write(&encode(&document)?)?;
             if record.independent.is_none() {
                 record.status = "unsupported".into();
                 record.reason = "fixed-owned-inputs-only".into();
@@ -523,7 +524,7 @@ impl Experiments {
                 }
             }
             *document.records.last_mut().unwrap() = record.clone();
-            save(&root, &document)?;
+            lease.write(&encode(&document)?)?;
             Ok(serde_json::to_value(record)?)
         })
         .await
@@ -634,7 +635,7 @@ mod tests {
         assert!(bind(&r, &bad).is_err());
     }
     #[tokio::test]
-    async fn owned_experiment_get_preserves_active_pending_and_reports_recovery_unknown() {
+    async fn owned_experiment_cross_process_lease_preserves_pending_and_recovers_unverified() {
         let root = tempfile::tempdir().unwrap();
         let service = Experiments::new(root.path().into(), PathBuf::from("/no-helper"));
         let r = request("register", 2);
@@ -649,11 +650,31 @@ mod tests {
         };
         let mut doc = empty();
         doc.records.push(record);
-        save(root.path(), &doc).unwrap();
+        durable::write_private(&path(root.path()), &encode(&doc).unwrap()).unwrap();
         let permit = service.permit.clone().acquire_owned().await.unwrap();
         assert_eq!(service.list().unwrap()["records"][0]["status"], "pending");
         drop(permit);
-        assert_eq!(service.list().unwrap()["records"][0]["status"], "unknown");
+        let peer = Experiments::new(root.path().into(), PathBuf::from("/no-helper"));
+        let held = crate::workspace_lease::Lease::acquire(&path(root.path())).unwrap();
+        assert_eq!(peer.list().unwrap()["records"][0]["status"], "pending");
+        let mut next = request("register", 2);
+        next.command_id = "next".into();
+        next.inputs.left = Decimal(8);
+        assert!(
+            peer.run(&serde_json::to_vec(&next).unwrap(), workspace(&next))
+                .await
+                .is_err()
+        );
+        assert_eq!(peer.list().unwrap()["records"].as_array().unwrap().len(), 1);
+        drop(held);
+        peer.run(&serde_json::to_vec(&next).unwrap(), workspace(&next))
+            .await
+            .unwrap();
+        assert_eq!(peer.list().unwrap()["records"][0]["status"], "unknown");
+        assert_eq!(
+            peer.list().unwrap()["records"][0]["reason"],
+            "completion-unverified"
+        );
     }
     #[tokio::test]
     async fn unsupported_owned_inputs_are_stored_without_starting_helper() {
@@ -738,7 +759,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(service.list().unwrap()["records"][0]["status"], "confirmed");
-        let mut doc = load(root.path(), false).unwrap();
+        let mut doc = load(root.path()).unwrap();
         doc.records[0].observed.as_mut().unwrap().pc_before = Decimal(0);
         durable::write_private(&path(root.path()), &serde_json::to_vec(&doc).unwrap()).unwrap();
         assert!(service.list().is_err());

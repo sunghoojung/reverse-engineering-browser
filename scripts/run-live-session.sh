@@ -282,6 +282,11 @@ analyze_captured_artifacts() {
     else
       current_signature="missing"
     fi
+    if [[ -f "${artifact_store_path}/capture-provenance-v1.json" ]]; then
+      current_signature+=":$(stat -f '%m:%z' "${artifact_store_path}/capture-provenance-v1.json")"
+    else
+      current_signature+=":provenance-missing"
+    fi
     if [[ "${current_signature}" != "${previous_signature}" ]]; then
       "${vm_analyzer}" --artifacts "${artifact_store_path}" --events "${store_path}" >>"${analyzer_log}" 2>&1 &
       worker_pid=$!
@@ -403,6 +408,18 @@ else
     exit 1
   fi
 fi
+
+# Persist the launch fact after startup succeeds. Never infer this from a later
+# debugger disconnection, and do not equate an omitted endpoint with invisibility.
+vm_capture_mode="cdp-attached"
+if [[ "${native_quiet_mode}" == 1 ]]; then
+  vm_capture_mode="native-stealth"
+fi
+provenance_temporary="${artifact_store_path}/capture-provenance-v1.json.tmp.$$"
+printf '{"contract_version":1,"sessions":[{"session_id":"%s","capture_mode":"%s"}]}\n' \
+  "${session_id}" "${vm_capture_mode}" >"${provenance_temporary}"
+chmod 600 "${provenance_temporary}"
+mv "${provenance_temporary}" "${artifact_store_path}/capture-provenance-v1.json"
 
 if [[ "${embedded_session}" == 1 ]]; then
   handshake_temporary="${session_handshake}.tmp.$$"

@@ -12,6 +12,9 @@ use std::{
     sync::LazyLock,
 };
 use wasmparser::{Operator, Parser, Payload, TypeRef};
+#[path = "vm_capture_mode.rs"]
+pub(crate) mod capture_mode;
+
 const PROFILE: &str = "anti-bot-vm-detection-v1";
 static CONFIG: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../assets/vm-profile.json")).expect("VM profile")
@@ -847,6 +850,17 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
     let (event_records, event_omissions, event_digest) =
         input(event_store, 16384, 100000, "event")?;
     omissions.extend(event_omissions);
+    let capture_provenance = capture_mode::Provenance::read(root)?;
+    let capture_mode = if omissions.is_empty() {
+        capture_provenance.aggregate(
+            manifest
+                .iter()
+                .chain(event_records.iter())
+                .map(|(_, record)| record),
+        )
+    } else {
+        "unknown"
+    };
     let mut artifacts = Vec::new();
     let mut snapshot_artifacts = Vec::new();
     let mut failures = Vec::new();
@@ -967,7 +981,7 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 .extend(omissions.clone());
         }
         if let Some(bytes) = bytes
-            && let Some(workspace) = crate::vm_opcode::workspace(
+            && let Some(mut workspace) = crate::vm_opcode::workspace(
                 root,
                 artifact,
                 &bytes,
@@ -976,6 +990,7 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 &events,
             )
         {
+            workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));
             opcode_workspaces.push(workspace);
         }
         results.push(result);
@@ -1005,7 +1020,7 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
             mixed.push(json!({"finding_id":finding(&format!("{}:{}",js["artifact_sha256"].as_str().unwrap(),wasm["artifact_sha256"].as_str().unwrap()),&rules),"runtime":"mixed","tier":if js["tier"]=="likely-vm" || wasm["tier"]=="likely-vm" {"likely-vm"} else {"candidate"},"artifact_ids":[parent,wasm["artifact_id"]],"vm_score":js["vm_score"].as_u64().unwrap()+wasm["vm_score"].as_u64().unwrap(),"anti_bot_score":js["anti_bot_score"],"evidence_families":js["evidence_families"].as_array().unwrap().iter().chain(wasm["evidence_families"].as_array().unwrap()).map(|v|v.as_str().unwrap()).collect::<BTreeSet<_>>(),"boundary":{"state":"observed","reason":"The WASM artifact manifest names the JavaScript artifact as its creator."}}));
         }
     }
-    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":current_producer(),"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest},"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
+    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":current_producer(),"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest,"capture_provenance_digest":capture_provenance.digest},"capture_mode":capture_mode,"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
     document["document_digest"] = json!(digest(&document)?);
     durable::write_private(
         &root.join("analysis/vm-analysis-v1.json"),

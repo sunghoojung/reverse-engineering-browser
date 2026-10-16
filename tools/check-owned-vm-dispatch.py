@@ -10,6 +10,50 @@ import tempfile
 from pathlib import Path
 
 
+
+def check_artifact_scoped_ui(repository, analyzer, artifacts, store, artifact):
+    """Actual analyzer output from authored same-source/session-scoped inputs."""
+    other = dict(artifact, artifact_id="207", session_id="201")
+    snapshot_bytes = bytes([1, 7, 8])  # Authored manifest fixture, not a browser capture.
+    snapshot_hash = hashlib.sha256(snapshot_bytes).hexdigest()
+    (artifacts / "blobs" / f"{snapshot_hash}.bin").write_bytes(snapshot_bytes)
+    snapshot = dict(artifact, artifact_id="108", parent_artifact_id="107",
+                    capture_origin="runtime_typed_array", kind="bytecode_buffer",
+                    mime_type="application/octet-stream", byte_size=len(snapshot_bytes),
+                    sha256=snapshot_hash, content_path=f"blobs/{snapshot_hash}.bin")
+    (artifacts / "manifest.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in [artifact, other, snapshot]))
+    (artifacts / "capture-provenance-v1.json").write_text(json.dumps({"contract_version": 1, "sessions": [
+        {"session_id": "101", "capture_mode": "native-stealth"},
+        {"session_id": "201", "capture_mode": "cdp-attached"}]}))
+    subprocess.run([analyzer, "--artifacts", str(artifacts), "--events", str(store)],
+                   capture_output=True, check=True, timeout=30)
+    analysis = json.loads((artifacts / "analysis/vm-analysis-v1.json").read_text())
+    document = json.loads((artifacts / "analysis/vm-opcode-workspace-v2.json").read_text())
+    assert len(analysis["results"]) == 2
+    assert len({row["finding_id"] for row in analysis["results"]}) == 1
+    model = (repository / "apps/research-ui/evidence_models.js").read_text()
+    app = (repository / "apps/research-ui/app.js").read_text()
+    presentation = app[app.index("      function vmSessionPresentation"):app.index("      function renderVmSessionStatus")]
+    exercise = "\nconst analysis=" + json.dumps(analysis) + ";const document=" + json.dumps(document) + ";" + r"""
+const assert=require('node:assert/strict');
+assert(isVmAnalysisDocument(analysis)); assert(isVmOpcodeWorkspaceDocument(document));
+const findings=vmFindingsFromAnalysis(analysis);
+assert.equal(new Set(findings.map(row=>row.findingId)).size,2);
+for(const [artifact,mode,count,label,samples] of [
+  ['107','native-stealth',1,'Native stealth',9], ['207','cdp-attached',0,'CDP attached',0]]) {
+  const finding=findings.find(row=>row.sourceArtifactId===artifact);
+  const selected=vmOpcodeWorkspaceForFinding(document,finding);
+  assert.equal(selected.interpreter_artifact_id,artifact); assert.equal(selected.capture_mode,mode);
+  assert.equal(selected.snapshots.length,count); assert.equal(selected.sample_count,samples);
+  assert.equal(vmSessionPresentation({vmOpcodeWorkspace:document,vmAnalysisDocument:analysis,
+    vmFindings:findings,selectedVmFindingId:finding.findingId}).label,label);
+}
+"""
+    subprocess.run(["node"], input=model + presentation + exercise, text=True,
+                   capture_output=True, check=True, timeout=10)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
@@ -78,6 +122,7 @@ def main():
                 assert all(row["invocation_id"] == "104" for row in workspace["samples"])
                 assert workspace["coverage"]["characterized_bytes"] == 0
                 assert not workspace["coverage"]["complete"]
+                check_artifact_scoped_ui(repository, args.analyzer, artifacts, store, artifact)
         assert len(events) == 10
         marker, *samples = events
         assert marker["type"] == "vm_finding" and marker["sequence_number"] == "1"
@@ -117,6 +162,8 @@ def main():
             rejected = subprocess.run(invalid, capture_output=True, check=False, timeout=10)
             assert rejected.returncode == 2 and not rejected.stdout, invalid
     print("Owned register/stack dispatch export: all 18 instructions stored by the broker")
+    if args.analyzer:
+        print("Actual analyzer UI selection: identical source findings retain separate session modes, samples and snapshot joins")
 
 
 if __name__ == "__main__":

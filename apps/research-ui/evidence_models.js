@@ -1824,7 +1824,8 @@
       }
 
       function isVmAnalysisResult(result) {
-        if (!isPlainObject(result) || typeof result.artifact_id !== 'string' ||
+        if (!isPlainObject(result) || !isCanonicalInteger(result.artifact_id, 0n, uint64Max) ||
+            (result.artifact_sha256 !== undefined && !vmWorkspaceDigest(result.artifact_sha256)) ||
             !['javascript', 'webassembly', 'unknown'].includes(result.runtime) ||
             !['complete', 'partial', 'failed'].includes(result.status)) return false;
         if (result.status === 'failed') {
@@ -1845,6 +1846,11 @@
       function isVmAnalysisDocument(document) {
         return isPlainObject(document) && document.contract_version === 1 &&
           document.document_kind === 'vm-analysis' &&
+          (document.capture_mode === undefined || vmWorkspaceMode(document.capture_mode)) &&
+          (document.inputs?.capture_provenance_digest === undefined ||
+            document.inputs.capture_provenance_digest === null ||
+            (typeof document.inputs.capture_provenance_digest === 'string' &&
+             /^[0-9a-f]{64}$/.test(document.inputs.capture_provenance_digest))) &&
           typeof document.document_digest === 'string' && /^[0-9a-f]{64}$/.test(document.document_digest) &&
           typeof document.profile_digest === 'string' && /^[0-9a-f]{64}$/.test(document.profile_digest) &&
           isPlainObject(document.profile) && document.profile.profile_id === 'anti-bot-vm-detection-v1' &&
@@ -1854,7 +1860,9 @@
           Array.isArray(document.mixed_findings) &&
           document.mixed_findings.every(finding => isPlainObject(finding) &&
             typeof finding.finding_id === 'string' && /^[0-9a-f]{24}$/.test(finding.finding_id) &&
-            finding.runtime === 'mixed' && ['candidate', 'likely-vm'].includes(finding.tier));
+            finding.runtime === 'mixed' && ['candidate', 'likely-vm'].includes(finding.tier) &&
+            Array.isArray(finding.artifact_ids) && finding.artifact_ids.length === 2 &&
+            finding.artifact_ids.every(id => isCanonicalInteger(id, 0n, uint64Max)));
       }
 
       function vmFindingsFromAnalysis(document) {
@@ -1862,7 +1870,7 @@
         const findings = document.results
           .filter(result => result.status !== 'failed' && result.tier !== 'none')
           .map(result => ({
-            findingId: `analysis:${result.finding_id}`,
+            findingId: `analysis:${result.finding_id}:artifact:${result.artifact_id}`,
             investigationId,
             kind: 'hypothesis',
             hostRuntime: result.runtime === 'javascript' ? 'JavaScript' : 'WebAssembly',
@@ -1875,7 +1883,7 @@
             analysis: result
           }));
         document.mixed_findings.forEach(result => findings.push({
-          findingId: `analysis:${result.finding_id}`,
+          findingId: `analysis:${result.finding_id}:artifacts:${JSON.stringify(result.artifact_ids)}`,
           investigationId,
           kind: 'hypothesis', hostRuntime: 'mixed', confidence: result.tier,
           label: result.tier === 'likely-vm' ? 'Likely mixed JavaScript/WASM VM' : 'Mixed runtime VM candidate',
@@ -2239,15 +2247,29 @@
 
       function vmOpcodeWorkspaceForFinding(document, finding) {
         if (!document || !finding) return null;
-        const findingId = finding.analysis?.finding_id ??
-          (finding.findingId?.startsWith('analysis:') ? finding.findingId.slice(9) : null);
-        const exact = findingId
-          ? document.workspaces.find(workspace => workspace.finding_id === findingId)
-          : null;
-        if (exact) return exact;
-        const artifactMatches = document.workspaces.filter(workspace =>
-          workspace.interpreter_artifact_id === finding.sourceArtifactId);
-        return artifactMatches.length === 1 ? artifactMatches[0] : null;
+        const analysis = finding.analysis;
+        const sourceHash = analysis?.artifact_sha256 ?? finding.sourceArtifactSha256;
+        const matches = document.workspaces.filter(workspace =>
+          workspace.interpreter_artifact_id === finding.sourceArtifactId &&
+          (sourceHash === undefined || workspace.source_artifact_sha256 === sourceHash));
+        if (analysis && analysis.runtime !== 'mixed') {
+          if (analysis.artifact_id !== finding.sourceArtifactId) return null;
+          const exact = matches.filter(workspace => workspace.finding_id === analysis.finding_id);
+          return exact.length === 1 ? exact[0] : null;
+        }
+        if (analysis?.runtime === 'mixed') {
+          // A mixed row explicitly selects its primary artifact, not the mixed finding hash.
+          return analysis.artifact_ids?.[0] === finding.sourceArtifactId && matches.length === 1 ? matches[0] : null;
+        }
+        if (finding.findingId?.startsWith('analysis:')) {
+          // Legacy authored projections may omit the analysis object; never fall back by hash alone.
+          const key = /^analysis:([0-9a-f]{24})(?::artifact:([0-9]+))?$/.exec(finding.findingId);
+          if (!key || (key[2] !== undefined && key[2] !== finding.sourceArtifactId)) return null;
+          const exact = matches.filter(workspace => workspace.finding_id === key[1]);
+          return exact.length === 1 ? exact[0] : null;
+        }
+        // Native findings carry an explicit source artifact but a separate finding identity.
+        return matches.length === 1 ? matches[0] : null;
       }
 
       function vmOpcodeRows(workspace) {

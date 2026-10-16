@@ -82,6 +82,11 @@ most 16 MiB and examines at most 4096 constructors. It never evaluates captured
 source, executes a decoder, or labels a static preview as a runtime snapshot.
 A workspace with only this preview reports `static-initializer-only`; without
 either preview it reports `runtime-snapshot-unavailable`.
+
+VM documents persist exact session launch provenance from
+[`capture-provenance-v1`](../../protocol/capture-provenance-v1.md). Missing metadata
+stays unknown, and a current debugger connection never relabels saved findings.
+
 Offline `reb-api describe OPERATION --action ACTION` also exposes source-backed
 advisory effects and prerequisites while retaining the operation's common
 guards. See the [execution metadata contract](../../protocol/http-api.md#execution-metadata).

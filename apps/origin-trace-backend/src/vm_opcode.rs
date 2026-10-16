@@ -945,7 +945,7 @@ pub(crate) fn store(root: &Path, analysis: &Value, mut workspaces: Vec<Value>) -
     let mut document = json!({
         "contract_version": 2,
         "document_kind": "vm-opcode-workspace",
-        "capture_mode": "unknown",
+        "capture_mode": analysis["capture_mode"],
         "producer": {"id":"origin-trace-vm-opcode","version":PRODUCER_VERSION},
         "profile_digest": analysis["profile_digest"],
         "analysis_digest": analysis["document_digest"],

@@ -154,9 +154,10 @@ impl App {
     }
     async fn vm_documents(&self) -> Result<(Value, Result<Value>)> {
         let signature = format!(
-            "{}:{}",
+            "{}:{}:{}",
             analysis_input_signature(&self.options.artifacts.join("manifest.jsonl")),
             analysis_input_signature(&self.options.store),
+            analysis_input_signature(&self.options.artifacts.join(vm::capture_mode::FILE_NAME)),
         );
         let mut cache = self.analysis.lock().await;
         if !cfg!(unix)

@@ -1,6 +1,8 @@
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -55,6 +57,60 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("role', 'option'", sources)
         self.assertIn("['ArrowUp', 'ArrowDown', 'Home', 'End']", sources)
         self.assertIn("Missing samples do not suppress inferred handlers", sources)
+
+    def test_analysis_selection_is_artifact_scoped_and_ambiguous_bindings_fail_closed(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        presentation = app[app.index("      function vmSessionPresentation"):app.index("      function renderVmSessionStatus")]
+        result = self.run_evidence_model(presentation + f"""
+const document = {json.dumps(fixture)};
+const first = document.workspaces[0], second = structuredClone(first);
+first.capture_mode = 'native-stealth'; second.capture_mode = 'cdp-attached';
+second.interpreter_artifact_id = '303'; second.samples = []; second.sample_count = 0; second.snapshots = [];
+document.workspaces.push(second);
+const analysisResult = workspace => ({{artifact_id:workspace.interpreter_artifact_id,
+  artifact_sha256:workspace.source_artifact_sha256, finding_id:workspace.finding_id, runtime:'javascript',
+  status:'complete',tier:'candidate',vm_score:20,anti_bot_score:0,evidence_families:[],observations:[],
+  related_request_ids:[],coverage:{{complete:true}}}});
+const analysis = {{contract_version:1,document_kind:'vm-analysis',document_digest:document.analysis_digest,
+  profile_digest:'a'.repeat(64),profile:{{profile_id:'anti-bot-vm-detection-v1'}},
+  input_coverage:{{complete:true,omissions:[]}},capture_mode:'unknown',
+  results:[analysisResult(first),analysisResult(second)],mixed_findings:[]}};
+const findings = vmFindingsFromAnalysis(analysis);
+const labels = findings.map(finding => vmSessionPresentation({{vmAnalysisDocument:analysis,
+  vmOpcodeWorkspace:document,vmFindings:findings,selectedVmFindingId:finding.findingId}}).label);
+const snapshots = findings.map(finding => vmOpcodeWorkspaceForFinding(document,finding).snapshots.length);
+const wrongHash = structuredClone(findings[0]); wrongHash.analysis.artifact_sha256 = '0'.repeat(64);
+const wrongFinding = structuredClone(findings[0]); wrongFinding.analysis.finding_id = '0'.repeat(24);
+const wrongArtifact = structuredClone(findings[0]); wrongArtifact.sourceArtifactId = '303';
+const duplicate = {{...document,workspaces:[first,structuredClone(first)]}};
+const native = {{findingId:'105',sourceArtifactId:'302'}};
+const mixed = {{finding_id:first.finding_id,runtime:'mixed',tier:'candidate',artifact_ids:['302','401']}};
+analysis.mixed_findings = [mixed,{{...mixed,artifact_ids:['302','402']}}];
+const mixedRows = vmFindingsFromAnalysis(analysis).filter(row => row.analysis.runtime === 'mixed');
+const invalidTuples = [undefined,null,'302',[],['302'],['302','401','402'],['0302','401']].map(artifact_ids => {{
+  const bad = {{...analysis,mixed_findings:[{{...mixed,artifact_ids}}]}};
+  try {{return !isVmAnalysisDocument(bad);}} catch {{return false;}}
+}});
+process.stdout.write(JSON.stringify({{
+  distinct:new Set(findings.map(row => row.findingId)).size === 2, labels, snapshots,
+  mixedDistinct:new Set(mixedRows.map(row => row.findingId)).size === 2,
+  mixedBound:mixedRows.every(row => vmOpcodeWorkspaceForFinding(document,row) === first), invalidTuples,
+  refusals:[wrongHash,wrongFinding,wrongArtifact].map(row => vmOpcodeWorkspaceForFinding(document,row) === null),
+  ambiguous:vmOpcodeWorkspaceForFinding(duplicate,findings[0]) === null,
+  nativeBound:vmOpcodeWorkspaceForFinding(document,native) === first,
+  nativeAmbiguous:vmOpcodeWorkspaceForFinding(duplicate,native) === null,
+  wrongSuffixRejected:vmOpcodeWorkspaceForFinding(document,{{findingId:`analysis:${{first.finding_id}}:artifact:999`,sourceArtifactId:'302'}}) === null,
+  hashOnlyRejected:vmOpcodeWorkspaceForFinding(document,{{findingId:`analysis:${{first.finding_id}}`}}) === null
+}}));
+""")
+        self.assertTrue(result["distinct"])
+        self.assertEqual(result["labels"], ["Native stealth", "CDP attached"])
+        self.assertEqual(result["snapshots"], [1, 0])
+        self.assertEqual(result["refusals"], [True] * 3)
+        self.assertEqual(result["invalidTuples"], [True] * 7)
+        for key in ("mixedDistinct", "mixedBound", "ambiguous", "nativeBound", "nativeAmbiguous", "hashOnlyRejected", "wrongSuffixRejected"):
+            self.assertTrue(result[key], key)
 
     def test_v2_rejects_missing_identity_forged_counts_and_malformed_rows(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -143,68 +199,100 @@ process.stdout.write(JSON.stringify({{accepted, rows, absent, guessedIndexReject
         self.assertIn("'WebAssembly · '", app)
         self.assertIn("dispatch-arm candidates", app)
 
-    def test_native_stealth_chip_explains_unavailable_debugger_tools(self) -> None:
+    def session_presentation(self, state: dict) -> dict:
         app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
         start = app.index("      function vmSessionPresentation")
         end = app.index("      function renderVmSessionStatus", start)
-        helper = app[start:end]
-        node = shutil.which("node")
-        if node is None:
-            self.skipTest("Node.js is not installed")
-        completed = subprocess.run(
-            [
-                node,
-                "-e",
-                helper
-                + """
-const result = vmSessionPresentation({
-  sessionMode: 'live', broker: 'connected', captureStopped: false,
-  debuggerRefreshFailed: false, debuggerSession: {state: 'unavailable', target: null},
-  vmStealthSession: false
-});
-process.stdout.write(JSON.stringify(result));
-""",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
+        return self.run_evidence_model(
+            app[start:end]
+            + f"\nprocess.stdout.write(JSON.stringify(vmSessionPresentation({json.dumps(state)})));"
         )
-        result = json.loads(completed.stdout)
 
+    def test_stored_capture_modes_survive_without_a_debugger(self) -> None:
+        for mode, label in [
+            ("native-stealth", "Native stealth"),
+            ("cdp-attached", "CDP attached"),
+            ("unknown", "Recorded evidence"),
+        ]:
+            with self.subTest(mode=mode):
+                result = self.session_presentation({
+                    "vmAnalysisDocument": {"capture_mode": mode},
+                    "sessionMode": "live", "broker": "connected", "captureStopped": False,
+                    "debuggerSession": {"state": "unavailable", "target": None},
+                })
+                self.assertEqual(result["label"], label)
+                if mode == "native-stealth":
+                    self.assertIn("does not establish", result["copy"])
+                    self.assertIn("without the DevTools endpoint", result["copy"])
+        unknown = self.session_presentation({
+            "vmAnalysisDocument": {}, "sessionMode": "live", "broker": "connected",
+            "captureStopped": False, "vmStealthSession": True,
+            "debuggerSession": {"state": "unavailable", "target": None},
+        })
+        self.assertEqual(unknown["label"], "Recorded evidence")
+        self.assertEqual(unknown["copy"], "Stored findings do not prove which live session mode produced them.")
+
+    def test_current_debugger_does_not_relabel_stored_capture(self) -> None:
+        result = self.session_presentation({
+            "vmAnalysisDocument": {"capture_mode": "native-stealth"},
+            "debuggerRefreshFailed": True,
+            "debuggerSession": {"state": "paused", "target": "page-1"},
+        })
         self.assertEqual(result["label"], "Native stealth")
-        self.assertIn("Runtime.enable", result["copy"])
-        self.assertIn("Breakpoints, watches, and console stay unavailable", result["copy"])
 
-    def test_failed_debugger_refresh_keeps_retained_cdp_session(self) -> None:
-        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
-        start = app.index("      function vmSessionPresentation")
-        end = app.index("      function renderVmSessionStatus", start)
-        helper = app[start:end]
-        node = shutil.which("node")
-        if node is None:
-            self.skipTest("Node.js is not installed")
-        completed = subprocess.run(
-            [
-                node,
-                "-e",
-                helper
-                + """
-const result = vmSessionPresentation({
-  sessionMode: 'live', broker: 'connected', captureStopped: false,
-  debuggerRefreshFailed: true, debuggerSession: {state: 'paused', target: 'page-1'},
-  vmStealthSession: false
-});
-process.stdout.write(JSON.stringify(result));
-""",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        result = json.loads(completed.stdout)
+    def test_exact_workspace_mode_overrides_mixed_aggregate_only_for_matching_analysis(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        fixture["workspaces"][0]["capture_mode"] = "cdp-attached"
+        state = {
+            "vmAnalysisDocument": {"capture_mode": "unknown", "document_digest": fixture["analysis_digest"]},
+            "vmOpcodeWorkspace": fixture,
+            "selectedVmFindingId": "analysis:c5e529342af22aafd3d7ddbc",
+            "vmFindings": [{"findingId": "analysis:c5e529342af22aafd3d7ddbc", "sourceArtifactId": "302"}],
+        }
+        self.assertEqual(self.session_presentation(state)["label"], "CDP attached")
+        state["vmAnalysisDocument"]["document_digest"] = "e" * 64
+        self.assertEqual(self.session_presentation(state)["label"], "Recorded evidence")
 
-        self.assertEqual(result["label"], "CDP attached")
-        self.assertIn("Runtime and Debugger domains are active", result["copy"])
+    def test_live_launcher_records_exact_mode_privately(self) -> None:
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("Bash is not installed")
+        script = (UI_DIRECTORY.parents[1] / "scripts" / "run-live-session.sh").read_text(encoding="utf-8")
+        start = script.index("# Persist the launch fact after startup succeeds.")
+        end = script.index('if [[ "${embedded_session}" == 1 ]]; then', start)
+        with tempfile.TemporaryDirectory() as temporary:
+            for quiet, mode in [("1", "native-stealth"), ("0", "cdp-attached")]:
+                subprocess.run([bash, "-c", script[start:end]], check=True, env={
+                    **os.environ, "artifact_store_path": temporary,
+                    "session_id": "18446744073709551615", "native_quiet_mode": quiet,
+                })
+                path = Path(temporary) / "capture-provenance-v1.json"
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {
+                    "contract_version": 1,
+                    "sessions": [{"session_id": "18446744073709551615", "capture_mode": mode}],
+                })
+                if os.name == "posix":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(len(list(Path(temporary).iterdir())), 1)
+
+    def test_unrecognized_capture_modes_fail_validation(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        result = self.run_evidence_model(f"""
+const workspace = {json.dumps(fixture)};
+workspace.capture_mode = 'invisible';
+const invalidDocument = !isVmOpcodeWorkspaceDocument(workspace);
+workspace.capture_mode = 'unknown';
+workspace.workspaces[0].capture_mode = 'invisible';
+const invalidWorkspace = !isVmOpcodeWorkspaceDocument(workspace);
+const analysis = {{contract_version:1, document_kind:'vm-analysis', document_digest:'a'.repeat(64),
+  profile_digest:'b'.repeat(64), profile:{{profile_id:'anti-bot-vm-detection-v1'}},
+  input_coverage:{{complete:true,omissions:[]}}, results:[], mixed_findings:[]}};
+const legacyAccepted = isVmAnalysisDocument(analysis);
+analysis.capture_mode = 'invisible';
+const invalidAnalysis = !isVmAnalysisDocument(analysis);
+process.stdout.write(JSON.stringify({{invalidDocument, invalidWorkspace, legacyAccepted, invalidAnalysis}}));
+""")
+        self.assertTrue(all(result.values()))
 
     def test_malformed_workspace_is_rejected_without_removing_findings(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))

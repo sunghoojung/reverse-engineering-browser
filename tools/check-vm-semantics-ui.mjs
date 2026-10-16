@@ -11,7 +11,7 @@ export async function installVmFindingsFixture() {
  state.lastValidAnalysisFindings=vmFindingsFromAnalysis(analysis);
  state.eventVmFindings=[];
  state.vmFindings=[...state.lastValidAnalysisFindings,...state.eventVmFindings];
- state.selectedVmFindingId='analysis:000000000000000000009876';
+ state.selectedVmFindingId='analysis:000000000000000000009876:artifact:9876';
  renderVmLab();
 }
 export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,screenshot}) {
@@ -176,7 +176,7 @@ export async function checkVmSemanticsInteractions({evaluate,viewport,click,key,
  // Settle the ordinary failing analyzer poll while Findings is hidden. This
  // deterministic interleaving preserves the original exact DOM/scroll assertion.
  await click('#vm-show-execution');await evaluate('refreshVmAnalysis()');await click('#vm-show-findings');
- assert.equal(await evaluate(`vmFindingNodes.list===document.querySelector('#vm-list').firstChild&&vmFindingNodes.detail===document.querySelector('#vm-detail').firstChild&&document.querySelector('#vm-detail').scrollTop===vmFindingScroll&&state.selectedVmFindingId==='analysis:000000000000000000009876'`),true,'Findings mode switch preserves DOM, exact identity and scroll');
+ assert.equal(await evaluate(`vmFindingNodes.list===document.querySelector('#vm-list').firstChild&&vmFindingNodes.detail===document.querySelector('#vm-detail').firstChild&&document.querySelector('#vm-detail').scrollTop===vmFindingScroll&&state.selectedVmFindingId==='analysis:000000000000000000009876:artifact:9876'`),true,'Findings mode switch preserves DOM, exact identity and scroll');
  assert.equal(await evaluate("state.vmAnalysisStatus"),'unavailable');
  assert.match(await evaluate("document.querySelector('#vm-notice').textContent"),/Last valid VM evidence remains visible/);
  assert.equal(await evaluate('document.activeElement.id'),'vm-show-findings');

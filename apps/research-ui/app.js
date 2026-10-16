@@ -188,6 +188,7 @@
           state.vmAnalysisRequestId = normalizedRequestId;
           state.vmAnalysisStatus = 'ready';
           state.vmAnalysisError = null;
+          state.vmAnalysisDocument = document;
           state.lastValidAnalysisFindings = vmFindingsFromAnalysis(document);
           state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
           await refreshVmOpcodeWorkspace(document, normalizedRequestId);
@@ -1394,40 +1395,30 @@
       }
 
       function vmSessionPresentation(targetState) {
-        const debuggerState = targetState.debuggerSession?.state;
-        const explicitStealth = targetState.vmStealthSession === true ||
-          targetState.debuggerSession?.stealth_session === true ||
-          targetState.debuggerSession?.native_stealth === true ||
-          targetState.debuggerSession?.quiet_mode === true;
-        const nativeCaptureUp = targetState.sessionMode === 'live' &&
-          targetState.broker === 'connected' && !targetState.captureStopped;
-        const debuggerAttached = Boolean(targetState.debuggerSession?.target) &&
-          ['running', 'paused', 'crashed'].includes(debuggerState);
-        if (explicitStealth || (nativeCaptureUp && !debuggerAttached)) {
+        const analysis = targetState.vmAnalysisDocument;
+        const finding = targetState.vmFindings?.find(item => item.findingId === targetState.selectedVmFindingId);
+        const workspaceDocument = targetState.vmOpcodeWorkspace;
+        const workspace = finding && workspaceDocument?.analysis_digest === analysis?.document_digest
+          ? vmOpcodeWorkspaceForFinding(workspaceDocument, finding) : null;
+        const mode = workspace?.capture_mode ?? analysis?.capture_mode ?? 'unknown';
+        if (mode === 'native-stealth') {
           return {
             mode: 'stealth',
             label: 'Native stealth',
-            copy: 'Inspector domains are off, so VM debug protection that watches Runtime.enable does not see a debugger. Breakpoints, watches, and console stay unavailable in this mode.'
+            copy: 'This capture was launched without the DevTools endpoint. This records launch mode; it does not establish that the session was undetectable.'
           };
         }
-        if (debuggerAttached) {
+        if (mode === 'cdp-attached') {
           return {
             mode: 'cdp',
             label: 'CDP attached',
-            copy: 'Runtime and Debugger domains are active. VM protection that watches Runtime.enable can detect this debugger connection.'
-          };
-        }
-        if (targetState.sessionMode !== 'live') {
-          return {
-            mode: 'recorded',
-            label: 'Recorded evidence',
-            copy: 'Stored findings do not prove which live session mode produced them.'
+            copy: 'This capture was launched with a DevTools endpoint for CDP. This does not establish which inspector domains were enabled.'
           };
         }
         return {
-          mode: 'unavailable',
-          label: 'CDP unavailable',
-          copy: 'Neither an attached debugger nor an active native stealth capture is currently observable.'
+          mode: 'recorded',
+          label: 'Recorded evidence',
+          copy: 'Stored findings do not prove which live session mode produced them.'
         };
       }
 
@@ -1788,11 +1779,11 @@
         const focusedHandlerKey = document.activeElement?.classList.contains('vm-handler-row')
           ? document.activeElement.dataset.handlerKey
           : null;
-        renderVmSessionStatus();
         elements.vmCount.textContent = String(state.vmFindings.length);
         if (!state.vmFindings.some(finding => finding.findingId === state.selectedVmFindingId)) {
           state.selectedVmFindingId = state.vmFindings[0]?.findingId ?? null;
         }
+        renderVmSessionStatus();
         const gapCount = countSequenceGaps(state.events);
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');

@@ -239,10 +239,10 @@ workspace:
   truncation, Open-in-Sources for the interpreter artifact.
 - **Coverage** bar: characterized / total snapshot bytes, plus named
   omissions.
-- **Session mode** chip: `CDP attached` vs `Native stealth`. In stealth
-  mode, Sources breakpoints stay disabled and the chip explains that
-  Inspector domains are off so VM debug protection does not see
-  `Runtime.enable`.
+- **Session mode** chip: stored `CDP attached`, `Native stealth`, or unknown.
+  [Capture provenance](../../protocol/capture-provenance-v1.md) records how the
+  exact input session launched. An omitted DevTools endpoint is not evidence
+  of undetectability or a statement about the current debugger connection.
 
 Empty, malformed-workspace, partial-coverage, and sampler-unavailable
 states remain visible. Captured bytes render as text, never as HTML.

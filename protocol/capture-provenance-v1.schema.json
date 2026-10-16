@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://origin-trace.local/protocol/capture-provenance-v1.schema.json",
+  "title": "VM capture launch provenance v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "sessions"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "sessions": {
+      "type": "array", "maxItems": 1024,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["session_id", "capture_mode"],
+        "properties": {
+          "session_id": {"type": "string", "maxLength": 20, "pattern": "^[1-9][0-9]*$"},
+          "capture_mode": {"enum": ["native-stealth", "cdp-attached", "unknown"]}
+        }
+      }
+    }
+  }
+}

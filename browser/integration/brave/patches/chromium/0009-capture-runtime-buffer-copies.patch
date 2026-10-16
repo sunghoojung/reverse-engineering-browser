@@ -2,7 +2,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 index 6ae616e..451e3df 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -252,6 +252,42 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+@@ -252,6 +252,41 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                           UNSAFE_BUFFERS(base::span(bytes, size)));
  }
  
@@ -44,7 +44,7 @@ index 6ae616e..451e3df 100644
  // NOTE: when editing this, please also edit the error messages we throw when
  // the size is exceeded (see uses of the constant), which use the human-friendly
  // "8MB" text.
-@@ -999,6 +1035,7 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -999,6 +1034,7 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
    isolate->SetWasmModuleCallback(WasmModuleOverride);
    isolate->SetWasmInstanceCallback(WasmInstanceOverride);
    isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);

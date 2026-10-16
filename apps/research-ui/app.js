@@ -1487,11 +1487,11 @@
         return lines.join('\n');
       }
 
-      function renderVmHandlers(workspace) {
+      function renderVmHandlers(workspace, onSelection = null) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(
-          textElement('h4', '', 'Handlers'),
+          textElement('h4', '', 'Handler listing'),
           textElement('span', '', workspace.runtime === 'webassembly' ? `${workspace.handlers.length} dispatch-arm candidates` : `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`)
         );
         section.append(heading);
@@ -1505,7 +1505,7 @@
         }
         const header = document.createElement('div'); header.className = 'vm-handler-head';
         header.setAttribute('aria-hidden', 'true');
-        ['opcode', 'label', 'state', 'samples', 'notes'].forEach(label => header.append(textElement('span', '', label)));
+        ['source offset', 'opcode', 'operation / handler', 'evidence', 'samples'].forEach(label => header.append(textElement('span', '', label)));
         const list = document.createElement('div'); list.className = 'vm-handler-list';
         list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Opcode handlers');
         const selectRow = (row, focus = true) => {
@@ -1516,6 +1516,7 @@
             candidate.tabIndex = selected ? 0 : -1;
           });
           if (focus) row.focus({ preventScroll: true });
+          if (onSelection) onSelection(row.dataset.handlerKey);
         };
         rows.forEach(rowData => {
           const row = document.createElement('button'); row.className = 'vm-handler-row'; row.type = 'button';
@@ -1532,6 +1533,7 @@
           const epistemic = textElement('span', 'vm-handler-state', rowData.state);
           epistemic.dataset.state = rowData.state;
           row.append(
+            textElement('span', 'vm-handler-source', rowData.source),
             textElement('strong', 'vm-handler-opcode', rowData.opcode),
             label,
             epistemic,
@@ -1807,7 +1809,27 @@
           textElement('span', '', `${workspace.runtime === 'webassembly' ? 'WebAssembly · ' : ''}${workspace.model ?? 'unknown'} model · interpreter artifact ${workspace.interpreter_artifact_id}`)
         );
         const body = document.createElement('div'); body.className = 'vm-workbench-body';
-        const handlers = renderVmHandlers(workspace); handlers.classList.add('vm-workbench-listing');
+        const selectedInspector = document.createElement('aside'); selectedInspector.className = 'vm-selection-inspector';
+        selectedInspector.setAttribute('aria-label', 'Selected handler');
+        const updateSelection = key => {
+          const row = vmOpcodeRows(workspace).find(item => item.key === key);
+          const heading = textElement('div', 'vm-pane-label', 'Selected handler');
+          if (!row) { selectedInspector.replaceChildren(heading, textElement('p', 'vm-selection-empty', 'Select a retained handler to inspect its evidence.')); return; }
+          const title = textElement('h3', '', row.label);
+          const identity = document.createElement('div'); identity.className = 'vm-selection-fields';
+          for (const [label, value] of [['Opcode', row.opcode], ['Source range', row.source], ['Evidence', row.state], ['Samples', String(row.samples)]]) {
+            identity.append(textElement('span', '', label), textElement('strong', '', value));
+          }
+          const observations = document.createElement('div'); observations.className = 'vm-selection-observations';
+          observations.append(textElement('h4', '', 'Retained positions'));
+          for (const position of row.positions) observations.append(textElement('p', '', position));
+          if (!row.positions.length) observations.append(textElement('p', 'vm-selection-empty', 'No retained PC or guest-byte position.'));
+          const notes = document.createElement('div'); notes.className = 'vm-selection-notes';
+          notes.append(textElement('h4', '', 'Evidence notes'), textElement('p', '', row.notes));
+          selectedInspector.replaceChildren(heading, title, identity, observations, notes);
+        };
+        const handlers = renderVmHandlers(workspace, updateSelection); handlers.classList.add('vm-workbench-listing');
+        updateSelection(state.selectedVmHandlerKey);
         const inspector = document.createElement('section'); inspector.className = 'vm-workbench-inspector';
         inspector.setAttribute('aria-label', 'Finding analysis tools');
         const navigation = document.createElement('nav'); navigation.className = 'vm-workbench-tabs';
@@ -1836,9 +1858,9 @@
           navigation.append(button); panels.append(panel);
           return {key, button, panel};
         });
-        inspector.append(navigation, textElement('p', 'vm-workbench-scope', 'Panels describe this exact finding. Handler selection highlights a candidate; it does not prove an opcode or execute code.'), panels);
-        body.append(handlers, inspector);
-        container.append(head, body);
+        inspector.append(navigation, panels);
+        body.append(handlers, selectedInspector);
+        container.append(head, body, inspector);
         return container;
       }
 
@@ -1914,9 +1936,12 @@
             row.append(textElement('strong', '', 'unknown'), textElement('span', '', unknown), textElement('b', '', '?'));
             evidence.append(row);
           });
-          card.append(head, fields, evidence);
-          elements.vmDetail.replaceChildren(summary, card);
+          const provenance = document.createElement('details'); provenance.className = 'vm-finding-provenance';
+          provenance.append(textElement('summary', '', 'Detection evidence & provenance'), fields, evidence);
+          card.append(head);
+          elements.vmDetail.replaceChildren(card, summary);
           renderVmOpcodeWorkspaceInPlace(selected);
+          elements.vmDetail.append(provenance);
           return;
         }
         const investigation = state.vmFindings.filter(finding => finding.investigationId === selected.investigationId);
@@ -1962,17 +1987,20 @@
           actions.append(openSource);
         }
         head.append(title, actions);
-        card.append(head, fields);
+        const provenance = document.createElement('details'); provenance.className = 'vm-finding-provenance';
+        provenance.append(textElement('summary', '', 'Finding metadata & provenance'), fields);
+        card.append(head);
         if (coverage) {
           const coveragePanel = document.createElement('div'); coveragePanel.className = 'vm-coverage';
           const line = document.createElement('div'); line.className = 'vm-coverage-line';
           line.append(textElement('span', '', coverage.label), textElement('strong', '', `${coverage.observedCount} / ${coverage.totalCount}`));
           const bar = document.createElement('div'); bar.className = 'vm-coverage-bar';
           const fill = document.createElement('span'); fill.style.width = `${coveragePercent}%`; bar.append(fill);
-          coveragePanel.append(line, bar); card.append(coveragePanel);
+          coveragePanel.append(line, bar); provenance.append(coveragePanel);
         }
-        elements.vmDetail.replaceChildren(summary, card);
+        elements.vmDetail.replaceChildren(card, summary);
         renderVmOpcodeWorkspaceInPlace(selected);
+        elements.vmDetail.append(provenance);
       }
 
       let renderedVmFindings = null;

@@ -423,8 +423,8 @@
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>VM investigation</h1></div>
-              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live owned fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace">Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace">Contextual build</button><button id="vm-show-packs" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-packs-workspace">Analysis packs</button><button id="vm-show-ledger" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-ledger-workspace">Opcode ledger</button></nav>
+              <div><h1>VM workbench</h1></div>
+              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace">Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace">Contextual</button><button id="vm-show-packs" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-packs-workspace">Analysis packs</button><button id="vm-show-ledger" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-ledger-workspace">Opcode ledger</button></nav>
               <div id="vm-session-status" class="vm-session-status" role="status" aria-live="polite"></div>
             </header>
             <div id="vm-owned-controls" hidden></div>
@@ -432,7 +432,7 @@
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
             <div class="vm-grid">
               <aside class="vm-list-pane" aria-label="VM findings">
-                <div class="vm-list-head">Findings <span id="vm-count">0</span></div>
+                <div class="vm-list-head">Program navigator <span id="vm-count">0</span></div>
                 <div id="vm-list" class="vm-list" role="listbox" aria-label="Captured VM findings"></div>
               </aside>
               <div id="vm-detail" class="vm-detail" tabindex="0"></div>

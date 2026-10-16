@@ -113,6 +113,9 @@ render();`;
       for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40});
       assert.equal(await evaluate("document.activeElement === document.querySelectorAll('.vm-handler-row')[1]"), true);
       assert.equal(await evaluate("document.activeElement.getAttribute('aria-selected')"), 'true');
+      assert.equal(await evaluate("document.querySelector('.vm-selection-inspector h3').textContent"), 'call_indirect target');
+      assert((await evaluate("document.querySelector('.vm-selection-inspector').textContent")).includes('50 + 3 bytes'));
+      assert.equal(await evaluate("document.querySelectorAll('.vm-selection-inspector img').length"), 0);
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
       for (const panel of ['bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'effects']) {
         await evaluate(`document.querySelector('[data-vm-panel="${panel}"]').click()`);

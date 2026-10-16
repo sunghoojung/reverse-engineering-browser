@@ -2036,3 +2036,13 @@ pixels. Full-page and scrolled-dock screenshots are saved under
 `build/vm-workspace-ui-qa/full-shell`; CI includes them in the VM artifact.
 This verifies product-shell composition with synthetic responses, not native
 capture, guest execution, every feature's semantics or a live backend.
+
+The desktop Findings layout keeps the program navigator, handler listing, and
+selected-handler inspector together above a bottom analysis dock. Handler click
+or arrow-key selection updates the inspector's exact source range, evidence
+class, sample count, retained positions, and notes. These are handler candidates,
+not invented guest instructions. The bottom analysis panels remain scoped to
+the finding; selecting a handler does not narrow or reclassify them. Detection
+scores and artifact identity stay in a compact strip; full detection evidence
+and provenance are available in a disclosure beneath the workspace. Smaller
+windows stack the listing and inspector without removing tools.

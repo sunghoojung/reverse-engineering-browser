@@ -24,7 +24,9 @@
   const gaps = new Set([7, 9]);
   const opcodes = [[1,'const'],[2,'add'],[3,'store'],[4,'load'],[5,'bz'],[6,'jump'],[7,'bnz'],[8,'halt']];
   const GOLDEN_SOURCE = '32f42d2408c8b2b77539c49ad458f3923d819fedc323e6529bbff7e83b14a52e';
-  let executed = 3, pin = 2, filter = null, view = 'run';
+  let executed = 3, pin = 2, filter = null, view = 'run', detailTab = 'state';
+  const history = [2];
+  let historyIndex = 0;
   function shortDigest(value) {
     const hex = String(value || '').toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(hex)) return 'unrecognized';
@@ -47,19 +49,21 @@
     return base + 'No opcode workspace is attached, so handler source, guest bytes, and traversal stay unknown.';
   }
   root.innerHTML = [
-    '<div class="vmp-top"><div class="vmp-title"><div class="vmp-kicker">VM workspace</div><h2>owned-register-v1</h2>',
-    '<p class="vmp-meta"><b>finding</b> 105 · <b>interpreter</b> 107 · <b>bytecode</b> 108 · <b>source</b> <span title="32f42d2408c8b2b77539c49ad458f3923d819fedc323e6529bbff7e83b14a52e">32f42d24…a52e</span></p></div>',
-    '<div class="vmp-mode" role="group" aria-label="Evidence shown"><button type="button" id="vmp-run" aria-pressed="true">This run</button><button type="button" id="vmp-declared" aria-pressed="false">Declarations</button></div></div>',
-    '<div class="vmp-session"><span class="vmp-pill" id="vmp-pill"><i class="vmp-dot"></i><span id="vmp-state">Paused</span></span><span class="vmp-capture" id="vmp-capture" hidden></span><span class="vmp-facts" id="vmp-facts"></span><span class="vmp-spacer"></span>',
-    '<button class="vmp-btn" type="button" id="vmp-follow">Follow live</button><button class="vmp-btn primary" type="button" id="vmp-step">Step</button><button class="vmp-btn" type="button" id="vmp-reset">Reset</button></div>',
+    '<div class="vmp-top"><div class="vmp-title"><div class="vmp-kicker">Owned fixture · deterministic example</div><h2>owned-register-v1</h2>',
+    '<p class="vmp-meta"><b>fixture finding</b> 105 · <b>interpreter</b> 107 · <b>bytecode</b> 108 · <b>source</b> <span title="32f42d2408c8b2b77539c49ad458f3923d819fedc323e6529bbff7e83b14a52e">32f42d24…a52e</span></p></div>',
+    '<div class="vmp-mode" role="group" aria-label="Evidence shown"><button type="button" id="vmp-run" aria-pressed="true">Fixture replay</button><button type="button" id="vmp-declared" aria-pressed="false">Declarations</button></div></div>',
+    '<div class="vmp-session"><span class="vmp-pill" id="vmp-pill"><i class="vmp-dot"></i><span id="vmp-state">Paused</span></span><span class="vmp-facts" id="vmp-facts"></span><span class="vmp-spacer"></span>',
+    '<button class="vmp-btn" type="button" id="vmp-follow">Current replay PC</button><button class="vmp-btn primary" type="button" id="vmp-step">Next fixture step</button><button class="vmp-btn" type="button" id="vmp-reset">Reset replay</button></div>',
+    '<p class="vmp-provenance">Authored owned-register-v1 example. Replay reveals fixed fixture transitions; it does not execute a VM or represent the active capture.</p>',
     '<p class="vmp-refusal" id="vmp-refusal" hidden></p>',
     '<div class="vmp-ruler"><div class="vmp-kicker">Instruction index</div><div class="vmp-cells" id="vmp-cells"></div>',
     '<div class="vmp-bytes" id="vmp-bytes"><strong>Guest bytes unavailable.</strong> An instruction index cannot characterize a byte. This is not execution coverage.</div>',
-    '<div class="vmp-key"><span><i class="obs"></i>observed</span><span><i class="inf"></i>declared only</span><span><i class="pin"></i>pinned</span><span><i class="live"></i>live PC</span><span><i class="unk"></i>unknown</span></div>',
+    '<div class="vmp-key"><span><i class="obs"></i>observed</span><span><i class="inf"></i>declared only</span><span><i class="pin"></i>pinned</span><span><i class="live"></i>replay PC</span><span><i class="unk"></i>unknown</span></div>',
     '<p class="vmp-quiet" id="vmp-quiet"></p></div>',
-    '<div class="vmp-body"><div><div class="vmp-kicker">Opcodes</div><div class="vmp-isa" id="vmp-isa"></div></div>',
-    '<div><div class="vmp-kicker">Program</div><p class="vmp-filter" id="vmp-filter" hidden></p><div class="vmp-rows" id="vmp-rows"></div></div>',
-    '<div class="vmp-inspector" id="vmp-inspector"></div></div>',
+    '<div class="vmp-navigation" aria-label="Instruction navigation"><button type="button" class="vmp-btn" id="vmp-back" aria-label="Previous selected instruction">← Back</button><button type="button" class="vmp-btn" id="vmp-forward" aria-label="Next selected instruction">Forward →</button><form id="vmp-goto"><label for="vmp-address">Go to PC</label><input id="vmp-address" inputmode="numeric" placeholder="index" aria-describedby="vmp-navigation-status"><button type="submit" class="vmp-btn">Go</button></form><span id="vmp-navigation-status" role="status" aria-live="polite">Select a row · ↑ ↓ Home End</span></div>',
+    '<div class="vmp-body"><aside class="vmp-symbols" aria-label="Opcode browser"><div class="vmp-pane-head">Opcodes <span>observed / declared</span></div><div class="vmp-isa" id="vmp-isa"></div></aside>',
+    '<section class="vmp-listing" aria-label="Instruction listing"><div class="vmp-pane-head">Listing <span>PC units: instruction index</span></div><p class="vmp-filter" id="vmp-filter" hidden></p><div class="vmp-columns" aria-hidden="true"><span>PC</span><span>Op</span><span>Instruction</span><span>Dispatch</span></div><div class="vmp-rows" id="vmp-rows"></div></section>',
+    '<section class="vmp-inspector" id="vmp-inspector" aria-label="Selected instruction"></section></div>',
     '<div class="vmp-queue"><div class="vmp-kicker" id="vmp-qk">Open</div><div class="vmp-items" id="vmp-queue"></div></div>'
   ].join('');
   const $ = id => document.getElementById(id);
@@ -106,9 +110,9 @@
     } else if (attachment.kind === 'attached') {
       const handler = (attachment.workspace.handlers || []).find(item => item && item.opcode === d.op);
       const coordinate = handler && handler.source;
-      const offset = coordinate && Number.isFinite(Number(coordinate.byte_offset)) ? Number(coordinate.byte_offset) : null;
-      const size = coordinate && Number.isFinite(Number(coordinate.byte_size)) ? Number(coordinate.byte_size) : null;
-      source = offset === null ? 'Matching source is attached. This opcode has no handler coordinate.' : 'Matching source, byte ' + offset + ', size ' + size + '.';
+      const offset = coordinate && Number.isSafeInteger(coordinate.byte_offset) && coordinate.byte_offset >= 0 ? coordinate.byte_offset : null;
+      const size = coordinate && Number.isSafeInteger(coordinate.byte_size) && coordinate.byte_size > 0 ? coordinate.byte_size : null;
+      source = offset === null ? 'Matching source is attached. This opcode has no handler coordinate.' : 'Matching source, byte ' + offset + ', size ' + (size === null ? 'unknown' : size) + '.';
       reach = 'Entry still unavailable. A matching source does not invent a byte entry for an instruction index.';
     }
     return '<div class="vmp-sec"><div class="vmp-kicker">Declared effect</div><div class="vmp-kv"><span>layout</span><b class="vmp-unk">offset and size unknown</b><span>width</span><b class="vmp-unk">unknown</b><span>reads</span><b>' + readText + '</b><span>writes</span><b>' + writeText + '</b><span>flow</span><b>' + flow + '</b></div></div>'
@@ -128,7 +132,7 @@
       '<span class="vmp-chip inf">effect inferred</span>',
       '<span class="vmp-chip no">not confirmed</span>'
     ];
-    if (view === 'run' && pin === live && !exec) claims.push('<span class="vmp-chip">machine is here</span>');
+    if (view === 'run' && pin === live && !exec) claims.push('<span class="vmp-chip">replay cursor</span>');
     let body = '<div class="vmp-sec"><div class="vmp-kicker">Identity</div><div class="vmp-kv"><span>PC</span><b>' + pin + '</b><span>units</span><b>instruction index</b><span>opcode</span><b>' + d.op + '</b><span>handler</span><b>' + d.op + '</b><span>binding</span><b>declared reference</b></div></div>';
     if (step) {
       body += '<div class="vmp-sec"><div class="vmp-kicker">Operands · observed</div><div class="vmp-kv">';
@@ -155,20 +159,15 @@
     } else {
       body += '<div class="vmp-sec"><div class="vmp-kicker">Snapshot</div><p>No retained transition at this PC. Operands stay unknown until a sample records them.</p><p class="vmp-note">The mnemonic is the declared name. It is not a lifted program.</p></div>';
     }
-    body += evidenceMarkup(d, step, attachment);
+    body = '<div class="vmp-detail-panel"' + (detailTab === 'state' ? '' : ' hidden') + '>' + body + '</div><div class="vmp-detail-panel"' + (detailTab === 'evidence' ? '' : ' hidden') + '>' + evidenceMarkup(d, step, attachment) + '</div>';
     body += '<p class="vmp-host">Host events · none linked to this instruction.</p>';
-    $('vmp-inspector').innerHTML = '<div class="vmp-kicker">' + (exec ? 'Pinned step' : 'Pinned declaration') + '</div><h3>' + d.name + '</h3>' + (step && step.line ? '<p class="vmp-line">' + step.line + '</p>' : '') + '<div class="vmp-claims">' + claims.join('') + '</div>' + body;
-  }
-  function syncCapture() {
-    const chip = document.querySelector('#vm-session-status .vm-session-chip');
-    const node = $('vmp-capture');
-    if (!node) return;
-    if (!chip || !chip.textContent) { node.hidden = true; return; }
-    node.hidden = false;
-    node.textContent = chip.textContent;
-    node.dataset.mode = chip.dataset.mode || 'recorded';
+    $('vmp-inspector').innerHTML = '<div class="vmp-kicker">' + (exec ? 'Pinned step' : 'Pinned declaration') + '</div><h3>' + d.name + '</h3>' + (step && step.line ? '<p class="vmp-line">' + step.line + '</p>' : '') + '<div class="vmp-claims">' + claims.join('') + '</div>' + '<div class="vmp-detail-tabs" role="group" aria-label="Instruction details"><button type="button" data-act="tab" data-tab="state" aria-pressed="' + (detailTab === 'state') + '">State</button><button type="button" data-act="tab" data-tab="evidence" aria-pressed="' + (detailTab === 'evidence') + '">Evidence & source</button></div><div class="vmp-detail-scroll">' + body + '</div>';
   }
   function render() {
+    const active = document.activeElement;
+    const focusKey = root.contains(active) ? ['act', 'pc', 'op', 'tab'].map(key => [key, active.dataset[key]]).filter(([, value]) => value !== undefined) : [];
+    const scroll = ['vmp-rows', 'vmp-isa'].map(id => [id, $(id).scrollTop]);
+    const detailScroll = root.querySelector('.vmp-detail-scroll')?.scrollTop || 0;
     const attachment = workspaceAttachment();
     const refusal = $('vmp-refusal');
     if (attachment.kind === 'refused') {
@@ -179,24 +178,24 @@
       refusal.textContent = '';
     }
     $('vmp-quiet').textContent = quietLine(attachment);
-    syncCapture();
+
     const live = livePc();
     const run = view === 'run';
     $('vmp-run').setAttribute('aria-pressed', String(run));
     $('vmp-declared').setAttribute('aria-pressed', String(!run));
     const pill = $('vmp-pill');
     pill.dataset.kind = !run ? 'static' : halted() ? 'halted' : 'paused';
-    $('vmp-state').textContent = !run ? 'Static' : halted() ? 'Halted' : 'Paused';
-    $('vmp-facts').textContent = !run ? 'declarations only · no live cursor' : halted() ? '9 of 9 executed · halted at PC 10' : executed + ' of 9 executed · live PC ' + live + ' · pinned PC ' + pin;
+    $('vmp-state').textContent = !run ? 'Static' : halted() ? 'Replay complete' : 'Replay paused';
+    $('vmp-facts').textContent = !run ? 'declarations only · no live cursor' : halted() ? '9 of 9 revealed · halted at PC 10' : executed + ' of 9 revealed · replay PC ' + live + ' · pinned PC ' + pin;
     $('vmp-step').disabled = !run || halted();
     $('vmp-follow').disabled = !run || pin === live;
-    $('vmp-follow').textContent = run && pin === live ? 'At live PC' : 'Follow live';
+    $('vmp-follow').textContent = run && pin === live ? 'At replay PC' : 'Current replay PC';
     const cells = [];
     for (let pc = 0; pc <= 10; pc++) {
       const gap = gaps.has(pc);
       const exec = !gap && done(pc);
       const cls = ['vmp-cell', gap ? 'gap' : exec ? 'exec' : 'ahead', pc === live ? 'live' : '', pc === pin ? 'pin' : ''].filter(Boolean).join(' ');
-      cells.push('<button type="button" class="' + cls + '" data-act="cell" data-pc="' + pc + '"' + (gap ? ' disabled' : '') + '>' + pc + '</button>');
+      cells.push('<button type="button" class="' + cls + '" data-act="cell" data-pc="' + pc + '" aria-label="Instruction index ' + pc + (gap ? ' absent' : '') + '" aria-pressed="' + (pc === pin) + '"' + (gap ? ' disabled' : '') + '>' + pc + '</button>');
     }
     $('vmp-cells').innerHTML = cells.join('');
     const counts = {};
@@ -223,43 +222,64 @@
       const exec = !!row.step;
       const cls = ['vmp-row', exec ? 'observed' : 'inferred', row.pc === pin ? 'pin' : '', row.pc === live ? 'live' : ''].filter(Boolean).join(' ');
       const line = exec && row.step.line ? row.step.name + ' ' + row.step.line : row.item.name;
-      const evidence = (exec ? 'observed' : 'inferred') + (row.pc === live ? ' · live' : '');
-      return '<button type="button" class="' + cls + '" data-act="row" data-pc="' + row.pc + '"><span class="pc">' + row.pc + '</span><span>' + String(row.item.op).padStart(2, '0') + '</span><span class="mn">' + line + '</span><span class="ev">' + evidence + '</span></button>';
+      const evidence = (exec ? 'observed' : 'inferred') + (row.pc === live ? ' · current' : '');
+      return '<button type="button" class="' + cls + '" data-act="row" data-pc="' + row.pc + '" aria-pressed="' + (row.pc === pin) + '"><span class="pc">' + row.pc + '</span><span>' + String(row.item.op).padStart(2, '0') + '</span><span class="mn">' + line + '</span><span class="ev">' + evidence + '</span></button>';
     }).join('');
     paintInspector(attachment);
     const items = queueItems(attachment);
     $('vmp-qk').textContent = 'Open · ' + items.length;
-    $('vmp-queue').innerHTML = items.map(item => '<button type="button" class="vmp-item ' + item.kind + '" data-act="q" data-id="' + item.id + '"><i></i><span><strong>' + item.title + '</strong><em>' + item.detail + '</em></span></button>').join('');
+    $('vmp-queue').innerHTML = items.map(item => '<div class="vmp-item ' + item.kind + '"><i></i><span><strong>' + item.title + '</strong><em>' + item.detail + '</em></span></div>').join('');
+    $('vmp-back').disabled = historyIndex === 0;
+    $('vmp-forward').disabled = historyIndex === history.length - 1;
+    for (const [id, top] of scroll) $(id).scrollTop = top;
+    root.querySelector('.vmp-detail-scroll').scrollTop = detailScroll;
+    if (focusKey.length) root.querySelector(focusKey.map(([key, value]) => '[data-' + key + '="' + value + '"]').join(''))?.focus({preventScroll: true});
   }
-  function select(pc) { if (gaps.has(pc)) return; pin = pc; render(); }
+  function select(pc, remember = true) {
+    if (!declared.some(item => item.pc === pc)) return;
+    if (remember && pc !== pin) { history.splice(historyIndex + 1); history.push(pc); if (history.length > 24) history.shift(); historyIndex = history.length - 1; }
+    pin = pc; render();
+  }
+  function reveal() {
+    const row = root.querySelector('[data-act="row"][data-pc="' + pin + '"]');
+    row?.focus({preventScroll: true}); row?.scrollIntoView({block: 'nearest'});
+  }
   root.addEventListener('click', event => {
     const node = event.target.closest('[data-act]');
     if (!node || !root.contains(node)) return;
     const act = node.dataset.act;
-    if (act === 'row' || act === 'cell') select(Number(node.dataset.pc));
+    if (act === 'tab') { detailTab = node.dataset.tab; render(); }
+    if (act === 'row' || act === 'cell') { if (act === 'cell') filter = null; select(Number(node.dataset.pc)); }
     if (act === 'op') {
       const op = Number(node.dataset.op);
       if (filter === op) { filter = null; render(); return; }
       filter = op;
       const match = declared.find(item => item.op === op && done(item.pc)) || declared.find(item => item.op === op);
-      pin = match.pc;
-      render();
+      select(match.pc);
     }
-    if (act === 'clear') { filter = null; render(); }
-    if (act === 'q') {
-      if (node.dataset.id === 'r2') pin = executed >= 5 ? 4 : (executed ? steps[executed - 1].pc : 0);
-      if (node.dataset.id === 'ahead') { filter = null; pin = livePc(); }
-      render();
-    }
+    if (act === 'clear') { filter = null; render(); reveal(); }
   });
   $('vmp-step').addEventListener('click', () => { if (view === 'run' && executed < steps.length) { executed += 1; render(); } });
-  $('vmp-follow').addEventListener('click', () => { if (view === 'run') { pin = livePc(); filter = null; render(); } });
-  $('vmp-reset').addEventListener('click', () => { executed = 3; pin = 2; filter = null; view = 'run'; render(); });
+  $('vmp-follow').addEventListener('click', () => { if (view === 'run') { filter = null; select(livePc()); reveal(); } });
+  $('vmp-reset').addEventListener('click', () => { executed = 3; pin = 2; filter = null; view = 'run'; history.splice(0, history.length, 2); historyIndex = 0; render(); });
   $('vmp-run').addEventListener('click', () => { view = 'run'; render(); });
   $('vmp-declared').addEventListener('click', () => { view = 'declared'; filter = null; render(); });
+  root.addEventListener('keydown', event => {
+    const row = event.target.closest('[data-act="row"]');
+    if (!row || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const rows = [...root.querySelectorAll('[data-act="row"]')];
+    const index = rows.indexOf(row);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+    event.preventDefault(); select(Number(rows[next].dataset.pc)); reveal();
+  });
+  $('vmp-back').addEventListener('click', () => { if (historyIndex > 0) { filter = null; select(history[--historyIndex], false); } });
+  $('vmp-forward').addEventListener('click', () => { if (historyIndex < history.length - 1) { filter = null; select(history[++historyIndex], false); } });
+  $('vmp-goto').addEventListener('submit', event => {
+    event.preventDefault(); const text = $('vmp-address').value.trim(); const pc = /^\d+$/.test(text) ? Number(text) : NaN;
+    if (!declared.some(item => item.pc === pc)) { $('vmp-navigation-status').textContent = 'No instruction at that index. Available: 0–6, 8, 10.'; return; }
+    filter = null; select(pc); reveal(); $('vmp-navigation-status').textContent = 'Selected PC ' + pc;
+  });
   render();
-  const sessionStatus = document.querySelector('#vm-session-status');
-  if (sessionStatus) new MutationObserver(syncCapture).observe(sessionStatus, {subtree: true, childList: true, characterData: true});
   const detail = document.querySelector('#vm-detail');
   if (detail) new MutationObserver(() => render()).observe(detail, {childList: true});
 }());

@@ -3958,17 +3958,16 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-listing-pager { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
 .vm-listing-pager > p { margin: 3px 0; font-size: 10px; }
 
-/* One program fills Findings. The other four modes keep the original pane. */
+/* Retained findings remain primary; the deterministic example is opt-in. */
 #vm-findings-workspace:not([hidden]) {
   display: block;
   overflow: auto;
   overscroll-behavior: contain;
 }
-#vm-findings-workspace > #vm-program-workspace { min-height: 100%; box-sizing: border-box; }
+
 #vm-findings-workspace > .vm-grid {
-  height: 100%;
+  height: min(72vh, 820px);
   min-height: 360px;
-  max-height: 100%;
   overflow: hidden;
 }
 .vm-program-workspace {
@@ -4070,10 +4069,56 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vmp-item.static i { background: var(--faint); }
 .vmp-item strong { display: block; font-size: 11.5px; font-weight: 600; }
 .vmp-item em { display: block; margin-top: 1px; color: var(--faint); font-style: normal; font-size: 11px; }
-@media (max-width: 980px) {
-  .vmp-body, .vmp-items { grid-template-columns: 1fr; }
+/* Bounded workbench panes keep the listing and its selected state in view. */
+.vm-program-example { border-top: 1px solid var(--line); }
+.vm-program-example > summary { padding: 12px 14px; cursor: pointer; font-size: 12px; }
+.vm-program-example > summary span { color: var(--muted); margin-left: 10px; }
+.vm-program-example > summary:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+.vm-program-workspace [hidden] { display: none !important; }
+.vmp-provenance { padding: 7px 9px; background: var(--panel-2); border-left: 3px solid var(--amber); font-size: 11px; color: var(--muted); }
+.vmp-navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.vmp-navigation form { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.vmp-navigation input { width: 64px; min-width: 0; padding: 4px 6px; font: 11px var(--mono); }
+#vmp-navigation-status { color: var(--muted); font-size: 11px; }
+.vmp-body { grid-template-columns: 160px minmax(280px, 1.5fr) minmax(280px, 1fr); gap: 1px; margin-top: 0; align-items: stretch; background: var(--line); border: 1px solid var(--line); height: 520px; }
+.vmp-body > * { min-width: 0; min-height: 0; background: var(--panel); }
+.vmp-pane-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px; padding: 9px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2); font-size: 12px; font-weight: 600; }
+.vmp-pane-head span { font-size: 10px; font-weight: 400; color: var(--muted); }
+.vmp-symbols { display: flex; flex-direction: column; }
+.vmp-isa { overflow: auto; margin-top: 0; padding: 4px; }
+.vmp-op { border-radius: 2px; padding: 7px 6px; }
+.vmp-listing { display: flex; flex-direction: column; }
+.vmp-columns, .vmp-row { grid-template-columns: 32px 28px minmax(0, 1fr) 92px; gap: 8px; justify-content: stretch; }
+.vmp-columns { display: grid; padding: 7px 8px; color: var(--muted); background: var(--panel-2); font: 10px var(--mono); border-bottom: 1px solid var(--line); }
+.vmp-rows { overflow: auto; min-height: 0; margin-top: 0; padding: 2px; }
+.vmp-row { min-height: 30px; border-radius: 0; }
+.vmp-row .mn { white-space: normal; overflow-wrap: anywhere; }
+.vmp-row .ev { white-space: normal; }
+.vmp-filter { padding: 8px; margin: 0; border-bottom: 1px solid var(--line); }
+.vmp-inspector { display: flex; flex-direction: column; border: 0; border-radius: 0; padding: 10px; }
+.vmp-detail-tabs { display: flex; gap: 4px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.vmp-detail-tabs button { flex: 1; padding: 6px; background: var(--panel-2); border: 1px solid var(--line); font-size: 11px; }
+.vmp-detail-tabs [aria-pressed="true"] { background: var(--panel-3); border-color: var(--accent); }
+.vmp-detail-scroll { overflow: auto; min-height: 0; overscroll-behavior: contain; }
+.vmp-detail-panel > .vmp-sec:first-child { margin-top: 0; border-top: 0; }
+.vmp-inspector p { overflow-wrap: anywhere; }
+.vmp-items { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+@media (max-width: 1100px) {
+  .vmp-body { grid-template-columns: 125px minmax(240px, 1fr) minmax(240px, 1fr); }
+  .vmp-columns, .vmp-row { grid-template-columns: 26px 24px minmax(0, 1fr); gap: 6px; }
+  .vmp-columns > :last-child { display: none; }
+  .vmp-row .ev { grid-column: 3; font-size: 9px; }
+}
+@media (max-width: 760px) {
+  .vmp-body { grid-template-columns: minmax(0, 1fr); height: auto; }
   .vmp-isa { flex-direction: row; flex-wrap: wrap; }
   .vmp-op { width: auto; }
+  .vmp-listing { max-height: 420px; }
+  .vmp-inspector { max-height: 500px; }
+  .vmp-items { grid-template-columns: minmax(0, 1fr); }
+  .vmp-session .vmp-facts { flex-basis: 100%; }
+  .vmp-navigation form { flex-basis: 100%; }
+  .vm-program-example > summary span { display: block; margin: 4px 0 0; }
 }
 .vm-listing-pager button { padding: 4px 6px; }
 .vm-listing-footer { padding: 4px 10px; border-top: 1px solid var(--line); color: var(--muted); }
@@ -4385,3 +4430,24 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-experiment-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .vm-experiment-form label { display: flex; flex-direction: column; gap: 4px; min-width: 150px; max-width: 100%; }
 .vm-experiment-form input, .vm-experiment-form select { box-sizing: border-box; max-width: 100%; }
+
+/* Actual retained findings: handler listing and analysis tools share a dock. */
+.vm-workbench-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 10px; align-items: start; min-width: 0; }
+.vm-workbench-listing { max-height: 580px; overflow: auto; }
+.vm-workbench-listing .vm-workspace-heading { position: sticky; top: 0; z-index: 1; background: var(--panel-2); }
+.vm-workbench-listing .vm-handler-head, .vm-workbench-listing .vm-handler-row { grid-template-columns: 50px minmax(90px, 1fr) 70px; gap: 6px; }
+.vm-workbench-listing .vm-handler-head > :nth-child(n+4) { display: none; }
+.vm-workbench-listing .vm-handler-samples { grid-column: 1; }
+.vm-workbench-listing .vm-handler-samples::before { content: 'samples '; color: var(--muted); font-size: 9px; }
+.vm-workbench-listing .vm-handler-notes { grid-column: 2 / -1; }
+.vm-workbench-listing .vm-handler-label strong { white-space: normal; overflow-wrap: anywhere; }
+.vm-workbench-inspector { min-width: 0; border: 1px solid var(--line); background: var(--panel); }
+.vm-workbench-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+.vm-workbench-tabs [aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.vm-workbench-scope { margin: 0; padding: 8px 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.vm-workbench-panels { max-height: 500px; overflow: auto; overscroll-behavior: contain; }
+.vm-workbench-panels > [hidden] { display: none !important; }
+.vm-workbench-panels > .vm-workspace-card { border: 0; }
+.vm-workbench-panels > .vm-workspace-card > :is(h4,p) { margin: 10px; }
+.vm-workbench-panels .vm-experiment-form { padding: 0 10px 10px; }
+@media (max-width: 1100px) { .vm-workbench-body { grid-template-columns: minmax(0, 1fr); } .vm-workbench-listing { max-height: 360px; } }

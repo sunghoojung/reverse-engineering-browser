@@ -250,6 +250,7 @@ function mountVmSemantics(root) {
   const input=fileInput('Import VM execution trace'),comparisonInput=fileInput('Import comparison VM trace'),hypothesis=fileInput('Validate opcode hypothesis file');hypothesis.disabled=true;
   const selector=select('Execution step'),comparisonSelector=select('Comparison execution step');
   const identity=node('div'),comparisonIdentity=node('div'),map=node('div'),details=pre(),validation=pre(),stateView=node('div'),stepHeading=node('h3'),occurrences=node('div'),validationView=node('div'),comparisonView=node('div');
+  map.className='vm-opcode-map';
   stepHeading.tabIndex=-1;stateView.className='vm-state-view';
   const changesOnly=node('input');changesOnly.type='checkbox';changesOnly.checked=true;changesOnly.setAttribute('aria-label','Show changed locations only');
   const changesLabel=node('label');changesLabel.className='vm-inline-control';changesLabel.append(changesOnly,node('span','Changes only'));
@@ -457,7 +458,7 @@ function mountVmSemantics(root) {
   const filters=node('div');filters.className='vm-step-controls';filters.append(filter,clearFilter,button('Reveal selected step',focusSelectedRow));
   const columns=node('div');columns.className='vm-listing-columns';columns.setAttribute('aria-hidden','true');for(const label of ['Sequence','PC before → after','Supplied opcode hex','Supplied operands','Candidate meaning'])columns.append(node('span',label));
   const listingHeading=node('header');listingHeading.className='vm-pane-heading';listingHeading.append(node('span','Execution'),title);title.title='Retained observations only. PC units are adapter-defined; full instruction bytes are unavailable.';const listingFooter=node('footer');listingFooter.className='vm-listing-footer';listingFooter.append(listingPager,listingStatus);listingHead.append(listingHeading,stepControls,filters,filterStatus,columns);listing.append(listingHead,listingBody,listingFooter);
-  const navigationHeading=node('header');navigationHeading.className='vm-pane-heading';navigationHeading.append(node('span','Navigation'),node('h2','Trace & opcodes'));provenance.append(traceSummary);navigator.append(navigationClose,navigationHeading,contextSummary,provenanceOpen,node('h3','Opcode observations'),map);
+  const navigationHeading=node('header');navigationHeading.className='vm-pane-heading';navigationHeading.append(node('span','Navigation'),node('h2','Trace & opcodes'));provenance.append(traceSummary);navigator.append(navigationClose,navigationHeading,provenanceOpen,contextSummary,node('h3','Opcode observations'),map);
   const inspectorHeading=node('header');inspectorHeading.className='vm-pane-heading';inspectorHeading.append(node('span','State'),node('h2','Selected instruction'),stepHeading);inspector.append(inspectorHeading);makeTabs(inspector,[['instruction','Instruction'],['registers','Registers'],['stack','Stack'],['memory','Memory']],stateButtons,'instruction',setStateTab,'state-tab');
   const inspectorScroll=node('div');inspectorScroll.className='vm-inspector-body';stateView.setAttribute('role','tabpanel');stateView.setAttribute('aria-labelledby',stateButtons.instruction.id);stateView.id='vm-state-panel';
   for(const b of Object.values(stateButtons))b.setAttribute('aria-controls',stateView.id);

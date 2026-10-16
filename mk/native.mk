@@ -40,7 +40,9 @@ APP_BINARIES := \
 	$(DECODER_BINARY) \
 	$(DEBUGGER_TRANSPORT_BINARY) \
 	$(NATIVE_CONSOLE_BINARY)
-$(NATIVE_VM_FIXTURE_BINARY): $(BUILD_DIR)/apps/reb-native-vm-fixture/main.o $(BUILD_DIR)/src/analysis/native_vm_recorder.o $(BUILD_DIR)/src/analysis/owned_vm_fixture.o
+$(NATIVE_VM_FIXTURE_BINARY): $(BUILD_DIR)/apps/reb-native-vm-fixture/main.o $(BUILD_DIR)/apps/reb-native-vm-fixture/dispatch_events.o \
+	$(BUILD_DIR)/src/analysis/native_vm_recorder.o $(BUILD_DIR)/src/analysis/owned_vm_fixture.o \
+	$(BUILD_DIR)/src/capture/event.o $(BUILD_DIR)/src/capture/vm_dispatch.o $(BUILD_DIR)/src/capture/vm_finding.o
 
 $(DEMO_BINARY): $(BUILD_DIR)/apps/reb-event-demo/main.o \
 	$(BUILD_DIR)/src/capture/event.o $(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT)

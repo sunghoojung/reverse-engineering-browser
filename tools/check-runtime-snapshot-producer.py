@@ -42,7 +42,7 @@ def main() -> None:
                 check=True, capture_output=True,
             )
             return json.loads(
-                (artifacts / "analysis/vm-opcode-workspace-v1.json").read_text(encoding="utf-8")
+                (artifacts / "analysis/vm-opcode-workspace-v2.json").read_text(encoding="utf-8")
             )["workspaces"][0]
 
         joined = analyze()

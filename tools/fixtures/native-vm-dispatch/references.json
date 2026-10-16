@@ -1,0 +1,20 @@
+{
+  "format": "reb-owned-vm-reference-sources-v1",
+  "program_manifest_sha256": "2e9f20bb3380e518db160b5da89e9a1530b03e31fb2bf094591b7ee5e0e1e778",
+  "binding": "declared-reference-not-captured-runtime-source",
+  "pc_units": "instruction-index",
+  "sources": [
+    {
+      "fixture": "register",
+      "program_id": "owned-register-v1",
+      "path": "register-reference.js",
+      "sha256": "32f42d2408c8b2b77539c49ad458f3923d819fedc323e6529bbff7e83b14a52e"
+    },
+    {
+      "fixture": "stack",
+      "program_id": "owned-stack-v1",
+      "path": "stack-reference.js",
+      "sha256": "e757c3029fdbf8ef0c77845e99c9270ad70d533c76a5625fb4d64129543c0812"
+    }
+  ]
+}

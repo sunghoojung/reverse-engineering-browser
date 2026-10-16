@@ -2021,7 +2021,7 @@ async fn vm_opcode_workspace_has_etag_and_failure_isolated_from_vm_analysis() {
         blocked
             .root
             .path()
-            .join("artifacts/analysis/vm-opcode-workspace-v1.json"),
+            .join("artifacts/analysis/vm-opcode-workspace-v2.json"),
     )
     .unwrap();
     assert_eq!(blocked.get("/api/analysis/vm").await.status(), 200);

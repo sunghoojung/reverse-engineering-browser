@@ -24,8 +24,9 @@ owned-vm-helper-check: $(NATIVE_VM_FIXTURE_BINARY) $(OWNED_VM_FIXTURE_TEST)
 	$(OWNED_VM_FIXTURE_TEST)
 	python3 tools/check-owned-vm-helper.py --binary $(NATIVE_VM_FIXTURE_BINARY)
 
-native-vm-recorder-check: $(NATIVE_VM_FIXTURE_BINARY)
+native-vm-recorder-check: $(NATIVE_VM_FIXTURE_BINARY) $(BROKER_BINARY)
 	python3 tools/check-native-vm-recorder.py --binary $(NATIVE_VM_FIXTURE_BINARY)
+	python3 tools/check-owned-vm-dispatch.py --binary $(NATIVE_VM_FIXTURE_BINARY) --broker $(BROKER_BINARY)
 
 native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 
@@ -118,6 +119,7 @@ javascript-check:
 	node tools/check-vm-semantics.mjs
 	node tools/check-vm-agent.mjs
 	node tools/check-vm-opcode-ledger.mjs
+	node tools/check-vm-workspace-contract.mjs
 	node tools/check-vm-static.mjs
 	node tools/check-vm-static-ui.mjs
 	node tools/check-vm-contextual.mjs

@@ -1898,92 +1898,343 @@
           isSafeIntegerInRange(coordinate.byte_size, 1, Number.MAX_SAFE_INTEGER);
       }
 
+      // Closed, inert declarations. No string is evaluated or loaded as code.
+      function vmWorkspaceExact(value, keys) {
+        return isPlainObject(value) && Object.keys(value).length === keys.length &&
+          hasOnlyKeys(value, new Set(keys));
+      }
+
+      function vmEffectIdentifier(value) {
+        return typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(value);
+      }
+
+      function isVmOpcodeEffect(effect) {
+        if (!vmWorkspaceExact(effect, ['effect_id', 'evidence_class', 'operation', 'instruction_size',
+          'operand_layout', 'reads', 'writes', 'flow', 'atomic_group', 'superoperator']) ||
+          !vmEffectIdentifier(effect.effect_id) ||
+          !['inferred', 'observed', 'contradicted', 'unknown'].includes(effect.evidence_class) ||
+          !['constant', 'add_modulo_2_64', 'add', 'load', 'store', 'branch_zero', 'branch_nonzero',
+            'jump', 'call', 'return', 'halt', 'unknown'].includes(effect.operation) ||
+          !(effect.instruction_size === null || isSafeIntegerInRange(effect.instruction_size, 1, 65)) ||
+          !Array.isArray(effect.operand_layout) || effect.operand_layout.length > 8) return false;
+        const operands = new Map();
+        for (const operand of effect.operand_layout) {
+          if (!vmWorkspaceExact(operand, ['name', 'kind', 'byte_offset', 'byte_size']) ||
+            !vmEffectIdentifier(operand.name) || operands.has(operand.name) ||
+            !['immediate', 'register', 'stack', 'address', 'target'].includes(operand.kind) ||
+            !((operand.byte_offset === null && operand.byte_size === null) ||
+              (isSafeIntegerInRange(operand.byte_offset, 1, 64) && [1, 2, 4, 8].includes(operand.byte_size) &&
+                effect.instruction_size !== null && operand.byte_offset + operand.byte_size <= effect.instruction_size))) return false;
+          operands.set(operand.name, operand);
+        }
+        const used = new Set();
+        for (const operand of operands.values()) {
+          if (operand.byte_offset === null) continue;
+          for (let offset = operand.byte_offset; offset < operand.byte_offset + operand.byte_size; offset++) {
+            if (used.has(offset)) return false;
+            used.add(offset);
+          }
+        }
+        const nullableU64 = value => value === null || isCanonicalInteger(value, 0n, uint64Max);
+        const cell = value => vmWorkspaceExact(value, ['space', 'index', 'operand', 'value']) &&
+          ['register', 'stack', 'memory'].includes(value.space) && nullableU64(value.index) && nullableU64(value.value) &&
+          (value.operand === null || operands.has(value.operand)) && !(value.index !== null && value.operand !== null);
+        if (![effect.reads, effect.writes].every(rows => Array.isArray(rows) && rows.length <= 16 && rows.every(cell))) return false;
+        const flow = effect.flow;
+        if (!vmWorkspaceExact(flow, ['kind', 'target_operand', 'target_offset']) ||
+          !['next', 'branch', 'jump', 'call', 'return', 'halt', 'unknown'].includes(flow.kind) ||
+          !(flow.target_offset === null || isSafeIntegerInRange(flow.target_offset, 0, 0xffffffff)) ||
+          !(flow.target_operand === null || ['address', 'target'].includes(operands.get(flow.target_operand)?.kind)) ||
+          (flow.target_offset !== null && flow.target_operand !== null) ||
+          (!['branch', 'jump', 'call'].includes(flow.kind) && (flow.target_offset !== null || flow.target_operand !== null))) return false;
+        const expectedFlow = {constant: 'next', add_modulo_2_64: 'next', add: 'next', load: 'next', store: 'next',
+          branch_zero: 'branch', branch_nonzero: 'branch', jump: 'jump', call: 'call', return: 'return', halt: 'halt'};
+        if (expectedFlow[effect.operation] && expectedFlow[effect.operation] !== flow.kind) return false;
+        const span = value => value === null || (vmWorkspaceExact(value, ['byte_offset', 'byte_size']) &&
+          isSafeIntegerInRange(value.byte_offset, 0, 65535) && isSafeIntegerInRange(value.byte_size, 1, 65536) &&
+          value.byte_offset + value.byte_size <= 65536);
+        return span(effect.atomic_group) && span(effect.superoperator);
+      }
+
+      function isVmOpcodeEffects(effects) {
+        return Array.isArray(effects) && effects.length <= 8 && effects.every(isVmOpcodeEffect) &&
+          new Set(effects.map(effect => effect.effect_id)).size === effects.length;
+      }
+
+      function vmUniqueWorkspaceEffect(handler) {
+        const effects = handler.effects ?? [];
+        const canonical = value => value && typeof value === 'object'
+          ? Array.isArray(value) ? value.map(canonical)
+            : Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+        const meaning = effect => {
+          const {effect_id: ignoredId, evidence_class: ignoredClass, ...body} = effect;
+          return JSON.stringify(canonical(body));
+        };
+        if (effects.some(effect => effect.evidence_class === 'contradicted')) return null;
+        const known = effects.filter(effect => ['inferred', 'observed'].includes(effect.evidence_class) && effect.operation !== 'unknown');
+        return known.length && known.every(effect => meaning(effect) === meaning(known[0])) ? known[0] : null;
+      }
+
+      function isVmByteCoverage(coverage, snapshots, handlers, unknowns) {
+        if (!vmWorkspaceExact(coverage, ['complete', 'handler_count', 'retained_snapshot_bytes', 'characterized_bytes',
+          'uncharacterized_bytes', 'attributions', 'omissions']) || typeof coverage.complete !== 'boolean' ||
+          coverage.handler_count !== handlers.length ||
+          !['retained_snapshot_bytes', 'characterized_bytes', 'uncharacterized_bytes'].every(key =>
+            isSafeIntegerInRange(coverage[key], 0, 65536)) || !Array.isArray(coverage.attributions) ||
+          coverage.attributions.length > 65536 || !Array.isArray(coverage.omissions) || coverage.omissions.length > 256 ||
+          !coverage.omissions.every(row => isPlainObject(row) && hasOnlyKeys(row, new Set(['reason', 'detail'])) &&
+            isBoundedText(row.reason, 80) && row.reason.length > 0 &&
+            (row.detail === undefined || (isBoundedText(row.detail, 240) && row.detail.length > 0)))) return false;
+        const previews = new Map();
+        let truncated = false;
+        for (const snapshot of snapshots) {
+          if (previews.has(snapshot.artifact_id)) return false;
+          const count = typeof snapshot.preview_hex === 'string' ? snapshot.preview_hex.length / 2 : 0;
+          if (count > snapshot.byte_count) return false;
+          previews.set(snapshot.artifact_id, {mask: new Uint8Array(count), hex: snapshot.preview_hex});
+          truncated ||= snapshot.truncated === true || snapshot.byte_count > count || snapshot.preview_hex === null;
+        }
+        const starts = new Map(), occupied = new Map();
+        const position = (artifact, offset) => `${artifact}:${offset}`;
+        for (const range of coverage.attributions) {
+          if (!vmWorkspaceExact(range, ['artifact_id', 'byte_offset', 'byte_size', 'opcode', 'kind', 'evidence_class'])) return false;
+          const image = previews.get(range.artifact_id);
+          const handler = handlers.find(row => row.opcode === range.opcode && row.state !== 'unknown');
+          const effect = handler && vmUniqueWorkspaceEffect(handler);
+          if (!image || !effect || !isSafeIntegerInRange(range.byte_offset, 0, 4095) ||
+            !isSafeIntegerInRange(range.byte_size, 1, 4096) || range.byte_offset + range.byte_size > image.mask.length ||
+            !isSafeIntegerInRange(range.opcode, 0, 255) || !['opcode', 'operand'].includes(range.kind) ||
+            range.evidence_class !== effect.evidence_class || effect.instruction_size === null) return false;
+          if (range.kind !== 'opcode') continue;
+          const start = position(range.artifact_id, range.byte_offset);
+          if (range.byte_size !== 1 || range.byte_offset + effect.instruction_size > image.mask.length ||
+            parseInt(image.hex.slice(range.byte_offset * 2, range.byte_offset * 2 + 2), 16) !== range.opcode) return false;
+          if (starts.has(start) && starts.get(start).opcode !== range.opcode) return false;
+          starts.set(start, {opcode: range.opcode, effect});
+          for (let offset = range.byte_offset; offset < range.byte_offset + effect.instruction_size; offset++) {
+            const cell = position(range.artifact_id, offset);
+            if (occupied.has(cell) && occupied.get(cell) !== start) return false;
+            occupied.set(cell, start);
+          }
+        }
+        for (const range of coverage.attributions) {
+          const image = previews.get(range.artifact_id);
+          if (range.kind === 'operand') {
+            const handler = handlers.find(row => row.opcode === range.opcode && row.state !== 'unknown');
+            const effect = vmUniqueWorkspaceEffect(handler);
+            if (!effect.operand_layout.some(operand => operand.byte_size === range.byte_size && operand.byte_offset !== null &&
+                starts.get(position(range.artifact_id, range.byte_offset - operand.byte_offset))?.opcode === range.opcode)) return false;
+          }
+          image.mask.fill(1, range.byte_offset, range.byte_offset + range.byte_size);
+        }
+        let retained = 0, characterized = 0;
+        for (const {mask} of previews.values()) {
+          retained += mask.length;
+          for (const byte of mask) characterized += byte;
+        }
+        return coverage.retained_snapshot_bytes === retained && coverage.characterized_bytes === characterized &&
+          coverage.uncharacterized_bytes === retained - characterized &&
+          (!coverage.complete || (retained > 0 && retained === characterized && coverage.omissions.length === 0 &&
+            unknowns.length === 0 && !truncated));
+      }
+
+      function vmInstructionSuccessors(effect, hex, offset) {
+        let target = effect.flow.target_offset;
+        if (effect.flow.target_operand !== null) {
+          const operand = effect.operand_layout.find(row => row.name === effect.flow.target_operand);
+          target = null;
+          if (operand?.byte_offset !== null && operand?.byte_size !== null) {
+            let value = 0n;
+            for (let index = operand.byte_size - 1; index >= 0; index--) {
+              const byte = parseInt(hex.slice((offset + operand.byte_offset + index) * 2,
+                (offset + operand.byte_offset + index) * 2 + 2), 16);
+              if (!Number.isInteger(byte)) return null;
+              value = value * 256n + BigInt(byte);
+            }
+            if (value <= 0xffffffffn) target = Number(value);
+          }
+        }
+        const next = offset + effect.instruction_size;
+        switch (effect.flow.kind) {
+          case 'next': return [['fallthrough', next]];
+          case 'branch': return [['branch_taken', target], ['branch_not_taken', next]];
+          case 'jump': return [['jump', target]];
+          case 'call': return [['call', target], ['call_continuation', next]];
+          case 'halt': return [];
+          case 'return': return [['return', null]];
+          default: return [['unknown', null]];
+        }
+      }
+
+      function isVmInstructionTraversal(traversal, snapshots, handlers) {
+        if (!vmWorkspaceExact(traversal, ['entry_offsets', 'instructions', 'edges', 'frontier', 'complete']) ||
+          typeof traversal.complete !== 'boolean' ||
+          !Array.isArray(traversal.entry_offsets) || traversal.entry_offsets.length > 16 ||
+          !Array.isArray(traversal.instructions) || traversal.instructions.length > 4096 ||
+          !Array.isArray(traversal.edges) || traversal.edges.length > 8192 ||
+          !Array.isArray(traversal.frontier) || traversal.frontier.length > 256) return false;
+        const images = new Map(snapshots.map(snapshot => [snapshot.artifact_id, snapshot.preview_hex]));
+        const key = (artifact, offset) => `${artifact}:${offset}`;
+        const instructions = new Map(), occupied = new Set(), expectedEdges = new Set();
+        for (const row of traversal.instructions) {
+          if (!vmWorkspaceExact(row, ['artifact_id', 'byte_offset', 'byte_size', 'opcode', 'effect_id'])) return false;
+          const preview = images.get(row.artifact_id);
+          const effect = handlers.filter(handler => handler.opcode === row.opcode)
+            .map(vmUniqueWorkspaceEffect).find(candidate => candidate?.effect_id === row.effect_id);
+          if (typeof preview !== 'string' || !isSafeIntegerInRange(row.byte_offset, 0, 4095) ||
+            !isSafeIntegerInRange(row.byte_size, 1, 65) || row.byte_offset + row.byte_size > preview.length / 2 ||
+            !isSafeIntegerInRange(row.opcode, 0, 255) || parseInt(preview.slice(row.byte_offset * 2, row.byte_offset * 2 + 2), 16) !== row.opcode ||
+            !effect || effect.instruction_size !== row.byte_size || instructions.has(key(row.artifact_id, row.byte_offset))) return false;
+          for (let offset = row.byte_offset; offset < row.byte_offset + row.byte_size; offset++) {
+            const cell = key(row.artifact_id, offset);
+            if (occupied.has(cell)) return false;
+            occupied.add(cell);
+          }
+          instructions.set(key(row.artifact_id, row.byte_offset), row);
+          const successors = vmInstructionSuccessors(effect, preview, row.byte_offset);
+          if (successors === null) return false;
+          for (const [kind, target] of successors) expectedEdges.add(JSON.stringify([row.artifact_id, row.byte_offset, target, kind]));
+        }
+        const entries = new Set();
+        for (const row of traversal.entry_offsets) {
+          if (!vmWorkspaceExact(row, ['artifact_id', 'byte_offset']) || !images.has(row.artifact_id) ||
+            !isSafeIntegerInRange(row.byte_offset, 0, 0xffffffff) || entries.has(key(row.artifact_id, row.byte_offset))) return false;
+          entries.add(key(row.artifact_id, row.byte_offset));
+        }
+        const outgoing = new Map();
+        for (const row of traversal.edges) {
+          if (!vmWorkspaceExact(row, ['artifact_id', 'from_offset', 'to_offset', 'kind']) ||
+            !instructions.has(key(row.artifact_id, row.from_offset)) ||
+            !(row.to_offset === null || isSafeIntegerInRange(row.to_offset, 0, 0xffffffff)) ||
+            !expectedEdges.delete(JSON.stringify([row.artifact_id, row.from_offset, row.to_offset, row.kind]))) return false;
+          const from = key(row.artifact_id, row.from_offset);
+          if (!outgoing.has(from)) outgoing.set(from, []);
+          if (row.to_offset !== null) outgoing.get(from).push(key(row.artifact_id, row.to_offset));
+        }
+        if (expectedEdges.size) return false;
+        const reachable = new Set(), pending = [...entries];
+        while (pending.length) {
+          const current = pending.pop();
+          if (reachable.has(current)) continue;
+          reachable.add(current);
+          pending.push(...(outgoing.get(current) ?? []));
+        }
+        if ([...instructions.keys()].some(instruction => !reachable.has(instruction))) return false;
+        const reasons = ['snapshot-unavailable', 'entry-unavailable', 'effect-unavailable', 'effect-contradiction',
+          'unknown-opcode', 'unknown-target', 'snapshot-gap', 'past-snapshot', 'truncated-instruction',
+          'overlapping-instruction', 'instruction-limit', 'frontier-limit', 'unsupported-layout'];
+        if (!traversal.frontier.every(row => vmWorkspaceExact(row, ['artifact_id', 'byte_offset', 'reason']) &&
+          (row.artifact_id === null || isCanonicalInteger(row.artifact_id, 0n, uint64Max)) &&
+          (row.byte_offset === null || isSafeIntegerInRange(row.byte_offset, 0, 0xffffffff)) && reasons.includes(row.reason))) return false;
+        return !traversal.complete || (entries.size > 0 && traversal.frontier.length === 0 &&
+          [...entries].every(entry => instructions.has(entry)) && traversal.edges.every(row =>
+            row.to_offset !== null && instructions.has(key(row.artifact_id, row.to_offset))));
+      }
+
       function isVmOpcodeHandler(handler) {
         if (!isPlainObject(handler) || !hasOnlyKeys(handler, new Set([
-          'opcode', 'handler_index', 'state', 'source', 'label', 'operand_width',
-          'sample_count', 'notes'
-        ])) || !isSafeIntegerInRange(handler.opcode, 0, 0xffffffff) ||
-            !['observed', 'inferred', 'correlated', 'unknown'].includes(handler.state) ||
-            !isVmOpcodeCoordinate(handler.source)) return false;
-        return (handler.handler_index === undefined ||
-            isSafeIntegerInRange(handler.handler_index, 0, Number.MAX_SAFE_INTEGER)) &&
+          'opcode', 'handler_index', 'state', 'source', 'label', 'operand_width', 'sample_count', 'notes', 'effects'
+        ])) || !(handler.opcode === null || isSafeIntegerInRange(handler.opcode, 0, 0xffffffff)) ||
+          !['observed', 'inferred', 'correlated', 'unknown'].includes(handler.state) ||
+          !isVmOpcodeCoordinate(handler.source) || !isVmOpcodeEffects(handler.effects)) return false;
+        return (handler.handler_index === undefined || isSafeIntegerInRange(handler.handler_index, 0, 0xffffffff)) &&
           (handler.label === undefined || isBoundedText(handler.label, 80)) &&
-          (handler.operand_width === undefined || isSafeIntegerInRange(handler.operand_width, 0, 8)) &&
-          (handler.sample_count === undefined ||
-            isSafeIntegerInRange(handler.sample_count, 0, Number.MAX_SAFE_INTEGER)) &&
-          (handler.notes === undefined || isBoundedText(handler.notes, 240));
+          isSafeIntegerInRange(handler.operand_width, 0, 8) &&
+          isSafeIntegerInRange(handler.sample_count, 0, Number.MAX_SAFE_INTEGER) && isBoundedText(handler.notes, 240) &&
+          (handler.opcode !== null || (handler.state === 'unknown' && handler.sample_count === 0 &&
+            handler.handler_index === undefined && handler.effects.length === 0));
       }
 
       function isVmOpcodeSnapshot(snapshot) {
-        if (!isPlainObject(snapshot) || !hasOnlyKeys(snapshot, new Set([
-          'artifact_id', 'origin', 'sha256', 'byte_count', 'preview_hex',
-          'truncated', 'unavailable_reason'
-        ])) || !isCanonicalInteger(snapshot.artifact_id, 0n, uint64Max) ||
-            snapshot.origin !== 'runtime-typed-array' ||
-            !isSafeIntegerInRange(snapshot.byte_count, 0, Number.MAX_SAFE_INTEGER) ||
-            !(snapshot.unavailable_reason === null ||
-              (isBoundedText(snapshot.unavailable_reason, 1024) && snapshot.unavailable_reason.length > 0))) {
-          return false;
-        }
-        return (snapshot.sha256 === undefined || /^[0-9a-f]{64}$/.test(snapshot.sha256)) &&
-          (snapshot.preview_hex === undefined || snapshot.preview_hex === null ||
-            (/^(?:[0-9a-f]{2})*$/.test(snapshot.preview_hex) && snapshot.preview_hex.length <= 8192)) &&
-          (snapshot.truncated === undefined || typeof snapshot.truncated === 'boolean');
+        return isPlainObject(snapshot) && hasOnlyKeys(snapshot, new Set([
+          'artifact_id', 'origin', 'sha256', 'byte_count', 'preview_hex', 'truncated', 'unavailable_reason'
+        ])) && isCanonicalInteger(snapshot.artifact_id, 0n, uint64Max) && snapshot.origin === 'runtime-typed-array' &&
+          (snapshot.sha256 === undefined || vmWorkspaceDigest(snapshot.sha256)) &&
+          isSafeIntegerInRange(snapshot.byte_count, 0, Number.MAX_SAFE_INTEGER) &&
+          (snapshot.preview_hex === null || (typeof snapshot.preview_hex === 'string' &&
+            /^(?:[0-9a-f]{2})*$/.test(snapshot.preview_hex) && snapshot.preview_hex.length <= 8192)) &&
+          typeof snapshot.truncated === 'boolean' && (snapshot.unavailable_reason === null ||
+            (isBoundedText(snapshot.unavailable_reason, 240) && snapshot.unavailable_reason.length > 0));
       }
 
-      function isVmOpcodeCoverage(coverage) {
-        return isPlainObject(coverage) &&
-          hasOnlyKeys(coverage, new Set([
-            'complete', 'characterized_opcodes', 'snapshot_bytes', 'omissions'
-          ])) && typeof coverage.complete === 'boolean' &&
-          isSafeIntegerInRange(coverage.characterized_opcodes, 0, Number.MAX_SAFE_INTEGER) &&
-          isSafeIntegerInRange(coverage.snapshot_bytes, 0, Number.MAX_SAFE_INTEGER) &&
-          Array.isArray(coverage.omissions) && coverage.omissions.length <= 1024 &&
-          coverage.omissions.every(omission => isPlainObject(omission) &&
-            hasOnlyKeys(omission, new Set(['reason', 'detail'])) &&
-            isBoundedText(omission.reason, 240) && omission.reason.length > 0 &&
-            (omission.detail === undefined || isBoundedText(omission.detail, 1024)));
+      function vmWorkspaceDigest(value) { return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value); }
+      function vmWorkspaceMode(value) { return ['native-stealth', 'cdp-attached', 'unknown'].includes(value); }
+      function vmSampleEvent(value) {
+        return vmWorkspaceExact(value, ['session_id', 'process_id', 'sequence_number']) &&
+          isCanonicalInteger(value.session_id, 1n, uint64Max) &&
+          isCanonicalInteger(value.sequence_number, 1n, uint64Max) && isSafeIntegerInRange(value.process_id, 1, 0xffffffff);
+      }
+      function vmSampleEventKey(value) { return `${value.session_id}:${value.process_id}:${value.sequence_number}`; }
+      function isVmDispatchSample(sample, workspace) {
+        return vmWorkspaceExact(sample, ['event', 'instruction_pointer', 'instruction_pointer_units', 'opcode',
+          'handler_index', 'sample_index', 'operand_count', 'finding_id', 'investigation_id',
+          'interpreter_artifact_id', 'bytecode_artifact_id', 'invocation_id', 'invocation_event']) &&
+          vmSampleEvent(sample.event) && ['instruction_pointer', 'opcode', 'handler_index', 'sample_index']
+            .every(key => isSafeIntegerInRange(sample[key], 0, 0xffffffff)) &&
+          isSafeIntegerInRange(sample.operand_count, 0, 255) &&
+          ['finding_id', 'investigation_id', 'interpreter_artifact_id'].every(key => isCanonicalInteger(sample[key], 1n, uint64Max)) &&
+          isCanonicalInteger(sample.bytecode_artifact_id, 0n, uint64Max) &&
+          sample.interpreter_artifact_id === workspace.interpreter_artifact_id &&
+          ['byte-offset', 'instruction-index', 'unknown'].includes(sample.instruction_pointer_units) &&
+          ((sample.invocation_id === null && sample.invocation_event === null && sample.instruction_pointer_units === 'unknown') ||
+            (isCanonicalInteger(sample.invocation_id, 1n, uint64Max) && vmSampleEvent(sample.invocation_event) &&
+              sample.invocation_event.session_id === sample.event.session_id && sample.invocation_event.process_id === sample.event.process_id &&
+              BigInt(sample.invocation_event.sequence_number) < BigInt(sample.event.sequence_number)));
       }
 
       function isVmOpcodeWorkspace(workspace) {
-        return isPlainObject(workspace) && hasOnlyKeys(workspace, new Set([
-          'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model',
-          'handlers', 'snapshots', 'coverage', 'unknowns'
-        ])) && isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) &&
-          (workspace.bytecode_artifact_id === undefined ||
-            isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) &&
-          typeof workspace.finding_id === 'string' && /^[0-9a-f]{24}$/.test(workspace.finding_id) &&
-          (workspace.model === undefined || ['stack', 'register', 'unknown'].includes(workspace.model)) &&
-          Array.isArray(workspace.handlers) && workspace.handlers.length <= 1024 &&
-          workspace.handlers.every(isVmOpcodeHandler) &&
-          Array.isArray(workspace.snapshots) && workspace.snapshots.length <= 16 &&
-          workspace.snapshots.every(isVmOpcodeSnapshot) && isVmOpcodeCoverage(workspace.coverage) &&
-          Array.isArray(workspace.unknowns) && workspace.unknowns.length <= 256 &&
-          workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0);
+        if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
+          'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
+          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal'
+        ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
+          (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
+          typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
+          !['stack', 'register', 'unknown'].includes(workspace.model) ||
+          !['javascript', 'webassembly'].includes(workspace.runtime) || !vmWorkspaceDigest(workspace.source_artifact_sha256) ||
+          !vmWorkspaceMode(workspace.capture_mode) || !Array.isArray(workspace.handlers) || workspace.handlers.length > 1024 ||
+          !workspace.handlers.every(isVmOpcodeHandler) || !Array.isArray(workspace.snapshots) || workspace.snapshots.length > 16 ||
+          !workspace.snapshots.every(isVmOpcodeSnapshot) || !Array.isArray(workspace.unknowns) || workspace.unknowns.length > 256 ||
+          !workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0) ||
+          new Set(workspace.unknowns).size !== workspace.unknowns.length ||
+          !Array.isArray(workspace.samples) || workspace.samples.length > 4096 ||
+          !workspace.samples.every(sample => isVmDispatchSample(sample, workspace)) ||
+          new Set(workspace.samples.map(sample => vmSampleEventKey(sample.event))).size !== workspace.samples.length ||
+          !isSafeIntegerInRange(workspace.sample_count, workspace.samples.length, Number.MAX_SAFE_INTEGER) ||
+          !isVmByteCoverage(workspace.coverage, workspace.snapshots, workspace.handlers, workspace.unknowns) ||
+          !isVmInstructionTraversal(workspace.traversal, workspace.snapshots, workspace.handlers)) return false;
+        const truncated = workspace.sample_count > workspace.samples.length;
+        if (truncated !== workspace.coverage.omissions.some(row => row.reason === 'sample-limit') ||
+          (truncated && workspace.samples.length !== 4096)) return false;
+        const opcodes = new Set();
+        let total = 0;
+        for (const handler of workspace.handlers) {
+          if (workspace.runtime === 'javascript' && handler.opcode !== null && opcodes.has(handler.opcode)) return false;
+          opcodes.add(handler.opcode);
+          const retained = workspace.samples.filter(sample => sample.opcode === handler.opcode).length;
+          if (handler.sample_count < retained || (!truncated && handler.sample_count !== retained)) return false;
+          total += handler.sample_count;
+        }
+        return total <= workspace.sample_count;
       }
 
       function isVmOpcodeWorkspaceDocument(document) {
-        const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
-        return isPlainObject(document) && hasOnlyKeys(document, new Set([
-          'contract_version', 'document_kind', 'producer', 'profile_digest',
-          'analysis_digest', 'inputs', 'workspaces', 'summary', 'document_digest'
-        ])) && document.contract_version === 1 && document.document_kind === 'vm-opcode-workspace' &&
-          isPlainObject(document.producer) &&
-          hasOnlyKeys(document.producer, new Set(['id', 'version'])) &&
-          document.producer.id === 'origin-trace-vm-opcode' &&
-          isBoundedText(document.producer.version, 32) && document.producer.version.length > 0 &&
-          digest(document.profile_digest) && digest(document.analysis_digest) &&
-          isPlainObject(document.inputs) &&
-          hasOnlyKeys(document.inputs, new Set(['artifact_manifest_digest', 'event_store_digest'])) &&
-          digest(document.inputs.artifact_manifest_digest) &&
-          (document.inputs.event_store_digest === null || digest(document.inputs.event_store_digest)) &&
-          Array.isArray(document.workspaces) && document.workspaces.length <= 256 &&
-          document.workspaces.every(isVmOpcodeWorkspace) &&
-          isPlainObject(document.summary) && hasOnlyKeys(document.summary, new Set([
-            'workspace_count', 'handler_count', 'snapshot_count', 'sample_count', 'unknown_count'
-          ])) && ['workspace_count', 'handler_count', 'snapshot_count', 'sample_count', 'unknown_count']
-            .every(field => isSafeIntegerInRange(document.summary[field], 0, Number.MAX_SAFE_INTEGER)) &&
-          digest(document.document_digest);
+        if (!vmWorkspaceExact(document, ['contract_version', 'document_kind', 'producer', 'profile_digest',
+          'analysis_digest', 'inputs', 'workspaces', 'summary', 'document_digest', 'capture_mode']) ||
+          document.contract_version !== 2 || document.document_kind !== 'vm-opcode-workspace' ||
+          !vmWorkspaceExact(document.producer, ['id', 'version']) || document.producer.id !== 'origin-trace-vm-opcode' ||
+          !isBoundedText(document.producer.version, 32) || document.producer.version.length === 0 ||
+          !vmWorkspaceMode(document.capture_mode) || !vmWorkspaceDigest(document.profile_digest) ||
+          !vmWorkspaceDigest(document.analysis_digest) || !vmWorkspaceDigest(document.document_digest) ||
+          !vmWorkspaceExact(document.inputs, ['artifact_manifest_digest', 'event_store_digest', 'capture_provenance_digest']) ||
+          !Object.values(document.inputs).every(value => value === null || vmWorkspaceDigest(value)) ||
+          !Array.isArray(document.workspaces) || document.workspaces.length > 256 || !document.workspaces.every(isVmOpcodeWorkspace) ||
+          !vmWorkspaceExact(document.summary, ['workspace_count', 'handler_count', 'snapshot_count', 'sample_count', 'unknown_count'])) return false;
+        const counts = {workspace_count: document.workspaces.length, handler_count: 0, snapshot_count: 0, sample_count: 0, unknown_count: 0};
+        for (const workspace of document.workspaces) {
+          counts.handler_count += workspace.handlers.length; counts.snapshot_count += workspace.snapshots.length;
+          counts.sample_count += workspace.sample_count; counts.unknown_count += workspace.unknowns.length;
+        }
+        return Object.entries(counts).every(([key, value]) => Number.isSafeInteger(value) && document.summary[key] === value);
       }
 
       function vmOpcodeWorkspaceForFinding(document, finding) {
@@ -2002,10 +2253,13 @@
       function vmOpcodeRows(workspace) {
         return workspace.handlers.map(handler => ({
           key: `${handler.opcode}:${handler.handler_index ?? ''}:${handler.source.byte_offset}`,
-          opcode: `0x${handler.opcode.toString(16).padStart(2, '0')}`,
+          opcode: handler.opcode === null ? 'unknown' : `0x${handler.opcode.toString(16).padStart(2, '0')}`,
           label: handler.label || `handler ${handler.handler_index ?? handler.opcode}`,
           state: handler.state,
-          samples: handler.sample_count ?? 0,
+          samples: handler.sample_count,
+          positions: workspace.samples.filter(sample => sample.opcode === handler.opcode).slice(0, 4).map(sample =>
+            `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`),
+          retainedPositions: workspace.samples.filter(sample => sample.opcode === handler.opcode).length,
           notes: handler.notes || 'No handler notes recorded.',
           source: `${handler.source.byte_offset} + ${handler.source.byte_size} bytes`
         }));

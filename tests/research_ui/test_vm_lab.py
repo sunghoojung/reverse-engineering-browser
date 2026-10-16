@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ui_test_support import UI_DIRECTORY, read_ui_sources
 
-FIXTURE = Path(__file__).parent / "fixtures" / "vm-opcode-workspace-v1.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "vm-opcode-workspace-v2.json"
 
 
 class VmLabTests(unittest.TestCase):
@@ -46,6 +46,8 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(result["rows"][0]["samples"], 0)
         self.assertEqual(result["rows"][1]["opcode"], "0x07")
         self.assertEqual(result["rows"][1]["source"], "172 + 35 bytes")
+        self.assertIn("PC 2 (instruction-index)", result["rows"][1]["positions"][0])
+        self.assertIn("handler 1 · bytecode 401", result["rows"][1]["positions"][0])
 
         sources = read_ui_sources()
         self.assertIn("role', 'listbox'", sources)
@@ -53,6 +55,36 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("role', 'option'", sources)
         self.assertIn("['ArrowUp', 'ArrowDown', 'Home', 'End']", sources)
         self.assertIn("Missing samples do not suppress inferred handlers", sources)
+
+    def test_v2_rejects_missing_identity_forged_counts_and_malformed_rows(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        result = self.run_evidence_model(
+            f"""
+const valid = {json.dumps(fixture)};
+const mutations = [
+  value => value.contract_version = 1,
+  value => delete value.workspaces[0].source_artifact_sha256,
+  value => value.workspaces[0].samples[0].interpreter_artifact_id = '999',
+  value => value.workspaces[0].samples[0].instruction_pointer_units = 'guessed',
+  value => value.workspaces[0].samples[0].invocation_event = null,
+  value => value.workspaces[0].samples[0].event.sequence_number = '0',
+  value => value.workspaces[0].samples.push(value.workspaces[0].samples[0]),
+  value => value.workspaces[0].sample_count = 1,
+  value => value.summary.sample_count = 0,
+  value => value.workspaces[0].coverage.attributions = [null],
+  value => value.workspaces[0].coverage.complete = true,
+  value => value.workspaces[0].traversal.instructions = [null],
+  value => value.workspaces[0].traversal.complete = true,
+  value => value.workspaces[0].handlers[0].effects = [null]
+];
+const rejected = mutations.map(mutate => {{
+  const value = structuredClone(valid); mutate(value);
+  try {{ return !isVmOpcodeWorkspaceDocument(value); }} catch {{ return false; }}
+}});
+process.stdout.write(JSON.stringify({{rejected}}));
+"""
+        )
+        self.assertEqual(result["rejected"], [True] * 14)
 
     def test_native_stealth_chip_explains_unavailable_debugger_tools(self) -> None:
         app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")

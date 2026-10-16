@@ -164,9 +164,9 @@ immutable artifact bytes or the fixed-size timeline summary.
 
 ## VM opcode workspace
 
-Inspector-free dynamic debugging writes the derived version 1 opcode workspace
-defined by [`vm-opcode-workspace-v1.schema.json`](vm-opcode-workspace-v1.schema.json)
-to `artifacts/analysis/vm-opcode-workspace-v1.json`. It is bound by digest to
+Inspector-free dynamic debugging writes the derived version 2 opcode workspace
+defined by [`vm-opcode-workspace-v2.schema.json`](vm-opcode-workspace-v2.schema.json)
+to `artifacts/analysis/vm-opcode-workspace-v2.json`. It is bound by digest to
 the detector profile, VM analysis document, artifact manifest, and event store.
 Integer switch cases and statically visible numeric handler tables are
 `inferred`. A matching `vm_dispatch_sample` event upgrades that opcode to
@@ -281,3 +281,8 @@ scoped by renderer, execution context and frame in the active session. Source
 URLs never determine this identity. `creator_event_id` names the admitted native
 snapshot observation when available, otherwise zero. The manifest preserves both
 IDs. Missing source, source URL and registry capacity are visible capture failures.
+
+[VM opcode workspace v2](vm-opcode-workspace-v2.md) preserves owned dispatch
+sample identities, guest positions and explicit units, source artifact digests,
+and separate bounded effect/coverage/traversal declarations. Historical v1
+workspaces are rejected rather than silently upconverted.

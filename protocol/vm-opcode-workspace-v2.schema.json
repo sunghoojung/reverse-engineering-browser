@@ -1,0 +1,1139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reverse-engineering-browser.local/protocol/vm-opcode-workspace-v2.schema.json",
+  "title": "Reverse Engineering Browser VM opcode workspace v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "document_kind",
+    "producer",
+    "profile_digest",
+    "analysis_digest",
+    "document_digest",
+    "inputs",
+    "workspaces",
+    "summary",
+    "capture_mode"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 2
+    },
+    "document_kind": {
+      "const": "vm-opcode-workspace"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "const": "origin-trace-vm-opcode"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "profile_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "analysis_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "document_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_manifest_digest",
+        "event_store_digest",
+        "capture_provenance_digest"
+      ],
+      "properties": {
+        "artifact_manifest_digest": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "event_store_digest": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "capture_provenance_digest": {
+          "$ref": "#/$defs/nullableDigest"
+        }
+      }
+    },
+    "workspaces": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/workspace"
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_count",
+        "handler_count",
+        "snapshot_count",
+        "sample_count",
+        "unknown_count"
+      ],
+      "properties": {
+        "workspace_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "handler_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "snapshot_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "capture_mode": {
+      "enum": [
+        "native-stealth",
+        "cdp-attached",
+        "unknown"
+      ]
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullableDigest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "uint64": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)$"
+    },
+    "findingId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{24}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byte_offset",
+        "byte_size"
+      ],
+      "properties": {
+        "byte_offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "handler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opcode",
+        "state",
+        "source",
+        "operand_width",
+        "sample_count",
+        "notes",
+        "effects"
+      ],
+      "properties": {
+        "opcode": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handler_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "state": {
+          "enum": [
+            "observed",
+            "inferred",
+            "correlated",
+            "unknown"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "operand_width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "effects": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/effect"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "opcode": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              },
+              "sample_count": {
+                "const": 0
+              },
+              "effects": {
+                "maxItems": 0
+              }
+            },
+            "not": {
+              "required": [
+                "handler_index"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "origin",
+        "byte_count",
+        "preview_hex",
+        "truncated",
+        "unavailable_reason"
+      ],
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "origin": {
+          "const": "runtime-typed-array"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "byte_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preview_hex": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "unavailable_reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "omission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "handler_count",
+        "retained_snapshot_bytes",
+        "characterized_bytes",
+        "uncharacterized_bytes",
+        "attributions",
+        "omissions"
+      ],
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "handler_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "retained_snapshot_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "characterized_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "uncharacterized_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "attributions": {
+          "type": "array",
+          "maxItems": 65536,
+          "items": {
+            "$ref": "#/$defs/byteAttribution"
+          }
+        },
+        "omissions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/omission"
+          }
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interpreter_artifact_id",
+        "finding_id",
+        "model",
+        "handlers",
+        "snapshots",
+        "coverage",
+        "unknowns",
+        "runtime",
+        "source_artifact_sha256",
+        "capture_mode",
+        "samples",
+        "sample_count",
+        "traversal"
+      ],
+      "properties": {
+        "interpreter_artifact_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "bytecode_artifact_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "finding_id": {
+          "$ref": "#/$defs/findingId"
+        },
+        "model": {
+          "enum": [
+            "stack",
+            "register",
+            "unknown"
+          ]
+        },
+        "handlers": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/handler"
+          }
+        },
+        "snapshots": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/snapshot"
+          }
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        },
+        "unknowns": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        },
+        "runtime": {
+          "enum": [
+            "javascript",
+            "webassembly"
+          ]
+        },
+        "source_artifact_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "capture_mode": {
+          "enum": [
+            "native-stealth",
+            "cdp-attached",
+            "unknown"
+          ]
+        },
+        "samples": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/dispatchSample"
+          }
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "traversal": {
+          "$ref": "#/$defs/traversal"
+        }
+      }
+    },
+    "effectSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byte_offset",
+        "byte_size"
+      ],
+      "properties": {
+        "byte_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      }
+    },
+    "effectOperand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "byte_offset",
+        "byte_size"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+        },
+        "kind": {
+          "enum": [
+            "immediate",
+            "register",
+            "stack",
+            "address",
+            "target"
+          ]
+        },
+        "byte_offset": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "byte_size": {
+          "anyOf": [
+            {
+              "enum": [
+                1,
+                2,
+                4,
+                8
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "effectCell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "space",
+        "index",
+        "operand",
+        "value"
+      ],
+      "properties": {
+        "space": {
+          "enum": [
+            "register",
+            "stack",
+            "memory"
+          ]
+        },
+        "index": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,19})$",
+              "maxLength": 20
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operand": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,19})$",
+              "maxLength": 20
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "effectFlow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "target_operand",
+        "target_offset"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "next",
+            "branch",
+            "jump",
+            "call",
+            "return",
+            "halt",
+            "unknown"
+          ]
+        },
+        "target_operand": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_offset": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effect_id",
+        "evidence_class",
+        "operation",
+        "instruction_size",
+        "operand_layout",
+        "reads",
+        "writes",
+        "flow",
+        "atomic_group",
+        "superoperator"
+      ],
+      "properties": {
+        "effect_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+        },
+        "evidence_class": {
+          "enum": [
+            "inferred",
+            "observed",
+            "contradicted",
+            "unknown"
+          ]
+        },
+        "operation": {
+          "enum": [
+            "constant",
+            "add_modulo_2_64",
+            "add",
+            "load",
+            "store",
+            "branch_zero",
+            "branch_nonzero",
+            "jump",
+            "call",
+            "return",
+            "halt",
+            "unknown"
+          ]
+        },
+        "instruction_size": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operand_layout": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/effectOperand"
+          }
+        },
+        "reads": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/effectCell"
+          }
+        },
+        "writes": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/effectCell"
+          }
+        },
+        "flow": {
+          "$ref": "#/$defs/effectFlow"
+        },
+        "atomic_group": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/effectSpan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "superoperator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/effectSpan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "byteAttribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "byte_offset",
+        "byte_size",
+        "opcode",
+        "kind",
+        "evidence_class"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,19})$",
+          "maxLength": 20
+        },
+        "byte_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "opcode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "kind": {
+          "enum": [
+            "opcode",
+            "operand"
+          ]
+        },
+        "evidence_class": {
+          "enum": [
+            "inferred",
+            "observed"
+          ]
+        }
+      }
+    },
+    "instructionPosition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "byte_offset"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,19})$",
+          "maxLength": 20
+        },
+        "byte_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "reachableInstruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "byte_offset",
+        "byte_size",
+        "opcode",
+        "effect_id"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,19})$",
+          "maxLength": 20
+        },
+        "byte_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65
+        },
+        "opcode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "effect_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+        }
+      }
+    },
+    "instructionEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "from_offset",
+        "to_offset",
+        "kind"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,19})$",
+          "maxLength": 20
+        },
+        "from_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "to_offset": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "fallthrough",
+            "branch_taken",
+            "branch_not_taken",
+            "jump",
+            "call",
+            "call_continuation",
+            "return",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "instructionFrontier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "byte_offset",
+        "reason"
+      ],
+      "properties": {
+        "artifact_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,19})$",
+              "maxLength": 20
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "byte_offset": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "enum": [
+            "snapshot-unavailable",
+            "entry-unavailable",
+            "effect-unavailable",
+            "effect-contradiction",
+            "unknown-opcode",
+            "unknown-target",
+            "snapshot-gap",
+            "past-snapshot",
+            "truncated-instruction",
+            "overlapping-instruction",
+            "instruction-limit",
+            "frontier-limit",
+            "unsupported-layout"
+          ]
+        }
+      }
+    },
+    "traversal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_offsets",
+        "instructions",
+        "edges",
+        "frontier",
+        "complete"
+      ],
+      "properties": {
+        "entry_offsets": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/instructionPosition"
+          }
+        },
+        "instructions": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/reachableInstruction"
+          }
+        },
+        "edges": {
+          "type": "array",
+          "maxItems": 8192,
+          "items": {
+            "$ref": "#/$defs/instructionEdge"
+          }
+        },
+        "frontier": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/instructionFrontier"
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "eventIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "process_id",
+        "sequence_number"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "process_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "sequence_number": {
+          "$ref": "#/$defs/uint64"
+        }
+      }
+    },
+    "dispatchSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instruction_pointer",
+        "opcode",
+        "handler_index",
+        "sample_index",
+        "finding_id",
+        "investigation_id",
+        "interpreter_artifact_id",
+        "bytecode_artifact_id",
+        "event",
+        "operand_count",
+        "instruction_pointer_units",
+        "invocation_id",
+        "invocation_event"
+      ],
+      "properties": {
+        "instruction_pointer": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "opcode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "handler_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "sample_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "finding_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "investigation_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "interpreter_artifact_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "bytecode_artifact_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "event": {
+          "$ref": "#/$defs/eventIdentity"
+        },
+        "operand_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "instruction_pointer_units": {
+          "enum": [
+            "byte-offset",
+            "instruction-index",
+            "unknown"
+          ]
+        },
+        "invocation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "invocation_event": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/eventIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "instruction_pointer_units": {
+                "enum": [
+                  "byte-offset",
+                  "instruction-index"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "invocation_id": {
+                "$ref": "#/$defs/uint64"
+              },
+              "invocation_event": {
+                "$ref": "#/$defs/eventIdentity"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

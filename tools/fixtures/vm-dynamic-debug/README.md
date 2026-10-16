@@ -13,4 +13,4 @@ JavaScript as inert bytes and never execute it.
 
 The `bytecode_buffer` record in the fake manifest uses the native artifact
 kind and `runtime_typed_array` capture origin. Workspace snapshot origin
-labels stay `runtime-typed-array` in `vm-opcode-workspace-v1`.
+labels stay `runtime-typed-array` in `vm-opcode-workspace-v2`.

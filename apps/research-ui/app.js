@@ -1480,7 +1480,7 @@
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(
           textElement('h4', '', 'Handlers'),
-          textElement('span', '', `${workspace.handlers.length} characterized ${workspace.handlers.length === 1 ? 'opcode' : 'opcodes'}`)
+          textElement('span', '', `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`)
         );
         section.append(heading);
         const rows = vmOpcodeRows(workspace);
@@ -1513,6 +1513,10 @@
           row.tabIndex = rowData.key === state.selectedVmHandlerKey ? 0 : -1;
           const label = document.createElement('span'); label.className = 'vm-handler-label';
           label.append(textElement('strong', '', rowData.label), textElement('small', '', `source ${rowData.source}`));
+          for (const position of rowData.positions) label.append(textElement('small', '', position));
+          if (!rowData.positions.length) label.append(textElement('small', '', 'PC unknown · sampled handler unknown · bytecode unknown'));
+          if (rowData.samples > rowData.positions.length) label.append(textElement('small', '',
+            `${rowData.samples - rowData.positions.length} additional accepted samples; ${rowData.retainedPositions} positions retained in the workspace.`));
           const epistemic = textElement('span', 'vm-handler-state', rowData.state);
           epistemic.dataset.state = rowData.state;
           row.append(
@@ -1571,14 +1575,14 @@
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(textElement('h4', '', 'Coverage'), textElement('span', '', workspace.coverage.complete ? 'complete' : 'partial'));
         const coverage = workspace.coverage;
-        const percent = coverage.snapshot_bytes > 0
-          ? Math.max(0, Math.min(100, Math.round(coverage.characterized_opcodes * 100 / coverage.snapshot_bytes)))
+        const percent = coverage.retained_snapshot_bytes > 0
+          ? Math.max(0, Math.min(100, Math.round(coverage.characterized_bytes * 100 / coverage.retained_snapshot_bytes)))
           : 0;
         const panel = document.createElement('div'); panel.className = 'vm-coverage';
         const line = document.createElement('div'); line.className = 'vm-coverage-line';
         line.append(
-          textElement('span', '', 'characterized opcodes vs snapshot bytes'),
-          textElement('strong', '', `${coverage.characterized_opcodes} / ${coverage.snapshot_bytes}`)
+          textElement('span', '', 'characterized bytes / retained snapshot bytes'),
+          textElement('strong', '', `${coverage.characterized_bytes} / ${coverage.retained_snapshot_bytes}`)
         );
         const bar = document.createElement('div'); bar.className = 'vm-coverage-bar';
         bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuemin', '0');

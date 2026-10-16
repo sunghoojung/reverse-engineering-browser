@@ -11,7 +11,8 @@ use std::{
     sync::LazyLock,
 };
 
-const PRODUCER_VERSION: &str = "1.0.0";
+const PRODUCER_VERSION: &str = "2.0.0";
+const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_WORKSPACES: usize = 256;
@@ -161,6 +162,7 @@ fn add_handler(
             "operand_width": 0,
             "sample_count": 0,
             "notes": note,
+            "effects": [],
         });
         if let Some(index) = handler_index {
             value["handler_index"] = json!(index);
@@ -329,40 +331,146 @@ fn static_handlers(
     )
 }
 
-fn sample_opcode(event: &Value, artifact: &Value) -> Option<u32> {
+fn event_identity(event: &Value) -> Option<(String, u32, String)> {
+    if !["session_id", "sequence_number"]
+        .iter()
+        .all(|key| evidence::canonical(&event[*key], 64, true))
+    {
+        return None;
+    }
+    let process = event["process_id"].as_u64()?;
+    if process == 0 || process > u64::from(u32::MAX) {
+        return None;
+    }
+    Some((
+        event["session_id"].as_str()?.into(),
+        process as u32,
+        event["sequence_number"].as_str()?.into(),
+    ))
+}
+
+fn event_reference(event: &Value) -> Value {
+    json!({"session_id":event["session_id"], "process_id":event["process_id"],
+           "sequence_number":event["sequence_number"]})
+}
+
+fn event_payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
     if event["category"] != "vm"
-        || event["type"] != "vm_dispatch_sample"
-        || event["artifact_id"] != artifact["artifact_id"]
+        || event["type"] != kind
+        || !matches!(event["protocol_version"].as_u64(), Some(2 | 3))
+        || event_identity(event).is_none()
+        || event
+            .get("payload_truncated")
+            .is_some_and(|value| value != false)
+        || event.get("payload_size").is_some_and(|value| value != 128)
+        || event
+            .get("payload_encoding")
+            .is_some_and(|value| value != "hex")
+        || event
+            .get("flags")
+            .is_some_and(|value| value.as_u64().is_none_or(|flags| flags & 1 != 0))
     {
         return None;
     }
-    let payload = hex::decode(event["payload"].as_str()?).ok()?;
-    if payload.len() != 128 {
+    let text = event["payload"].as_str()?;
+    if text.len() != 256 {
         return None;
     }
-    let version = u16::from_le_bytes(payload[0..2].try_into().ok()?);
-    let payload_size = u16::from_le_bytes(payload[2..4].try_into().ok()?);
-    let reserved_alignment = u32::from_le_bytes(payload[20..24].try_into().ok()?);
-    let finding_id = u64::from_le_bytes(payload[24..32].try_into().ok()?);
-    let investigation_id = u64::from_le_bytes(payload[32..40].try_into().ok()?);
-    let flags = payload[56];
-    let reserved0 = u16::from_le_bytes(payload[58..60].try_into().ok()?);
-    let reserved1 = u32::from_le_bytes(payload[60..64].try_into().ok()?);
-    let reserved2 = u64::from_le_bytes(payload[64..72].try_into().ok()?);
-    if version != 1
-        || payload_size != 128
-        || reserved_alignment != 0
-        || finding_id == 0
-        || investigation_id == 0
-        || flags != 0
-        || reserved0 != 0
-        || reserved1 != 0
-        || reserved2 != 0
-        || payload[72..].iter().any(|byte| *byte != 0)
+    let payload = hex::decode(text).ok()?;
+    (payload[0..4] == [1, 0, 128, 0]).then_some(payload)
+}
+
+fn read_u64(payload: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(
+        payload[offset..offset + 8]
+            .try_into()
+            .expect("fixed payload range"),
+    )
+}
+
+fn sample(
+    event: &Value,
+    artifact: &Value,
+    invocations: &BTreeMap<(String, u32, String), &Value>,
+) -> Option<Value> {
+    if ["artifact_id", "session_id", "navigation_id", "frame_id"]
+        .iter()
+        .any(|key| event[*key] != artifact[*key])
     {
         return None;
     }
-    Some(u32::from_le_bytes(payload[8..12].try_into().ok()?))
+    let payload = event_payload(event, "vm_dispatch_sample")?;
+    let finding = read_u64(&payload, 24);
+    let investigation = read_u64(&payload, 32);
+    let interpreter = read_u64(&payload, 40);
+    let bytecode = read_u64(&payload, 48);
+    if payload[20..24].iter().any(|byte| *byte != 0)
+        || finding == 0
+        || investigation == 0
+        || interpreter == 0
+        || interpreter.to_string() != artifact["artifact_id"].as_str()?
+        || payload[56] != 0
+        || payload[58..].iter().any(|byte| *byte != 0)
+    {
+        return None;
+    }
+    let u32_at = |offset| {
+        u32::from_le_bytes(
+            payload[offset..offset + 4]
+                .try_into()
+                .expect("sample range"),
+        )
+    };
+    let mut result = json!({
+        "event":event_reference(event),
+        "instruction_pointer":u32_at(4), "instruction_pointer_units":"unknown",
+        "opcode":u32_at(8), "handler_index":u32_at(12), "sample_index":u32_at(16),
+        "operand_count":payload[57], "finding_id":finding.to_string(),
+        "investigation_id":investigation.to_string(), "interpreter_artifact_id":interpreter.to_string(),
+        "bytecode_artifact_id":bytecode.to_string(), "invocation_id":null, "invocation_event":null,
+    });
+    if let Some(parent) = event["parent_event_id"].as_str() {
+        let mut identity = event_identity(event)?;
+        identity.2 = parent.into();
+        if let Some(marker) = invocations.get(&identity)
+            && [
+                "artifact_id",
+                "session_id",
+                "navigation_id",
+                "frame_id",
+                "process_id",
+            ]
+            .iter()
+            .all(|key| marker[*key] == event[*key])
+            && parent.parse::<u64>().ok()?
+                < event["sequence_number"].as_str()?.parse::<u64>().ok()?
+            && bytecode != 0
+            && let Some(bytes) = event_payload(marker, "vm_finding")
+        {
+            let label_size = u16::from_le_bytes(bytes[8..10].try_into().ok()?) as usize;
+            // This exact typed native marker declares only owned fixture units.
+            // A label alone, a nearby timestamp, or shared frame is insufficient.
+            if bytes[4..8] == [3, 0, 1, 4]
+                && label_size <= 40
+                && bytes[10..24].iter().all(|byte| *byte == 0)
+                && read_u64(&bytes, 24) == finding
+                && read_u64(&bytes, 32) == investigation
+                && read_u64(&bytes, 40) != 0
+                && read_u64(&bytes, 48) == bytecode
+                && bytes[56..72].iter().all(|byte| *byte == 0)
+                && bytes[72 + label_size..].iter().all(|byte| *byte == 0)
+                && matches!(
+                    &bytes[72..72 + label_size],
+                    b"owned-register-v1" | b"owned-stack-v1"
+                )
+            {
+                result["instruction_pointer_units"] = json!("instruction-index");
+                result["invocation_id"] = json!(read_u64(&bytes, 40).to_string());
+                result["invocation_event"] = event_reference(marker);
+            }
+        }
+    }
+    Some(result)
 }
 
 fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Value>, Vec<Value>) {
@@ -444,14 +552,28 @@ pub(crate) fn workspace(
     if handlers.is_empty() {
         omissions.push(json!({"reason":"handler-unavailable","detail":"No static integer handler candidate was visible in the dispatch region."}));
     }
+    let invocations = events
+        .iter()
+        .filter(|event| event["type"] == "vm_finding")
+        .filter_map(|event| event_identity(event).map(|identity| (identity, event)))
+        .collect::<BTreeMap<_, _>>();
     let mut samples = BTreeMap::<u32, u64>::new();
+    let mut retained_samples = Vec::new();
+    let mut sample_count = 0u64;
     for event in events {
-        if let Some(opcode) = sample_opcode(event, artifact) {
+        if let Some(value) = sample(event, artifact, &invocations) {
+            let opcode = value["opcode"].as_u64().expect("sample opcode") as u32;
             *samples.entry(opcode).or_default() += 1;
+            sample_count += 1;
+            if retained_samples.len() < MAX_SAMPLES {
+                retained_samples.push(value);
+            }
         }
     }
-    if samples.is_empty() {
+    if sample_count == 0 {
         omissions.push(json!({"reason":"sampler-unavailable"}));
+    } else if sample_count > retained_samples.len() as u64 {
+        omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
     }
     for handler in &mut handlers {
         let opcode = handler["opcode"].as_u64().expect("handler opcode") as u32;
@@ -499,20 +621,35 @@ pub(crate) fn workspace(
         .filter_map(|snapshot| snapshot["preview_hex"].as_str())
         .map(|preview| preview.len() / 2)
         .sum::<usize>();
-    let complete = omissions.is_empty() && unknowns.is_empty();
+    if snapshot_bytes > 0 {
+        omissions.push(json!({"reason":"byte-attribution-unavailable", "detail":"Dispatch positions alone do not establish byte-level opcode or operand attribution."}));
+    }
+    // No byte attribution is established by observing an instruction-index PC.
+    let complete = false;
     let mut workspace = json!({
         "interpreter_artifact_id": artifact["artifact_id"],
+        "source_artifact_sha256": artifact["sha256"],
+        "runtime": result["runtime"],
+        "capture_mode": "unknown",
+        "sample_count": sample_count,
+        "samples": retained_samples,
         "finding_id": result["finding_id"],
         "model": model,
         "handlers": handlers,
         "snapshots": snapshots,
         "coverage": {
             "complete": complete,
-            "characterized_opcodes": handlers.len(),
-            "snapshot_bytes": snapshot_bytes,
+            "handler_count": handlers.len(),
+            "retained_snapshot_bytes": snapshot_bytes,
+            "characterized_bytes": 0,
+            "uncharacterized_bytes": snapshot_bytes,
+            "attributions": [],
             "omissions": omissions,
         },
         "unknowns": unknowns,
+        "traversal": {"entry_offsets":[],"instructions":[],"edges":[],
+            "frontier":[{"artifact_id":null,"byte_offset":null,"reason":"entry-unavailable"}],
+            "complete":false},
     });
     if let Some(snapshot) = workspace["snapshots"]
         .as_array()
@@ -544,20 +681,22 @@ pub(crate) fn store(root: &Path, analysis: &Value, mut workspaces: Vec<Value>) -
         .sum::<usize>();
     let sample_count = workspaces
         .iter()
-        .flat_map(|workspace| workspace["handlers"].as_array().into_iter().flatten())
-        .filter_map(|handler| handler["sample_count"].as_u64())
+        .filter_map(|workspace| workspace["sample_count"].as_u64())
         .sum::<u64>();
     let unknown_count = workspaces
         .iter()
         .map(|workspace| workspace["unknowns"].as_array().map_or(0, Vec::len))
         .sum::<usize>();
     let mut document = json!({
-        "contract_version": 1,
+        "contract_version": 2,
         "document_kind": "vm-opcode-workspace",
+        "capture_mode": "unknown",
         "producer": {"id":"origin-trace-vm-opcode","version":PRODUCER_VERSION},
         "profile_digest": analysis["profile_digest"],
         "analysis_digest": analysis["document_digest"],
-        "inputs": analysis["inputs"],
+        "inputs": {"artifact_manifest_digest":analysis["inputs"]["artifact_manifest_digest"],
+            "event_store_digest":analysis["inputs"]["event_store_digest"],
+            "capture_provenance_digest":analysis["inputs"]["capture_provenance_digest"]},
         "workspaces": workspaces,
         "summary": {
             "workspace_count": workspaces.len(),
@@ -569,7 +708,7 @@ pub(crate) fn store(root: &Path, analysis: &Value, mut workspaces: Vec<Value>) -
     });
     document["document_digest"] = json!(vm::digest(&document)?);
     durable::write_private(
-        &root.join("analysis/vm-opcode-workspace-v1.json"),
+        &root.join("analysis/vm-opcode-workspace-v2.json"),
         &vm::canonical(&document)?,
     )?;
     Ok(document)
@@ -597,6 +736,7 @@ mod tests {
         payload[8..12].copy_from_slice(&opcode.to_le_bytes());
         payload[24..32].copy_from_slice(&1u64.to_le_bytes());
         payload[32..40].copy_from_slice(&1u64.to_le_bytes());
+        payload[40..48].copy_from_slice(&1u64.to_le_bytes());
         json!({
             "protocol_version":2,
             "session_id":"1",
@@ -652,7 +792,7 @@ mod tests {
         fs::write(&event_store, event_lines).expect("event store");
         let analysis = crate::vm::store(root.path(), &event_store).expect("VM documents");
         let workspace: Value = serde_json::from_slice(
-            &fs::read(root.path().join("analysis/vm-opcode-workspace-v1.json"))
+            &fs::read(root.path().join("analysis/vm-opcode-workspace-v2.json"))
                 .expect("opcode workspace"),
         )
         .expect("workspace JSON");
@@ -661,7 +801,7 @@ mod tests {
 
     fn assert_schema(document: &Value) {
         let schema: Value = serde_json::from_str(include_str!(
-            "../../../protocol/vm-opcode-workspace-v1.schema.json"
+            "../../../protocol/vm-opcode-workspace-v2.schema.json"
         ))
         .expect("opcode workspace schema");
         let validator = jsonschema::validator_for(&schema).expect("workspace validator");
@@ -745,7 +885,7 @@ mod tests {
         fs::write(&events, b"").expect("event store");
         crate::vm::store(root.path(), &events).expect("VM documents");
         let workspace: Value = serde_json::from_slice(
-            &fs::read(root.path().join("analysis/vm-opcode-workspace-v1.json"))
+            &fs::read(root.path().join("analysis/vm-opcode-workspace-v2.json"))
                 .expect("opcode workspace"),
         )
         .expect("workspace JSON");
@@ -823,6 +963,198 @@ mod tests {
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0]["opcode"], 7);
         assert!(unknowns.iter().any(|unknown| unknown.contains("computed")));
+    }
+
+    fn change_payload(event: &mut Value, change: impl FnOnce(&mut Vec<u8>)) {
+        let mut bytes = hex::decode(event["payload"].as_str().unwrap()).unwrap();
+        change(&mut bytes);
+        event["payload"] = json!(hex::encode(bytes));
+    }
+
+    fn invocation() -> Value {
+        let mut marker = event(0);
+        marker["type"] = json!("vm_finding");
+        marker["sequence_number"] = json!("1");
+        let mut bytes = vec![0u8; 128];
+        bytes[0..8].copy_from_slice(&[1, 0, 128, 0, 3, 0, 1, 4]);
+        let label = b"owned-stack-v1";
+        bytes[8..10].copy_from_slice(&(label.len() as u16).to_le_bytes());
+        for offset in [24, 32, 40] {
+            bytes[offset..offset + 8].copy_from_slice(&1u64.to_le_bytes());
+        }
+        bytes[48..56].copy_from_slice(&2u64.to_le_bytes());
+        bytes[72..72 + label.len()].copy_from_slice(label);
+        marker["payload"] = json!(hex::encode(bytes));
+        marker
+    }
+
+    #[test]
+    fn dispatch_retains_exact_payload_and_scoped_invocation_units() {
+        let mut value = event(80);
+        value["sequence_number"] = json!("2");
+        value["parent_event_id"] = json!("1");
+        change_payload(&mut value, |bytes| {
+            bytes[4..8].copy_from_slice(&10u32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&3u32.to_le_bytes());
+            bytes[16..20].copy_from_slice(&8u32.to_le_bytes());
+            bytes[48..56].copy_from_slice(&2u64.to_le_bytes());
+            bytes[57] = 2;
+        });
+        let (_, _, document) = analyze(&fixture("stack-vm.js"), &[invocation(), value.clone()]);
+        let workspace = &document["workspaces"][0];
+        let sample = &workspace["samples"][0];
+        assert_eq!(sample["instruction_pointer"], 10);
+        assert_eq!(sample["handler_index"], 3);
+        assert_eq!(sample["sample_index"], 8);
+        assert_eq!(sample["operand_count"], 2);
+        assert_eq!(sample["bytecode_artifact_id"], "2");
+        assert_eq!(sample["instruction_pointer_units"], "instruction-index");
+        assert_eq!(sample["invocation_id"], "1");
+        assert_eq!(sample["invocation_event"]["sequence_number"], "1");
+        assert_eq!(sample["event"]["sequence_number"], "2");
+        assert_eq!(workspace["sample_count"], 1);
+        assert_eq!(
+            workspace["source_artifact_sha256"],
+            hex::encode(Sha256::digest(fixture("stack-vm.js")))
+        );
+        assert_schema(&document);
+
+        for wrong in [
+            "session_id",
+            "process_id",
+            "navigation_id",
+            "frame_id",
+            "artifact_id",
+        ] {
+            let mut marker = invocation();
+            marker[wrong] = if wrong == "process_id" {
+                json!(9)
+            } else {
+                json!("9")
+            };
+            let (_, _, rejected) = analyze(&fixture("stack-vm.js"), &[marker, value.clone()]);
+            assert_eq!(
+                rejected["workspaces"][0]["samples"][0]["instruction_pointer_units"], "unknown",
+                "{wrong}"
+            );
+            assert!(rejected["workspaces"][0]["samples"][0]["invocation_id"].is_null());
+        }
+        let mut marker = invocation();
+        change_payload(&mut marker, |bytes| bytes[112] = 1);
+        let (_, _, rejected) = analyze(&fixture("stack-vm.js"), &[marker, value]);
+        assert_eq!(
+            rejected["workspaces"][0]["samples"][0]["instruction_pointer_units"],
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn dispatch_rejects_wrong_interpreter_scope_short_reserved_and_truncated() {
+        let source = fixture("stack-vm.js");
+        let mut cases = Vec::new();
+        for offset in [20, 24, 32, 40, 56, 58, 64, 72, 112, 127] {
+            let mut value = event(80);
+            change_payload(&mut value, |bytes| {
+                if [24, 32, 40].contains(&offset) {
+                    bytes[offset..offset + 8].copy_from_slice(&0u64.to_le_bytes());
+                } else {
+                    bytes[offset] = 1;
+                }
+            });
+            cases.push(value);
+        }
+        let mut wrong_interpreter = event(80);
+        change_payload(&mut wrong_interpreter, |bytes| {
+            bytes[40..48].copy_from_slice(&2u64.to_le_bytes())
+        });
+        cases.push(wrong_interpreter);
+        let mut short = event(80);
+        change_payload(&mut short, |bytes| {
+            bytes.pop();
+        });
+        cases.push(short);
+        for key in ["session_id", "navigation_id", "frame_id", "artifact_id"] {
+            let mut value = event(80);
+            value[key] = json!("2");
+            cases.push(value);
+        }
+        let mut truncated = event(80);
+        truncated["payload_truncated"] = json!(true);
+        cases.push(truncated);
+        for value in cases {
+            let (_, _, document) = analyze(&source, &[value]);
+            let workspace = &document["workspaces"][0];
+            assert_eq!(workspace["sample_count"], 0);
+            assert!(workspace["samples"].as_array().unwrap().is_empty());
+            assert!(
+                workspace["handlers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|handler| handler["state"] == "inferred")
+            );
+            assert!(
+                workspace["coverage"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["reason"] == "sampler-unavailable")
+            );
+            assert_schema(&document);
+        }
+    }
+
+    #[test]
+    fn dispatch_unknown_opcode_and_retention_limit_preserve_total_counts() {
+        let mut events = Vec::new();
+        for index in 0..MAX_SAMPLES + 2 {
+            let mut value = event(if index == 0 { 99 } else { 80 });
+            value["sequence_number"] = json!((index + 1).to_string());
+            events.push(value);
+        }
+        let (_, _, document) = analyze(&fixture("stack-vm.js"), &events);
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["samples"].as_array().unwrap().len(), MAX_SAMPLES);
+        assert_eq!(workspace["sample_count"], MAX_SAMPLES + 2);
+        assert_eq!(document["summary"]["sample_count"], MAX_SAMPLES + 2);
+        assert_eq!(workspace["samples"][0]["opcode"], 99);
+        let push = workspace["handlers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["opcode"] == 80)
+            .unwrap();
+        assert_eq!(push["sample_count"], MAX_SAMPLES + 1);
+        assert!(
+            workspace["unknowns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row.as_str().unwrap().contains("99"))
+        );
+        assert!(
+            workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["reason"] == "sample-limit")
+        );
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn workspace_v1_is_not_guessed_into_v2() {
+        let (_, _, mut document) = analyze(&fixture("stack-vm.js"), &[]);
+        document["contract_version"] = json!(1);
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-opcode-workspace-v2.schema.json"
+        ))
+        .unwrap();
+        assert!(
+            !jsonschema::validator_for(&schema)
+                .unwrap()
+                .is_valid(&document)
+        );
     }
 
     #[test]

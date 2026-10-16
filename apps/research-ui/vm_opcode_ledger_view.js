@@ -1,16 +1,23 @@
 /* Local researcher assertions only. Imports, edits and exports never execute code. */
 const RebVmOpcodeLedgerView = (() => {
   function mount(root, model = vmOpcodeLedger) {
-    const node = (tag, text = '') => { const el = document.createElement(tag); el.textContent = text; return el; };
+    const node = (tag, text = '', className = '') => { const el = document.createElement(tag); el.textContent = text; el.className = className; return el; };
+    root.className = 'vm-tool-shell';
+    const heading = node('h2', 'Opcode evidence ledger', 'vm-tool-title');
+    const subtitle = node('p', 'Track what each opcode means, what supports it, and what remains unknown.', 'vm-tool-subtitle');
+    const imports = node('div', '', 'vm-tool-imports');
+    const editorArea = node('div', '', 'vm-tool-imports');
+    const inputSummaries = {}, disclosures = {};
+    root.append(heading, subtitle, imports);
     const button = (text, action) => { const el = node('button', text); el.type = 'button'; el.className = 'secondary-button'; el.addEventListener('click', action); return el; };
     const editors = {}, files = {}, reads = {definition: 0, ledger: 0};
     let revision = 0, report = null, current = false;
     const pending = {definition: false, ledger: false};
-    const notice = node('p', 'Choose exact definition JSON and a ledger, or create a new ledger.');
+    const notice = node('p', 'Import a definition, then add a ledger or create an empty one.', 'vm-tool-status');
     notice.setAttribute('role', 'status'); notice.setAttribute('aria-live', 'polite');
-    const coverageState = node('p');
-    const results = node('section'); results.setAttribute('aria-label', 'Opcode ledger coverage');
-    const controls = node('div'); controls.className = 'vm-static-toolbar';
+    const coverageState = node('p', '', 'vm-tool-subtitle');
+    const results = node('section', '', 'vm-tool-results'); results.setAttribute('aria-label', 'Opcode ledger coverage');
+    const controls = node('div'); controls.className = 'vm-tool-toolbar';
     const invalidate = () => {
       revision++; current = false; download.disabled = true;
       coverageState.textContent = report ? 'Previous coverage is stale and does not describe the current draft.' : '';
@@ -26,31 +33,48 @@ const RebVmOpcodeLedgerView = (() => {
         if (bytes.byteLength > model.ledgerLimits.input_bytes) throw new TypeError('File exceeds the 1 MiB bound.');
         const text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes);
         if (text.charCodeAt(0) === 0xfeff) throw new TypeError('JSON must not begin with a UTF-8 BOM.');
-        editors[kind].value = text; invalidate();
+        editors[kind].value = text; inputSummaries[kind].textContent = `${file.name || 'Local JSON'} · ${bytes.byteLength.toLocaleString()} bytes`; invalidate();
         notice.textContent = `${kind === 'definition' ? 'Definition' : 'Ledger'} loaded locally. Validate the draft to check schema and exact definition identity.`;
       } catch (error) { if (serial === reads[kind]) notice.textContent = `Import refused: ${error.message}`; }
       finally { if (serial === reads[kind]) pending[kind] = false; }
     }
     for (const [kind, title] of [['definition', 'Exact definition JSON'], ['ledger', 'Opcode ledger JSON editor']]) {
-      const section = node('section'), label = node('label', title), fileLabel = node('label', `Import ${kind} JSON`);
-      const editor = node('textarea'); editor.rows = kind === 'ledger' ? 14 : 5; editor.spellcheck = false;
-      editor.style.width = '100%'; editor.style.boxSizing = 'border-box'; editor.style.maxWidth = '100%';
-      editor.maxLength = model.ledgerLimits.input_bytes; editor.setAttribute('aria-label', title);
-      editor.addEventListener('input', () => { reads[kind]++; pending[kind] = false; invalidate(); });
+      const card = node('section', '', 'vm-tool-import-card');
+      const fileLabel = node('label', kind === 'definition' ? '1. VM definition' : '2. Evidence ledger');
+      const summary = node('span', 'No file selected', 'vm-tool-subtitle'); inputSummaries[kind] = summary;
       const file = node('input'); file.type = 'file'; file.accept = '.json,application/json'; file.setAttribute('aria-label', `Import ${kind} JSON`);
-      file.style.maxWidth = '100%'; file.addEventListener('change', () => { const selected = file.files?.[0]; file.value = ''; void importFile(kind, selected); });
-      label.append(editor); fileLabel.append(file); section.append(label, fileLabel); root.append(section);
+      file.addEventListener('change', () => { const selected = file.files?.[0]; file.value = ''; void importFile(kind, selected); });
+      fileLabel.append(file, summary); card.append(fileLabel); imports.append(card);
+      const disclosure = node('details', '', 'vm-tool-editor'); disclosures[kind] = disclosure;
+      disclosure.setAttribute('data-ledger-editor', kind);
+      disclosure.append(node('summary', kind === 'definition' ? 'View or edit definition JSON' : 'Edit ledger JSON'));
+      const label = node('label', title), editor = node('textarea'); editor.rows = 10; editor.spellcheck = false;
+      editor.maxLength = model.ledgerLimits.input_bytes; editor.setAttribute('aria-label', title);
+      editor.addEventListener('input', () => { reads[kind]++; pending[kind] = false; inputSummaries[kind].textContent = editor.value ? 'Edited local draft · validate before export' : 'Empty draft'; invalidate(); });
+      label.append(editor); disclosure.append(label); editorArea.append(disclosure);
       editors[kind] = editor; files[kind] = file;
     }
+    const empty = () => { results.replaceChildren(node('h3', 'No validated ledger yet'), node('p', 'Import local JSON above, or create an empty ledger from a definition. Validation will reveal opcode coverage here.', 'vm-tool-empty')); };
+    empty();
     function render() {
       results.replaceChildren();
       const counts = report.coverage.counts;
-      results.append(node('p', `${report.coverage.total} declared opcodes: ${counts.observed} observed, ${counts.inferred} inferred, ${counts.unmodeled} unmodeled; ${counts.missing_entries} missing entries. These are supplied labels, not runtime coverage.`));
-      const identity = node('p', `Definition ${report.ledger.definition_id} · exact source SHA-256 ${report.definition_source_sha256}`); identity.style.overflowWrap = 'anywhere'; results.append(identity);
+      results.append(node('h3', `${report.coverage.total} declared opcodes`));
+      results.append(node('p', `${counts.observed} observed · ${counts.inferred} inferred · ${counts.unmodeled} unmodeled · ${counts.missing_entries} missing entries`, 'vm-tool-subtitle'));
+      results.append(node('p', 'Researcher assertions only. Coverage does not establish runtime execution; references and supplied test outcomes are unverified.', 'vm-tool-subtitle'));
+      const table = node('table', '', 'vm-tool-table'), head = node('thead'), header = node('tr'), body = node('tbody');
+      for (const title of ['Opcode', 'Evidence status', 'Asserted meaning', 'Supplied tests']) { const cell = node('th', title); cell.setAttribute('scope', 'col'); header.append(cell); }
+      head.append(header);
       for (const entry of report.coverage.opcodes) {
-        const row = node('p', `${entry.opcode} · ${entry.status}${entry.entry_present ? '' : ' (missing entry)'} · declared operation: ${entry.declared_operation} · supplied tests: ${entry.test_status} · ${entry.meaning ?? 'No asserted meaning'}`);
-        row.style.overflowWrap = 'anywhere'; results.append(row);
+        const row = node('tr');
+        row.append(node('td', entry.opcode), node('td', `${entry.status}${entry.entry_present ? '' : ' · missing entry'}`));
+        const meaning = node('td'); meaning.append(node('span', entry.meaning ?? 'No asserted meaning'), node('small', `Declared operation: ${entry.declared_operation}`));
+        row.append(meaning, node('td', entry.test_status)); body.append(row);
       }
+      table.append(head, body); results.append(table);
+      const identity = node('details', '', 'vm-tool-editor'); identity.append(node('summary', `Definition identity · ${report.ledger.definition_id}`));
+      identity.append(node('p', `Exact source SHA-256 ${report.definition_source_sha256}`)); results.append(identity);
+
     }
     async function validate() {
       if (pending.definition || pending.ledger) { notice.textContent = 'Wait for the selected file to finish loading.'; return; }
@@ -72,7 +96,7 @@ const RebVmOpcodeLedgerView = (() => {
       try {
         const next = await model.createLedger(editors.definition.value);
         if (serial !== revision) return;
-        editors.ledger.value = JSON.stringify(next, null, 2); invalidate();
+        editors.ledger.value = JSON.stringify(next, null, 2); inputSummaries.ledger.textContent = 'New local draft · no asserted entries'; disclosures.ledger.open = true; invalidate();
         notice.textContent = 'Created an empty ledger bound to these exact definition bytes. Add reviewed entries, then validate. No entries or meanings are inferred.';
       } catch (error) { if (serial === revision) notice.textContent = `Creation refused: ${error.message}`; }
     }
@@ -104,14 +128,14 @@ const RebVmOpcodeLedgerView = (() => {
     const createButton = button('Create empty ledger', () => void create());
     const clear = button('Clear all ledger inputs', () => {
       reads.definition++; reads.ledger++; pending.definition = false; pending.ledger = false; editors.definition.value = ''; editors.ledger.value = ''; report = null;
-      invalidate(); results.replaceChildren(); notice.textContent = 'Local inputs and coverage cleared.'; files.definition.focus();
+      invalidate(); empty(); for (const kind of ['definition', 'ledger']) { inputSummaries[kind].textContent = 'No file selected'; disclosures[kind].open = false; } notice.textContent = 'Local inputs and coverage cleared.'; files.definition.focus();
     });
     controls.append(createButton, validateButton, download, clear);
-    const help = node('details'); help.append(node('summary', 'Entry schema and research boundaries'));
+    const help = node('details', '', 'vm-tool-editor'); help.append(node('summary', 'Entry schema and research boundaries'));
     help.append(node('p', 'Edit entries in the JSON editor. Each opcode must exist in the definition. Observed/inferred require meaning and source_refs. Unmodeled requires null meaning. Passed/failed/inconclusive tests require test_refs; not_run requires none. Handler offsets are byte offsets. Nothing is fetched, verified, executed, uploaded or automatically saved.'));
     const sample = node('pre', JSON.stringify({opcode: '00', status: 'unmodeled', meaning: null, handler_location: null, operand_format: null, source_refs: [], test_status: 'not_run', test_refs: [], unresolved_questions: []}, null, 2));
     sample.style.whiteSpace = 'pre-wrap'; sample.style.overflowWrap = 'anywhere'; help.append(sample);
-    root.append(controls, notice, help, coverageState, results);
+    root.append(controls, notice, coverageState, results, editorArea, help);
     return {editors, files, notice, results, validate, create, importFile, exportText, download, clear, getReport: () => report};
   }
   return {mount};

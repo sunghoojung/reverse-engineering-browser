@@ -2050,3 +2050,18 @@ the finding; selecting a handler does not narrow or reclassify them. Detection
 scores and artifact identity stay in a compact strip; full detection evidence
 and provenance are available in a disclosure beneath the workspace. Smaller
 windows stack the listing and inspector without removing tools.
+
+### Compact pack and ledger workspaces
+
+Analysis packs and Opcode ledger put local file selection and structured results
+first. Expand **Compare two builds** for the comparison workspace inputs and
+exact artifact IDs. Pack reports show bounded ranking/comparison tables;
+**Inspect raw report JSON** retains the original preview and the export keeps
+the complete exact response. Numeric identities too large for exact browser
+number display are labeled **See exact JSON**, never silently rounded.
+
+Ledger JSON editors are collapsed beneath coverage. **Create empty ledger**
+opens the ledger editor for deliberate authoring. Coverage separates opcode,
+evidence status, asserted meaning and supplied test outcome; definition hashes
+remain available under **Definition identity**. These presentation changes do
+not alter schema checks, research assertions, cancellation or export boundaries.

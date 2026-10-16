@@ -5,6 +5,19 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,readFile,writeFile,rm,mkdir,copyFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
+// Track process close (including stdio), not just exit, before profile removal.
+const closed = new WeakSet();
+const track = child => { child.once('close', () => closed.add(child)); return child; };
+async function stop(child) {
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    if (closed.has(child)) return;
+    try { if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal); else child.kill(signal); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+    const deadline = Date.now() + 3000;
+    while (!closed.has(child) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  if (!closed.has(child)) throw new Error('Owned test process did not close; retained its temporary profile.');
+}
 const root = new URL('..',import.meta.url).pathname;
 const temporary = await mkdtemp(join(tmpdir(),'reb-pack-ui-'));
 const uiDirectory=join(temporary,'ui');await mkdir(uiDirectory);
@@ -14,12 +27,12 @@ const binary=resolve(process.env.REB_PACK_BACKEND || join(process.env.CARGO_TARG
 const endpointFile=join(temporary,'endpoint');
 const args=['--port','0','--endpoint-file',endpointFile,'--ui-directory',uiDirectory,'--analyst-runner',binary];
 for(const [flag,name] of [['--store','events'],['--trace-store','traces'],['--signal-store','signals'],['--artifacts','artifacts'],['--api-collection','collection.json'],['--local-analyst','analyst.json']])args.push(flag,join(temporary,name));
-const backend=spawn(binary,args,{stdio:['ignore','ignore','pipe']});
+const backend=track(spawn(binary,args,{detached:process.platform !== 'win32',stdio:['ignore','ignore','pipe']}));
 let backendErrors='';backend.stderr.on('data',chunk=>{backendErrors=(backendErrors+chunk).slice(-4000);});
 let base;const startup=Date.now();
 try { while(!base){if(Date.now()-startup>15000 || backend.exitCode!==null)throw Error('Backend startup failed: '+backendErrors);try{base=(await readFile(endpointFile,'utf8')).trim();}catch{await new Promise(resolve=>setTimeout(resolve,20));}} }
-catch(error){backend.kill('SIGKILL');await rm(temporary,{recursive:true,force:true});throw error;}
-const browser=spawn(process.env.CHROME_BIN || '/usr/bin/chromium',['--headless=new','--no-sandbox','--disable-gpu','--remote-debugging-port=0',`--user-data-dir=${join(temporary,'profile')}`,'about:blank'],{stdio:['ignore','ignore','pipe']});
+catch(error){await stop(backend);await rm(temporary,{recursive:true,force:true,maxRetries:5,retryDelay:200});throw error;}
+const browser=track(spawn(process.env.CHROME_BIN || '/usr/bin/chromium',['--headless=new','--no-sandbox','--disable-gpu','--remote-debugging-port=0',`--user-data-dir=${join(temporary,'profile')}`,'about:blank'],{detached:process.platform !== 'win32',stdio:['ignore','ignore','pipe']}));
 let socket;
 try {
  let stderr='';const endpoint=await new Promise((resolve,reject)=>{
@@ -43,6 +56,7 @@ try {
   const box=await evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)}),r=element.getBoundingClientRect();const x=r.x+r.width/2,y=r.y+r.height/2;return {x,y,visible:r.width>0&&r.height>0&&x>=0&&x<innerWidth&&y>=0&&y<innerHeight&&element.contains(document.elementFromPoint(x,y))};})()`);
   assert(box.visible,selector+' must be visibly clickable');await command('Input.dispatchMouseEvent',{type:'mousePressed',x:box.x,y:box.y,button:'left',clickCount:1});await command('Input.dispatchMouseEvent',{type:'mouseReleased',x:box.x,y:box.y,button:'left',clickCount:1});
  };
+ await click('[data-pack-inputs="compare"] > summary');
  for(const [label,name] of [['Analysis pack','pack.json'],['Left opcode workspace','build-a.workspace.json'],['Right opcode workspace','build-b.workspace.json']]){
   const {root:doc}=await command('DOM.getDocument');const {nodeId}=await command('DOM.querySelector',{nodeId:doc.nodeId,selector:`input[aria-label="${label}"]`});
   await command('DOM.setFileInputFiles',{nodeId,files:[join(root,'tools/fixtures/vm-analysis-packs',name)]});
@@ -70,5 +84,9 @@ try {
  await click('#packs button:nth-child(4)');assert.equal(await evaluate(`document.querySelector('pre').textContent`),'');
  console.log('PASS rendered pack UI: real Rust comparison, exact file inputs, keyboard action, stale report invalidation, bad identity refusal, Clear and 1180/760/390 layouts.');
 } finally {
- socket?.close();browser.kill('SIGKILL');await new Promise(resolve=>(browser.exitCode!==null || browser.signalCode!==null)?resolve():browser.once('exit',resolve));backend.kill('SIGKILL');await new Promise(resolve=>(backend.exitCode!==null || backend.signalCode!==null)?resolve():backend.once('exit',resolve));await rm(temporary,{recursive:true,force:true});
+ socket?.close();
+ const stopped = await Promise.allSettled([stop(browser), stop(backend)]);
+ const failures = stopped.filter(result => result.status === 'rejected').map(result => result.reason);
+ if (failures.length) throw new AggregateError(failures, 'Test processes failed to close; temporary files retained.');
+ await rm(temporary,{recursive:true,force:true,maxRetries:5,retryDelay:200});
 }

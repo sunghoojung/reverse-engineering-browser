@@ -30,19 +30,51 @@ function mountVmAnalysisPacks(root) {
   };
   const inputs = {}, epochs = {}, pickers = {}, statuses = {};
   let generation = 0, controller = null, reportText = null, pending = false;
-  const heading = node('h2', 'Analysis packs and build comparison');
-  const help = node('p', 'Import local JSON. Packs are inert ranking and family declarations. No source or bytecode is executed, capture is unchanged, and no external service is contacted.');
+  root.className = 'vm-tool-shell';
+  const heading = node('h2', 'Analysis packs', 'vm-tool-title');
+  const help = node('p', 'Apply a ranking overlay or compare instruction sets across two builds.', 'vm-tool-subtitle');
   const limits = node('p', 'Pack: 64 KiB. Combined request: 16 MiB. Both workspace digests and exact interpreter IDs are verified. A family binding is your declaration, not proof of behavioral equivalence.');
-  const status = node('p', 'Select a pack and analysis, or two opcode workspace documents.', 'vm-static-notice vm-pack-status');
+  const status = node('p', 'Select a pack and analysis, or two opcode workspace documents.', 'vm-tool-status vm-pack-status');
   status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-  const fields = node('div', '', 'vm-static-toolbar vm-pack-inputs'), actions = node('div', '', 'vm-static-toolbar');
-  const output = node('pre', '', 'vm-pack-output'); output.tabIndex = 0; output.setAttribute('aria-label', 'Analysis pack report preview');
+  const fields = node('div', '', 'vm-tool-imports vm-pack-inputs'), actions = node('div', '', 'vm-tool-toolbar');
+  const applyInputs = node('details', '', 'vm-tool-editor'); applyInputs.open = true; applyInputs.setAttribute('data-pack-inputs', 'apply'); applyInputs.append(node('summary', 'Apply a ranking pack'));
+  const compareInputs = node('details', '', 'vm-tool-editor'); compareInputs.setAttribute('data-pack-inputs', 'compare'); compareInputs.append(node('summary', 'Compare two builds'));
+  const results = node('section', '', 'vm-tool-results');
+  const empty = () => { results.textContent = ''; results.append(node('h3', 'No analysis report yet'), node('p', 'Choose a pack and the local evidence to analyze. Results will appear here without changing the original evidence.', 'vm-tool-empty')); };
+  empty();
+  const raw = node('details', '', 'vm-tool-editor'); raw.append(node('summary', 'Inspect raw report JSON'));
+  const output = node('pre', '', 'vm-pack-output'); output.tabIndex = 0; output.setAttribute('aria-label', 'Analysis pack report preview'); raw.append(output);
+  const textValue = value => typeof value === 'string' ? value.length > 2048 ? value.slice(0, 2048) + '…' : value : typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value == null ? '—' : 'See exact JSON';
+  function renderReport(report, mode) {
+    results.textContent = '';
+    const rows = mode === 'apply' ? report.rankings : report.rows;
+    results.append(node('h3', mode === 'apply' ? 'Ranking overlay' : 'Instruction-set comparison'));
+    results.append(node('p', `${rows.length} rows${rows.length > 128 ? ' · first 128 shown; complete results in JSON export' : ''} · ${mode === 'apply' ? 'Original evidence and generic scores unchanged' : 'Comparison hypotheses, not proven behavioral equivalence'}`, 'vm-tool-subtitle'));
+    if (mode === 'compare') {
+      const counts = new Map(); for (const row of rows) { const key = ['unchanged', 'moved', 'changed', 'ambiguous', 'unknown', 'contradicted', 'left-only', 'right-only'].includes(row?.status) ? row.status : 'unknown'; counts.set(key, (counts.get(key) || 0) + 1); }
+      results.append(node('p', Array.from(counts, ([key, count]) => `${count} ${key}`).join(' · '), 'vm-tool-subtitle'));
+    }
+    const table = node('table', '', 'vm-tool-table'), head = node('thead'), header = node('tr'), body = node('tbody');
+    for (const title of mode === 'apply' ? ['Artifact', 'Pack score', 'Generic score', 'Labels'] : ['Left opcode', 'Right opcode', 'Status', 'Match basis']) { const cell = node('th', title); cell.setAttribute('scope', 'col'); header.append(cell); }
+    head.append(header);
+    for (const entry of rows.slice(0, 128)) {
+      const row = node('tr');
+      const cells = mode === 'apply' ? [entry?.artifact_id, entry?.anti_bot_score, entry?.generic_anti_bot_score, Array.isArray(entry?.labels) ? entry.labels.map(textValue).join(', ') : null] : [entry?.left?.opcode, entry?.right?.opcode, entry?.status, entry?.match_basis];
+      for (const value of cells) row.append(node('td', textValue(value))); body.append(row);
+    }
+    table.append(head, body); results.append(table);
+    if (!rows.length) results.append(node('p', 'No matching rows were returned. Unknowns remain in the complete report.', 'vm-tool-empty'));
+    const provenance = node('details', '', 'vm-tool-editor'); provenance.append(node('summary', 'Report identity and limitations'));
+    provenance.append(node('p', `SHA-256 ${report.document_digest}`));
+    for (const limitation of (Array.isArray(report.limitations) ? report.limitations.slice(0, 32) : [])) provenance.append(node('p', textValue(limitation)));
+    results.append(provenance);
+  }
   const invalidate = () => {
     generation++; controller?.abort(); controller = null; pending = false; reportText = null;
-    output.textContent = ''; download.disabled = true; apply.disabled = false; compare.disabled = false;
+    output.textContent = ''; empty(); download.disabled = true; apply.disabled = false; compare.disabled = false;
   };
   for (const [key, title] of [['pack', 'Analysis pack'], ['analysis', 'VM analysis (apply)'], ['left', 'Left opcode workspace'], ['right', 'Right opcode workspace']]) {
-    const label = node('label', title), picker = node('input'); picker.type = 'file'; picker.setAttribute('aria-label', title); picker.accept = '.json,application/json';
+    const label = node('label', title, 'vm-tool-import-card'), picker = node('input'); picker.type = 'file'; picker.setAttribute('aria-label', title); picker.accept = '.json,application/json';
     const selected = node('span', 'No file selected'); pickers[key] = picker; statuses[key] = selected; epochs[key] = 0;
     picker.addEventListener('change', async () => {
       const epoch = ++epochs[key], file = picker.files?.[0]; invalidate(); inputs[key] = null;
@@ -57,14 +89,15 @@ function mountVmAnalysisPacks(root) {
         status.textContent = 'Inputs changed. Run an explicit analysis to validate these documents.';
       } catch (error) { if (epoch === epochs[key]) { selected.textContent = `Unavailable: ${error.message}`; status.textContent = `Import refused: ${error.message}`; } }
     });
-    label.append(picker, selected); fields.append(label);
+    label.append(picker, selected); (key === 'pack' ? fields : key === 'analysis' ? applyInputs : compareInputs).append(label);
   }
   const ids = {};
   for (const side of ['left', 'right']) {
-    const label = node('label', `${side === 'left' ? 'Left' : 'Right'} interpreter artifact ID`), input = node('input'); input.type = 'text'; input.setAttribute('aria-label', `${side} interpreter artifact ID`); input.inputMode = 'numeric'; input.maxLength = 20;
+    const label = node('label', `${side === 'left' ? 'Left' : 'Right'} interpreter artifact ID`, 'vm-tool-import-card'), input = node('input'); input.type = 'text'; input.setAttribute('aria-label', `${side} interpreter artifact ID`); input.inputMode = 'numeric'; input.maxLength = 20;
     input.addEventListener('input', () => { invalidate(); status.textContent = 'Interpreter selection changed. Run comparison again.'; });
-    ids[side] = input; label.append(input); fields.append(label);
+    ids[side] = input; label.append(input); compareInputs.append(label);
   }
+  fields.append(applyInputs, compareInputs);
   const button = (text, callback) => { const element = node('button', text, 'secondary-button'); element.type = 'button'; element.addEventListener('click', callback); actions.append(element); return element; };
   const run = async mode => {
     if (pending) return;
@@ -86,9 +119,9 @@ function mountVmAnalysisPacks(root) {
       const report = JSON.parse(text), expected = mode === 'apply' ? 'vm-pack-application' : 'vm-instruction-set-comparison';
       if (report.contract_version !== 1 || report.document_kind !== expected || !/^[a-f0-9]{64}$/.test(report.document_digest) ||
           !Array.isArray(mode === 'apply' ? report.rankings : report.rows) || mode === 'compare' && report.behavioral_equivalence_proven !== false) throw new Error('Malformed pack report.');
-      reportText = text; output.textContent = text.length > 65536 ? `${text.slice(0, 65536)}\n… Preview limited to 65,536 characters. Download retains the complete report.` : text;
+      renderReport(report, mode); reportText = text; output.textContent = text.length > 65536 ? `${text.slice(0, 65536)}\n… Preview limited to 65,536 characters. Download retains the complete report.` : text;
       const count = mode === 'apply' ? report.rankings?.length : report.rows?.length;
-      status.textContent = `${mode === 'apply' ? 'Ranking overlay' : 'Build comparison'} ready · ${count ?? 'unknown'} rows · digest ${report.document_digest}. Original evidence retained; this is not proof of execution or equivalence.`;
+      status.textContent = `${mode === 'apply' ? 'Ranking overlay' : 'Build comparison'} ready · ${count ?? 'unknown'} rows. Original evidence retained. Report identity and limitations are below.`;
       download.disabled = false;
     } catch (error) {
       if (current === generation) status.textContent = error.name === 'AbortError' ? 'Request cancelled or deadline exceeded. No report accepted; retry explicitly.' : `Analysis refused: ${error.message}`;
@@ -111,7 +144,8 @@ function mountVmAnalysisPacks(root) {
     }
     const url = URL.createObjectURL(new Blob([reportText], {type: 'application/json'})), link = node('a'); link.href = url; link.download = 'vm-pack-report.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }); download.disabled = true;
-  root.append(heading, help, limits, fields, actions, status, node('p', 'Reports may contain sensitive retained evidence. Review before sharing. Downloads use your browser’s normal file permissions.'), output);
+  const boundaries = node('details', '', 'vm-tool-editor'); boundaries.append(node('summary', 'Input limits and research boundaries'), limits, node('p', 'Packs are inert declarations. No imported source or bytecode executes and no external service is contacted. Reports may contain private evidence; review before sharing.'));
+  root.append(heading, help, fields, actions, status, results, raw, boundaries);
   return {clear: () => { invalidate(); }, run};
 }
 if (typeof module !== 'undefined') module.exports = {vmPackRequestText, mountVmAnalysisPacks};

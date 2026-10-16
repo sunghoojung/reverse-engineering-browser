@@ -7,6 +7,19 @@ import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import model from '../apps/research-ui/vm_opcode_ledger.js';
+// Track process close (including stdio), not just exit, before profile removal.
+const closed = new WeakSet();
+const track = child => { child.once('close', () => closed.add(child)); return child; };
+async function stop(child) {
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    if (closed.has(child)) return;
+    try { if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal); else child.kill(signal); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+    const deadline = Date.now() + 3000;
+    while (!closed.has(child) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  if (!closed.has(child)) throw new Error('Owned test process did not close; retained its temporary profile.');
+}
 const root = new URL('..',import.meta.url).pathname;
 const temporary = await mkdtemp(join(tmpdir(),'reb-ledger-ui-'));
 const assets = ['captured_client.js','vm_static.js','vm_opcode_ledger.js','vm_opcode_ledger_view.js'];
@@ -17,7 +30,7 @@ const server=createServer(async(req,res)=>{
  res.setHeader('content-type',name.endsWith('.css')?'text/css':'text/javascript');res.end(await readFile(join(root,'apps/research-ui',name)));
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-const browser=spawn(process.env.CHROME_BIN || '/usr/bin/chromium',['--headless=new','--no-sandbox','--disable-gpu','--remote-debugging-port=0',`--user-data-dir=${join(temporary,'profile')}`,'about:blank'],{stdio:['ignore','ignore','pipe']});
+const browser=track(spawn(process.env.CHROME_BIN || '/usr/bin/chromium',['--headless=new','--no-sandbox','--disable-gpu','--remote-debugging-port=0',`--user-data-dir=${join(temporary,'profile')}`,'about:blank'],{detached:process.platform !== 'win32',stdio:['ignore','ignore','pipe']}));
 let socket;
 try {
  let stderr='';const endpoint=await new Promise((resolve,reject)=>{
@@ -59,6 +72,7 @@ try {
  assert.deepEqual(JSON.parse(await evaluate('ui.exportText()')),ledger);
  assert(await evaluate('ui.results.textContent.includes("<img src=x onerror=alert(1)>")'));
  assert.equal(await evaluate('document.querySelectorAll("#ledger img").length'),0);
+ await click('[data-ledger-editor="ledger"] > summary');
  await click('textarea[aria-label="Opcode ledger JSON editor"]');
  await command('Input.dispatchKeyEvent',{type:'keyDown',key:'End',code:'End',windowsVirtualKeyCode:35,modifiers:2});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'End',code:'End',windowsVirtualKeyCode:35,modifiers:2});
  await command('Input.insertText',{text:' '});await until('ui.download.disabled');
@@ -74,5 +88,8 @@ try {
  assert(await evaluate('ui.getReport()===null && ui.exportText()===null && document.activeElement===ui.files.definition'));
  console.log('PASS rendered opcode ledger editor: browser File import, native pointer/keyboard validation, inert markup, stale export guard, clear focus, 1180/760/390 layouts.');
 } finally {
- socket?.close();browser.kill('SIGKILL');await new Promise(resolve=>(browser.exitCode!==null || browser.signalCode!==null)?resolve():browser.once('exit',resolve));server.closeAllConnections();server.close();await rm(temporary,{recursive:true,force:true});
+ socket?.close();
+ try { await stop(browser); }
+ finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+ await rm(temporary,{recursive:true,force:true,maxRetries:5,retryDelay:200});
 }

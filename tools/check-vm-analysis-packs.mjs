@@ -72,7 +72,7 @@ ui.button('Cancel').click(); held.resolve(response()); await pending;
 assert.match(ui.status.textContent, /Cancelled/); assert(ui.button('Copy complete report JSON').disabled);
 const old = deferred(); next = old.promise; const obsolete = ui.ui.run('apply'); await Promise.resolve();
 await ui.load(0, '{"version":2}'); next = response(); await ui.ui.run('apply'); old.resolve(response({...report, document_digest: 'b'.repeat(64)})); await obsolete;
-assert.match(ui.status.textContent, new RegExp('a'.repeat(64))); assert(!ui.status.textContent.includes('b'.repeat(64)));
+assert.match(ui.root.textContent, new RegExp('a'.repeat(64))); assert(!ui.root.textContent.includes('b'.repeat(64)));
 next = response({}); await ui.ui.run('apply'); assert.match(ui.status.textContent, /Malformed pack report/);
 next = response({error: {unsafe: 'object'}}, 400); await ui.ui.run('apply'); assert.match(ui.status.textContent, /backend refused/); assert(!ui.status.textContent.includes('[object Object]'));
 const readHeld = deferred(); const reading = ui.load(0, '{}', () => readHeld.promise);
@@ -92,3 +92,24 @@ assert(bomBody.includes('\ufeff{}'), 'File import preserves BOM for the exact st
 await ui.load(0); await ui.load(1);
 next = response({...report, rankings: {length: 0}}); await ui.ui.run('apply');
 assert.match(ui.status.textContent, /Malformed pack report/);
+
+// Presentation remains structured; raw documents and comparison inputs are secondary.
+const all = element => [element, ...element.children.flatMap(all)];
+const elements = all(ui.root);
+assert(elements.some(element => element.tagName === 'details' && element.attributes['data-pack-inputs'] === 'compare' && !element.open));
+assert(elements.some(element => element.tagName === 'details' && element.children[0]?.textContent === 'Inspect raw report JSON' && !element.open));
+next = response({...report, rankings: [{artifact_id: Number.MAX_SAFE_INTEGER + 1, anti_bot_score: 40, generic_anti_bot_score: 20, labels: ['<script>inert</script>']}]});
+await ui.ui.run('apply');
+assert(all(ui.root).some(element => element.tagName === 'table' && element.className === 'vm-tool-table'));
+assert.match(ui.root.textContent, /See exact JSON/, 'Unsafe numeric IDs are never displayed as rounded identities');
+assert.match(ui.root.textContent, /<script>inert<\/script>/);
+assert(!all(ui.root).some(element => element.tagName === 'script'));
+const comparison = {...report, document_kind: 'vm-instruction-set-comparison', behavioral_equivalence_proven: false,
+  rows: Array.from({length: 130}, (_, index) => ({status: 'moved', match_basis: 'unique-exact-effect-shape', left: {opcode: index}, right: {opcode: index + 1}}))};
+next = response(comparison); await ui.load(2); await ui.load(3);
+for (const input of all(ui.root).filter(element => element.type === 'text')) input.value = '1';
+await ui.ui.run('compare');
+assert.match(ui.root.textContent, /130 rows · first 128 shown/);
+assert.equal(all(ui.root).filter(element => element.tagName === 'tbody')[0].children.length, 128);
+assert.match(ui.root.textContent, /130 moved/);
+await ui.button('Copy complete report JSON').click(); assert.equal(JSON.parse(copied).rows.length, 130, 'Structured preview bounds do not truncate exact export');

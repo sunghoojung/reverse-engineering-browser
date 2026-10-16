@@ -91,3 +91,10 @@ const unavailable = noClipboardAPI.mount(new Element('section'));
 unavailable.editors.definition.value = definition; unavailable.editors.ledger.value = text; await unavailable.validate();
 await unavailable.download.events.click(); assert.match(unavailable.notice.textContent, /unavailable or denied/);
 console.log('Opcode ledger browser model/CLI parity and editor controller passed: exact identity, inert markup, malformed imports, stale export guard, cancelled and interrupted reads/validation.');
+
+const descendants = element => [element, ...element.children.flatMap(descendants)];
+const presentationRoot = new Element('section'), presentation = api.mount(presentationRoot);
+assert(descendants(presentationRoot).filter(element => element.attributes['data-ledger-editor']).every(element => !element.open), 'JSON editors are secondary, closed by default');
+assert.equal(presentation.editors.ledger.rows, 10);
+await presentation.importFile('definition', file(definition)); await presentation.importFile('ledger', file(text)); await presentation.validate();
+assert(descendants(presentation.results).some(element => element.tagName === 'table' && element.className === 'vm-tool-table'));

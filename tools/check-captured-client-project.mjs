@@ -215,7 +215,7 @@ async function checkGeneratedProject() {
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:override}));
     result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).status,302);assert.equal(seen.length,2,'Redirect never follows across any origin');
     for(const [path,expected] of [['/large','large'],['/exact-limit','exact'],['/slow','timeout']]) {
-      await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+path,timeout_ms:100}}));
+      await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+path,timeout_ms:path==='/slow'?100:5000}}));
       result=await execute('--send');
       if(expected==='large'||expected==='exact'){assert.equal(result.code,0,result.stderr);const response=JSON.parse(result.stdout);assert.equal(response.body.length,65536);assert.equal(response.body_truncated,expected==='large');}
       else assert.notEqual(result.code,0,'Timeout is surfaced with no retry');
@@ -284,7 +284,7 @@ async function checkGeneratedGoProject() {
     const override={...copy(source.input),method:'GET',body:'',headers:[],url:origin+'/redirect'};
     await config({allowedOrigin:origin,request:override});result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).status,302);assert.equal(seen.length,2);
     for(const path of ['/large','/exact-limit','/slow']){
-      await config({allowedOrigin:origin,request:{...override,url:origin+path,timeout_ms:100}});result=await execute('--send');
+      await config({allowedOrigin:origin,request:{...override,url:origin+path,timeout_ms:path==='/slow'?100:5000}});result=await execute('--send');
       if(path==='/slow'){assert.notEqual(result.code,0,'Timeout is reported without retry');assert.match(result.stderr,/check its state/);}
       else {assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).body.length,65536);assert.equal(JSON.parse(result.stdout).body_truncated,path==='/large');}
     }

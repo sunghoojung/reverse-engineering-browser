@@ -115,6 +115,7 @@ static_library("renderer") {
     "common/native_console_messages.cc",
     "common/native_console_messages.h",
     "common/native_vm_finding.h",
+    "common/native_vm_dispatch.h",
     "renderer/native_console_agent.cc",
     "renderer/native_console_agent.h",
     "renderer/native_console_runtime.cc",
@@ -167,6 +168,7 @@ source_set("browser") {
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
     "common/native_vm_finding.h",
+    "common/native_vm_dispatch.h",
   ]
 
   deps = [

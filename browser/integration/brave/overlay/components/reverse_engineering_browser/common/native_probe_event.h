@@ -66,6 +66,7 @@ enum class NativeProbeType : std::uint16_t {
   kVmFinding = 13,
   kArtifactCaptured = 14,
   kArtifactCaptureFailed = 15,
+  kVmDispatchSample = 16,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

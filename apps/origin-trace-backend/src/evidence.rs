@@ -280,6 +280,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             "source_map",
             "response_body",
             "canvas_data_url",
+            "bytecode_buffer",
         ]
         .contains(&artifact["kind"].as_str().unwrap_or(""))
         && artifact["url"].as_str().is_some_and(|s| !s.is_empty())
@@ -317,6 +318,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 "webassembly_module",
                 "webassembly_instantiate",
                 "canvas_to_data_url",
+                "runtime_typed_array",
             ]
             .contains(&origin)
             || (origin == "dynamic_javascript"
@@ -326,6 +328,9 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             || (origin == "canvas_to_data_url"
                 && (artifact["kind"] != "canvas_data_url"
                     || artifact["execution_context_id"] != "0"))
+            || (origin == "runtime_typed_array"
+                && (artifact["kind"] != "bytecode_buffer"
+                    || artifact["execution_context_id"] == "0"))
         {
             return Err(Error::new(
                 500,
@@ -1059,5 +1064,39 @@ mod frozen_tests {
             .status,
             413
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_typed_array_artifact_requires_bytecode_and_context() {
+        let mut artifact = json!({
+            "protocol_version": 1,
+            "artifact_id": "1",
+            "session_id": "2",
+            "navigation_id": "0",
+            "frame_id": "3",
+            "parent_artifact_id": "0",
+            "creator_event_id": "0",
+            "execution_context_id": "4",
+            "capture_origin": "runtime_typed_array",
+            "kind": "bytecode_buffer",
+            "url": "https://example.test/vm.js",
+            "mime_type": "application/octet-stream",
+            "byte_size": 32,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "sensitive": false,
+            "content_path": "blobs/0000000000000000000000000000000000000000000000000000000000000000.bin"
+        });
+        assert!(validate_artifact(&mut artifact).is_ok());
+
+        artifact["kind"] = json!("javascript");
+        assert!(validate_artifact(&mut artifact).is_err());
+        artifact["kind"] = json!("bytecode_buffer");
+        artifact["execution_context_id"] = json!("0");
+        assert!(validate_artifact(&mut artifact).is_err());
     }
 }

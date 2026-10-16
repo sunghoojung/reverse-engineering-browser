@@ -80,6 +80,7 @@ class NativeArtifactCaptureSink final {
   struct PendingContext final {
     std::uint64_t request_id = 0;
     std::uint64_t frame_id = 0;
+    NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
   };
 
   NativeArtifactCaptureSink();
@@ -93,7 +94,9 @@ class NativeArtifactCaptureSink final {
                   std::uint64_t artifact_id,
                   std::uint64_t request_id,
                   std::uint64_t frame_id,
-                  const std::string& detail) noexcept;
+                  const std::string& detail,
+                  NativeProbeCategory category = NativeProbeCategory::kArtifact) noexcept;
+  [[nodiscard]] bool IsEnabledFor(NativeProbeCategory category) const noexcept;
   [[nodiscard]] bool Reserve(std::size_t bytes) noexcept;
   void Release(std::size_t bytes) noexcept;
 
@@ -103,6 +106,7 @@ class NativeArtifactCaptureSink final {
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<std::uint64_t> next_artifact_id_{1};
   std::atomic<std::size_t> active_bytes_{0};
+  std::atomic<std::size_t> runtime_typed_array_count_{0};
   std::map<std::uint64_t, PendingContext> pending_;
 };
 

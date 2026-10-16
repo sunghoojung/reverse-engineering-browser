@@ -326,7 +326,7 @@ bool ParseManifestRecord(const std::string_view line,
     if (capture_origin != "unknown" && capture_origin != "network_response" &&
         capture_origin != "dynamic_javascript" && capture_origin != "webassembly_compile" &&
         capture_origin != "webassembly_module" && capture_origin != "webassembly_instantiate" &&
-        capture_origin != "canvas_to_data_url") {
+        capture_origin != "canvas_to_data_url" && capture_origin != "runtime_typed_array") {
       return false;
     }
     position = origin_end + std::string_view("\",\"kind\":\"").size();
@@ -340,14 +340,15 @@ bool ParseManifestRecord(const std::string_view line,
   }
   const std::string_view kind = line.substr(position, kind_end - position);
   if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body" &&
-      kind != "canvas_data_url") {
+      kind != "canvas_data_url" && kind != "bytecode_buffer") {
     return false;
   }
   if ((!capture_origin.empty() && capture_origin != "unknown" &&
        capture_origin != "network_response" && execution_context_id == 0) ||
       (capture_origin == "dynamic_javascript" && kind != "javascript") ||
       (capture_origin.starts_with("webassembly_") && kind != "wasm") ||
-      (capture_origin == "canvas_to_data_url" && kind != "canvas_data_url")) {
+      (capture_origin == "canvas_to_data_url" && kind != "canvas_data_url") ||
+      (capture_origin == "runtime_typed_array" && kind != "bytecode_buffer")) {
     return false;
   }
   position = kind_end + std::string_view("\",\"url\":\"").size();
@@ -413,7 +414,7 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
   const bool valid_kind =
       header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
       header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody ||
-      header.kind == ArtifactKind::kCanvasDataUrl;
+      header.kind == ArtifactKind::kCanvasDataUrl || header.kind == ArtifactKind::kBytecodeBuffer;
   const bool valid_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -421,7 +422,8 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyCompile ||
       header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyModule ||
       header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyInstantiate ||
-      header.capture_origin == ArtifactCaptureOrigin::kCanvasToDataUrl;
+      header.capture_origin == ArtifactCaptureOrigin::kCanvasToDataUrl ||
+      header.capture_origin == ArtifactCaptureOrigin::kRuntimeTypedArray;
   const bool compatible_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -432,7 +434,9 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
         header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyModule ||
         header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyInstantiate)) ||
       (header.kind == ArtifactKind::kCanvasDataUrl &&
-       header.capture_origin == ArtifactCaptureOrigin::kCanvasToDataUrl);
+       header.capture_origin == ArtifactCaptureOrigin::kCanvasToDataUrl) ||
+      (header.kind == ArtifactKind::kBytecodeBuffer &&
+       header.capture_origin == ArtifactCaptureOrigin::kRuntimeTypedArray);
   const bool runtime_has_context =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -453,6 +457,8 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
       return "response_body";
     case ArtifactKind::kCanvasDataUrl:
       return "canvas_data_url";
+    case ArtifactKind::kBytecodeBuffer:
+      return "bytecode_buffer";
     case ArtifactKind::kUnknown:
       return "unknown";
   }
@@ -473,6 +479,8 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
       return "webassembly_instantiate";
     case ArtifactCaptureOrigin::kCanvasToDataUrl:
       return "canvas_to_data_url";
+    case ArtifactCaptureOrigin::kRuntimeTypedArray:
+      return "runtime_typed_array";
     case ArtifactCaptureOrigin::kUnknown:
       return "unknown";
   }

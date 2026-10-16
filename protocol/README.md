@@ -134,6 +134,14 @@ native event path. The fixed little-endian record is defined in
 `native_vm_finding.h`, with compile-time size, offset, and enum synchronization
 checks in the native test suite.
 
+Dynamic VM dispatch evidence uses `vm_dispatch_sample`, whose fixed 128-byte
+payload is defined in `include/reb/vm_dispatch.hpp` and mirrored by
+`common/native_vm_dispatch.h`. Runtime copies of `ArrayBuffer`, `Uint8Array`,
+`Uint16Array`, and `Uint32Array` use artifact protocol version 1 with kind
+`bytecode_buffer` and capture origin `runtime_typed_array`. The complete
+stealth-session and ABI contract is in
+[`VM Dynamic Debug v1`](../docs/product/vm-dynamic-debug-v1.md).
+
 Each finding has stable finding, investigation, subject, and related-subject
 identifiers. Its kind is one of interpreter, guest program, invocation, host
 binding, hypothesis, or coverage. Host runtime and confidence are independent

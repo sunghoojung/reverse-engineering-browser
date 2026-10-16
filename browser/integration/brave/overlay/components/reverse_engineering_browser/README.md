@@ -102,6 +102,12 @@ Bounded VM investigation metadata uses `NativeVmFindingPayload` from
 interpreter, guest program, invocation, host binding, hypothesis, and coverage
 findings distinct. Guest bytes remain in the artifact channel and are linked by
 artifact ID instead of being copied through the renderer queue.
+`NativeVmDispatchSamplePayload` adds a fixed 128-byte dispatch-sample ABI. The
+VM category also permits 32-byte through 16-MiB snapshots of runtime-created
+`ArrayBuffer`, `Uint8Array`, `Uint16Array`, and `Uint32Array` data. The V8 hook
+uses an embedder callback and never wraps JavaScript constructors. At most 16
+snapshots are submitted per renderer and per browser session, then all bytes
+use the existing bounded artifact transfer queue.
 
 Renderer code never writes files or sockets directly.
 

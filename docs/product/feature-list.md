@@ -66,6 +66,8 @@ privacy, and implementation limits are documented in
 - Detect JavaScript VM structures such as switch dispatch, function arrays, object maps, indexed bytecode reads, stack arrays, and dynamically generated handlers.
 - Detect WASM VM structures such as dispatch loops, `br_table`, indirect calls, tables, advancing address locals, repeated linear-memory access, and bytecode-like regions.
 - Keep interpreter, guest program, invocation, host-binding, hypothesis, and coverage evidence separate with explicit confidence.
+- Observe inspector-detecting VMs through a stealth session that never enables CDP `Runtime` or `Debugger` domains; native quiet mode plus VM-category probes are the supported path, documented in [`vm-dynamic-debug-v1.md`](./vm-dynamic-debug-v1.md).
+- Snapshot candidate guest bytecode after runtime decode from typed arrays into the artifact channel (`kBytecodeBuffer` / `kRuntimeTypedArray`) without wrapping page constructors.
 - Build an evidence-linked opcode workspace that maps candidate opcodes to handlers, operands, state effects, atomic operations, fused superoperators, confidence, and unresolved ambiguity.
 - Traverse reachable guest code recursively while reporting characterized and uncharacterized coverage.
 - Confirm VM hypotheses only in an isolated Experiment session by tracing bounded opcode dispatch, handler selection, instruction-pointer movement, and selected state changes against explicit inputs.

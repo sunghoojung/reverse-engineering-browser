@@ -6369,7 +6369,8 @@
               "wasm",
               "source_map",
               "response_body",
-              "canvas_data_url"
+              "canvas_data_url",
+              "bytecode_buffer"
             ]
           },
           "url": {

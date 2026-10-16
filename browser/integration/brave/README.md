@@ -156,6 +156,11 @@ that V8 handler, the rule does not depend on source rewriting or CDP. The live
 launcher also omits the remote-debugging endpoint in this mode. Ordinary V8
 behavior remains unchanged unless the session passes
 `--js-flags=--reb-ignore-debugger-statements`.
+For inspector-detecting JavaScript VMs, launch with
+`REB_NATIVE_QUIET_MODE=1` and authorize the VM category. This path does not
+start the V8 debug agent, enable `Runtime` or `Debugger`, or call
+`Debug::SetBreakPoint`. It therefore avoids the `Runtime.enable` signal watched
+by obfuscator.io `vmDebugProtection.inspectorDetection`.
 
 Embedder-requested debugger pauses retain V8's agent break reason. This lets
 other attached inspector sessions recognize an XHR/fetch or DOM breakpoint
@@ -182,3 +187,10 @@ Renderer hooks perform one inactive atomic check, cap each submission at 16
 MiB, and send bytes one way to the browser process. The browser copies shared
 memory before validation, preserves the bounded context URL, assigns the artifact ID,
 and remains the only process that owns the authenticated artifact socket.
+
+The VM category separately enables runtime-buffer snapshots for `ArrayBuffer`,
+`Uint8Array`, `Uint16Array`, and `Uint32Array` constructor results. V8 invokes
+an embedder callback after initialization; no JavaScript constructor or host
+builtin is wrapped. Buffers from 32 bytes through 16 MiB are copied into
+`bytecode_buffer` artifacts, with at most 16 snapshots per session sharing the
+existing 16-artifact, 32-MiB transfer queue.

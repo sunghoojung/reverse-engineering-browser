@@ -43,7 +43,7 @@ native-console: native-console-build
 native-console-check: native-console-build origin-trace-backend
 	python3 tools/check-native-console.py --binary $(NATIVE_CONSOLE_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
 
-e2e: origin-trace-backend producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder native-console-check
+e2e: origin-trace-backend native-vm-fixture producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder native-console-check
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
@@ -70,6 +70,7 @@ e2e: origin-trace-backend producer broker artifact-producer artifact-receiver de
 	test "$$(python3 -c 'import json; print(json.load(open("$(BUILD_DIR)/sessions/artifacts/analysis/vm-analysis-v1.json"))["summary"]["likely_vm_count"])')" = "1"
 	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl \
 		--broker $(BROKER_BINARY) --receiver $(ARTIFACT_RECEIVER_BINARY) --producer $(PRODUCER_BINARY)
+	python3 tools/check-owned-vm-dispatch.py --binary $(NATIVE_VM_FIXTURE_BINARY) --broker $(BROKER_BINARY) --analyzer $(VM_ANALYZER)
 
 ui: e2e heap-snapshot decoder deob-worker-build
 	$(ORIGIN_TRACE_BACKEND) \

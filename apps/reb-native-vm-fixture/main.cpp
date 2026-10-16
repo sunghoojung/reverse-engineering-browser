@@ -8,6 +8,7 @@
 
 #include <unistd.h>
 
+#include "dispatch_events.hpp"
 #include "owned_vm_helper_protocol.hpp"
 
 #include "reb/native_vm_recorder.hpp"
@@ -594,6 +595,8 @@ int ControlMain(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc > 1 && std::string_view(argv[1]) == "--emit-dispatch-events-v1")
+    return EmitOwnedVmDispatchEvents(argc, argv);
   if (argc > 1 && std::string_view(argv[1]) == "--control-owned-fixture-v1")
     return ControlMain(argc, argv);
   bool enabled = false;

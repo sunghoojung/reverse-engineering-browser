@@ -192,8 +192,8 @@ forbidden in this milestone because it activates Inspector-adjacent state.
 ## Cold-path opcode workspace
 
 Store a derived document at
-`ARTIFACT_STORE/analysis/vm-opcode-workspace-v1.json`. Schema:
-[`protocol/vm-opcode-workspace-v1.schema.json`](../../protocol/vm-opcode-workspace-v1.schema.json).
+`ARTIFACT_STORE/analysis/vm-opcode-workspace-v2.json`. Schema:
+[`protocol/vm-opcode-workspace-v2.schema.json`](../../protocol/vm-opcode-workspace-v2.schema.json).
 
 The analyzer reads:
 
@@ -209,8 +209,8 @@ It writes, per likely-vm artifact:
 - operand width guesses from adjacent indexed reads;
 - bytecode hex preview from the linked snapshot (cap 4096 bytes in the
   document, full bytes remain in the artifact store);
-- coverage: characterized opcode indices vs uncharacterized snapshot
-  bytes;
+- coverage: byte-attributed ranges versus retained snapshot bytes; an
+  instruction-index sample alone does not characterize a byte;
 - residual unknowns for stateful, register-based, and call-context
   opcodes.
 
@@ -224,7 +224,8 @@ Keep the current finding list. When a selected finding has an opcode
 workspace:
 
 - **Handlers** table: opcode, handler source range, epistemic state,
-  sample count, notes.
+  sample count, guest position with units, selected handler index, bytecode
+  artifact ID and notes.
 - **Bytecode** panel: hex of the snapshot, digest, producer origin,
   truncation, Open-in-Sources for the interpreter artifact.
 - **Coverage** bar: characterized / total snapshot bytes, plus named
@@ -296,3 +297,7 @@ combination as the supported way to study inspector-detecting VMs.
 4. ABI tests lock payload size, offsets, and unknown-enum rejection.
 5. `make lint`, `make check`, and the research-ui VM tests pass. Brave
    probe compilation is reported honestly when the toolchain is absent.
+
+Owned cooperative dispatch emission and exact v2 retention are specified in
+[VM opcode workspace v2](../../protocol/vm-opcode-workspace-v2.md). This does not
+implement arbitrary-site guest dispatch or confirm opcode effects.

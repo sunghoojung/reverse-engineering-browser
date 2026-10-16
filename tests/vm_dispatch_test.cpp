@@ -107,5 +107,12 @@ int main() {
              "encoded dirty reserved tail accepted")) {
     return 1;
   }
+  if (!Check(reb::SetVmDispatchSamplePayload(event, sample), "sample restore failed")) {
+    return 1;
+  }
+  event.header.payload_size = 127;
+  if (!Check(!reb::DecodeVmDispatchSample(event, decoded), "short sample accepted")) {
+    return 1;
+  }
   return 0;
 }

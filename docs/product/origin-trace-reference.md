@@ -394,7 +394,7 @@ count and cumulative region work are also bounded; exhausting either limit
 produces a named partial-coverage omission.
 
 The opcode workspace is stored at
-`ARTIFACT_STORE/analysis/vm-opcode-workspace-v1.json`. It reports bounded
+`ARTIFACT_STORE/analysis/vm-opcode-workspace-v2.json`. It reports bounded
 integer switch and numeric handler-table candidates from the same JavaScript
 function region as `js.dispatch-loop`, joins matching `vm_dispatch_sample`
 events, and links verified `runtime-typed-array` snapshots when available.

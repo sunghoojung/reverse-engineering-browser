@@ -3792,6 +3792,16 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #repeater-client-export .exchange-options-menu select { min-width: 0; width: 100%; max-width: 100%; }
 #traffic-capture-export .exchange-options-menu :focus-visible,
 #repeater-client-export .exchange-options-menu :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Phone toolbars can scroll horizontally. Anchor the export surface to the
+   viewport so its right-aligned trigger cannot put controls off the left edge. */
+@media (max-width: 600px) {
+  #traffic-capture-export .exchange-options-menu,
+  #repeater-client-export .exchange-options-menu {
+    position: fixed; inset: auto 12px 28px; width: auto;
+    max-height: min(480px, calc(100dvh - 80px)); z-index: 50;
+  }
+}
+
 
 
 #repeater-body-panel > textarea { height: auto; flex: 1; }

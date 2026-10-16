@@ -528,9 +528,10 @@ async function checkBrowser() {
       await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
       await evaluate("document.querySelector('[data-client-provider=\"capture\"]').scrollIntoView({block:'nearest'})");
       const layout=await evaluate("(()=>{const m=document.querySelector('#traffic-capture-export .exchange-options-menu'),s=document.querySelector('[data-client-provider=\"capture\"]'),r=s.getBoundingClientRect();return {left:r.left,right:r.right,width:innerWidth,overflow:m.scrollWidth>m.clientWidth+1};})()");
-      assert(layout.left>=0&&layout.right<=layout.width&&!layout.overflow,'Export selectors fit the viewport');
+      assert(layout.left>=0&&layout.right<=layout.width&&!layout.overflow,'Export selectors fit the viewport: '+JSON.stringify({width,height,...layout}));
       await shot('export-menu-'+width);
     }
+    await selectRenderedOption({evaluate,click,key,selector:'[data-client-provider="capture"]',index:2,keyboardFocus:true});
     await key('Escape','Escape');assert.equal(await evaluate("document.querySelector('#traffic-capture-export').open"),false);
 
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);

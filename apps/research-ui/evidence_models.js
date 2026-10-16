@@ -54,11 +54,13 @@
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
       const artifactKinds = new Set([
-        'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url'
+        'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
+        'bytecode_buffer'
       ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
-        'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url'
+        'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url',
+        'runtime_typed_array'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -211,6 +213,9 @@
           (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
           (body.capture_stopped === undefined || typeof body.capture_stopped === 'boolean') &&
           (body.capture_controls_available === undefined || typeof body.capture_controls_available === 'boolean') &&
+          (body.stealth_session === undefined || typeof body.stealth_session === 'boolean') &&
+          (body.native_stealth === undefined || typeof body.native_stealth === 'boolean') &&
+          (body.quiet_mode === undefined || typeof body.quiet_mode === 'boolean') &&
           (body.canvas_render_captures === undefined ||
             (body.capture_mode === 'demo' &&
               Array.isArray(body.canvas_render_captures) &&
@@ -258,7 +263,9 @@
             (artifact.capture_origin.startsWith('webassembly_') &&
               (artifact.kind !== 'wasm' || artifact.execution_context_id === '0')) ||
             (artifact.capture_origin === 'canvas_to_data_url' &&
-              (artifact.kind !== 'canvas_data_url' || artifact.execution_context_id !== '0'))) return false;
+              (artifact.kind !== 'canvas_data_url' || artifact.execution_context_id !== '0')) ||
+            (artifact.capture_origin === 'runtime_typed_array' &&
+              (artifact.kind !== 'bytecode_buffer' || artifact.execution_context_id === '0'))) return false;
         }
         return artifact.protocol_version === 1 &&
           artifactIdentifierFields.every(field => isCanonicalInteger(artifact[field], 0n, uint64Max)) &&
@@ -1877,6 +1884,136 @@
           analysis: result
         }));
         return findings.sort((left, right) => (right.analysis?.vm_score ?? 0) - (left.analysis?.vm_score ?? 0));
+      }
+
+      function hasOnlyKeys(value, allowed) {
+        return Object.keys(value).every(key => allowed.has(key));
+      }
+
+      function isVmOpcodeCoordinate(coordinate) {
+        return isPlainObject(coordinate) &&
+          hasOnlyKeys(coordinate, new Set(['byte_offset', 'byte_size'])) &&
+          isSafeIntegerInRange(coordinate.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(coordinate.byte_size, 1, Number.MAX_SAFE_INTEGER);
+      }
+
+      function isVmOpcodeHandler(handler) {
+        if (!isPlainObject(handler) || !hasOnlyKeys(handler, new Set([
+          'opcode', 'handler_index', 'state', 'source', 'label', 'operand_width',
+          'sample_count', 'notes'
+        ])) || !isSafeIntegerInRange(handler.opcode, 0, 0xffffffff) ||
+            !['observed', 'inferred', 'correlated', 'unknown'].includes(handler.state) ||
+            !isVmOpcodeCoordinate(handler.source)) return false;
+        return (handler.handler_index === undefined ||
+            isSafeIntegerInRange(handler.handler_index, 0, Number.MAX_SAFE_INTEGER)) &&
+          (handler.label === undefined || isBoundedText(handler.label, 80)) &&
+          (handler.operand_width === undefined || isSafeIntegerInRange(handler.operand_width, 0, 8)) &&
+          (handler.sample_count === undefined ||
+            isSafeIntegerInRange(handler.sample_count, 0, Number.MAX_SAFE_INTEGER)) &&
+          (handler.notes === undefined || isBoundedText(handler.notes, 240));
+      }
+
+      function isVmOpcodeSnapshot(snapshot) {
+        if (!isPlainObject(snapshot) || !hasOnlyKeys(snapshot, new Set([
+          'artifact_id', 'origin', 'sha256', 'byte_count', 'preview_hex',
+          'truncated', 'unavailable_reason'
+        ])) || !isCanonicalInteger(snapshot.artifact_id, 0n, uint64Max) ||
+            snapshot.origin !== 'runtime-typed-array' ||
+            !isSafeIntegerInRange(snapshot.byte_count, 0, Number.MAX_SAFE_INTEGER) ||
+            !(snapshot.unavailable_reason === null ||
+              (isBoundedText(snapshot.unavailable_reason, 1024) && snapshot.unavailable_reason.length > 0))) {
+          return false;
+        }
+        return (snapshot.sha256 === undefined || /^[0-9a-f]{64}$/.test(snapshot.sha256)) &&
+          (snapshot.preview_hex === undefined || snapshot.preview_hex === null ||
+            (/^(?:[0-9a-f]{2})*$/.test(snapshot.preview_hex) && snapshot.preview_hex.length <= 8192)) &&
+          (snapshot.truncated === undefined || typeof snapshot.truncated === 'boolean');
+      }
+
+      function isVmOpcodeCoverage(coverage) {
+        return isPlainObject(coverage) &&
+          hasOnlyKeys(coverage, new Set([
+            'complete', 'characterized_opcodes', 'snapshot_bytes', 'omissions'
+          ])) && typeof coverage.complete === 'boolean' &&
+          isSafeIntegerInRange(coverage.characterized_opcodes, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(coverage.snapshot_bytes, 0, Number.MAX_SAFE_INTEGER) &&
+          Array.isArray(coverage.omissions) && coverage.omissions.length <= 1024 &&
+          coverage.omissions.every(omission => isPlainObject(omission) &&
+            hasOnlyKeys(omission, new Set(['reason', 'detail'])) &&
+            isBoundedText(omission.reason, 240) && omission.reason.length > 0 &&
+            (omission.detail === undefined || isBoundedText(omission.detail, 1024)));
+      }
+
+      function isVmOpcodeWorkspace(workspace) {
+        return isPlainObject(workspace) && hasOnlyKeys(workspace, new Set([
+          'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model',
+          'handlers', 'snapshots', 'coverage', 'unknowns'
+        ])) && isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) &&
+          (workspace.bytecode_artifact_id === undefined ||
+            isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) &&
+          typeof workspace.finding_id === 'string' && /^[0-9a-f]{24}$/.test(workspace.finding_id) &&
+          (workspace.model === undefined || ['stack', 'register', 'unknown'].includes(workspace.model)) &&
+          Array.isArray(workspace.handlers) && workspace.handlers.length <= 1024 &&
+          workspace.handlers.every(isVmOpcodeHandler) &&
+          Array.isArray(workspace.snapshots) && workspace.snapshots.length <= 16 &&
+          workspace.snapshots.every(isVmOpcodeSnapshot) && isVmOpcodeCoverage(workspace.coverage) &&
+          Array.isArray(workspace.unknowns) && workspace.unknowns.length <= 1024 &&
+          workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0);
+      }
+
+      function isVmOpcodeWorkspaceDocument(document) {
+        const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+        return isPlainObject(document) && hasOnlyKeys(document, new Set([
+          'contract_version', 'document_kind', 'producer', 'profile_digest',
+          'analysis_digest', 'inputs', 'workspaces', 'summary', 'document_digest'
+        ])) && document.contract_version === 1 && document.document_kind === 'vm-opcode-workspace' &&
+          isPlainObject(document.producer) &&
+          hasOnlyKeys(document.producer, new Set(['id', 'version'])) &&
+          document.producer.id === 'origin-trace-vm-opcode' &&
+          isBoundedText(document.producer.version, 32) && document.producer.version.length > 0 &&
+          digest(document.profile_digest) && digest(document.analysis_digest) &&
+          isPlainObject(document.inputs) &&
+          hasOnlyKeys(document.inputs, new Set(['artifact_manifest_digest', 'event_store_digest'])) &&
+          digest(document.inputs.artifact_manifest_digest) &&
+          (document.inputs.event_store_digest === null || digest(document.inputs.event_store_digest)) &&
+          Array.isArray(document.workspaces) && document.workspaces.length <= 256 &&
+          document.workspaces.every(isVmOpcodeWorkspace) &&
+          isPlainObject(document.summary) && hasOnlyKeys(document.summary, new Set([
+            'workspace_count', 'handler_count', 'snapshot_count', 'sample_count', 'unknown_count'
+          ])) && ['workspace_count', 'handler_count', 'snapshot_count', 'sample_count', 'unknown_count']
+            .every(field => isSafeIntegerInRange(document.summary[field], 0, Number.MAX_SAFE_INTEGER)) &&
+          digest(document.document_digest);
+      }
+
+      function vmOpcodeWorkspaceForFinding(document, finding) {
+        if (!document || !finding) return null;
+        const findingId = finding.analysis?.finding_id ??
+          (finding.findingId?.startsWith('analysis:') ? finding.findingId.slice(9) : null);
+        const exact = findingId
+          ? document.workspaces.find(workspace => workspace.finding_id === findingId)
+          : null;
+        if (exact) return exact;
+        const artifactMatches = document.workspaces.filter(workspace =>
+          workspace.interpreter_artifact_id === finding.sourceArtifactId);
+        return artifactMatches.length === 1 ? artifactMatches[0] : null;
+      }
+
+      function vmOpcodeRows(workspace) {
+        return workspace.handlers.map(handler => ({
+          key: `${handler.opcode}:${handler.handler_index ?? ''}:${handler.source.byte_offset}`,
+          opcode: `0x${handler.opcode.toString(16).padStart(2, '0')}`,
+          label: handler.label || `handler ${handler.handler_index ?? handler.opcode}`,
+          state: handler.state,
+          samples: handler.sample_count ?? 0,
+          notes: handler.notes || 'No handler notes recorded.',
+          source: `${handler.source.byte_offset} + ${handler.source.byte_size} bytes`
+        }));
+      }
+
+      function retainVmOpcodeWorkspaceOnFailure(targetState, status, errorMessage) {
+        targetState.vmOpcodeWorkspaceStatus = status;
+        targetState.vmOpcodeWorkspaceError = errorMessage;
+        targetState.vmOpcodeWorkspace = targetState.lastValidVmOpcodeWorkspace;
       }
 
       function isWasmInspection(value, source) {

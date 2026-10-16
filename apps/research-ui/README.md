@@ -1088,6 +1088,17 @@ by default. The toggle remains available at narrow window sizes.
 
 VM analysis is a secondary Traffic view, reached through Related VM candidates
 for a selected request. It has a Back to traffic control and no primary tab.
+When the selected finding has a validated opcode workspace, VM Lab adds the
+handler mapping, runtime typed-array bytecode preview, characterized coverage,
+named omissions, and residual unknowns beneath the unchanged detection detail.
+Handler rows keep inferred candidates visible even when the runtime sampler is
+unavailable, and support Up, Down, Home, and End selection. Workspace failures
+retain the last valid workspace and never remove detection findings.
+
+The VM header distinguishes an attached CDP debugger from an active native
+stealth capture. Native stealth copy states that Inspector domains are off and
+that breakpoints, watches, and console controls remain unavailable. Captured
+hex, labels, notes, omissions, and unknowns are inserted as DOM text.
 
 Experiments puts its mode switcher and current connection state in one compact
 toolbar above three stable setup, editor, and result panes. Each pane scrolls

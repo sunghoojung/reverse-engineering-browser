@@ -420,6 +420,26 @@ semantics. Empty, disconnected, malformed-analysis, malformed-finding, and
 sequence-gap states remain visible. Unlike the request backtrace demonstration,
 VM Lab does not populate sample findings in standalone preview mode.
 
+VM Dynamic Debug v1 extends a selected detection finding with a validated
+`vm-opcode-workspace` document. The browser UI requests
+`/api/analysis/vm/opcodes`, accepts the same document embedded as
+`opcode_workspace` in `/api/analysis/vm`, and treats a missing route as an
+explicit unavailable state. A malformed or failed workspace refresh retains
+the last valid workspace and leaves the finding list intact. The workspace
+shows every inferred, observed, correlated, or unknown handler, bounded
+runtime-typed-array bytecode hex, digest and truncation facts, characterized
+opcode coverage against snapshot bytes, named omissions such as
+`sampler-unavailable`, and residual unknowns. It does not infer handler meaning
+from an opcode number or from a missing sample.
+
+The VM Lab header reports `Native stealth` when a live native capture is active
+without an attached debugger, or when the launcher provides an explicit stealth
+flag. In that mode Inspector domains are off, so protections watching
+`Runtime.enable` do not see a debugger; breakpoints, watches, and console remain
+unavailable. An attached debugger is reported as `CDP attached`. Stored evidence
+uses a neutral recorded-evidence status because the current live mode cannot be
+reconstructed from the document alone.
+
 The UI validates the broker envelope and every returned event before replacing
 the last known-good view. Protocol v2 transports 64-bit identifiers,
 timestamps, and transfer sizes as canonical decimal strings so browser-side

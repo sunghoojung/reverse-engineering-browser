@@ -1,0 +1,95 @@
+{
+  "contract_version": 1,
+  "document_kind": "vm-opcode-workspace",
+  "producer": {
+    "id": "origin-trace-vm-opcode",
+    "version": "1.0.0"
+  },
+  "profile_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "analysis_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "inputs": {
+    "artifact_manifest_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "event_store_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "workspaces": [
+    {
+      "interpreter_artifact_id": "302",
+      "bytecode_artifact_id": "401",
+      "finding_id": "c5e529342af22aafd3d7ddbc",
+      "model": "stack",
+      "handlers": [
+        {
+          "opcode": 1,
+          "handler_index": 0,
+          "state": "inferred",
+          "source": {"byte_offset": 144, "byte_size": 28},
+          "label": "push constant",
+          "operand_width": 1,
+          "notes": "Reads one immediate byte."
+        },
+        {
+          "opcode": 7,
+          "handler_index": 1,
+          "state": "observed",
+          "source": {"byte_offset": 172, "byte_size": 35},
+          "label": "binary add",
+          "operand_width": 0,
+          "sample_count": 3,
+          "notes": "Observed at a sampled program counter."
+        },
+        {
+          "opcode": 9,
+          "handler_index": 2,
+          "state": "correlated",
+          "source": {"byte_offset": 207, "byte_size": 41},
+          "label": "host call candidate",
+          "sample_count": 1,
+          "notes": "Sample and handler share an index; decode is not proven."
+        },
+        {
+          "opcode": 12,
+          "handler_index": 3,
+          "state": "unknown",
+          "source": {"byte_offset": 248, "byte_size": 22},
+          "label": "stateful candidate",
+          "sample_count": 0,
+          "notes": "Meaning may depend on register state."
+        }
+      ],
+      "snapshots": [
+        {
+          "artifact_id": "401",
+          "origin": "runtime-typed-array",
+          "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "byte_count": 5,
+          "preview_hex": "0107090c00",
+          "truncated": false,
+          "unavailable_reason": null
+        }
+      ],
+      "coverage": {
+        "complete": false,
+        "characterized_opcodes": 4,
+        "snapshot_bytes": 5,
+        "omissions": [
+          {
+            "reason": "sampler-unavailable",
+            "detail": "Static handlers remain visible without runtime samples."
+          }
+        ]
+      },
+      "unknowns": [
+        "Opcode 12 may depend on register state.",
+        "Call-context behavior is not characterized."
+      ]
+    }
+  ],
+  "summary": {
+    "workspace_count": 1,
+    "handler_count": 4,
+    "snapshot_count": 1,
+    "sample_count": 4,
+    "unknown_count": 2
+  },
+  "document_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+}

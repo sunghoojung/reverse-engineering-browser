@@ -165,7 +165,10 @@ if (process.argv.includes('--fixture-only')) {
         assert.equal(await evaluate(`document.querySelector('#${panel}').hidden`), false, `${mode} panel at ${width}`);
         assert.equal(await evaluate(`document.querySelector('#vm-show-${mode}').getAttribute('aria-pressed')`), 'true');
         assert.equal(await evaluate(`(()=>{const n=document.querySelector('#vm-show-${mode}'),r=n.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight&&n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})()`), true, `${mode} control reachable at ${width}`);
-        if (mode === 'static' && width === 390) assert.equal(await evaluate("[...document.querySelectorAll('#vm-static-workspace .vm-static-panels button')].every(button=>button.clientWidth>=80 && getComputedStyle(button).whiteSpace==='nowrap')"), true, 'Narrow static panel buttons retain complete readable labels');
+        if (mode === 'static' && width === 390) {
+          await until(() => evaluate("document.querySelector('#vm-static-workspace').dataset.layout === 'narrow'"), 'Static workspace resize observer applies narrow layout');
+          assert.equal(await evaluate("[...document.querySelectorAll('#vm-static-workspace .vm-static-panels button')].every(button=>button.clientWidth>=80 && getComputedStyle(button).whiteSpace==='nowrap')"), true, 'Narrow static panel buttons retain complete readable labels');
+        }
         await screenshot(`vm-mode-${mode}-empty-${width}`);
       }
       await click('#vm-show-findings');

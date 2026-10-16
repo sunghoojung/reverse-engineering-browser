@@ -32,6 +32,14 @@ export async function catalogActivationPoint() {
   return receipt;
 }
 
+// A forced refresh can return immediately while an older poll is in flight.
+// Select only after the expected fixture has reached the real Traffic model.
+function catalogCaptureFixtureReady(generation, identity, evidence) {
+  if (state.debuggerSession?.generation !== generation) return false;
+  const record = apiCatalogResolveSource(identity, state.requests).record;
+  return Boolean(record && JSON.stringify(record.captureRecord) === JSON.stringify(evidence));
+}
+
 function checkCatalogActivationReadiness() {
   const frames=[],rect=(y)=>({x:100,y,left:100,right:180,top:y,bottom:y+24,width:80,height:24});
   let painted=0,box=rect(700),overlay=false,passiveOpen=false,disabled=false;
@@ -162,8 +170,38 @@ console.log('PASS catalog validator, independent coverage, five-value identity, 
 checkComparison();
 await checkController();
 await checkHistory();
+await checkCaptureFixtureReadiness();
 
 if (process.argv.includes('--browser') || process.argv.includes('--serve')) await checkBrowser();
+async function checkCaptureFixtureReadiness() {
+  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const refresh=app.slice(app.indexOf('      async function refreshDebugger(force = false)'),app.indexOf('      async function refreshArtifacts()'));
+  const rebuild=app.slice(app.indexOf('      function rebuildTrafficRequests()'),app.indexOf('      function renderShellStatus()'));
+  const next=copy(fixture.debuggerState);next.generation++;next.network.requests[0].started_monotonic_ms=1000;
+  const evidence=next.network.requests[0],expected=api.apiCatalogRequestIdentity(api.requestsFromDebuggerNetwork(next.network)[0]);
+  const state={debuggerRefreshing:true,debuggerSession:copy(fixture.debuggerState),sessionMode:'live',nativeRequests:[],requests:api.requestsFromDebuggerNetwork(fixture.debuggerState.network),
+    selectedRequestId:requests[0].id,selectedCaptureIdentity:copy(identity)};
+  let fetches=0;
+  const model=runInNewContext(`${refresh}\n${rebuild}\n${catalogCaptureFixtureReady}\n;({refreshDebugger,rebuildTrafficRequests,catalogCaptureFixtureReady})`,
+    {state,location:{protocol:'http:'},...api,fetch:()=>{fetches++;throw Error('An active poll must not be replaced');},
+      syncTrafficComparison:()=>{},resetRequestSelection:()=>{state.selectedRequestId=null;state.selectedCaptureIdentity=null;},investigationNotice:()=>{},apiCatalogPanel:{sync(){}}});
+  await model.refreshDebugger(true);
+  assert.equal(fetches,0,'Forced refresh returns while the existing poll still owns the request');
+  assert.equal(state.selectedCaptureIdentity.started,100.0000001);
+  assert.equal(model.catalogCaptureFixtureReady(next.generation,expected,evidence),false,'Awaiting refresh does not establish fixture readiness');
+  state.debuggerSession=next;model.rebuildTrafficRequests();
+  assert.equal(state.selectedRequestId,null,'The real model expires a selection made before the new identity arrives');
+  assert.match(state.trafficSelectionNotice,/expired or its exact source changed/);
+  assert.equal(model.catalogCaptureFixtureReady(next.generation,expected,evidence),true);
+  assert.equal(model.catalogCaptureFixtureReady(next.generation+1,expected,evidence),false,'Fixture generation must match');
+  const changed=copy(evidence);changed.response.body.text+=' changed';
+  assert.equal(model.catalogCaptureFixtureReady(next.generation,expected,changed),false,'Exact evidence, including export inputs, must match');
+  state.requests.push({...state.requests[0]});
+  assert.equal(model.catalogCaptureFixtureReady(next.generation,expected,evidence),false,'Ambiguous retained identities remain refused');
+  state.requests.pop();state.selectedRequestId=evidence.id;state.selectedCaptureIdentity=expected;model.rebuildTrafficRequests();
+  assert.equal(state.selectedRequestId,evidence.id,'Selection after readiness survives an unchanged poll');
+  console.log('PASS export fixture readiness: actual in-flight refresh early return, stale selection expiration, exact generation/identity/evidence and ambiguity refusal (model; not rendered QA)');
+}
 function checkComparison() {
   const catalog = comparisonFixture(fixture.catalog);
   assert(api.isApiObservationCatalog(catalog));
@@ -535,7 +573,11 @@ async function checkBrowser() {
     selected.timing_evidence={format:'reb-network-timing-v1',request_monotonic_seconds:a(1),request_wall_seconds:a(1700000000),response_monotonic_seconds:a(1.06),completion_monotonic_seconds:a(1.1),response_observed:true,completion_observed:true,response_source:'responseReceived',completion_source:'loadingFinished',duplicate_response:false,duplicate_completion:false,response_after_completion:false,resource_timing:{state:'available',fields:{requestTime:a(1.005),proxyStart:u(),proxyEnd:u(),workerStart:u(),dnsStart:a(1),dnsEnd:a(3),connectStart:a(4),connectEnd:a(10),sslStart:a(5),sslEnd:a(9),sendStart:a(12),sendEnd:a(13),receiveHeadersStart:a(40),receiveHeadersEnd:a(45)}}};
     fixture.debuggerState.generation++;assert(api.isDebuggerResponse(fixture.debuggerState));
     await click('[data-export-close]');
-    await evaluate('refreshDebugger(true)');await click('[data-request-id="synthetic-json"]');
+    await evaluate('refreshDebugger(true)');
+    const exportIdentity=api.apiCatalogRequestIdentity(api.requestsFromDebuggerNetwork(fixture.debuggerState.network).find(request=>request.id===selected.id));
+    await until(()=>evaluate(`(${catalogCaptureFixtureReady})(${JSON.stringify(fixture.debuggerState.generation)},${JSON.stringify(exportIdentity)},${JSON.stringify(selected)})`),'exact HAR/SDL fixture before selection');
+    await click('[data-request-id="synthetic-json"]');
+    assert.deepEqual(await evaluate('state.selectedCaptureIdentity'),copy(exportIdentity),'Export selects the updated exact capture');
     if(!await evaluate("document.querySelector('#traffic-capture-export').open"))await click('#traffic-capture-export > summary');
     await openExport();await chooseExport('format',2);
     for(const [index,mode,filename] of [[0,'redacted_copy','selected.redacted.har'],[1,'raw','selected.raw.har']]) {

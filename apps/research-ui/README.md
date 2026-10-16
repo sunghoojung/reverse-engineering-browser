@@ -177,6 +177,35 @@ reuses this generator for a reviewed saved exact-request API response.
 See [Client project v1](../../docs/product/client-project-v1.md) for limits,
 unsupported cases, layout, privacy and validation.
 
+The **Client language** selector in both Traffic and retained Repeater-run export
+menus also offers **Python · requests** and **Python · httpx**. Each uses the same
+offline generator as `--python-client`, with fixed source, pinned direct provider,
+shared explicit copy policy and a dry run. Python's timeout is per operation,
+not a whole-request deadline. Native project exports use the existing local Save
+dialog and fixed-path ZIP validation, including the Python-only layout.
+
+Traffic **Export capture** also offers explicit **redacted HAR**, **raw HAR** and
+**captured GraphQL SDL** actions. HAR refuses missing, malformed or ambiguous
+source timing rather than inventing phases. SDL requires a complete retained
+HTTP 200 introspection response. **Export saved introspection JSON as SDL**
+accepts a local `__schema` or `data.__schema` JSON file up to 1 MiB; duplicate keys,
+invalid UTF-8, partial/error schemas and unsafe SDL literals are refused.
+Browser development downloads these text files. In the native shell the actions
+are labeled **Copy** and explicitly place text on the local clipboard; save it
+locally yourself. No clipboard write happens on opening or refreshing the menu.
+SDL is a raw schema export: descriptions and identifiers can be sensitive.
+Captured SDL includes the exact retained identity; the CLI additionally hashes
+the original saved input. Export never queries an introspection endpoint, sends
+a captured request, installs packages, evaluates capture values or changes the
+retained evidence. Status and unsupported/error reasons remain in the menu.
+
+`node tools/check-captured-export-ui.mjs` exercises the real action handlers with
+an in-memory DOM, including native bridge/clipboard routing, both providers and
+copy modes, invalid timing, partial schemas and canceled file reads. The rendered
+API-catalog lane exercises the menu with real keyboard/pointer actions and local
+downloads at three viewport sizes. Native Save-panel testing remains a macOS gate.
+
+
 ## Saved investigation notebook
 
 Use **Notebook** in the toolbar to create a named local notebook, then **Pin

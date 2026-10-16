@@ -119,9 +119,15 @@
                       <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="clipboard">Copy redacted copy</button>
                       <button id="passive-security-open" class="exchange-button" type="button" aria-haspopup="dialog">Local passive security report</button>
                       <button class="exchange-button" type="button" data-client-capture="draft">Review captured request in Repeater</button>
+                      <label>Client language <select data-client-provider="capture"><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label>
                       <button class="exchange-button" type="button" data-client-capture="raw">Export raw client project</button>
                       <button class="exchange-button" type="button" data-client-capture="redacted_copy">Export redacted client project</button>
-                      <p data-client-export-support></p>
+                      <p data-client-export-support></p><p data-client-export-status role="status" aria-live="polite"></p>
+                      <button class="exchange-button" type="button" data-capture-format="har" data-export-mode="redacted_copy">Export redacted HAR</button>
+                      <button class="exchange-button" type="button" data-capture-format="har" data-export-mode="raw">Export raw HAR</button>
+                      <button class="exchange-button" type="button" data-capture-format="sdl">Export captured GraphQL SDL</button>
+                      <label>Export saved introspection JSON as SDL <input type="file" accept=".json,application/json" data-sdl-file></label>
+                      <p data-format-export-support></p>
                       <p>Client projects contain one observed operation, source evidence, configuration and a dry-run example. Unsupported inputs remain explicit; no request is sent by export.</p>
                       <p>Redacted copies remove header values and bodies, plus URL credentials, queries and fragments. Paths and other metadata may still contain secrets. Review before sharing.</p>
                       <p data-traffic-export-status role="status" aria-live="polite"></p>
@@ -683,7 +689,7 @@
                   <button id="repeater-create" class="secondary-button" type="button">Start session</button>
                   <button id="repeater-dispose" class="secondary-button" type="button" disabled>End session</button>
                   <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
-                  <details class="exchange-options" id="repeater-client-export"><summary>Export project</summary><div class="exchange-options-menu"><p>Export the selected retained run as a one-operation Node.js project. Raw evidence can contain private data. Sending the example requires explicit configuration and --send.</p><button class="exchange-button" type="button" data-client-run-export="raw" disabled>Download raw project</button><button class="exchange-button" type="button" data-client-run-export="redacted_copy" disabled>Download redacted project</button><p data-client-export-support></p></div></details>
+                  <details class="exchange-options" id="repeater-client-export"><summary>Export project</summary><div class="exchange-options-menu"><p>Export the selected retained run as a one-operation client project. Raw evidence can contain private data. Sending the example requires explicit configuration and --send.</p><label>Client language <select data-client-provider="run"><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label><button class="exchange-button" type="button" data-client-run-export="raw" disabled>Download raw project</button><button class="exchange-button" type="button" data-client-run-export="redacted_copy" disabled>Download redacted project</button><p data-client-export-support></p><p data-client-export-status role="status" aria-live="polite"></p></div></details>
                 </div>
               </div>
 
@@ -1464,6 +1470,7 @@
     <script src="traffic_view.js"></script>
     <script src="api_catalog.js"></script>
     <script src="captured_client.js"></script>
+    <script src="captured_export_formats.js"></script>
     <script src="passive_security.js"></script>
     <script src="vm_debugger.js"></script>
     <script src="vm_static.js"></script>

@@ -1,5 +1,7 @@
 # Offline HAR export v1
 
+Traffic **Export capture** exposes raw and redacted HAR actions using this same offline generator and strict timing validator. Browser development downloads the file; the native **Copy** action writes text to the local clipboard only when explicitly selected.
+
 Export one reviewed, saved `get_network_request` response without contacting its
 URL or executing anything in it:
 

@@ -490,8 +490,52 @@ async function checkBrowser() {
     await click('[data-client-capture="raw"]');
     const downloaded=await until(async()=>{try{return await readFile(join(output,'reb-client-project.raw.zip'));}catch{return null;}},'explicit client ZIP download');
     assert.equal(downloaded.readUInt32LE(0),0x04034b50);
+    for (const [index,provider] of [[1,'requests'],[2,'httpx']]) {
+      await rm(join(output,'reb-client-project.raw.zip'));
+      await selectRenderedOption({evaluate,click,key,selector:'[data-client-provider="capture"]',index,keyboardFocus:true});
+      await click('[data-client-capture="raw"]');
+      const archive=await until(async()=>{try{return await readFile(join(output,'reb-client-project.raw.zip'));}catch{return null;}},'explicit Python '+provider+' ZIP download');
+      assert(archive.includes(Buffer.from(provider+'==')));assert(archive.includes(Buffer.from('reb-client-project/client.py')));
+    }
+    // Missing timing and a non-introspection response produce visible, local errors.
+    await click('[data-capture-format="har"][data-export-mode="redacted_copy"]');
+    assert.match(await evaluate("document.querySelector('[data-client-export-status]').textContent"),/HAR export unsupported/);
+    await click('[data-capture-format="sdl"]');
+    assert.match(await evaluate("document.querySelector('[data-client-export-status]').textContent"),/Export failed/);
+    const schema={data:{__schema:{queryType:{name:'Query'},mutationType:null,subscriptionType:null,types:[{kind:'SCALAR',name:'String',description:null},{kind:'OBJECT',name:'Query',description:null,interfaces:[],fields:[{name:'hello',description:null,args:[],type:{kind:'SCALAR',name:'String',ofType:null},isDeprecated:false,deprecationReason:null}]}],directives:[]}}};
+    selected.started_monotonic_ms=1000;selected.protocol='h2';
+    selected.response.headers=[['Content-Type','application/json']];selected.response.body={state:'available',mime:'application/json',text:JSON.stringify(schema),base64:'',truncated:false,reason:''};
+    const a=value=>({state:'available',value}),u=()=>({state:'unavailable'});
+    selected.timing_evidence={format:'reb-network-timing-v1',request_monotonic_seconds:a(1),request_wall_seconds:a(1700000000),response_monotonic_seconds:a(1.06),completion_monotonic_seconds:a(1.1),response_observed:true,completion_observed:true,response_source:'responseReceived',completion_source:'loadingFinished',duplicate_response:false,duplicate_completion:false,response_after_completion:false,resource_timing:{state:'available',fields:{requestTime:a(1.005),proxyStart:u(),proxyEnd:u(),workerStart:u(),dnsStart:a(1),dnsEnd:a(3),connectStart:a(4),connectEnd:a(10),sslStart:a(5),sslEnd:a(9),sendStart:a(12),sendEnd:a(13),receiveHeadersStart:a(40),receiveHeadersEnd:a(45)}}};
+    fixture.debuggerState.generation++;assert(api.isDebuggerResponse(fixture.debuggerState));
+    await evaluate('refreshDebugger(true)');await click('[data-request-id="synthetic-json"]');
+    if(!await evaluate("document.querySelector('#traffic-capture-export').open"))await click('#traffic-capture-export > summary');
+    for(const [mode,filename] of [['redacted_copy','selected.redacted.har'],['raw','selected.raw.har']]) {
+      await click('[data-capture-format="har"][data-export-mode="'+mode+'"]');
+      const bytes=await until(async()=>{try{return await readFile(join(output,filename));}catch{return null;}},'explicit '+mode+' HAR download');
+      const entry=JSON.parse(bytes).log.entries[0];assert.equal(entry._reb.mode,mode);
+      if(mode==='redacted_copy')assert.equal(entry.request.queryString.length,0);
+    }
+    await click('[data-capture-format="sdl"]');
+    const sdl=await until(async()=>{try{return await readFile(join(output,'selected.graphql'),'utf8');}catch{return null;}},'captured GraphQL SDL download');
+    assert.match(sdl,/type Query/);assert.match(sdl,/# Saved REB identity:/);
+    const input=join(output,'authored-introspection.json');await writeFile(input,JSON.stringify(schema));
+    const dom=await send('DOM.getDocument');const inputNode=await send('DOM.querySelector',{nodeId:dom.root.nodeId,selector:'[data-sdl-file]'});
+    await send('DOM.setFileInputFiles',{nodeId:inputNode.nodeId,files:[input]});
+    const fileSDL=await until(async()=>{try{return await readFile(join(output,'schema.graphql'),'utf8');}catch{return null;}},'selected local introspection file download');
+    assert.match(fileSDL,/type Query/);
+    for(const [width,height] of [[1440,900],[760,560],[360,740]]) {
+      await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+      await evaluate("document.querySelector('[data-client-provider=\"capture\"]').scrollIntoView({block:'nearest'})");
+      const layout=await evaluate("(()=>{const m=document.querySelector('#traffic-capture-export .exchange-options-menu'),s=document.querySelector('[data-client-provider=\"capture\"]'),r=s.getBoundingClientRect();return {left:r.left,right:r.right,width:innerWidth,overflow:m.scrollWidth>m.clientWidth+1};})()");
+      assert(layout.left>=0&&layout.right<=layout.width&&!layout.overflow,'Export selectors fit the viewport: '+JSON.stringify({width,height,...layout}));
+      await shot('export-menu-'+width);
+    }
+    await selectRenderedOption({evaluate,click,key,selector:'[data-client-provider="capture"]',index:2,keyboardFocus:true});
+    await key('Escape','Escape');assert.equal(await evaluate("document.querySelector('#traffic-capture-export').open"),false);
+
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);
-    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',catalog_activation:catalogActivation,passive_security:passiveSecurity,product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download'],keyboard:['Tab filter focus','Enter clear filters','native keyboard comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
+    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',catalog_activation:catalogActivation,passive_security:passiveSecurity,product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download','Python requests/httpx keyboard selection and downloads','HAR raw/redacted downloads and missing-timing refusal','captured and local-file GraphQL SDL','export menu three-viewport geometry'],keyboard:['Tab filter focus','Enter clear filters','native keyboard comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
     console.log(`PASS rendered catalog: keyboard and pointer, three viewports, scrolling, inert markup, raw header preservation, explicit read-only lifecycle, source invalidation. Evidence: ${output}`);
   } catch (error) {
     firstFailure=error;

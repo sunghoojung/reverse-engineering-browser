@@ -328,8 +328,8 @@ async function checkController() {
   const runExports=['raw','redacted_copy'].map(mode=>{const node=new Node();node.dataset.clientRunExport=mode;return node;});
   let native=false,bridgeMode='saved',bridgeCalls=0;
   const bridge={postMessage:async payload=>{bridgeCalls++;assert.equal(payload.format,'reb-client-project-save-v1');assert.equal(payload.mode,'raw');assert.equal(Buffer.from(payload.base64,'base64').readUInt32LE(0),0x04034b50);if(bridgeMode==='failed')throw new Error('authored save denial');return {status:bridgeMode};}};
-  const document={querySelector:selector=>selector==='[data-client-capture="draft"]'?drafts:nodes.get(selector),
-    querySelectorAll:selector=>selector==='[data-client-capture]'?[drafts,...exports]:selector==='[data-client-run-export]'?runExports:selector==='[data-client-export-support]'?[]:exports,
+  const document={querySelector:selector=>selector==='[data-client-capture="draft"]'?drafts:selector.startsWith('[data-client-provider=')?{value:'standard'}:nodes.get(selector),
+    querySelectorAll:selector=>selector==='[data-client-capture]'?[drafts,...exports]:selector==='[data-client-run-export]'?runExports:selector==='[data-client-capture="raw"], [data-client-capture="redacted_copy"]'?exports:[],
     createElement:tag=>new Node(tag),body:new Node(),documentElement:{classList:{contains:()=>native}},events:{},addEventListener(type,handler){this.events[type]=handler;}};
   const dialog=nodes.get('#captured-client-review');dialog.querySelector=selector=>nodes.get(selector);
   const install=runInNewContext(code.join('\n')+'\ninstallCapturedClientWorkflow',{...globals,document,Blob,webkit:{messageHandlers:{rebClientProjectExport:bridge}},URL:class extends URL {static createObjectURL(){downloads++;return 'blob:authored';}static revokeObjectURL(){}},setTimeout:()=>0});

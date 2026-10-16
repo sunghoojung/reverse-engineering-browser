@@ -27,7 +27,6 @@ const analysis = {
   mixed_findings: [], opcode_workspace: fixture
 };
 assert(runInNewContext(`${model}\nisVmAnalysisDocument(analysis) && isVmOpcodeWorkspaceDocument(fixture)`, {analysis, fixture, TextEncoder}));
-if (process.argv.includes('--fixture-only')) { console.log('PASS full-shell authored HTTP fixture contracts (not rendered)'); process.exit(0); }
 const assets = new Set(['index.html', ...[...html.matchAll(/(?:src|href)="([^"/]+\.(?:js|css))"/g)].map(match => match[1])]);
 const requests = [];
 const server = createServer(async (request, response) => {
@@ -35,12 +34,12 @@ const server = createServer(async (request, response) => {
   const json = value => { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(value)); };
   if (path.startsWith('/api/')) {
     requests.push({method: request.method, path});
-    if (request.method !== 'GET') { response.writeHead(405); json({error: 'Read-only authored fixture'}); return; }
+    if (request.method !== 'GET') { response.statusCode = 405; json({error: 'Read-only authored fixture'}); return; }
     if (path === '/api/events') return json({count: 0, events: [], capture_mode: 'demo', broker_connected: false, capture_stopped: true});
     if (path === '/api/artifacts') return json({count: 0, artifacts: []});
     if (path === '/api/analysis/vm') return json(analysis);
     if (path === '/api/analysis/vm/opcodes') return json(fixture);
-    response.writeHead(503); json({error: 'Unavailable in authored full-shell fixture'}); return;
+    response.statusCode = 503; json({error: 'Unavailable in authored full-shell fixture'}); return;
   }
   const name = path === '/' ? 'index.html' : path.slice(1);
   if (!/^[a-z][a-z0-9_]*\.(?:html|js|css)$/.test(name) || !assets.has(name)) { response.writeHead(404).end(); return; }
@@ -49,6 +48,21 @@ const server = createServer(async (request, response) => {
     response.end(await readFile(join(root, 'apps/research-ui', name)));
   } catch { response.writeHead(500).end(); }
 });
+if (process.argv.includes('--fixture-only')) {
+  for (const [method, url, status] of [['GET', '/api/unavailable', 503], ['POST', '/api/analysis/vm', 405], ['GET', '/api/analysis/vm', 200]]) {
+    const response = {statusCode: 200, headersSent: false, headers: {},
+      setHeader(name, value) { assert.equal(this.headersSent, false, 'Headers must precede body'); this.headers[name] = value; },
+      writeHead(code) { this.statusCode = code; this.headersSent = true; },
+      end(body) { this.headersSent = true; this.body = body; }};
+    server.emit('request', {url, method}, response);
+    assert.equal(response.statusCode, status);
+    assert.equal(response.headers['content-type'], 'application/json');
+    assert.doesNotThrow(() => JSON.parse(response.body));
+  }
+  server.close();
+  console.log('PASS full-shell authored HTTP contracts and response ordering (not rendered)');
+  process.exit(0);
+}
   const profile = await mkdtemp(join(tmpdir(), 'reb-vm-workspace-'));
   let browser, socket, closed = false, diagnostics = '', sequence = 0;
   const pending = new Map(), errors = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms));

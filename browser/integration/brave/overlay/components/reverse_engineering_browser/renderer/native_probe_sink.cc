@@ -331,8 +331,8 @@ bool EqualsAt(const RegionScan& scan,
   }
   for (std::size_t offset = 0; offset < length; ++offset) {
     const char current = scan.At(index + offset);
-    const char expected = ignore_case ? AsciiLower(static_cast<unsigned char>(word[offset]))
-                                      : word[offset];
+    const char expected =
+        ignore_case ? AsciiLower(static_cast<unsigned char>(word[offset])) : word[offset];
     const char actual = ignore_case ? AsciiLower(static_cast<unsigned char>(current)) : current;
     if (actual != expected) {
       return false;
@@ -363,10 +363,9 @@ bool ContainsLoop(const RegionScan& scan) noexcept {
   constexpr std::size_t kWhileLen = sizeof(kWhile) - 1U;
   constexpr std::size_t kForLen = sizeof(kFor) - 1U;
   for (std::size_t index = scan.begin; index < scan.end; ++index) {
-    const std::size_t length =
-        EqualsAt(scan, index, kWhile, kWhileLen, false) ? kWhileLen
-        : EqualsAt(scan, index, kFor, kForLen, false)   ? kForLen
-                                                         : 0U;
+    const std::size_t length = EqualsAt(scan, index, kWhile, kWhileLen, false) ? kWhileLen
+                               : EqualsAt(scan, index, kFor, kForLen, false)   ? kForLen
+                                                                               : 0U;
     if (length == 0 || scan.WordBefore(index) || scan.WordAfter(index + length)) {
       continue;
     }
@@ -468,9 +467,8 @@ bool ContainsIpUpdate(const RegionScan& scan) noexcept {
     while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
       ++cursor;
     }
-    if (cursor + 1U < scan.end &&
-        ((scan.At(cursor) == '+' && scan.At(cursor + 1U) == '+') ||
-         (scan.At(cursor) == '-' && scan.At(cursor + 1U) == '-'))) {
+    if (cursor + 1U < scan.end && ((scan.At(cursor) == '+' && scan.At(cursor + 1U) == '+') ||
+                                   (scan.At(cursor) == '-' && scan.At(cursor + 1U) == '-'))) {
       return true;
     }
     if (cursor < scan.end && (scan.At(cursor) == '+' || scan.At(cursor) == '-')) {
@@ -517,8 +515,8 @@ bool ContainsNamedBracket(const RegionScan& scan,
 }
 
 bool ContainsBytecodeRead(const RegionScan& scan) noexcept {
-  constexpr const char* kWords[] = {"instructions", "bytecode", "opcodes", "program", "bytes",
-                                    "code"};
+  constexpr const char* kWords[] = {"instructions", "bytecode", "opcodes",
+                                    "program",      "bytes",    "code"};
   constexpr std::size_t kLens[] = {12U, 8U, 7U, 7U, 5U, 4U};
   if (ContainsNamedBracket(scan, kWords, kLens, 6U) ||
       ContainsBoundedWord(scan, "Uint8Array", 10U, false) ||
@@ -573,9 +571,9 @@ bool ContainsStateWord(const RegionScan& scan) noexcept {
     if (cursor < scan.end && scan.At(cursor) == '[') {
       return true;
     }
-    if (cursor < scan.end && (scan.At(cursor) == '+' || scan.At(cursor) == '-' ||
-                              scan.At(cursor) == '^' || scan.At(cursor) == '|' ||
-                              scan.At(cursor) == '&')) {
+    if (cursor < scan.end &&
+        (scan.At(cursor) == '+' || scan.At(cursor) == '-' || scan.At(cursor) == '^' ||
+         scan.At(cursor) == '|' || scan.At(cursor) == '&')) {
       ++cursor;
     }
     if (cursor < scan.end && scan.At(cursor) == '=') {
@@ -803,13 +801,12 @@ RegionScore ScoreRegion(const RegionScan& scan) noexcept {
   int best_families = -1;
   std::size_t best_start = 0;
   for (std::size_t index = 0; index < region_count; ++index) {
-    const RegionScan scan{text, owner, regions[index].id, regions[index].start,
-                          regions[index].end};
+    const RegionScan scan{text, owner, regions[index].id, regions[index].start, regions[index].end};
     const RegionScore scored = ScoreRegion(scan);
     if (scored.score > best_score ||
-        (scored.score == best_score && (scored.families > best_families ||
-                                        (scored.families == best_families &&
-                                         regions[index].start < best_start)))) {
+        (scored.score == best_score &&
+         (scored.families > best_families ||
+          (scored.families == best_families && regions[index].start < best_start)))) {
       best_score = scored.score;
       best_families = scored.families;
       best_start = regions[index].start;

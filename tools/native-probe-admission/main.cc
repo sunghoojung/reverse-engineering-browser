@@ -430,11 +430,14 @@ void RuntimeSourceFeed() {
   sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", std::span(buffer).first(32),
                                 again);
   assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
-  capture("var vm=(pc)=>{while(pc<program.length){switch(program[pc++]){case 1:stack.push(1);return;}}};",
-          32);
+  capture(
+      "var vm=(pc)=>{while(pc<program.length){switch(program[pc++]){case "
+      "1:stack.push(1);return;}}};",
+      32);
   assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
-  capture("var vm=pc=>{while(pc<program.length){switch(program[pc++]){case 1:stack.push(1);return;}}};",
-          32);
+  capture(
+      "var vm=pc=>{while(pc<program.length){switch(program[pc++]){case 1:stack.push(1);return;}}};",
+      32);
   assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
   const std::string_view unrelated{"function add(a,b){return a+b;}"};
   const std::vector<std::uint8_t> unrelated_bytes(unrelated.begin(), unrelated.end());

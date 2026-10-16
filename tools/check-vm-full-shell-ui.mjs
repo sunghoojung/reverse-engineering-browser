@@ -154,7 +154,7 @@ if (process.argv.includes('--fixture-only')) {
     };
     const modes = await evaluate("[...document.querySelectorAll('.vm-workspace-switch button')].map(node=>[node.id.replace('vm-show-',''),node.getAttribute('aria-controls')])");
     for (const expected of ['findings','execution','owned','static','contextual']) assert(modes.some(([mode]) => mode === expected));
-    for (const width of [1440, 900, 390]) {
+    for (const width of [1440, 1280, 900, 390]) {
       await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
       await click('#nav-vm-workspace');
       assert.equal(await evaluate("document.querySelector('#screen-vm').hidden"), false);
@@ -172,7 +172,12 @@ if (process.argv.includes('--fixture-only')) {
       await until(() => evaluate("document.querySelectorAll('.vm-workbench-tabs button').length >= 6"), 'actual finding analysis tabs');
       assert.equal(await evaluate("document.querySelector('.vm-finding-provenance').open"), false);
       await evaluate("document.querySelector('#vm-detail').scrollTop=0;document.querySelector('#vm-findings-workspace').scrollTop=0");
-      if (width === 1440) assert.equal(await evaluate("['.vm-handler-head','.vm-handler-row'].every(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return r.top>=0&&r.bottom<innerHeight;})"), true, 'Listing header and first handler remain above the fold');
+      if (width >= 1280) assert.equal(await evaluate("['.vm-handler-head','.vm-handler-row'].every(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return r.top>=0&&r.bottom<innerHeight;})"), true, 'Listing header and first handler remain above the fold');
+      if (width >= 1280) {
+        const columns = await evaluate("(()=>{const head=document.querySelector('.vm-handler-head'),list=document.querySelector('.vm-handler-list'),row=list.querySelector('.vm-handler-row');return {listWidth:list.clientWidth,rowWidth:row.getBoundingClientRect().width,offsets:[...head.children].map((cell,index)=>Math.abs(cell.getBoundingClientRect().left-row.children[index].getBoundingClientRect().left))};})()");
+        assert(Math.abs(columns.listWidth - columns.rowWidth) <= 1, 'Handler rows fill the listing width');
+        assert(columns.offsets.every(offset => offset <= 1), 'Handler cells align with their column headers');
+      }
       await click('.vm-handler-row');
       await key('ArrowDown', 'ArrowDown', 40);
       assert.equal(await evaluate("document.querySelector('.vm-selection-inspector h3').textContent"),
@@ -210,10 +215,11 @@ if (process.argv.includes('--fixture-only')) {
     await click('[data-pack-inputs="apply"] > summary');
     const rawClosed = "[...document.querySelectorAll('#vm-packs-workspace details')].filter(node=>node.querySelector('.vm-pack-output')).every(node=>!node.open)";
     assert.equal(await evaluate(rawClosed), true);
-    for (const width of [1440,900,390]) {
+    for (const width of [1440,1280,900,390]) {
       await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
       await evaluate("document.querySelector('#vm-packs-workspace').scrollTop=0");
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `Populated packs fit at ${width}`);
+      assert.equal(await evaluate("(()=>{const panel=document.querySelector('#vm-packs-workspace .vm-tool-results'),row=panel.querySelector('tbody tr');return row.getBoundingClientRect().bottom<=panel.getBoundingClientRect().bottom;})()"), true, 'Comparison rows are not hidden in a shrunken result viewport');
       await screenshot(`vm-packs-populated-${width}`);
     }
     await send('Emulation.setDeviceMetricsOverride', {width: 1440, height: 900, deviceScaleFactor: 1, mobile: false});
@@ -232,15 +238,16 @@ if (process.argv.includes('--fixture-only')) {
     await clickLabel('#vm-ledger-workspace', 'Validate ledger');
     await until(() => evaluate("document.querySelector('#vm-ledger-workspace .vm-tool-table tbody tr') !== null"), 'Structured ledger report');
     assert.equal(await evaluate("[...document.querySelectorAll('[data-ledger-editor]')].every(node=>!node.open)"), true);
-    for (const width of [1440,900,390]) {
+    for (const width of [1440,1280,900,390]) {
       await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
       await evaluate("document.querySelector('#vm-ledger-workspace').scrollTop=0");
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `Populated ledger fits at ${width}`);
+      assert.equal(await evaluate("(()=>{const panel=document.querySelector('#vm-ledger-workspace .vm-tool-results'),row=panel.querySelector('tbody tr');return row.getBoundingClientRect().bottom<=panel.getBoundingClientRect().bottom;})()"), true, 'Ledger rows are not hidden in a shrunken result viewport');
       await screenshot(`vm-ledger-populated-${width}`);
     }
     assert.deepEqual(errors, []);
     assert.equal(requests.some(request => request.method !== 'GET' && !(request.method === 'POST' && request.path === '/api/analysis/vm/packs/compare')), false, 'Only exact authored comparison may POST');
-    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440,900,390],
+    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440,1280,900,390],
       scope: 'Actual index.html, shipped scripts, HTTP admission of authored retained finding, all mode controls and analysis panels, selected handler linkage, real File inputs and authored pack/ledger result presentation. Pack response is a synthetic display fixture, not real backend analysis. No live capture, native runtime or VM execution.', requests}, null, 2));
     console.log(`PASS full VM product shell: ${output}`);
   } catch (error) {

@@ -2032,10 +2032,10 @@ installed Chrome/Chromium, omit the flag to load the actual `index.html` and all
 shipped scripts. The loopback fixture admits one authored retained finding
 through the ordinary analysis API. It checks the primary VM entry, every VM
 mode and finding panel, linked keyboard handler selection, and above-fold
-listing visibility at 1440 pixels. Real local File imports populate Packs and
+listing visibility at 1440 and 1280 pixels. Real local File imports populate Packs and
 Ledger; one exact bounded comparison request receives an explicitly authored
 presentation response. Raw editors stay collapsed for result captures. Empty
-modes and populated results are captured at 1440, 900 and 390 pixels.
+modes and populated results are captured at 1440, 1280, 900 and 390 pixels.
 Full-page and scrolled-dock screenshots are saved under
 `build/vm-workspace-ui-qa/full-shell`; CI includes them in the VM artifact.
 This verifies product-shell composition with synthetic responses, not native

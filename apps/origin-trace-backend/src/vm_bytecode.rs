@@ -431,7 +431,7 @@ mod tests {
         fs::write(&events, b"").unwrap();
         let analysis = crate::vm::store(root.path(), &events).unwrap();
         let workspace = serde_json::from_slice(
-            &fs::read(root.path().join("analysis/vm-opcode-workspace-v1.json")).unwrap(),
+            &fs::read(root.path().join("analysis/vm-opcode-workspace-v2.json")).unwrap(),
         )
         .unwrap();
         let schema: Value =

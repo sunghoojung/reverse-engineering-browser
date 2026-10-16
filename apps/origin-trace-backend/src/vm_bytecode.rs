@@ -207,6 +207,15 @@ pub(crate) fn snapshot(source: &str, id: &str) -> Value {
         );
     }
     let masked = crate::vm::mask(source);
+    // The lightweight mask removes comments and quoted text, but does not
+    // distinguish regular-expression literals from division. Neither may turn
+    // literal text into a byte initializer, so refuse this lexical ambiguity.
+    if masked.contains('/') {
+        return unavailable(
+            id,
+            "A slash outside masked comments or strings leaves lexical ambiguity; the static initializer is unknown.",
+        );
+    }
     if REBOUND_BUILTIN.is_match(&masked) {
         return unavailable(
             id,
@@ -386,6 +395,66 @@ mod tests {
             assert!(value["snapshot_hex"].is_null(), "{source}: {value}");
             assert!(value.get("sha256").is_none(), "{source}");
             assert!(value["unavailable_reason"].is_string(), "{source}");
+        }
+    }
+
+    #[test]
+    fn regex_and_division_ambiguity_never_become_static_initializers() {
+        for source in [
+            r"/Uint8Array.of(80)/",
+            r"/[a-z]Uint8Array.of(80)/",
+            r"/[\/]Uint8Array.of(80)/",
+            r"/\/Uint8Array.of(80)/",
+            "const ratio = 4 / 2; Uint8Array.of(80)",
+            "Uint8Array.of(80) / 2",
+        ] {
+            let value = snapshot(source, "7");
+            assert!(value["snapshot_hex"].is_null(), "{source}: {value}");
+            assert!(value.get("sha256").is_none());
+            assert!(
+                value["unavailable_reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("lexical ambiguity")
+            );
+        }
+        assert_preview(
+            "/* /Uint8Array.of(1)/ */ Uint8Array.fromBase64('/w==')",
+            &[255],
+        );
+        assert_preview("// /Uint8Array.of(1)/\nUint8Array.of(80)", &[80]);
+        assert_preview(
+            "const text = '/Uint8Array.of(1)/'; Uint8Array.of(80)",
+            &[80],
+        );
+        for initializer in [
+            r"/Uint8Array.of(80)/",
+            r"/[\/]Uint8Array.of(80)/",
+            "Uint8Array.of(80) / 2",
+        ] {
+            let (analysis, workspace) = documents(initializer);
+            assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+            let preview = &analysis["results"][0]["bytecode_snapshot"];
+            assert!(preview["snapshot_hex"].is_null());
+            assert!(
+                preview["unavailable_reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("lexical ambiguity")
+            );
+            let omissions = workspace["workspaces"][0]["coverage"]["omissions"]
+                .as_array()
+                .unwrap();
+            assert!(
+                omissions
+                    .iter()
+                    .any(|row| row["reason"] == "runtime-snapshot-unavailable")
+            );
+            assert!(
+                !omissions
+                    .iter()
+                    .any(|row| row["reason"] == "static-initializer-only")
+            );
         }
     }
 

@@ -73,7 +73,11 @@ string-iterator element, whereas TextEncoder produces UTF-8. The preview keeps
 `static-initializer`, with an original-source byte offset and truncation flag.
 Malformed or noncanonical base64 may stay unavailable. Bare string constructor
 arguments, variables, unresolved assignments, custom
-mappers/decoders, and shadowed built-ins stay unavailable. Recognition reads at
+mappers/decoders, and shadowed built-ins stay unavailable. A slash outside masked
+comments or quoted strings also leaves the preview unavailable with a lexical-
+ambiguity reason: this bounded recognizer does not distinguish regex literals
+from division. Slashes inside supported string/base64 arguments remain valid.
+Recognition reads at
 most 16 MiB and examines at most 4096 constructors. It never evaluates captured
 source, executes a decoder, or labels a static preview as a runtime snapshot.
 A workspace with only this preview reports `static-initializer-only`; without

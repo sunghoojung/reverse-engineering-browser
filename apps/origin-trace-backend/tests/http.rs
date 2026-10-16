@@ -593,7 +593,8 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 37, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 39, "Review route coverage when the API changes");
+    assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -775,7 +776,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 37);
+    assert_eq!(operation_count, 39);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [

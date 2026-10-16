@@ -42,11 +42,12 @@ function mountVmAnalysisPacks(root) {
     output.textContent = ''; download.disabled = true; apply.disabled = false; compare.disabled = false;
   };
   for (const [key, title] of [['pack', 'Analysis pack'], ['analysis', 'VM analysis (apply)'], ['left', 'Left opcode workspace'], ['right', 'Right opcode workspace']]) {
-    const label = node('label', title), picker = node('input'); picker.type = 'file'; picker.accept = '.json,application/json';
+    const label = node('label', title), picker = node('input'); picker.type = 'file'; picker.setAttribute('aria-label', title); picker.accept = '.json,application/json';
     const selected = node('span', 'No file selected'); pickers[key] = picker; statuses[key] = selected; epochs[key] = 0;
     picker.addEventListener('change', async () => {
       const epoch = ++epochs[key], file = picker.files?.[0]; invalidate(); inputs[key] = null;
       selected.textContent = file ? 'Reading selected file…' : 'No file selected';
+      status.textContent = file ? 'Reading input. Previous report cleared.' : 'Input selection cleared. Previous report cleared.';
       if (!file) return;
       try {
         if (file.size > (key === 'pack' ? 65536 : 16777216)) throw new Error('File exceeds the input limit.');
@@ -54,13 +55,13 @@ function mountVmAnalysisPacks(root) {
         if (epoch !== epochs[key]) return;
         inputs[key] = text; selected.textContent = `${file.name} · ${file.size} bytes`;
         status.textContent = 'Inputs changed. Run an explicit analysis to validate these documents.';
-      } catch (error) { if (epoch === epochs[key]) selected.textContent = `Unavailable: ${error.message}`; }
+      } catch (error) { if (epoch === epochs[key]) { selected.textContent = `Unavailable: ${error.message}`; status.textContent = `Import refused: ${error.message}`; } }
     });
     label.append(picker, selected); fields.append(label);
   }
   const ids = {};
   for (const side of ['left', 'right']) {
-    const label = node('label', `${side === 'left' ? 'Left' : 'Right'} interpreter artifact ID`), input = node('input'); input.type = 'text'; input.inputMode = 'numeric'; input.maxLength = 20;
+    const label = node('label', `${side === 'left' ? 'Left' : 'Right'} interpreter artifact ID`), input = node('input'); input.type = 'text'; input.setAttribute('aria-label', `${side} interpreter artifact ID`); input.inputMode = 'numeric'; input.maxLength = 20;
     input.addEventListener('input', () => { invalidate(); status.textContent = 'Interpreter selection changed. Run comparison again.'; });
     ids[side] = input; label.append(input); fields.append(label);
   }

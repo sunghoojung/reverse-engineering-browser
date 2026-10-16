@@ -62,7 +62,7 @@ if application.is_dir():
 PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
-for asset in index.html app.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js investigation_navigation.js investigation_notebook.js traffic_view.js api_catalog.js captured_client.js passive_security.js vm_semantics.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_debugger.js traffic_comparison.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js element_screenshot.js local_override_manager.js app.js analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js investigation_navigation.js investigation_notebook.js traffic_view.js api_catalog.js captured_client.js captured_export_formats.js passive_security.js vm_semantics.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_debugger.js traffic_comparison.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js element_screenshot.js local_override_manager.js app.js analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"

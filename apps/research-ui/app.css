@@ -3785,6 +3785,14 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #captured-client-review > [data-client-apply] { min-height: 30px; }
 #repeater-client-export .exchange-options-menu { right: 0; width: min(320px,calc(100vw - 24px)); max-height: 50vh; overflow: auto; }
 #repeater-client-export .exchange-options-menu p { white-space: normal; font-size: 11px; line-height: 1.4; margin: 8px; }
+#traffic-capture-export .exchange-options-menu label,
+#repeater-client-export .exchange-options-menu label { display: grid; gap: 5px; margin: 8px; white-space: normal; font-size: 11px; }
+#traffic-capture-export .exchange-options-menu input,
+#traffic-capture-export .exchange-options-menu select,
+#repeater-client-export .exchange-options-menu select { min-width: 0; width: 100%; max-width: 100%; }
+#traffic-capture-export .exchange-options-menu :focus-visible,
+#repeater-client-export .exchange-options-menu :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 
 #repeater-body-panel > textarea { height: auto; flex: 1; }
 #repeater-body-representation-note { flex: 0 0 auto; margin: 8px 12px; color: var(--muted); font-size: 11px; line-height: 1.4; }

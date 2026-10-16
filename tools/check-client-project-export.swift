@@ -131,6 +131,16 @@ enum ClientProjectExportChecks {
     reject("no evidence") {
       _ = try ClientProjectArchive.validate(zip(files.filter { !ClientProjectArchive.evidencePaths.contains($0.path) }))
     }
+    let pythonShared = files.filter { ClientProjectArchive.pythonRequiredPaths.contains($0.path) || ClientProjectArchive.evidencePaths.contains($0.path) }
+    let python = pythonShared + [Entry(path: "reb-client-project/client.py", body: Data("# authored fixture".utf8)),
+      Entry(path: "reb-client-project/requirements.txt", body: Data("httpx==0.28.1".utf8))]
+    _ = try ClientProjectArchive.validate(zip(python), expectedMode: .raw)
+    reject("Python missing required file") { _ = try ClientProjectArchive.validate(zip(Array(python.dropLast()))) }
+    reject("mixed client layouts") { _ = try ClientProjectArchive.validate(zip(files + [python.last!])) }
+    var escapedPython = python
+    escapedPython[escapedPython.count - 1].path = "reb-client-project/../requirements.txt"
+    reject("Python traversal") { _ = try ClientProjectArchive.validate(zip(escapedPython)) }
+
     var invalidUTF8 = files; invalidUTF8[files.count - 1].body = Data([0xff])
     reject("UTF-8 with matching CRC") { _ = try ClientProjectArchive.validate(zip(invalidUTF8)) }
 

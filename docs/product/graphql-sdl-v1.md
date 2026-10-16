@@ -1,5 +1,7 @@
 # Saved GraphQL introspection to SDL
 
+Traffic **Export capture** exposes captured-response SDL and an explicit local introspection-file picker using the same structural generator. Browser development downloads the result; the native **Copy** action explicitly copies text locally. The UI records selected capture identity; source-file SHA-256 remains a CLI receipt.
+
 Convert an explicitly selected local introspection result into reviewable SDL:
 
 ```sh

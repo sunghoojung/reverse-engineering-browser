@@ -418,7 +418,7 @@ function mountOwnedVmDebugger(root, options = {}) {
     if (session) fixture.value = session.fixture;
     const pendingText = model.pending.map(item => `${item.action} requested; awaiting acknowledgment`).join('; ');
     const state = session?.state || 'idle';
-    status.textContent = !view ? 'Reading debugger capability…' : !view.available ? `Live fixture unavailable: ${view.unavailable_reason || 'this server does not provide native execution'}.` :
+    status.textContent = !view ? (model.notice ? 'Live fixture status unavailable.' : 'Reading debugger capability…') : !view.available ? `Live fixture unavailable: ${view.unavailable_reason || 'this server does not provide native execution'}.` :
       session ? `${state} · PC ${session.current_snapshot ? ownedVmPC(session.current_snapshot) : 'unavailable'} · executed ${session.executed_count} · retained ${session.retained_count}${session.execution_state_known ? '' : state === 'starting' ? ' · awaiting initial snapshot' : ' · execution state unknown'}${pendingText ? ` · ${pendingText}` : ''}${visible && doc.visibilityState !== 'hidden' ? '' : ' · last observed; details hidden'}` : 'Available · no fixture created · Create starts paused.';
     if (notice.textContent !== model.notice) notice.textContent = model.notice;
     const announced = session && !['running', 'starting', 'pausing', 'stepping', 'stopping'].includes(state) ? `${scope}:${state}:${session.last_command?.command_id || ''}` : '';

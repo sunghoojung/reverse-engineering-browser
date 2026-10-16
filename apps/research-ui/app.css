@@ -4627,3 +4627,35 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-workbench-listing .vm-handler-row, #screen-vm .vm-handler-label strong { font-size: 12px; }
 #screen-vm .vm-selection-fields, #screen-vm .vm-selection-inspector p { font-size: 11px; }
 #screen-vm .vm-workbench-tabs button { font-size: 11px; }
+#screen-vm .vm-workbench-listing .vm-handler-row { width: 100%; box-sizing: border-box; }
+/* Follow-up from full-window QA: readable native controls and non-shrinking results. */
+#screen-vm .vm-tool-shell > * { flex-shrink: 0; }
+#screen-vm .vm-tool-results > :is(h3,p) { margin: 0; padding: 8px 12px; }
+#screen-vm .vm-tool-results > h3 { padding-top: 12px; padding-bottom: 4px; font-size: 13px; }
+#screen-vm .vm-tool-results > details { padding: 8px 12px; }
+#screen-vm :is(input[type="text"], input[type="search"], select) { min-height: 28px; border: 1px solid var(--line); border-radius: 3px; background: var(--bg); color: var(--text); padding: 4px 7px; font: 11px var(--sans); }
+#screen-vm input[type="file"]::file-selector-button { border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--text); padding: 5px 8px; margin-right: 8px; font: 11px var(--sans); }
+#screen-vm :where(#vm-owned-debugger, #vm-owned-controls) button { border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--text); padding: 5px 8px; font: 11px var(--sans); }
+#screen-vm :where(#vm-owned-debugger, #vm-owned-controls) button:disabled { color: var(--faint); background: var(--chrome); }
+#screen-vm .owned-vm-debugger-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+#screen-vm .owned-vm-debugger-toolbar { padding: 9px 12px; gap: 7px; font-size: 11px; }
+#screen-vm .owned-vm-debugger-toolbar p { margin: 3px 0; line-height: 1.5; }
+#screen-vm .owned-vm-debugger-panes { font-size: 11px; line-height: 1.5; }
+#screen-vm .owned-vm-debugger-panes h3 { font-size: 12px; }
+#screen-vm .owned-vm-debugger-tabs { display: flex; gap: 4px; margin: 8px 0; }
+#screen-vm .owned-vm-debugger-tabs [aria-selected="true"] { background: var(--accent-soft); border-color: var(--accent); }
+#screen-vm .vm-tool-primary:not(:disabled) { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+#screen-vm .vm-tool-tertiary { background: transparent; border-color: transparent; color: var(--muted); }
+#vm-contextual-workspace { grid-row: 3; padding: 16px 20px; overflow: auto; }
+#vm-contextual-workspace > p { font-size: 11px; color: var(--muted); line-height: 1.6; }
+#vm-contextual-workspace .vm-contextual-imports { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin: 16px 0 10px; }
+#vm-contextual-workspace .vm-contextual-imports label { display: flex; flex-direction: column; align-items: start; gap: 9px; padding: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); font-size: 11px; }
+#vm-contextual-workspace .vm-contextual-imports input { width: 100%; font-size: 10px; }
+#vm-contextual-workspace .vm-contextual-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+#vm-contextual-workspace .vm-contextual-panes:has(button) { border: 1px solid var(--line); gap: 0; margin-top: 12px; }
+#vm-contextual-workspace .vm-contextual-list:not(:empty), #vm-contextual-workspace .vm-contextual-detail:not(:empty) { padding: 12px; background: var(--panel); min-width: 0; }
+#vm-contextual-workspace .vm-contextual-detail:not(:empty) { border-left: 1px solid var(--line); }
+#vm-contextual-workspace .vm-contextual-panes h2 { font-size: 12px; }
+@media(max-width:700px) { #vm-contextual-workspace { padding: 12px; } #vm-contextual-workspace .vm-contextual-imports { grid-template-columns: minmax(0,1fr); } }
+
+:root:not([data-theme="light"]) #screen-vm { --vm-action-bg: #83b8ff; --vm-action-fg: #14181f; --vm-focus: #83b8ff; --vm-disabled-bg: #202630; --vm-disabled-fg: #8e9bac; }

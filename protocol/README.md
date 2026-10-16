@@ -286,3 +286,5 @@ IDs. Missing source, source URL and registry capacity are visible capture failur
 sample identities, guest positions and explicit units, source artifact digests,
 and separate bounded effect/coverage/traversal declarations. Historical v1
 workspaces are rejected rather than silently upconverted.
+
+- [Owned opcode experiments v1](owned-opcode-experiments-v1.md): explicit, input-specific native confirmation and counterexamples.

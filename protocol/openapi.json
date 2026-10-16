@@ -4741,6 +4741,223 @@
           }
         ]
       }
+    },
+    "/api/analysis/vm/experiments": {
+      "get": {
+        "operationId": "get_owned_opcode_experiments",
+        "summary": "Read persisted input-specific owned opcode outcomes",
+        "tags": [
+          "owned-vm-experiment"
+        ],
+        "responses": {
+          "200": {
+            "description": "Typed bounded owned-fixture state, including pending and unknown outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnedOpcodeExperiments"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or stale contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Exact run or revision conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Helper or bounded admission unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/vm_experiment.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "owned-fixture-only",
+              "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads cached state/evidence only. Does not start a helper, execute an instruction, renew expiry or issue a control; the independent owner may progress an already-enabled run.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm_experiment.rs",
+              "symbol": "Experiments::list"
+            }
+          ]
+        }
+      },
+      "post": {
+        "operationId": "run_owned_opcode_experiment",
+        "summary": "Explicit isolated native opcode experiment for listed owned inputs",
+        "tags": [
+          "owned-vm-experiment"
+        ],
+        "responses": {
+          "200": {
+            "description": "Input-specific outcome or counterexample, persisted locally after native disposal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/record"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or stale contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Exact run or revision conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Helper or bounded admission unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Controls require application/json with optional UTF-8 charset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired before control admission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/vm_experiment.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-max-body-bytes": 4096,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/request"
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "filesystem-write",
+            "process-launch",
+            "process-stop",
+            "code-execution"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            },
+            {
+              "id": "owned-fixture-only",
+              "condition": "Only the repository-owned fixed register and stack fixtures are admitted. No captured code, URL, executable path or arbitrary bytecode is accepted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "An explicit request runs only an owned native helper in a separate disposable process. No baseline tab, captured code, CDP or page JavaScript is used. No automatic retry.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm_experiment.rs",
+              "symbol": "Experiments::run"
+            }
+          ]
+        }
+      }
     }
   },
   "components": {
@@ -24084,6 +24301,365 @@
           "ok",
           "capture"
         ]
+      },
+      "OwnedOpcodeExperiments": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "scope",
+          "records"
+        ],
+        "properties": {
+          "schema": {
+            "const": "reb-owned-opcode-experiments-v1"
+          },
+          "scope": {
+            "const": "Only the listed owned fixture, opcode, and explicit inputs are tested; results do not generalize."
+          },
+          "records": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/record"
+            }
+          }
+        },
+        "$defs": {
+          "inputs": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "left",
+              "right"
+            ],
+            "properties": {
+              "left": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              },
+              "right": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              }
+            }
+          },
+          "expectation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "value",
+              "next_pc",
+              "branch_taken"
+            ],
+            "properties": {
+              "operation": {
+                "enum": [
+                  "constant",
+                  "add_modulo_2_64",
+                  "load",
+                  "store",
+                  "branch_zero",
+                  "branch_nonzero",
+                  "jump",
+                  "halt",
+                  "unknown"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              },
+              "next_pc": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              },
+              "branch_taken": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          },
+          "request": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "command_id",
+              "fixture",
+              "workspace_digest",
+              "source_artifact_sha256",
+              "interpreter_artifact_id",
+              "finding_id",
+              "opcode",
+              "effect_id",
+              "inputs",
+              "expected"
+            ],
+            "properties": {
+              "command_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+              },
+              "fixture": {
+                "enum": [
+                  "register",
+                  "stack"
+                ]
+              },
+              "workspace_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "source_artifact_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "interpreter_artifact_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              },
+              "finding_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+              },
+              "opcode": {
+                "enum": [
+                  2,
+                  7
+                ]
+              },
+              "effect_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+              },
+              "inputs": {
+                "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/inputs"
+              },
+              "expected": {
+                "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/expectation"
+              }
+            }
+          },
+          "observation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "backend_instance_id",
+              "session_id",
+              "run_id",
+              "run_generation",
+              "invocation_id",
+              "record_sequence",
+              "build_id",
+              "program_sha256",
+              "opcode",
+              "handler_index",
+              "pc_before",
+              "instruction_pointer_units",
+              "inputs",
+              "effect"
+            ],
+            "properties": {
+              "backend_instance_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+              },
+              "run_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_:-]{1,128}$"
+              },
+              "run_generation": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              },
+              "invocation_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              },
+              "record_sequence": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              },
+              "build_id": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "program_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "opcode": {
+                "enum": [
+                  2,
+                  7
+                ]
+              },
+              "handler_index": {
+                "enum": [
+                  2,
+                  7
+                ]
+              },
+              "pc_before": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "maxLength": 20
+              },
+              "instruction_pointer_units": {
+                "const": "instruction-index"
+              },
+              "inputs": {
+                "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/inputs"
+              },
+              "effect": {
+                "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/expectation"
+              }
+            }
+          },
+          "record": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "request",
+              "effect_digest",
+              "fixture_revision",
+              "status",
+              "independent",
+              "observed",
+              "reason"
+            ],
+            "properties": {
+              "request": {
+                "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/request"
+              },
+              "effect_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "fixture_revision": {
+                "const": 1
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "confirmed",
+                  "mismatch",
+                  "unsupported",
+                  "unknown"
+                ]
+              },
+              "independent": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/expectation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "observed": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/observation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "execution-not-yet-complete",
+                  "interrupted-execution",
+                  "fixed-owned-inputs-only",
+                  "agreement-for-listed-inputs-only",
+                  "expected-or-observed-effect-differs",
+                  "native-execution-or-disposal-unconfirmed"
+                ]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "confirmed",
+                        "mismatch"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "observed": {
+                      "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/observation"
+                    },
+                    "independent": {
+                      "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/expectation"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "unsupported"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "observed": {
+                      "type": "null"
+                    },
+                    "independent": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "pending",
+                        "unknown"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "observed": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
       }
     }
   },

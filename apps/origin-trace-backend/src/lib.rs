@@ -22,6 +22,7 @@ pub mod vm;
 mod vm_byte_coverage;
 mod vm_bytecode;
 mod vm_effects;
+mod vm_experiment;
 mod vm_opcode;
 mod vm_reachability;
 pub mod wasm;

@@ -1692,6 +1692,61 @@
         return section;
       }
 
+      const ownedExperimentDrafts = new Map();
+      const ownedExperimentResults = new Map();
+      let ownedExperimentPending = false;
+      function renderVmOwnedExperiment(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.append(textElement('h4', '', 'Isolated owned opcode experiment'));
+        section.append(textElement('p', '', 'Opt-in native fixture only. This disposable process does not use a baseline tab. Confirmation applies only to the listed inputs and does not generalize.'));
+        const references = {'32f42d2408c8b2b77539c49ad458f3923d819fedc323e6529bbff7e83b14a52e':'register', 'e757c3029fdbf8ef0c77845e99c9270ad70d533c76a5625fb4d64129543c0812':'stack'};
+        const fixture = references[workspace.source_artifact_sha256];
+        const candidates = workspace.handlers.flatMap(h => [2,7].includes(h.opcode) ? h.effects.filter(e =>
+          ['inferred','observed'].includes(e.evidence_class) && e.operation === (h.opcode === 2 ? 'add_modulo_2_64' : 'branch_nonzero')).map(e=>({opcode:h.opcode,effect:e})) : []);
+        if (!fixture || candidates.length === 0) { section.append(textElement('p', '', 'Unavailable: an exact owned reference source and supported effect declaration are required.')); return section; }
+        const key = `${state.vmOpcodeWorkspace.document_digest}:${workspace.source_artifact_sha256}:${workspace.interpreter_artifact_id}`;
+        const workspaceDigest = state.vmOpcodeWorkspace.document_digest;
+        let draft = ownedExperimentDrafts.get(key);
+        if (!draft) { if(ownedExperimentDrafts.size>=64) ownedExperimentDrafts.delete(ownedExperimentDrafts.keys().next().value); draft={opcode:String(candidates[0].opcode),left:'7',right:'5',value:'12',next_pc:candidates[0].opcode===2?'3':'10',branch:'true'}; ownedExperimentDrafts.set(key,draft); }
+        const form = document.createElement('form'); form.className='vm-experiment-form';
+        const select = document.createElement('select'); select.setAttribute('aria-label','Owned opcode');
+        candidates.forEach(c=>{ const option=document.createElement('option'); option.value=String(c.opcode); option.textContent=`${c.opcode}: ${c.effect.operation}`;select.append(option); }); select.value=draft.opcode;
+        const label = (name,node) => { const l=document.createElement('label');l.append(document.createTextNode(`${name} `),node);form.append(l); };
+        label('Opcode',select);
+        const fields={};
+        for (const [name,title] of [['left','Left input (fixed 7)'],['right','Right input (fixed 5)'],['value','Expected selected value'],['next_pc','Expected next instruction index']]) {
+          const input=document.createElement('input');input.type='text';input.inputMode='numeric';input.maxLength=20;input.value=draft[name];
+          input.addEventListener('input',()=>{draft[name]=input.value;});fields[name]=input;label(title,input);
+        }
+        select.addEventListener('change',()=>{draft.opcode=select.value;draft.next_pc=select.value==='2'?'3':'10';fields.next_pc.value=draft.next_pc;});
+        const branch=document.createElement('select'); for(const [value,title] of [['true','Taken'],['false','Not taken']]) {const option=document.createElement('option');option.value=value;option.textContent=title;branch.append(option);} branch.value=draft.branch;branch.addEventListener('change',()=>{draft.branch=branch.value;});label('Expected branch (opcode 7)',branch);
+        form.append(textElement('p','',fixture==='register'?'Selected state: register 0 for add; unchanged register 2 for branch.':'Selected state: stack slot 0 for add or branch.'));
+        const run=document.createElement('button');run.type='submit';run.textContent='Run isolated native experiment';run.disabled=ownedExperimentPending;
+        const load=document.createElement('button');load.type='button';load.textContent='Read saved results';
+        const output=document.createElement('div');output.setAttribute('role','status');
+        const retain = rows => { if(!ownedExperimentResults.has(key) && ownedExperimentResults.size>=64) ownedExperimentResults.delete(ownedExperimentResults.keys().next().value); ownedExperimentResults.set(key,rows); };
+        const show = rows => { output.replaceChildren(); if(rows.length===0) output.append(textElement('p','','No saved result for this exact workspace and selected effect.')); rows.forEach(row=>output.append(textElement('p','',`${row.status}: opcode ${row.request.opcode}, inputs ${row.request.inputs.left}, ${row.request.inputs.right}; expected ${row.request.expected.value}, next PC ${row.request.expected.next_pc}; observed ${row.observed?.effect.value ?? 'unknown'}, handler ${row.observed?.handler_index ?? 'unknown'}, PC ${row.observed?.pc_before ?? 'unknown'} → next PC ${row.observed?.effect.next_pc ?? 'unknown'}. ${row.reason}. These inputs only; does not generalize.`))); };
+        show(ownedExperimentResults.get(key) ?? []);
+        form.addEventListener('submit',async event=>{
+          event.preventDefault(); if(ownedExperimentPending) return;
+          const candidate=candidates.find(c=>String(c.opcode)===select.value); if(!candidate) return;
+          const request={command_id:crypto.randomUUID(),fixture,workspace_digest:workspaceDigest,
+            source_artifact_sha256:workspace.source_artifact_sha256,interpreter_artifact_id:workspace.interpreter_artifact_id,finding_id:workspace.finding_id,
+            opcode:candidate.opcode,effect_id:candidate.effect.effect_id,inputs:{left:fields.left.value,right:fields.right.value},
+            expected:{operation:candidate.effect.operation,value:fields.value.value,next_pc:fields.next_pc.value,branch_taken:candidate.opcode===7?branch.value==='true':null}};
+          ownedExperimentPending=true;run.disabled=true;output.textContent='Running the disposable owned fixture. No automatic retry.';
+          try {const response=await fetch('/api/analysis/vm/experiments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(30000)});
+            const row=await response.json();if(!response.ok || !isVmOwnedExperimentRecord(row) || row.request.command_id!==request.command_id) throw new Error('Outcome unknown or refused. Read saved results before trying another experiment.');
+            const rows=[...(ownedExperimentResults.get(key) ?? []),row].slice(-64);retain(rows);show(rows);
+          } catch(error) {output.textContent=error.message;} finally {ownedExperimentPending=false;run.disabled=false;}
+        });
+        load.addEventListener('click',async()=>{load.disabled=true;try {const response=await fetch('/api/analysis/vm/experiments',{cache:'no-store',signal:AbortSignal.timeout(5000)});const doc=await response.json();
+          if(!response.ok || doc.schema!=='reb-owned-opcode-experiments-v1' || !Array.isArray(doc.records) || doc.records.length>64 || !doc.records.every(isVmOwnedExperimentRecord)) throw new Error('Saved experiment results are unavailable or malformed.');
+          const rows=doc.records.filter(r=>r.request.workspace_digest===workspaceDigest && r.request.finding_id===workspace.finding_id && r.request.source_artifact_sha256===workspace.source_artifact_sha256 && r.request.interpreter_artifact_id===workspace.interpreter_artifact_id && candidates.some(c=>c.opcode===r.request.opcode && c.effect.effect_id===r.request.effect_id));retain(rows);show(rows);
+        }catch(error){output.textContent=error.message;}finally{load.disabled=false;}});
+        form.append(run,load);section.append(form,output);return section;
+      }
+
       function renderVmOpcodeWorkspace(selected) {
         const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
         const container = document.createElement('section'); container.className = 'vm-workspace';
@@ -1711,7 +1766,8 @@
           renderVmBytecode(workspace),
           renderVmReachability(workspace),
           renderVmWorkspaceCoverage(workspace),
-          renderVmWorkspaceUnknowns(workspace)
+          renderVmWorkspaceUnknowns(workspace),
+          renderVmOwnedExperiment(workspace)
         );
         return container;
       }

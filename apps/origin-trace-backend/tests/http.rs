@@ -6637,3 +6637,105 @@ fn owned_vm_all_control_variants_are_cli_read_only_rejected_before_dispatch() {
         );
     }
 }
+
+#[tokio::test]
+async fn owned_opcode_experiment_reads_and_refusals_never_execute() {
+    let server = Server::start_with_helper_canaries(true).await;
+    let response = server.get("/api/analysis/vm/experiments").await;
+    assert_eq!(response.status(), 200);
+    let value: Value = response.json().await.unwrap();
+    assert_eq!(value["schema"], "reb-owned-opcode-experiments-v1");
+    assert_eq!(value["records"], json!([]));
+    let response = server
+        .client
+        .post(format!("{}/api/analysis/vm/experiments", server.url))
+        .header("content-type", "text/plain")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 415);
+    let response = server
+        .client
+        .post(format!("{}/api/analysis/vm/experiments", server.url))
+        .header("content-type", "application/json")
+        .header("sec-fetch-site", "cross-site")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires REB_OWNED_VM_TEST_HELPER"]
+async fn owned_opcode_experiment_real_http_native_effect_binding() {
+    let helper = std::env::var("REB_OWNED_VM_TEST_HELPER").unwrap();
+    let server = Server::start_with_args(&["--owned-vm-fixture".into(), helper]).await;
+    let source = include_str!("../../../tools/fixtures/native-vm-dispatch/register-reference.js");
+    let digest = hex::encode(Sha256::digest(source.as_bytes()));
+    server.file(&format!("artifacts/blobs/{digest}.bin"), source.as_bytes());
+    let artifact = json!({"protocol_version":1,"artifact_id":"107","session_id":"101","navigation_id":"102","frame_id":"103",
+        "parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":"dynamic_javascript","kind":"javascript",
+        "url":"fixture://declared-native-reference/register.js","mime_type":"text/javascript","byte_size":source.len(),"sha256":digest,"sensitive":false,"content_path":format!("blobs/{digest}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file("events.jsonl", b"");
+    let document: Value = server
+        .get("/api/analysis/vm/opcodes")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let workspace = &document["workspaces"][0];
+    assert_eq!(workspace["source_artifact_sha256"], digest, "{document}");
+    let effect = &workspace["handlers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["opcode"] == 2)
+        .unwrap()["effects"][0];
+    let mut request = json!({"command_id":"http-add","fixture":"register","workspace_digest":document["document_digest"],"source_artifact_sha256":digest,
+        "interpreter_artifact_id":"107","finding_id":workspace["finding_id"],"opcode":2,"effect_id":effect["effect_id"],"inputs":{"left":"7","right":"5"},
+        "expected":{"operation":"add_modulo_2_64","value":"12","next_pc":"3","branch_taken":null}});
+    let response = server
+        .action("/api/analysis/vm/experiments", request.clone())
+        .await;
+    assert_eq!(response.status(), 200);
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["status"], "confirmed", "{result}");
+    request["command_id"] = json!("http-wrong");
+    request["expected"]["value"] = json!("13");
+    let result: Value = server
+        .action("/api/analysis/vm/experiments", request)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "mismatch");
+    let stored: Value = server
+        .get("/api/analysis/vm/experiments")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["records"].as_array().unwrap().len(), 2);
+    assert!(
+        server
+            .get("/api/vm-debugger")
+            .await
+            .json::<Value>()
+            .await
+            .unwrap()["session"]
+            .is_null()
+    );
+}

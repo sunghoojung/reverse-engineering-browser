@@ -324,3 +324,13 @@ depths and table identifiers are never presented as known handler indices.
 Guest semantics and the stack/register model remain explicit residual unknowns.
 The same 1024-candidate and 16-snapshot caps apply. Non-VM modules have no
 workspace, and unrelated functions cannot contribute candidates.
+
+## Owned input-specific confirmation
+
+The opcode workspace exposes an explicit **Isolated owned opcode experiment**
+for the exact native reference sources and effect declarations. Select owned
+addition or nonzero branch, enter the compiled inputs 7 and 5 and an expected
+value/next instruction index, then run a separate disposable native helper.
+Results are stored separately as confirmed for those inputs, mismatch, unsupported
+or unknown; no handler receives a universal confirmed label. See the
+[experiment contract](../../protocol/owned-opcode-experiments-v1.md).

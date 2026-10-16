@@ -51,7 +51,7 @@ function mountVmAnalysisPacks(root) {
       if (!file) return;
       try {
         if (file.size > (key === 'pack' ? 65536 : 16777216)) throw new Error('File exceeds the input limit.');
-        const text = new TextDecoder('utf-8', {fatal: true}).decode(await file.arrayBuffer());
+        const text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(await file.arrayBuffer());
         if (epoch !== epochs[key]) return;
         inputs[key] = text; selected.textContent = `${file.name} · ${file.size} bytes`;
         status.textContent = 'Inputs changed. Run an explicit analysis to validate these documents.';

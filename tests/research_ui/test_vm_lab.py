@@ -85,6 +85,37 @@ process.stdout.write(JSON.stringify(result));
         self.assertIn("Runtime.enable", result["copy"])
         self.assertIn("Breakpoints, watches, and console stay unavailable", result["copy"])
 
+    def test_failed_debugger_refresh_keeps_retained_cdp_session(self) -> None:
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        start = app.index("      function vmSessionPresentation")
+        end = app.index("      function renderVmSessionStatus", start)
+        helper = app[start:end]
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        completed = subprocess.run(
+            [
+                node,
+                "-e",
+                helper
+                + """
+const result = vmSessionPresentation({
+  sessionMode: 'live', broker: 'connected', captureStopped: false,
+  debuggerRefreshFailed: true, debuggerSession: {state: 'paused', target: 'page-1'},
+  vmStealthSession: false
+});
+process.stdout.write(JSON.stringify(result));
+""",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["label"], "CDP attached")
+        self.assertIn("Runtime and Debugger domains are active", result["copy"])
+
     def test_malformed_workspace_is_rejected_without_removing_findings(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         malformed = json.loads(json.dumps(fixture))

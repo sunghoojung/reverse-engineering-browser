@@ -157,7 +157,7 @@
         } catch (error) {
           retainVmOpcodeWorkspaceOnFailure(
             state,
-            error instanceof TypeError || error instanceof SyntaxError ? 'malformed' : 'unavailable',
+            error instanceof SyntaxError ? 'malformed' : 'unavailable',
             error.message
           );
           state.vmOpcodeWorkspaceRequestId = requestId;
@@ -1401,8 +1401,7 @@
           targetState.debuggerSession?.quiet_mode === true;
         const nativeCaptureUp = targetState.sessionMode === 'live' &&
           targetState.broker === 'connected' && !targetState.captureStopped;
-        const debuggerAttached = !targetState.debuggerRefreshFailed &&
-          Boolean(targetState.debuggerSession?.target) &&
+        const debuggerAttached = Boolean(targetState.debuggerSession?.target) &&
           ['running', 'paused', 'crashed'].includes(debuggerState);
         if (explicitStealth || (nativeCaptureUp && !debuggerAttached)) {
           return {
@@ -1815,7 +1814,7 @@
         const renderKey = JSON.stringify([state.vmFindings, state.selectedVmFindingId,
           state.artifacts.some(artifact => artifact.artifact_id === selectedSourceId)]);
         const workspaceKey = JSON.stringify([
-          state.vmOpcodeWorkspaceStatus, state.vmOpcodeWorkspace?.analysis_digest ?? null,
+          state.vmOpcodeWorkspaceStatus, state.vmOpcodeWorkspace?.document_digest ?? null,
           state.selectedVmHandlerKey
         ]);
         if (renderKey === renderedVmFindings && workspaceKey === renderedVmWorkspace) return;

@@ -1957,7 +1957,7 @@
           workspace.handlers.every(isVmOpcodeHandler) &&
           Array.isArray(workspace.snapshots) && workspace.snapshots.length <= 16 &&
           workspace.snapshots.every(isVmOpcodeSnapshot) && isVmOpcodeCoverage(workspace.coverage) &&
-          Array.isArray(workspace.unknowns) && workspace.unknowns.length <= 1024 &&
+          Array.isArray(workspace.unknowns) && workspace.unknowns.length <= 256 &&
           workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0);
       }
 

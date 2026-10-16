@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Authored local fixtures only. No real captures, target requests or mutation.
 import assert from 'node:assert/strict';
+import {trafficBrowserDownloadObserver} from './browser-download-observer.mjs';
 import {readFile, writeFile, mkdtemp, mkdir, rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
@@ -238,11 +239,11 @@ async function checkBrowser() {
   await mkdir(output,{recursive:true});
   await rm(join(output,'validation.json'),{force:true});
   await rm(join(output,'failure.png'),{force:true});
-  let browser, socket, sequence=0, diagnostics='', phase='fixture startup', firstFailure=null, browserClosed=false, catalogActivation=null; const commands=new Map();
+  let browser, socket, downloadSocket, downloadObserver, sequence=0, diagnostics='', phase='fixture startup', firstFailure=null, browserClosed=false, catalogActivation=null; const commands=new Map(), downloadReceipts=[];
   const grouped=process.platform!=='win32';
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   async function until(check,description) {phase=description;for(let i=0;i<200;i++){const value=await check();if(value)return value;await delay(50);}throw new Error(`Timed out: ${description}`);}
-  const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{commands.delete(id);reject(new Error(`CDP timeout: ${method}`));},10000);commands.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params}));});
+  const send=(method,params={},connection=socket)=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{commands.delete(id);reject(new Error(`CDP timeout: ${method}`));},10000);commands.set(id,{resolve,reject,timer});connection.send(JSON.stringify({id,method,params}));});
   const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.text+' '+JSON.stringify(result.exceptionDetails.exception));return result.result.value;};
   const key=async (key,code,options={})=>{
     const windowsVirtualKeyCode={Tab:9,Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowUp:38}[key];
@@ -276,7 +277,14 @@ async function checkBrowser() {
     const pages=await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     socket=new WebSocket(pages.find(page=>page.type==='page').webSocketDebuggerUrl);
     await new Promise((ready,reject)=>{socket.addEventListener('open',ready,{once:true});socket.addEventListener('error',reject,{once:true});});
-    socket.addEventListener('message',event=>{const message=JSON.parse(event.data);if(message.method==='Runtime.exceptionThrown'){errors.push(message.params.exceptionDetails);if(errors.length>32)errors.shift();}const command=commands.get(message.id);if(command){clearTimeout(command.timer);commands.delete(message.id);if(message.error)command.reject(new Error(message.error.message));else command.resolve(message.result);}});
+    const onMessage=event=>{const message=JSON.parse(event.data);downloadObserver?.observe(message);if(message.method==='Runtime.exceptionThrown'){errors.push(message.params.exceptionDetails);if(errors.length>32)errors.shift();}const command=commands.get(message.id);if(command){clearTimeout(command.timer);commands.delete(message.id);if(message.error)command.reject(new Error(message.error.message));else command.resolve(message.result);}};
+    socket.addEventListener('message',onMessage);
+    const version=await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    downloadSocket=new WebSocket(version.webSocketDebuggerUrl);
+    await new Promise((ready,reject)=>{downloadSocket.addEventListener('open',ready,{once:true});downloadSocket.addEventListener('error',reject,{once:true});});
+    downloadSocket.addEventListener('message',onMessage);
+    downloadSocket.addEventListener('close',()=>downloadObserver?.close('Browser download connection closed'));
+    downloadSocket.addEventListener('error',()=>downloadObserver?.close('Browser download connection failed'));
     await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});
     await until(()=>evaluate("typeof state !== 'undefined' && state.requests.length===1"),'loaded real Traffic UI');
@@ -486,7 +494,20 @@ async function checkBrowser() {
     await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await evaluate("showScreen('traffic')");
     if(!await evaluate("document.querySelector('#traffic-capture-export').open"))await click('#traffic-capture-export > summary');
-    await send('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:output});
+    await send('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:output,eventsEnabled:true},downloadSocket);
+    const downloadFrame=(await send('Page.getFrameTree')).frameTree.frame.id;
+    const exportDownload=async filename=>{
+      phase='completed local export: '+filename;
+      downloadObserver=trafficBrowserDownloadObserver({timeoutMs:10000});
+      const receipt=downloadObserver.arm(downloadFrame,filename);
+      try {
+        await Promise.all([click('[data-export-submit]'),receipt.completion]);
+        // A filename may exist before its bytes are written. Read once only
+        // after the exact frame/filename/GUID reports completed; never retry
+        // assertions against corrupt or incomplete completed output.
+        return await readFile(join(output,filename));
+      } finally {downloadReceipts.push({filename,events:downloadObserver.receipts()});if(downloadReceipts.length>8)downloadReceipts.shift();receipt.cancel();downloadObserver.close();downloadObserver=null;}
+    };
     const chooseExport = async (field,index) => selectRenderedOption({evaluate,click,key,selector:'[data-export-'+field+']',index});
     const openExport = async () => {
       if(await evaluate("document.querySelector('#captured-export-dialog').open"))await click('[data-export-close]');
@@ -495,13 +516,12 @@ async function checkBrowser() {
       assert.equal(await evaluate("document.querySelector('[data-export-policy]').value"),'redacted_copy','Every opening defaults to a redacted copy');
     };
     await openExport();await chooseExport('format',1);await chooseExport('policy',1);
-    await click('[data-export-submit]');
-    const downloaded=await until(async()=>{try{return await readFile(join(output,'reb-client-project.raw.zip'));}catch{return null;}},'explicit client ZIP download');
+    const downloaded=await exportDownload('reb-client-project.raw.zip');
     assert.equal(downloaded.readUInt32LE(0),0x04034b50);
     for (const [index,provider] of [[1,'requests'],[2,'httpx']]) {
       await rm(join(output,'reb-client-project.raw.zip'));
-      await chooseExport('provider',index);await click('[data-export-submit]');
-      const archive=await until(async()=>{try{return await readFile(join(output,'reb-client-project.raw.zip'));}catch{return null;}},'explicit Python '+provider+' ZIP download');
+      await chooseExport('provider',index);
+      const archive=await exportDownload('reb-client-project.raw.zip');
       assert(archive.includes(Buffer.from(provider+'==')));assert(archive.includes(Buffer.from('reb-client-project/client.py')));
     }
     await chooseExport('format',2);await chooseExport('policy',0);await click('[data-export-submit]');
@@ -519,13 +539,13 @@ async function checkBrowser() {
     if(!await evaluate("document.querySelector('#traffic-capture-export').open"))await click('#traffic-capture-export > summary');
     await openExport();await chooseExport('format',2);
     for(const [index,mode,filename] of [[0,'redacted_copy','selected.redacted.har'],[1,'raw','selected.raw.har']]) {
-      await chooseExport('policy',index);await click('[data-export-submit]');
-      const bytes=await until(async()=>{try{return await readFile(join(output,filename));}catch{return null;}},'explicit '+mode+' HAR download');
+      await chooseExport('policy',index);
+      const bytes=await exportDownload(filename);
       const entry=JSON.parse(bytes).log.entries[0];assert.equal(entry._reb.mode,mode);
       if(mode==='redacted_copy')assert.equal(entry.request.queryString.length,0);
     }
-    await chooseExport('format',3);await click('[data-export-submit]');
-    const sdl=await until(async()=>{try{return await readFile(join(output,'selected.graphql'),'utf8');}catch{return null;}},'captured GraphQL SDL download');
+    await chooseExport('format',3);
+    const sdl=(await exportDownload('selected.graphql')).toString('utf8');
     assert.match(sdl,/type Query/);assert.match(sdl,/# Saved REB identity:/);
     await chooseExport('source',1);assert.equal(await evaluate("document.querySelector('[data-export-submit]').disabled"),true);
     const input=join(output,'authored-introspection.json');await writeFile(input,JSON.stringify(schema));
@@ -533,8 +553,7 @@ async function checkBrowser() {
     await send('DOM.setFileInputFiles',{nodeId:inputNode.nodeId,files:[input]});
     await until(()=>evaluate("!document.querySelector('[data-export-submit]').disabled"),'local schema validated');
     assert.equal(await readFile(join(output,'schema.graphql')).then(()=>true,()=>false),false,'Choosing a local file never exports it automatically');
-    await click('[data-export-submit]');
-    const fileSDL=await until(async()=>{try{return await readFile(join(output,'schema.graphql'),'utf8');}catch{return null;}},'selected local introspection file download');assert.match(fileSDL,/type Query/);
+    const fileSDL=(await exportDownload('schema.graphql')).toString('utf8');assert.match(fileSDL,/type Query/);
     await openExport();await chooseExport('format',1);
     for(const [width,height] of [[1440,900],[760,560],[360,740]]) {
       await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
@@ -556,13 +575,13 @@ async function checkBrowser() {
     assert.equal(await evaluate("document.querySelector('[data-export-policy]').value"),'redacted_copy');
     await click('[data-export-cancel]');
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);
-    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',catalog_activation:catalogActivation,passive_security:passiveSecurity,product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download','Python requests/httpx keyboard selection and downloads','HAR raw/redacted downloads and missing-timing refusal','captured and local-file GraphQL SDL','compact export dialog three-viewport geometry and focus return'],keyboard:['Tab filter focus','Enter clear filters','native keyboard comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
+    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',download_receipts:downloadReceipts,catalog_activation:catalogActivation,passive_security:passiveSecurity,product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download','Python requests/httpx keyboard selection and downloads','HAR raw/redacted downloads and missing-timing refusal','captured and local-file GraphQL SDL','compact export dialog three-viewport geometry and focus return'],keyboard:['Tab filter focus','Enter clear filters','native keyboard comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
     console.log(`PASS rendered catalog: keyboard and pointer, three viewports, scrolling, inert markup, raw header preservation, explicit read-only lifecycle, source invalidation. Evidence: ${output}`);
   } catch (error) {
     firstFailure=error;
     // Persist the first failure before browser teardown. Only the authored local
     // fixture is ever loaded; bound text diagnostics independently of screenshots.
-    const failure={status:'failed',phase,catalog_activation:catalogActivation,error:String(error.stack ?? error).slice(0,8192),browser_stderr:diagnostics.slice(-8192),
+    const failure={status:'failed',phase,download_receipts:downloadReceipts,catalog_activation:catalogActivation,error:String(error.stack ?? error).slice(0,8192),browser_stderr:diagnostics.slice(-8192),
       browser_exit:browser?.exitCode ?? null,browser_signal:browser?.signalCode ?? null,catalog_reads:catalogReads,
       requests:logs.slice(-256),mutations:mutations.slice(-64),runtime_errors:JSON.stringify(errors).slice(0,16384),rendered:false};
     if(socket?.readyState===WebSocket.OPEN) {
@@ -588,7 +607,7 @@ async function checkBrowser() {
   } finally {
     const cleanupErrors=[];let profileReleased=!browser?.pid;
     const cleanup=async task=>{try{await task();}catch(error){cleanupErrors.push(String(error).slice(0,2048));}};
-    await cleanup(async()=>{held.splice(0).forEach(release=>release());for(const command of commands.values())clearTimeout(command.timer);socket?.close();});
+    await cleanup(async()=>{held.splice(0).forEach(release=>release());for(const command of commands.values())clearTimeout(command.timer);downloadObserver?.close();downloadSocket?.close();socket?.close();});
     await cleanup(async()=>{
       if(!browser?.pid)return;
       const alive=()=>{if(!grouped)return !browserClosed;try{process.kill(-browser.pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;throw error;}};

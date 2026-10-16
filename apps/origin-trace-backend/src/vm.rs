@@ -76,7 +76,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.1.1"})
+    json!({"id":"origin-trace-vm-detector","version":"1.2.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -772,31 +772,10 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
     }
     let mut result = json!({"artifact_id":artifact["artifact_id"],"artifact_sha256":artifact["sha256"],"runtime":runtime,"status":if omissions.is_empty() {"complete"} else {"partial"},"finding_id":id,"tier":tier,"vm_score":score,"vm_threshold":60,"required_family_count":3,"evidence_families":observations.iter().map(|o|o["family"].as_str().unwrap()).collect::<BTreeSet<_>>(),"observations":observations,"anti_bot_score":anti.iter().map(|o|o["weight"].as_u64().unwrap()).sum::<u64>().min(100),"anti_bot_observations":anti,"related_request_ids":requests,"graph":{"nodes":nodes,"edges":edges},"coverage":{"complete":omissions.is_empty(),"observed_bytes":bytes.len(),"total_bytes":bytes.len(),"omissions":omissions,"residual_unknowns":["Static evidence does not confirm guest dispatch at runtime.","Request edges are correlation, not exact value provenance."]},"frontend":frontend});
     if runtime == "javascript" && tier != "none" {
-        result["bytecode_snapshot"]=bytecode(source,artifact["artifact_id"].as_str().unwrap()).unwrap_or_else(||json!({"artifact_id":artifact["artifact_id"],"snapshot_hex":null,"unavailable_reason":"No bounded static byte initializer was recognized."}));
+        result["bytecode_snapshot"] =
+            crate::vm_bytecode::snapshot(source, artifact["artifact_id"].as_str().unwrap());
     }
     result
-}
-fn bytecode(source: &str, id: &str) -> Option<Value> {
-    static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)(?:Uint8Array\.of|new\s+Uint8Array)\s*\((?:\[)?\s*((?:0x[0-9a-f]+|\d+)(?:\s*,\s*(?:0x[0-9a-f]+|\d+))*)").unwrap()
-    });
-    let m = PATTERN.captures(source)?;
-    let full = m[1]
-        .split(',')
-        .map(|n| {
-            let n = n.trim();
-            if n.starts_with("0x") || n.starts_with("0X") {
-                u8::from_str_radix(&n[2..], 16)
-            } else {
-                n.parse::<u8>()
-            }
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .ok()?;
-    let size = full.len().min(256);
-    Some(
-        json!({"artifact_id":id,"producer":{"kind":"static-initializer","byte_offset":m.get(0)?.start()},"consumer":{"kind":"indexed-read","status":"inferred"},"sha256":hex::encode(Sha256::digest(&full)),"original_byte_count":full.len(),"snapshot_byte_count":size,"snapshot_hex":hex::encode(&full[..size]),"truncated":size<full.len(),"unavailable_reason":null}),
-    )
 }
 // Read a bounded prefix, report omissions, and hash exactly the consumed input.
 type JsonlInput = (Vec<(usize, Value)>, Vec<Value>, String);

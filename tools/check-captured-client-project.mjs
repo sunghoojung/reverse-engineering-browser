@@ -359,7 +359,7 @@ async function checkController() {
   for(const key of [{key:'F8'},{key:'ArrowLeft',altKey:true},{key:'p',ctrlKey:true},{key:'j',metaKey:true}]) {
     let stopped=false,prevented=false;document.events.keydown({...key,preventDefault:()=>prevented=true,stopImmediatePropagation:()=>stopped=true});assert(stopped&&prevented);
   }
-  close.click();exports[0].click();exports[1].click();assert.equal(downloads,2,'Only explicit export clicks create downloads');
+  close.click();assert.equal(downloads,0,'Review never starts an export');
   assert.equal(written,1);assert.equal(opened,1);
   createNew=true;
   for(const transition of ['cleared-by-create','new-selection','new-edit']) {
@@ -371,9 +371,6 @@ async function checkController() {
     close.click();current=requests(fixture());selected=current[0];
   }
   createNew=false;release=null;
-  native=true;install(options);
-  for(const mode of ['saved','canceled','failed']) {bridgeMode=mode;await exports[0].click();assert.match(notice,mode==='saved'?/saved locally/:mode==='canceled'?/canceled.*No archive/:/failed.*authored save denial/);}
-  assert.equal(bridgeCalls,3);assert.equal(downloads,2,'Native export never falls through to unsupported blob download');
   console.log('PASS capture review controller: explicit-only creation/export, dirty guard, changed/expired/ambiguous sources, canceled or edited late creation, context ownership and modal shortcut isolation');
 }
 

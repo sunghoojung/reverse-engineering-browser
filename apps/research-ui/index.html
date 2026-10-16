@@ -97,7 +97,7 @@
                 <div class="request-table">
                   <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
-                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-api-catalog" type="button" aria-haspopup="dialog">API catalog</button></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-api-catalog" type="button" aria-haspopup="dialog">API catalog</button><button class="exchange-button" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
                 </div>
               </div>
 
@@ -110,27 +110,11 @@
                   <button id="request-copy-url" class="secondary-button" type="button" title="Copy selected request URL">Copy URL</button>
                   <button id="request-evidence-toggle" class="secondary-button" type="button" aria-expanded="false">Evidence</button>
                   <details id="traffic-capture-export" class="exchange-options">
-                    <summary aria-label="Export selected capture">Export capture</summary>
+                    <summary aria-label="Selected capture actions">Capture actions</summary>
                     <div class="exchange-options-menu">
-                      <p>Raw values can contain credentials. Saved copies stay on this device; sharing is your choice.</p>
-                      <button class="exchange-button" type="button" data-traffic-export="raw" data-traffic-destination="download">Save raw capture</button>
-                      <button class="exchange-button" type="button" data-traffic-export="raw" data-traffic-destination="clipboard">Copy raw capture</button>
-                      <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="download">Save redacted copy</button>
-                      <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="clipboard">Copy redacted copy</button>
-                      <button id="passive-security-open" class="exchange-button" type="button" aria-haspopup="dialog">Local passive security report</button>
-                      <button class="exchange-button" type="button" data-client-capture="draft">Review captured request in Repeater</button>
-                      <label>Client language <select data-client-provider="capture"><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label>
-                      <button class="exchange-button" type="button" data-client-capture="raw">Export raw client project</button>
-                      <button class="exchange-button" type="button" data-client-capture="redacted_copy">Export redacted client project</button>
-                      <p data-client-export-support></p><p data-client-export-status role="status" aria-live="polite"></p>
-                      <button class="exchange-button" type="button" data-capture-format="har" data-export-mode="redacted_copy">Export redacted HAR</button>
-                      <button class="exchange-button" type="button" data-capture-format="har" data-export-mode="raw">Export raw HAR</button>
-                      <button class="exchange-button" type="button" data-capture-format="sdl">Export captured GraphQL SDL</button>
-                      <label>Export saved introspection JSON as SDL <input type="file" accept=".json,application/json" data-sdl-file></label>
-                      <p data-format-export-support></p>
-                      <p>Client projects contain one observed operation, source evidence, configuration and a dry-run example. Unsupported inputs remain explicit; no request is sent by export.</p>
-                      <p>Redacted copies remove header values and bodies, plus URL credentials, queries and fragments. Paths and other metadata may still contain secrets. Review before sharing.</p>
-                      <p data-traffic-export-status role="status" aria-live="polite"></p>
+                      <button class="exchange-button" type="button" data-client-capture="draft">Review in Repeater</button>
+                      <button id="passive-security-open" class="exchange-button" type="button" aria-haspopup="dialog">Passive security report</button>
+                      <p data-traffic-export-status role="status" aria-live="polite" hidden></p>
                     </div>
                   </details>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
@@ -689,7 +673,7 @@
                   <button id="repeater-create" class="secondary-button" type="button">Start session</button>
                   <button id="repeater-dispose" class="secondary-button" type="button" disabled>End session</button>
                   <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
-                  <details class="exchange-options" id="repeater-client-export"><summary>Export project</summary><div class="exchange-options-menu"><p>Export the selected retained run as a one-operation client project. Raw evidence can contain private data. Sending the example requires explicit configuration and --send.</p><label>Client language <select data-client-provider="run"><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label><button class="exchange-button" type="button" data-client-run-export="raw" disabled>Download raw project</button><button class="exchange-button" type="button" data-client-run-export="redacted_copy" disabled>Download redacted project</button><p data-client-export-support></p><p data-client-export-status role="status" aria-live="polite"></p></div></details>
+                  <button class="exchange-button" id="repeater-client-export" type="button" data-export-open="run" aria-haspopup="dialog" disabled>Export…</button>
                 </div>
               </div>
 
@@ -1439,6 +1423,24 @@
         <p id="api-catalog-filter-scope">Local substring search of endpoint and structural names only; no captured values or target requests.</p>
         <p id="api-catalog-filter-status" role="status" aria-live="polite"></p>
         <div id="api-catalog-content" class="api-catalog-content" tabindex="0" aria-label="Endpoint observations"></div>
+      </dialog>
+
+      <dialog id="captured-export-dialog" class="captured-export-dialog" aria-labelledby="captured-export-title" aria-describedby="captured-export-context">
+        <header class="captured-export-header"><div><p class="captured-export-eyebrow">LOCAL EXPORT</p><h2 id="captured-export-title">Export capture</h2></div><button class="secondary-button" type="button" data-export-close aria-label="Close export">×</button></header>
+        <div class="captured-export-body">
+          <p id="captured-export-context" class="captured-export-context"></p>
+          <div class="captured-export-fields">
+            <label>Format<select data-export-format><option value="json">Capture JSON</option><option value="client">Client project · ZIP</option><option value="har">HAR · network archive</option><option value="sdl">GraphQL schema · SDL</option></select></label>
+            <label data-export-provider-field hidden>Client runtime<select data-export-provider><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label>
+            <label data-export-source-field hidden>Schema source<select data-export-source><option value="capture">Selected response</option><option value="file">Local introspection JSON</option></select></label>
+            <label data-export-file-field hidden>Introspection file<input type="file" accept=".json,application/json" data-export-file><span>Up to 1 MiB · complete __schema or data.__schema</span></label>
+            <label data-export-policy-field>Data policy<select data-export-policy><option value="redacted_copy">Redacted copy</option><option value="raw">Raw · includes private values</option></select></label>
+            <label>Destination<select data-export-destination><option value="save">Save file</option><option value="copy">Copy to clipboard</option></select></label>
+          </div>
+          <p class="captured-export-note" data-export-note></p>
+          <p class="captured-export-status" data-export-status role="status" aria-live="polite" hidden></p>
+        </div>
+        <footer class="captured-export-footer"><span>On this device only</span><button class="secondary-button" type="button" data-export-cancel>Cancel</button><button class="secondary-button captured-export-primary" type="button" data-export-submit>Export</button></footer>
       </dialog>
 
       <dialog id="captured-client-review" class="api-catalog" aria-labelledby="captured-client-title">

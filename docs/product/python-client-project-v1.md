@@ -1,6 +1,6 @@
 # Offline Python client projects v1
 
-Traffic and retained Repeater-run **Export project** menus expose both Python providers through **Client language**. The UI and this CLI share the same generator; native ZIP validation accepts only the fixed Python layout.
+Traffic and retained Repeater-run **Export…** dialogs expose both Python providers through **Format → Client project**, then **Runtime**. A redacted copy is selected initially; raw output requires an explicit policy choice. The UI and this CLI share the same generator; native ZIP validation accepts only the fixed Python layout.
 
 This optional repository export reuses one reviewed saved exact-request input,
 its immutable evidence and the existing configuration/response-check vocabulary.

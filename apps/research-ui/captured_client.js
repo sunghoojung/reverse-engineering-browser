@@ -1031,23 +1031,15 @@ function installCapturedClientWorkflow(options) {
   const content = dialog.querySelector('[data-client-review-content]'), status = dialog.querySelector('[data-client-review-status]');
   const apply = dialog.querySelector('[data-client-apply]'), replace = dialog.querySelector('[data-client-replace]');
   const replaceLabel = dialog.querySelector('[data-client-replace-label]');
-  const nativeShell = document.documentElement.classList.contains('native-shell');
-  const nativeExporter = globalThis.webkit?.messageHandlers?.rebClientProjectExport;
-  const exportUnavailable = nativeShell && !nativeExporter;
-  document.querySelectorAll('[data-client-export-support]').forEach(node => {
-    node.textContent = exportUnavailable ? 'Project export is unavailable in this older native shell. Update the packaged app; Copy raw capture remains available.' : nativeShell ? 'Choose a local ZIP destination in the macOS Save dialog. Raw evidence can contain secrets; review before sharing.' : 'Download a local ZIP. Raw evidence can contain secrets; review before sharing.';
-  });
-  const report = message => {
-    document.querySelectorAll('[data-client-export-status]').forEach(node => { node.textContent = message; });
-    options.notice(message);
-  };
-  let reviewed = null, revision = 0, busy = false, opener = null;
-  const currentCapture = () => {
+  const report = message => options.notice(message);
+  let reviewed = null, revision = 0, busy = false, opener = null, exporter = null;
+  const captureRequest = () => {
     const selected = options.getRequest();
     const identity = selected && apiCatalogRequestIdentity(selected);
     if (!identity || !apiCatalogResolveSource(identity,options.getRequests()).record) throw new TypeError('The exact selected capture is unavailable or ambiguous.');
-    return capturedClientCapture(selected);
+    return selected;
   };
+  const currentCapture = () => capturedClientCapture(captureRequest());
   const stillCurrent = () => {
     try { const current = currentCapture(); return JSON.stringify([current.identity,current.evidence]) === JSON.stringify([reviewed.identity,reviewed.evidence]); } catch { return false; }
   };
@@ -1063,10 +1055,8 @@ function installCapturedClientWorkflow(options) {
   },true);
   const sync = () => {
     let capture = false; try { capture = Boolean(options.getRequest()?.captureRecord); } catch { /* No retained selection. */ }
-    document.querySelectorAll('[data-client-capture]').forEach(button => { button.disabled = !capture || busy || exportUnavailable && button.dataset.clientCapture !== 'draft'; });
-    document.querySelectorAll('[data-client-run-export]').forEach(button => { button.disabled = !options.getRun() || busy || exportUnavailable; });
-    document.querySelectorAll('[data-capture-format]').forEach(button => { button.disabled = !capture || busy; });
-    document.querySelectorAll('[data-client-provider], [data-sdl-file]').forEach(control => { control.disabled = busy; });
+    document.querySelectorAll('[data-client-capture]').forEach(button => { button.disabled = !capture || busy; });
+    exporter?.sync();
     if (!dialog.open || !reviewed) return;
     const matches = busy || stillCurrent();
     apply.disabled = busy || !matches || reviewed.problems.length > 0 || reviewed.templateProblems.length > 0 || options.hasDraft() && !replace.checked;
@@ -1107,89 +1097,164 @@ function installCapturedClientWorkflow(options) {
     } catch (error) { if (owner === revision && dialog.open) status.textContent = `${error.message} Context creation may already have completed; no target request was sent.`; }
     finally { if (owner === revision) busy = false; sync(); }
   });
-  const download = async (source,mode,provider) => {
-    if (busy) return;
-    if (exportUnavailable) throw new TypeError('Update the native app to enable the client-project Save dialog.');
-    const project = provider === 'standard' ? capturedClientProject(source,mode) : capturedExportFormats.pythonProject(source,mode,provider);
-    busy = true; sync();
-    try {
-      if (nativeShell) {
-        let binary = '';
-        for (let offset=0;offset<project.bytes.length;offset+=16384) binary += String.fromCharCode(...project.bytes.subarray(offset,offset+16384));
-        const result = await nativeExporter.postMessage({format:'reb-client-project-save-v1',mode,base64:btoa(binary)});
-        if (!result || !['saved','canceled'].includes(result.status)) throw new TypeError('The native save result could not be confirmed.');
-        report(result.status === 'saved' ? `Client project saved locally (${mode}). Review its evidence and configuration before explicitly sending or sharing.` : 'Project save canceled. No archive was written.');
-      } else {
-        const url = URL.createObjectURL(new Blob([project.bytes],{type:'application/zip'}));
-        const link = document.createElement('a'); link.href = url; link.download = mode === 'raw' ? 'reb-client-project.raw.zip' : 'reb-client-project.redacted.zip';
-        link.hidden = true; document.body.append(link); link.click(); link.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000);
-        report(`Project download requested (${mode}). Check browser downloads. It contains one operation, a dry-run example and explicit provenance; review before sharing.`);
-      }
-    } finally { busy = false; sync(); }
-  };
-  for (const button of document.querySelectorAll('[data-client-capture="raw"], [data-client-capture="redacted_copy"]')) button.addEventListener('click',async () => {
-    if (button.disabled || busy) return;
-    try { await download(currentCapture(),button.dataset.clientCapture,document.querySelector('[data-client-provider="capture"]').value); } catch (error) { report(`Project save failed: ${error.message}`); }
-  });
-  for (const button of document.querySelectorAll('[data-client-run-export]')) button.addEventListener('click',async () => {
-    if (button.disabled || busy) return;
-    try {
+  exporter = installCapturedExportDialog({...options,getCaptureRequest:captureRequest});
+  sync(); return {sync,close() { close(); exporter.close(); }};
+}
+
+// A single deliberate local export. The dialog never sends a target request.
+function installCapturedExportDialog(options) {
+  const dialog = document.querySelector('#captured-export-dialog');
+  if (!dialog) return {sync() {},close() {}};
+  const query = name => dialog.querySelector('[data-export-'+name+']');
+  const fields = Object.fromEntries(['format','provider','source','file','policy','destination','submit','close','cancel','note','status'].map(name=>[name,query(name)]));
+  const native = document.documentElement.classList.contains('native-shell');
+  const bridge = globalThis.webkit?.messageHandlers?.rebClientProjectExport;
+  const triggers = [...document.querySelectorAll('[data-export-open]')];
+  let kind = 'capture', snapshot = null, opener = null, revision = 0, busy = false, outputStarted = false, fileRevision = 0, preparedFile = null;
+  const fileMode = () => fields.format.value === 'sdl' && fields.source.value === 'file';
+  const source = () => {
+    if (kind === 'run') {
       const run = options.getRun(), context = options.contextKey();
-      await download(capturedClientRun(run,context,options.getRunCapture(run,context)),button.dataset.clientRunExport,document.querySelector('[data-client-provider="run"]').value);
-    } catch (error) { report(`Project save failed: ${error.message}`); }
-  });
-  // These local exports share the exact generators used by the offline commands.
-  // Native WebKit does not support Blob downloads; copy only on the explicit action.
-  const formatSupport = document.querySelector('[data-format-export-support]');
-  if (formatSupport) formatSupport.textContent = nativeShell
-    ? 'HAR and SDL actions copy text to the clipboard on this Mac. Save it locally yourself. SDL is raw schema data; descriptions may contain private information. No introspection request is sent.'
-    : 'HAR and SDL download locally. SDL is raw schema data; descriptions may contain private information. No introspection request is sent.';
-  for (const button of document.querySelectorAll('[data-capture-format]')) {
-    if (nativeShell) button.textContent = button.textContent.replace('Export','Copy');
-  }
-  const fileInput = document.querySelector('[data-sdl-file]');
-  if (nativeShell && fileInput) fileInput.parentNode.firstChild.textContent = 'Copy saved introspection JSON as SDL ';
-  const saveText = async (text,filename,type) => {
-    if (nativeShell) {
-      if (!navigator.clipboard?.writeText) throw new TypeError('Clipboard access is unavailable. Use the offline export command.');
-      await navigator.clipboard.writeText(text);
-      report('Copied '+filename+' locally. Review before saving or sharing. No target request was sent.');
-    } else {
-      const url = URL.createObjectURL(new Blob([text],{type}));
-      const link = document.createElement('a'); link.href = url; link.download = filename;
-      link.hidden = true; document.body.append(link);
-      try { link.click(); } finally { link.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
-      report('Download requested: '+filename+'. Review before sharing. No target request was sent.');
+      return capturedClientRun(run,context,options.getRunCapture(run,context));
     }
+    const request = options.getCaptureRequest();
+    return {request,identity:apiCatalogRequestIdentity(request),evidence:capturedClientTrafficDocument(request,'raw')};
   };
-  for (const button of document.querySelectorAll('[data-capture-format]')) button.addEventListener('click',async () => {
-    if (button.disabled || busy) return;
-    busy = true; sync();
+  const fingerprint = value => JSON.stringify(kind === 'run' ? value : [value.identity,value.evidence]);
+  const current = () => { try { return snapshot !== null && fingerprint(source()) === snapshot; } catch { return false; } };
+  const status = (message,failed=false) => { fields.status.textContent = message; fields.status.hidden = !message; fields.status.dataset.kind = failed ? 'error' : 'result'; };
+  function sync() {
+    for (const trigger of triggers) {
+      let available = false;
+      try { available = trigger.dataset.exportOpen === 'run' ? Boolean(options.getRun()) : true; } catch { /* Expired selection. */ }
+      trigger.disabled = busy || !available;
+    }
+    if (!dialog.open) return;
+    const project = fields.format.value === 'client', sdl = fields.format.value === 'sdl';
+    for (const option of fields.format.options) option.disabled = kind === 'run' ? option.value !== 'client' : snapshot === null && option.value !== 'sdl';
+    fields.source.querySelector('[value="capture"]').disabled = snapshot === null;
+    query('provider-field').hidden = !project;
+    query('policy-field').hidden = sdl;
+    query('source-field').hidden = !sdl;
+    query('file-field').hidden = !fileMode();
+    const save = fields.destination.querySelector('[value="save"]'), copy = fields.destination.querySelector('[value="copy"]');
+    save.disabled = native && !project; copy.disabled = project;
+    save.textContent = native ? 'macOS Save dialog' : 'Download file';
+    if (native && !project) fields.destination.value = 'copy';
+    if (project) fields.destination.value = 'save';
+    for (const name of ['format','provider','source','file','policy','destination']) fields[name].disabled = busy;
+    fields.close.disabled = fields.cancel.disabled = outputStarted;
+    const unavailable = project && native && !bridge;
+    const validFile = preparedFile && fields.file.files?.length === 1 && preparedFile.file === fields.file.files[0];
+    fields.submit.disabled = busy || unavailable || (fileMode() ? !validFile : !current());
+    const privacy = sdl ? 'Schema descriptions and identifiers may be private. SDL is exported as raw text.'
+      : fields.policy.value === 'raw' ? 'Raw output includes retained private values. Review before sharing.'
+      : 'Header values, bodies and URL credentials/query are removed. Paths and metadata can still be private.';
+    const limit = project ? (fields.provider.value === 'standard' ? 'Dry-run clients; sending requires separate explicit configuration.' : 'Python uses per-operation timeouts, not an overall deadline.')
+      : fields.format.value === 'har' ? 'Requires complete source timing; unsupported captures are refused.'
+      : sdl ? 'Uses retained or local JSON only; no introspection query is sent.' : 'One retained request; original evidence stays unchanged.';
+    fields.note.textContent = privacy+' '+limit;
+    if (unavailable) status('Update the native app to enable project saving.',true);
+    else if (!busy && !fileMode() && !current()) status('The selected evidence changed or expired. Close and open Export again.',true);
+
+  }
+  function close() {
+    if (outputStarted) { status('Finish the active save or clipboard operation first.'); return; }
+    revision++; fileRevision++; preparedFile = null; busy = false; snapshot = null; fields.file.value = '';
+    if (dialog.open) dialog.close();
+    opener?.focus({preventScroll:true}); sync();
+  }
+  for (const trigger of triggers) trigger.addEventListener('click',() => {
+    if (trigger.disabled || busy || dialog.open) return;
     try {
-      const source = currentCapture();
-      if (button.dataset.captureFormat === 'har') {
-        const mode = button.dataset.exportMode, result = capturedExportFormats.harProject(source,mode);
-        await saveText(new TextDecoder().decode(result.bytes),'selected.'+(mode === 'raw' ? 'raw' : 'redacted')+'.har','application/json');
-      } else if (button.dataset.captureFormat === 'sdl') {
-        await saveText(capturedExportFormats.capturedSDL(source).text,'selected.graphql','text/plain');
-      } else throw new TypeError('Unknown export format.');
-    } catch (error) { report('Export failed: '+error.message); }
-    finally { busy = false; sync(); }
+      kind = trigger.dataset.exportOpen;
+      if (!['capture','run'].includes(kind)) throw new TypeError('Unknown export source.');
+      snapshot = null;
+      try { snapshot = fingerprint(source()); } catch (error) { if (kind === 'run') throw error; }
+      opener = trigger; revision++; fileRevision++; preparedFile = null;
+      fields.format.value = kind === 'run' ? 'client' : snapshot === null ? 'sdl' : 'json'; fields.provider.value = 'standard';
+      fields.source.value = snapshot === null ? 'file' : 'capture'; fields.policy.value = 'redacted_copy'; fields.destination.value = native && kind === 'capture' ? 'copy' : 'save';
+      fields.file.value = ''; status('');
+      document.querySelector('#captured-export-title').textContent = kind === 'run' ? 'Export retained run' : 'Export capture';
+      document.querySelector('#captured-export-context').textContent = kind === 'run' ? 'One retained Repeater run' : snapshot === null ? 'No selected capture · choose local introspection JSON' : 'One selected Traffic request';
+      // Return focus to the exact toolbar action when dismissed.
+      dialog.showModal(); sync(); fields.format.focus({preventScroll:true});
+    } catch (error) { options.notice(error.message); }
   });
-  fileInput?.addEventListener('change',async () => {
-    if (busy || !fileInput.files?.length) return;
-    const file = fileInput.files[0], owner = revision;
-    busy = true; sync();
+  for (const name of ['format','provider','source','policy','destination']) fields[name].addEventListener('change',() => { status(''); sync(); });
+  fields.file.addEventListener('change',async () => {
+    const owner = ++fileRevision, file = fields.file.files?.length === 1 ? fields.file.files[0] : null;
+    preparedFile = null; status(''); sync();
+    if (!file || !dialog.open) return;
     try {
-      if (file.size > 1048576) throw new TypeError('Choose an introspection JSON file up to 1 MiB.');
-      const bytes = await file.arrayBuffer();
-      if (owner !== revision) return;
-      if (bytes.byteLength > 1048576) throw new TypeError('Choose an introspection JSON file up to 1 MiB.');
-      const text = new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);
-      const result = capturedExportFormats.introspectionSDL(capturedClientJSON(text,new Map()));
-      await saveText(result.text,'schema.graphql','text/plain');
-    } catch (error) { report('SDL export failed: '+error.message); }
-    finally { fileInput.value = ''; busy = false; sync(); }
+      if (file.size > 1048576) throw new TypeError('Choose a JSON file up to 1 MiB.');
+      status('Checking local JSON…');
+      const buffer = await file.arrayBuffer();
+      if (owner !== fileRevision || !dialog.open) return;
+      if (buffer.byteLength > 1048576) throw new TypeError('Choose a JSON file up to 1 MiB.');
+      const text = capturedExportFormats.introspectionSDL(capturedClientJSON(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(buffer),new Map())).text;
+      preparedFile = {file,text};
+      if (fileMode()) status('Local schema ready. Choose Export to save or copy.');
+    } catch (error) { if (owner === fileRevision && dialog.open && fileMode()) status('Local file failed: '+error.message,true); }
+    finally { if (owner === fileRevision) sync(); }
+  });
+  fields.close.addEventListener('click',close); fields.cancel.addEventListener('click',close);
+  dialog.addEventListener('cancel',event => { event.preventDefault(); close(); });
+  dialog.addEventListener('close',() => { revision++; fileRevision++; preparedFile = null; snapshot = null; busy = false; fields.file.value = ''; });
+  document.addEventListener('keydown',event => {
+    if (!dialog.open) return;
+    if (event.key === 'F8' || event.altKey && ['ArrowLeft','ArrowRight'].includes(event.key) ||
+        (event.ctrlKey || event.metaKey) && ['p','j'].includes(event.key.toLowerCase())) { event.preventDefault(); event.stopImmediatePropagation(); }
+  },true);
+  fields.submit.addEventListener('click',async () => {
+    sync(); if (fields.submit.disabled || busy) return;
+    const owner = ++revision, format = fields.format.value, mode = format === 'sdl' ? 'raw' : fields.policy.value;
+    const destination = fields.destination.value, provider = fields.provider.value, localFile = fileMode() ? fields.file.files[0] : null;
+    busy = true; sync(); status('Preparing local export…');
+    try {
+      if (!['json','client','har','sdl'].includes(format) || kind === 'run' && format !== 'client' || !['raw','redacted_copy'].includes(mode)) throw new TypeError('Choose a supported export format and policy.');
+      if (!['save','copy'].includes(destination) || format === 'client' && destination !== 'save' || native && format !== 'client' && destination !== 'copy') throw new TypeError('This destination is unavailable for the selected format.');
+      let bytes, text, filename, type;
+      if (localFile) {
+        if (!preparedFile || preparedFile.file !== localFile) throw new TypeError('Choose and validate a local schema first.');
+        text = preparedFile.text;
+        filename = 'schema.graphql'; type = 'text/plain';
+      } else {
+        const selected = source();
+        if (fingerprint(selected) !== snapshot) throw new TypeError('The selected evidence changed. Reopen Export.');
+        if (format === 'json') {
+          text = JSON.stringify(capturedClientTrafficDocument(selected.request,mode),null,2)+'\n';
+          filename = 'selected.reb-traffic.'+(mode === 'raw' ? 'raw' : 'redacted')+'.json'; type = 'application/json';
+        } else {
+          const captured = kind === 'run' ? selected : capturedClientSource(selected.identity,selected.evidence);
+          if (format === 'client') {
+            const project = provider === 'standard' ? capturedClientProject(captured,mode) : capturedExportFormats.pythonProject(captured,mode,provider);
+            bytes = project.bytes; filename = 'reb-client-project.'+(mode === 'raw' ? 'raw' : 'redacted')+'.zip'; type = 'application/zip';
+          } else if (format === 'har') {
+            text = new TextDecoder().decode(capturedExportFormats.harProject(captured,mode).bytes);
+            filename = 'selected.'+(mode === 'raw' ? 'raw' : 'redacted')+'.har'; type = 'application/json';
+          } else { text = capturedExportFormats.capturedSDL(captured).text; filename = 'selected.graphql'; type = 'text/plain'; }
+        }
+      }
+      if (owner !== revision || !dialog.open) return;
+      outputStarted = true; sync();
+      if (native && format === 'client') {
+        if (!bridge) throw new TypeError('Native project saving is unavailable.');
+        let binary = ''; for (let offset=0;offset<bytes.length;offset+=16384) binary += String.fromCharCode(...bytes.subarray(offset,offset+16384));
+        const result = await bridge.postMessage({format:'reb-client-project-save-v1',mode,base64:btoa(binary)});
+        if (!result || !['saved','canceled'].includes(result.status)) throw new TypeError('The native save result could not be confirmed.');
+        status(result.status === 'saved' ? 'Project saved locally.' : 'Save canceled. No archive was written.');
+      } else if (destination === 'copy') {
+        if (!navigator.clipboard?.writeText) throw new TypeError('Clipboard access is unavailable.');
+        await navigator.clipboard.writeText(text); status('Copied locally. Review before sharing.');
+      } else {
+        const url = URL.createObjectURL(new Blob([bytes ?? text],{type}));
+        const link = document.createElement('a'); link.href = url; link.download = filename; link.hidden = true; document.body.append(link);
+        try { link.click(); } finally { link.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
+        status('Download requested. Check your local downloads.');
+      }
+    } catch (error) { if (owner === revision && dialog.open) status('Export failed: '+error.message,true); }
+    finally { if (owner === revision) { busy = false; outputStarted = false; sync(); } }
   });
   sync(); return {sync,close};
 }

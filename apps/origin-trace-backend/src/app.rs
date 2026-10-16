@@ -83,6 +83,7 @@ pub struct App {
     pub debugger: Arc<Debugger>,
     native_console: NativeConsole,
     owned_vm_debugger: OwnedVmDebugger,
+    vm_experiments: crate::vm_experiment::Experiments,
     capture_stopped: AtomicBool,
     capture: Mutex<()>,
     io: Arc<Semaphore>,
@@ -122,6 +123,14 @@ impl App {
                 "OriginTraceOwnedVmFixture",
                 "build/reb-native-vm-fixture",
             )),
+            vm_experiments: crate::vm_experiment::Experiments::new(
+                options.artifacts.clone(),
+                options.worker(
+                    &options.owned_vm_fixture,
+                    "OriginTraceOwnedVmFixture",
+                    "build/reb-native-vm-fixture",
+                ),
+            ),
             options,
             capture_stopped: AtomicBool::new(false),
             capture: Mutex::new(()),
@@ -281,6 +290,7 @@ impl App {
             }
             "/api/decoder" => self.decoder.state(),
             "/api/native-console" => self.native_console.state().await,
+            "/api/analysis/vm/experiments" => self.vm_experiments.list()?,
             "/api/vm-debugger" => self.owned_vm_debugger.state().await?,
             "/api/wasm" => {
                 let id = q.required("artifact_id")?.to_owned();
@@ -872,7 +882,10 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
-            if path == "/api/vm-debugger/actions" {
+            if matches!(
+                path,
+                "/api/vm-debugger/actions" | "/api/analysis/vm/experiments"
+            ) {
                 let content_type = parts
                     .headers
                     .get("content-type")
@@ -893,6 +906,14 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                         415,
                         "Owned VM controls require application/json with optional UTF-8 charset",
                     ));
+                }
+                if path == "/api/analysis/vm/experiments" {
+                    let (_, workspace) = app.vm_documents().await?;
+                    return app
+                        .vm_experiments
+                        .run(&bytes, workspace?)
+                        .await
+                        .map(|value| axum::Json(value).into_response());
                 }
                 return app
                     .owned_vm_debugger

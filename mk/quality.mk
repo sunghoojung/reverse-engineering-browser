@@ -121,6 +121,8 @@ javascript-check:
 	node tools/check-vm-opcode-ledger.mjs
 	node tools/check-vm-workspace-contract.mjs
 	node tools/check-vm-opcode-workspace-ui.mjs
+	node tools/check-owned-opcode-experiments.mjs
+	node tools/owned-opcode-experiment-ui-cases.mjs --validate-fixtures
 	node tools/check-vm-static.mjs
 	node tools/check-vm-static-ui.mjs
 	node tools/check-vm-contextual.mjs

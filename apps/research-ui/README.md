@@ -1935,3 +1935,12 @@ and makes no network requests. See [contextual decoding](../../protocol/vm-conte
 and [runtime evidence linking](../../protocol/vm-contextual-evidence-v1.md).
 `tools/check-vm-contextual-ui.mjs` covers controller/CLI boundaries; its rendered
 flow is part of the existing browser gate, not macOS packaged-app acceptance.
+
+## Owned opcode experiments
+
+VM Lab's exact owned-source workspace offers an explicit isolated native
+experiment for declared addition and nonzero branch. Enter fixed inputs 7 and 5
+and the expected selected value/next PC, then choose Run isolated native
+experiment. Read saved results does not execute. Results show tested inputs and
+do not generalize; unsupported inputs are retained without execution. See
+[the strict contract](../../protocol/owned-opcode-experiments-v1.md).

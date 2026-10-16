@@ -4264,3 +4264,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-effect-row summary { padding: 10px; cursor: pointer; }
 .vm-effect-row summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .vm-effect-detail { padding: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.vm-experiment-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.vm-experiment-form label { display: flex; flex-direction: column; gap: 4px; min-width: 150px; max-width: 100%; }
+.vm-experiment-form input, .vm-experiment-form select { box-sizing: border-box; max-width: 100%; }

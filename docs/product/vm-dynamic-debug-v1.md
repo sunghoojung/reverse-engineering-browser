@@ -291,7 +291,7 @@ combination as the supported way to study inspector-detecting VMs.
   Traffic (existing request capture already stores the response if
   authorized; this milestone only snapshots the decoded buffer).
 - Automatic lifting of guest bytecode to JavaScript.
-- Isolated-experiment opcode confirmation (VM Lab v2.1).
+- Generalized opcode confirmation beyond the explicitly tested owned inputs.
 - Target-specific vendor packs.
 - MCP.
 
@@ -309,7 +309,8 @@ combination as the supported way to study inspector-detecting VMs.
 
 Owned cooperative dispatch emission and exact v2 retention are specified in
 [VM opcode workspace v2](../../protocol/vm-opcode-workspace-v2.md). This does not
-implement arbitrary-site guest dispatch or confirm opcode effects.
+implement arbitrary-site guest dispatch. Input-specific owned confirmation is
+provided separately below.
 
 ## WebAssembly dispatch workspaces
 
@@ -324,3 +325,13 @@ depths and table identifiers are never presented as known handler indices.
 Guest semantics and the stack/register model remain explicit residual unknowns.
 The same 1024-candidate and 16-snapshot caps apply. Non-VM modules have no
 workspace, and unrelated functions cannot contribute candidates.
+
+## Owned input-specific confirmation
+
+The opcode workspace exposes an explicit **Isolated owned opcode experiment**
+for the exact native reference sources and effect declarations. Select owned
+addition or nonzero branch, enter the compiled inputs 7 and 5 and an expected
+value/next instruction index, then run a separate disposable native helper.
+Results are stored separately as confirmed for those inputs, mismatch, unsupported
+or unknown; no handler receives a universal confirmed label. See the
+[experiment contract](../../protocol/owned-opcode-experiments-v1.md).

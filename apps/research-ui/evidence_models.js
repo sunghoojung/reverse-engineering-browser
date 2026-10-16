@@ -2318,3 +2318,39 @@
           ...targetState.eventVmFindings
         ];
       }
+
+      function isVmOwnedExperimentRecord(row) {
+        const exact = vmWorkspaceExact;
+        const dec = value => isCanonicalInteger(value, 0n, uint64Max);
+        const id = value => typeof value === 'string' && /^[A-Za-z0-9_:-]{1,128}$/.test(value);
+        const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+        const inputs = value => exact(value, ['left','right']) && dec(value.left) && dec(value.right);
+        const effect = value => exact(value,['operation','value','next_pc','branch_taken']) &&
+          ['constant','add_modulo_2_64','load','store','branch_zero','branch_nonzero','jump','halt','unknown'].includes(value.operation) &&
+          dec(value.value) && dec(value.next_pc) && (value.branch_taken === null || typeof value.branch_taken === 'boolean');
+        if (!exact(row,['request','effect_digest','fixture_revision','status','independent','observed','reason']) ||
+            !digest(row.effect_digest) || row.fixture_revision !== 1 ||
+            !['pending','confirmed','mismatch','unsupported','unknown'].includes(row.status) ||
+            !['execution-not-yet-complete','completion-unverified','fixed-owned-inputs-only','agreement-for-listed-inputs-only',
+              'expected-or-observed-effect-differs','native-execution-or-disposal-unconfirmed'].includes(row.reason)) return false;
+        const r=row.request;
+        if (!exact(r,['command_id','fixture','workspace_digest','source_artifact_sha256','interpreter_artifact_id','finding_id','opcode','effect_id','inputs','expected']) ||
+            !id(r.command_id) || !['stack','register'].includes(r.fixture) || !digest(r.workspace_digest) || !digest(r.source_artifact_sha256) ||
+            !isCanonicalInteger(r.interpreter_artifact_id,1n,uint64Max) || !id(r.finding_id) || ![2,7].includes(r.opcode) || !id(r.effect_id) || !inputs(r.inputs) || !effect(r.expected)) return false;
+        const same = (a,b) => a && b && a.operation === b.operation && a.value === b.value && a.next_pc === b.next_pc && a.branch_taken === b.branch_taken;
+        const prediction = r.inputs.left === '7' && r.inputs.right === '5' ? {operation:r.opcode===2?'add_modulo_2_64':'branch_nonzero',value:'12',next_pc:r.opcode===2?'3':'10',branch_taken:r.opcode===2?null:true} : null;
+        if (prediction === null ? row.independent !== null : !effect(row.independent) || !same(prediction,row.independent)) return false;
+        const o=row.observed;
+        if (o !== null && (!exact(o,['backend_instance_id','session_id','run_id','run_generation','invocation_id','record_sequence','build_id','program_sha256','opcode','handler_index','pc_before','instruction_pointer_units','inputs','effect']) ||
+            !['backend_instance_id','session_id','run_id'].every(k=>id(o[k])) || !['run_generation','invocation_id','record_sequence','pc_before'].every(k=>dec(o[k])) ||
+            !digest(o.build_id) || !digest(o.program_sha256) || o.opcode!==r.opcode || o.handler_index!==r.opcode ||
+            o.pc_before!==(r.opcode===2?'2':'8') || o.instruction_pointer_units!=='instruction-index' || !inputs(o.inputs) || !effect(o.effect))) return false;
+        return row.status !== 'confirmed' || Boolean(o && same(r.expected,prediction) && same(o.effect,prediction) && o.inputs.left===r.inputs.left && o.inputs.right===r.inputs.right);
+      }
+
+      function sameVmOwnedExperimentRequest(left, right) {
+        const fields=['command_id','fixture','workspace_digest','source_artifact_sha256','interpreter_artifact_id','finding_id','opcode','effect_id'];
+        return Boolean(left && right && fields.every(key=>left[key]===right[key]) && left.inputs && right.inputs &&
+          ['left','right'].every(key=>left.inputs[key]===right.inputs[key]) && left.expected && right.expected &&
+          ['operation','value','next_pc','branch_taken'].every(key=>left.expected[key]===right.expected[key]));
+      }

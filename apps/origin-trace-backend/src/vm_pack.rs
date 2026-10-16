@@ -274,9 +274,16 @@ fn workspace<'a>(document: &'a Value, artifact: &str) -> Result<&'a Value> {
         ));
     }
     let mut opcodes = BTreeSet::new();
+    let wasm = selected[0]["runtime"] == "webassembly";
     for handler in selected[0]["handlers"].as_array().unwrap() {
+        let site = wasm.then(|| {
+            (
+                handler["source"]["byte_offset"].as_u64().unwrap(),
+                handler["source"]["byte_size"].as_u64().unwrap(),
+            )
+        });
         if let Some(opcode) = handler["opcode"].as_u64()
-            && !opcodes.insert(opcode)
+            && !opcodes.insert((opcode, site))
         {
             return Err(Error::bad("Duplicate opcode rows cannot be compared"));
         }
@@ -484,8 +491,18 @@ pub fn compare(
     }
     let left_rows = left_workspace["handlers"].as_array().unwrap();
     let right_rows = right_workspace["handlers"].as_array().unwrap();
+    // A WASM br_table selector is local to its dispatch site, not a proven
+    // guest opcode. The current contract has no guest-binding proof to align it.
+    let left_comparable = left_workspace["runtime"] != "webassembly";
+    let right_comparable = right_workspace["runtime"] != "webassembly";
     let mut shapes = BTreeMap::<String, (Vec<usize>, Vec<usize>)>::new();
-    for (side, rows) in [left_rows, right_rows].iter().enumerate() {
+    for (side, (rows, comparable)) in [(left_rows, left_comparable), (right_rows, right_comparable)]
+        .iter()
+        .enumerate()
+    {
+        if !comparable {
+            continue;
+        }
         for (index, handler) in rows.iter().enumerate() {
             if let Some(shape) = effect_shape(handler)? {
                 let entry = shapes.entry(shape).or_default();
@@ -525,7 +542,7 @@ pub fn compare(
         if used_left.contains(&a) {
             continue;
         }
-        let known = uncertainty(handler).is_none();
+        let known = left_comparable && right_comparable && uncertainty(handler).is_none();
         let other = known
             .then(|| {
                 right_rows.iter().enumerate().find(|(index, row)| {
@@ -541,16 +558,28 @@ pub fn compare(
             rows.push(json!({"status":"changed","match_basis":"same-opcode-different-effects","effect_shape_digest":null,"left":handler,"right":other}));
         }
     }
-    for (side, source, used) in [
-        ("left", left_rows, &used_left),
-        ("right", right_rows, &used_right),
+    for (side, source, used, comparable) in [
+        ("left", left_rows, &used_left, left_comparable),
+        ("right", right_rows, &used_right, right_comparable),
     ] {
         for (_, handler) in source
             .iter()
             .enumerate()
             .filter(|(index, _)| !used.contains(index))
         {
-            let mut row = json!({"status":uncertainty(handler).unwrap_or(if side=="left" {"left-only"} else {"right-only"}),"match_basis":"unmatched","effect_shape_digest":null,"left":null,"right":null});
+            let uncertainty = uncertainty(handler);
+            let status = if comparable {
+                uncertainty.unwrap_or(if side == "left" {
+                    "left-only"
+                } else {
+                    "right-only"
+                })
+            } else {
+                uncertainty
+                    .filter(|state| *state == "contradicted")
+                    .unwrap_or("unknown")
+            };
+            let mut row = json!({"status":status,"match_basis":if comparable {"unmatched"} else {"wasm-guest-binding-unavailable"},"effect_shape_digest":null,"left":null,"right":null});
             row[side] = handler.clone();
             rows.push(row);
         }
@@ -1014,5 +1043,58 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn vm_pack_preserves_analyzer_wasm_selectors_at_distinct_sites_without_alignment() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../tools/fixtures/vm-dynamic-debug/wasm-dispatch.json"
+        ))
+        .unwrap();
+        let bytes = hex::decode(fixtures["two_br_tables"].as_str().unwrap()).unwrap();
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let hash = hex::encode(Sha256::digest(&bytes));
+        std::fs::create_dir(root.path().join("blobs")).unwrap();
+        std::fs::write(root.path().join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+        let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":"webassembly_compile","kind":"wasm","url":"fixture://two-br-tables","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        std::fs::write(root.path().join("manifest.jsonl"), format!("{artifact}\n")).unwrap();
+        let events = root.path().join("events.jsonl");
+        std::fs::write(&events, "").unwrap();
+        let analysis = vm::store(root.path(), &events).unwrap();
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        let mut document = read(&root.path().join("analysis/vm-opcode-workspace-v2.json")).unwrap();
+        let pack = json!({"contract_version":1,"document_kind":"vm-analysis-pack","pack_id":"owned-wasm","version":"1.0.0","rules":[],"families":[{"source_artifact_sha256":hash,"program_family":"owned-wasm"}]});
+        let handlers = document["workspaces"][0]["handlers"].as_array().unwrap();
+        assert_eq!(handlers.len(), 6);
+        assert_eq!(handlers[0]["opcode"], handlers[3]["opcode"]);
+        assert_ne!(handlers[0]["source"], handlers[3]["source"]);
+        for annotate in [false, true] {
+            if annotate {
+                // An effect declaration alone is not a WASM guest-selector binding.
+                document["workspaces"][0]["handlers"][0]["effects"] =
+                    fixture("build-a.workspace.json")["workspaces"][0]["handlers"][0]["effects"]
+                        .clone();
+                seal(&mut document);
+            }
+            let report = compare(&pack, &document, "1", &document, "1").unwrap();
+            let rows = report["rows"].as_array().unwrap();
+            assert_eq!(rows.len(), 12);
+            assert!(rows.iter().all(|row| row["status"] == "unknown"
+                && row["match_basis"] == "wasm-guest-binding-unavailable"));
+            for side in ["left", "right"] {
+                for original in document["workspaces"][0]["handlers"].as_array().unwrap() {
+                    assert_eq!(rows.iter().filter(|row| &row[side] == original).count(), 1);
+                }
+            }
+        }
+        let duplicate = document["workspaces"][0]["handlers"][0].clone();
+        document["workspaces"][0]["handlers"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        document["workspaces"][0]["coverage"]["handler_count"] = json!(7);
+        document["summary"]["handler_count"] = json!(7);
+        seal(&mut document);
+        assert!(compare(&pack, &document, "1", &document, "1").is_err());
     }
 }

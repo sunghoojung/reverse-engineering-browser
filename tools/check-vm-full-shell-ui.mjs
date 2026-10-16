@@ -8,6 +8,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
+import ledgerModel from '../apps/research-ui/vm_opcode_ledger.js';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const output = process.env.REB_VM_FULL_SHELL_OUTPUT || join(root, 'build/vm-workspace-ui-qa/full-shell');
 const html = await readFile(join(root, 'apps/research-ui/index.html'), 'utf8');
@@ -28,12 +29,33 @@ const analysis = {
 };
 assert(runInNewContext(`${model}\nisVmAnalysisDocument(analysis) && isVmOpcodeWorkspaceDocument(fixture)`, {analysis, fixture, TextEncoder}));
 const assets = new Set(['index.html', ...[...html.matchAll(/(?:src|href)="([^"/]+\.(?:js|css))"/g)].map(match => match[1])]);
+const compareInputs = {};
+for (const [key, name] of [['pack','pack.json'],['left','build-a.workspace.json'],['right','build-b.workspace.json']]) {
+  compareInputs[key] = JSON.parse(await readFile(join(root, 'tools/fixtures/vm-analysis-packs', name), 'utf8'));
+}
+const compareRequest = {...compareInputs, left_artifact: '1', right_artifact: '1'};
+const compareReport = {contract_version: 1, document_kind: 'vm-instruction-set-comparison', document_digest: 'a'.repeat(64),
+  behavioral_equivalence_proven: false, rows: [
+    {status: 'moved', match_basis: 'unique-exact-effect-shape', left: {opcode: 1}, right: {opcode: 4}},
+    {status: 'unknown', match_basis: 'unmatched', left: {opcode: 2}, right: null}
+  ], limitations: ['Authored presentation fixture; not actual backend analysis.']};
 const requests = [];
 const server = createServer(async (request, response) => {
   const path = request.url.split('?')[0];
   const json = value => { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(value)); };
   if (path.startsWith('/api/')) {
     requests.push({method: request.method, path});
+    if (request.method === 'POST' && path === '/api/analysis/vm/packs/compare') {
+      let body = ''; let size = 0;
+      for await (const chunk of request) {
+        size += chunk.length;
+        if (size > 1048576) { response.statusCode = 413; json({error: 'Fixture request bound exceeded'}); return; }
+        body += chunk.toString('utf8');
+      }
+      try { assert.deepEqual(JSON.parse(body), compareRequest); }
+      catch { response.statusCode = 422; json({error: 'Only the exact authored comparison inputs are accepted'}); return; }
+      return json(compareReport);
+    }
     if (request.method !== 'GET') { response.statusCode = 405; json({error: 'Read-only authored fixture'}); return; }
     if (path === '/api/events') return json({count: 0, events: [], capture_mode: 'demo', broker_connected: false, capture_stopped: true});
     if (path === '/api/artifacts') return json({count: 0, artifacts: []});
@@ -114,6 +136,22 @@ if (process.argv.includes('--fixture-only')) {
     const key = async (key, code, value) => {
       for (const type of ['rawKeyDown','keyUp']) await send('Input.dispatchKeyEvent',{type,key,code,windowsVirtualKeyCode:value});
     };
+    const screenshot = async name => {
+      await evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+      const {data} = await send('Page.captureScreenshot', {format: 'png'});
+      await writeFile(join(output, name + '.png'), Buffer.from(data, 'base64'));
+    };
+    const clickLabel = async (rootSelector, label) => {
+      const selector = await evaluate(`(()=>{const root=document.querySelector(${JSON.stringify(rootSelector)});const buttons=[...root.querySelectorAll('button')];const index=buttons.findIndex(node=>node.textContent===${JSON.stringify(label)});if(index<0)throw Error('Missing action');buttons[index].setAttribute('data-full-shell-action','target');return ${JSON.stringify(rootSelector)}+' [data-full-shell-action="target"]';})()`);
+      await click(selector);
+      await evaluate("document.querySelector('[data-full-shell-action]')?.removeAttribute('data-full-shell-action')");
+    };
+    const importFile = async (selector, path) => {
+      const {root: doc} = await send('DOM.getDocument');
+      const {nodeId} = await send('DOM.querySelector', {nodeId: doc.nodeId, selector});
+      assert(nodeId, 'File input exists: ' + selector);
+      await send('DOM.setFileInputFiles', {nodeId, files: [path]});
+    };
     const modes = await evaluate("[...document.querySelectorAll('.vm-workspace-switch button')].map(node=>[node.id.replace('vm-show-',''),node.getAttribute('aria-controls')])");
     for (const expected of ['findings','execution','owned','static','contextual']) assert(modes.some(([mode]) => mode === expected));
     for (const width of [1440, 900, 390]) {
@@ -125,12 +163,20 @@ if (process.argv.includes('--fixture-only')) {
         assert.equal(await evaluate(`document.querySelector('#${panel}').hidden`), false, `${mode} panel at ${width}`);
         assert.equal(await evaluate(`document.querySelector('#vm-show-${mode}').getAttribute('aria-pressed')`), 'true');
         assert.equal(await evaluate(`(()=>{const n=document.querySelector('#vm-show-${mode}'),r=n.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight&&n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})()`), true, `${mode} control reachable at ${width}`);
+        await screenshot(`vm-mode-${mode}-empty-${width}`);
       }
       await click('#vm-show-findings');
       await click('#vm-list .vm-row');
       await key('ArrowDown', 'ArrowDown', 40);
       assert.equal(await evaluate("document.activeElement.classList.contains('vm-row')"), true);
       await until(() => evaluate("document.querySelectorAll('.vm-workbench-tabs button').length >= 6"), 'actual finding analysis tabs');
+      assert.equal(await evaluate("document.querySelector('.vm-finding-provenance').open"), false);
+      await evaluate("document.querySelector('#vm-detail').scrollTop=0;document.querySelector('#vm-findings-workspace').scrollTop=0");
+      if (width === 1440) assert.equal(await evaluate("['.vm-handler-head','.vm-handler-row'].every(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return r.top>=0&&r.bottom<innerHeight;})"), true, 'Listing header and first handler remain above the fold');
+      await click('.vm-handler-row');
+      await key('ArrowDown', 'ArrowDown', 40);
+      assert.equal(await evaluate("document.querySelector('.vm-selection-inspector h3').textContent"),
+        await evaluate("document.querySelector('.vm-handler-row[aria-selected=true] .vm-handler-label strong').textContent"));
       const panels = await evaluate("[...document.querySelectorAll('.vm-workbench-tabs [data-vm-panel]')].map(node=>node.dataset.vmPanel)");
       for (const expected of ['bytecode','reachability','coverage','unknowns','experiment','effects']) assert(panels.includes(expected));
       for (const panel of panels) {
@@ -149,10 +195,53 @@ if (process.argv.includes('--fixture-only')) {
       const dock = await send('Page.captureScreenshot', {format: 'png'});
       await writeFile(join(output, `vm-full-shell-dock-${width}.png`), Buffer.from(dock.data, 'base64'));
     }
+    // Real File inputs and local actions, with an explicitly authored pack response.
+    await send('Emulation.setDeviceMetricsOverride', {width: 1440, height: 900, deviceScaleFactor: 1, mobile: false});
+    await click('#vm-show-packs');
+    await click('[data-pack-inputs="compare"] > summary');
+    for (const [label, name] of [['Analysis pack','pack.json'],['Left opcode workspace','build-a.workspace.json'],['Right opcode workspace','build-b.workspace.json']]) {
+      await importFile(`input[aria-label="${label}"]`, join(root, 'tools/fixtures/vm-analysis-packs', name));
+      await until(() => evaluate(`document.querySelector('input[aria-label="${label}"]').parentElement.textContent.includes('bytes')`), label + ' import');
+    }
+    for (const side of ['left','right']) { await click(`input[aria-label="${side} interpreter artifact ID"]`); await send('Input.insertText', {text: '1'}); }
+    await clickLabel('#vm-packs-workspace', 'Compare builds');
+    await until(() => evaluate("document.querySelector('#vm-packs-workspace .vm-tool-table tbody tr') !== null"), 'Structured comparison report');
+    await click('[data-pack-inputs="compare"] > summary');
+    await click('[data-pack-inputs="apply"] > summary');
+    const rawClosed = "[...document.querySelectorAll('#vm-packs-workspace details')].filter(node=>node.querySelector('.vm-pack-output')).every(node=>!node.open)";
+    assert.equal(await evaluate(rawClosed), true);
+    for (const width of [1440,900,390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      await evaluate("document.querySelector('#vm-packs-workspace').scrollTop=0");
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `Populated packs fit at ${width}`);
+      await screenshot(`vm-packs-populated-${width}`);
+    }
+    await send('Emulation.setDeviceMetricsOverride', {width: 1440, height: 900, deviceScaleFactor: 1, mobile: false});
+    await click('#vm-show-ledger');
+    const definition = JSON.stringify({format: 'reb-vm-definition-v1', definition_id: 'authored-shell-fixture', architecture: 'stack',
+      opcode_bytes: 1, operand_endianness: 'little', register_count: 0,
+      opcodes: ['00','01','ff'].map(code => ({code, mnemonic: 'OP_' + code, operands: [], semantics: {operation: 'unknown', args: []}, flow: {kind: 'unknown'}}))});
+    const ledger = await ledgerModel.createLedger(definition);
+    ledger.entries.push({opcode: '00', status: 'inferred', meaning: 'Candidate constant handler', handler_location: null, operand_format: null,
+      source_refs: [{artifact_id: 'authored-shell-fixture', event_id: null}], test_status: 'not_run', test_refs: [], unresolved_questions: ['Operand layout remains unknown.']});
+    for (const [kind, text] of [['definition', definition], ['ledger', JSON.stringify(ledger)]]) {
+      const path = join(profile, 'authored-' + kind + '.json'); await writeFile(path, text);
+      await importFile(`input[aria-label="Import ${kind} JSON"]`, path);
+      await until(() => evaluate(`document.querySelector('[data-ledger-editor="${kind}"] textarea').value.length > 0`), kind + ' import');
+    }
+    await clickLabel('#vm-ledger-workspace', 'Validate ledger');
+    await until(() => evaluate("document.querySelector('#vm-ledger-workspace .vm-tool-table tbody tr') !== null"), 'Structured ledger report');
+    assert.equal(await evaluate("[...document.querySelectorAll('[data-ledger-editor]')].every(node=>!node.open)"), true);
+    for (const width of [1440,900,390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      await evaluate("document.querySelector('#vm-ledger-workspace').scrollTop=0");
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `Populated ledger fits at ${width}`);
+      await screenshot(`vm-ledger-populated-${width}`);
+    }
     assert.deepEqual(errors, []);
-    assert.equal(requests.some(request => request.method !== 'GET'), false, 'Navigation never executes or mutates');
+    assert.equal(requests.some(request => request.method !== 'GET' && !(request.method === 'POST' && request.path === '/api/analysis/vm/packs/compare')), false, 'Only exact authored comparison may POST');
     await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440,900,390],
-      scope: 'Actual index.html, shipped scripts, HTTP admission of authored retained finding, five mode controls and six analysis panels. No live capture, native runtime or VM execution.', requests}, null, 2));
+      scope: 'Actual index.html, shipped scripts, HTTP admission of authored retained finding, all mode controls and analysis panels, selected handler linkage, real File inputs and authored pack/ledger result presentation. Pack response is a synthetic display fixture, not real backend analysis. No live capture, native runtime or VM execution.', requests}, null, 2));
     console.log(`PASS full VM product shell: ${output}`);
   } catch (error) {
     if (socket?.readyState === 1) {

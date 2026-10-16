@@ -1517,6 +1517,7 @@
           });
           if (focus) row.focus({ preventScroll: true });
           if (onSelection) onSelection(row.dataset.handlerKey);
+          document.querySelectorAll('[data-vm-symbol-key]').forEach(symbol => symbol.setAttribute('aria-pressed', String(symbol.dataset.vmSymbolKey === row.dataset.handlerKey)));
         };
         rows.forEach(rowData => {
           const row = document.createElement('button'); row.className = 'vm-handler-row'; row.type = 'button';
@@ -1544,7 +1545,7 @@
           row.addEventListener('keydown', event => {
             if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
             event.preventDefault();
-            const options = [...list.querySelectorAll('.vm-handler-row')];
+            const options = [...list.querySelectorAll('.vm-handler-row')].filter(option => !option.hidden);
             const current = options.indexOf(row);
             const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
               : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
@@ -1552,7 +1553,39 @@
           });
           list.append(row);
         });
-        section.append(header, list);
+        const toolbar = document.createElement('div'); toolbar.className = 'vm-listing-toolbar';
+        toolbar.setAttribute('role', 'group'); toolbar.setAttribute('aria-label', 'Handler navigation');
+        for (const [label, direction, glyph] of [['Previous handler', -1, '↑'], ['Next handler', 1, '↓']]) {
+          const button = textElement('button', 'secondary-button', glyph); button.type = 'button';
+          button.title = label; button.setAttribute('aria-label', label);
+          button.addEventListener('click', () => {
+            const visible = [...list.children].filter(row => !row.hidden);
+            if (!visible.length) return;
+            const index = visible.findIndex(row => row.dataset.handlerKey === state.selectedVmHandlerKey);
+            const nextIndex = index < 0 ? (direction < 0 ? visible.length - 1 : 0) : (index + direction + visible.length) % visible.length;
+            const next = visible[nextIndex];
+            selectRow(next); next.scrollIntoView({block: 'nearest'});
+          });
+          toolbar.append(button);
+        }
+        const search = document.createElement('input'); search.type = 'search'; search.placeholder = 'Filter handlers';
+        search.setAttribute('aria-label', 'Filter retained handlers'); search.maxLength = 256;
+        const count = textElement('span', 'vm-listing-count', `${rows.length} handlers`);
+        count.setAttribute('role', 'status');
+        search.addEventListener('input', () => {
+          const query = search.value.trim().toLowerCase();
+          const visible = [...list.children].filter((row, index) => {
+            row.hidden = !`${rows[index].source} ${rows[index].opcode} ${rows[index].label}`.toLowerCase().includes(query);
+            return !row.hidden;
+          });
+          [...list.children].forEach(row => { row.tabIndex = -1; });
+          const selected = visible.find(row => row.dataset.handlerKey === state.selectedVmHandlerKey) ?? visible[0];
+          if (selected) selected.tabIndex = 0;
+          count.textContent = `${visible.length} / ${rows.length} handlers`;
+          [...toolbar.querySelectorAll('button')].forEach(button => { button.disabled = !visible.length; });
+        });
+        toolbar.append(search, count);
+        section.append(toolbar, header, list);
         return section;
       }
 
@@ -1873,11 +1906,33 @@
             return node;
           })();
         host.replaceChildren(...(selected ? [renderVmOpcodeWorkspace(selected)] : []));
+        const symbols = document.querySelector('#vm-symbol-list');
+        if (symbols) {
+          const workspace = selected && vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
+          const rows = workspace ? vmOpcodeRows(workspace) : [];
+          symbols.replaceChildren();
+          for (const row of rows) {
+            const button = textElement('button', 'vm-symbol-row', row.label); button.type = 'button';
+            button.dataset.vmSymbolKey = row.key;
+            button.setAttribute('aria-pressed', String(row.key === state.selectedVmHandlerKey));
+            button.title = `Opcode ${row.opcode} · source ${row.source}`;
+            button.addEventListener('click', () => {
+              const target = [...host.querySelectorAll('.vm-handler-row')].find(item => item.dataset.handlerKey === row.key);
+              if (!target) return;
+              const filter = host.querySelector('input[aria-label="Filter retained handlers"]');
+              if (filter && target.hidden) { filter.value = ''; filter.dispatchEvent(new Event('input')); }
+              target.click(); target.scrollIntoView({block: 'nearest'});
+            });
+            symbols.append(button);
+          }
+          if (!rows.length) symbols.append(textElement('p', '', 'No retained handler symbols for this finding.'));
+        }
       }
 
       function renderVmDetail() {
         const selected = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
         if (!selected) {
+          document.querySelector('#vm-symbol-list')?.replaceChildren(textElement('p', '', 'Select a finding to browse its retained handlers.'));
           elements.vmDetail.replaceChildren(textElement('div', 'vm-empty', 'No valid VM findings have been captured. Capture stays separate from interpretation, so the lab does not synthesize sample conclusions.'));
           return;
         }
@@ -2043,7 +2098,7 @@
           state.artifacts.some(artifact => artifact.artifact_id === selectedSourceId)]);
         const workspaceKey = JSON.stringify([
           state.vmOpcodeWorkspaceStatus, state.vmOpcodeWorkspace?.document_digest ?? null,
-          state.selectedVmHandlerKey, state.vmHostLinksStatus, state.vmHostLinks?.document_digest ?? null
+          state.vmHostLinksStatus, state.vmHostLinks?.document_digest ?? null
         ]);
         if (renderKey === renderedVmFindings && workspaceKey === renderedVmWorkspace) return;
         if (renderKey !== renderedVmFindings) {
@@ -12699,3 +12754,41 @@
         }
       });
       initializePaneLayout();
+
+      // Native disclosures keep the application menus keyboard-accessible without
+      // claiming an ARIA menubar's separate arrow-key interaction model.
+      const vmMenus = [...document.querySelectorAll('.vm-menu')];
+      const closeVmMenus = () => vmMenus.forEach(menu => { menu.open = false; });
+      vmMenus.forEach(menu => {
+        menu.addEventListener('toggle', () => {
+          if (menu.open) {
+            vmMenus.forEach(other => { if (other !== menu) other.open = false; });
+            menu.querySelectorAll('[data-vm-command^="vm-handler-"]').forEach(button => {
+              const label = button.dataset.vmCommand === 'vm-handler-filter' ? 'Filter retained handlers' : button.dataset.vmCommand === 'vm-handler-next' ? 'Next handler' : 'Previous handler';
+              const target = document.querySelector(`[aria-label="${label}"]`);
+              button.disabled = !target || target.disabled;
+            });
+          }
+        });
+        menu.addEventListener('keydown', event => {
+          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); menu.open = false; menu.querySelector('summary').focus(); }
+        });
+      });
+      document.addEventListener('pointerdown', event => { if (!event.target.closest('.vm-menu')) closeVmMenus(); });
+      document.querySelectorAll('[data-vm-command]').forEach(button => {
+        button.addEventListener('click', () => {
+          const command = button.dataset.vmCommand;
+          const summary = button.closest('.vm-menu').querySelector('summary');
+          closeVmMenus(); summary.focus();
+          if (command === 'vm-return-traffic') { document.querySelector('#screen-vm .back-button').click(); return; }
+          if (command.startsWith('vm-handler-')) {
+            document.querySelector('#vm-show-findings').click();
+            const label = command === 'vm-handler-filter' ? 'Filter retained handlers' : command === 'vm-handler-next' ? 'Next handler' : 'Previous handler';
+            const target = document.querySelector(`[aria-label="${label}"]`);
+            if (target && !target.disabled) { if (command === 'vm-handler-filter') target.focus(); else target.click(); }
+            return;
+          }
+          const target = document.getElementById(command);
+          if (target) { target.click(); target.focus(); }
+        });
+      });

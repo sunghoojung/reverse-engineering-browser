@@ -184,6 +184,48 @@ if (process.argv.includes('--fixture-only')) {
       await key('ArrowDown', 'ArrowDown', 40);
       assert.equal(await evaluate("document.querySelector('.vm-selection-inspector h3').textContent"),
         await evaluate("document.querySelector('.vm-handler-row[aria-selected=true] .vm-handler-label strong').textContent"));
+      assert.equal(await evaluate("document.querySelectorAll('#vm-symbol-list [data-vm-symbol-key]').length"),
+        await evaluate("document.querySelectorAll('.vm-handler-row').length"), 'Symbol dock reflects retained handlers');
+      await click('.vm-symbol-row:last-child');
+      assert.equal(await evaluate("document.querySelector('.vm-symbol-row[aria-pressed=true]').dataset.vmSymbolKey"),
+        await evaluate("document.querySelector('.vm-handler-row[aria-selected=true]').dataset.handlerKey"), 'Symbol navigation selects the linked listing');
+      await click('[aria-label="Previous handler"]');
+      assert.equal(await evaluate("document.querySelector('.vm-symbol-row[aria-pressed=true]').dataset.vmSymbolKey"),
+        await evaluate("document.querySelector('.vm-handler-row[aria-selected=true]').dataset.handlerKey"), 'Toolbar navigation keeps symbols synchronized');
+      await click('.vm-symbol-row');
+      await click('[aria-label="Filter retained handlers"]');
+      await send('Input.insertText', {text: 'candidate'});
+      await evaluate('renderVmLab()');
+      assert.equal(await evaluate("document.querySelector('input[aria-label=\"Filter retained handlers\"]').value"), 'candidate', 'Identical poll retains filter after selection');
+      await click('[aria-label="Previous handler"]');
+      assert.equal(await evaluate("document.querySelector('.vm-handler-row[aria-selected=true]').dataset.handlerKey"),
+        await evaluate("[...document.querySelectorAll('.vm-handler-row')].filter(row=>!row.hidden).at(-1).dataset.handlerKey"), 'Previous starts at last visible row when selection was excluded');
+      await click('.vm-symbol-row:last-child');
+      assert.equal(await evaluate("document.querySelector('input[aria-label=\"Filter retained handlers\"]').value"), 'candidate', 'Visible symbol keeps matching filter');
+      await click('.vm-symbol-row');
+      await click('.vm-menu:nth-child(3) > summary');
+      await click('[data-vm-command="vm-handler-filter"]');
+      assert.equal(await evaluate("document.activeElement.getAttribute('aria-label')"), 'Filter retained handlers', 'Search menu focuses real filter');
+      await click('.vm-menu:nth-child(1) > summary');
+      await key('Escape', 'Escape', 27);
+      assert.equal(await evaluate("document.querySelector('.vm-menu').open"), false);
+      assert.equal(await evaluate("document.activeElement === document.querySelector('.vm-menu > summary')"), true, 'Escape restores menu trigger focus');
+      await click('.vm-menu:nth-child(4) > summary');
+      await click('[data-vm-command="vm-show-execution"]');
+      assert.equal(await evaluate("document.querySelector('#vm-semantics-workflow').hidden"), false, 'Window menu opens existing Execution workspace');
+      await click('#vm-show-findings');
+      await click('[aria-label="Filter retained handlers"]');
+      await send('Input.insertText', {text: 'no-retained-handler-matches-this'});
+      assert.equal(await evaluate("[...document.querySelectorAll('.vm-handler-row')].filter(row=>!row.hidden).length"), 0);
+      assert.equal(await evaluate("document.querySelector('[aria-label=\"Next handler\"]').disabled"), true, 'No-result navigation is disabled');
+      assert.equal(await evaluate("document.querySelector('.vm-listing-count').getBoundingClientRect().height > 0"), true, 'No-match count stays visible on narrow layouts');
+      await click('.vm-menu:nth-child(2) > summary');
+      assert.equal(await evaluate("document.querySelector('[data-vm-command=\"vm-handler-next\"]').disabled"), true, 'Menu respects empty filter navigation');
+      await click('.vm-listing-count');
+      assert.equal(await evaluate("document.querySelector('.vm-menu[open]') === null"), true, 'Outside click closes menu');
+      await click('.vm-symbol-row');
+      assert.equal(await evaluate("document.querySelector('input[aria-label=\"Filter retained handlers\"]').value"), '', 'Symbol navigation clears an excluding filter');
+      assert.equal(await evaluate("document.querySelector('.vm-handler-row[aria-selected=true]').hidden"), false);
       const panels = await evaluate("[...document.querySelectorAll('.vm-workbench-tabs [data-vm-panel]')].map(node=>node.dataset.vmPanel)");
       for (const expected of ['bytecode','reachability','coverage','unknowns','experiment','effects']) assert(panels.includes(expected));
       for (const panel of panels) {

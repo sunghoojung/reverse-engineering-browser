@@ -10,6 +10,23 @@ Project-wide authorization, capture, and privacy policy is in
 [SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
 and limits.
 
+## VM desktop workspace
+
+The compact Analysis, Navigation, Search and Window menus invoke the existing
+workspaces and handler navigation. Escape closes a menu and returns focus to its
+trigger; the toolbar keeps all seven workspace modes directly accessible.
+
+The Findings view uses compact CodeBrowser-style docks: Program Trees holds
+captured findings, Symbol Tree lists the selected finding's retained handlers,
+the central Handler listing drives the linked evidence inspector, and analysis
+tools use a bottom tab strip. The layout keeps the Rosé Pine Moon palette.
+Symbols and the up/down toolbar navigate the same selection. The literal handler
+filter matches retained source offsets, opcodes and labels; selecting a symbol
+clears an excluding filter. Arrow keys, Home and End navigate visible listing
+rows. No-match filters keep the selected evidence available and disable stepping.
+These docks expose existing evidence, not a native-code decompiler or editable
+Ghidra project. The deterministic fixture remains explicitly opt-in.
+
 ## Local file override manager
 
 In **Experiments → Interceptor**, create an isolated context and apply **Target**

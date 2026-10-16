@@ -4270,5 +4270,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 
 /* Bounded inert pack output; long source identities never widen the workspace. */
 .vm-pack-output { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-#vm-packs-workspace .vm-static-toolbar label { display: grid; gap: 0.35rem; min-width: 0; max-width: 100%; }
-#vm-packs-workspace input { max-width: 100%; min-width: 0; }
+.vm-pack-inputs label { display: grid; gap: 0.35rem; min-width: 0; max-width: 100%; }
+.vm-pack-inputs input { max-width: 100%; min-width: 0; }
+
+.vm-pack-status { overflow-wrap: anywhere; word-break: break-word; }

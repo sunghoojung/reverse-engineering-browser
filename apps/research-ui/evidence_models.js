@@ -2354,3 +2354,52 @@
           ['left','right'].every(key=>left.inputs[key]===right.inputs[key]) && left.expected && right.expected &&
           ['operation','value','next_pc','branch_taken'].every(key=>left.expected[key]===right.expected[key]));
       }
+
+      function isVmHostLinksDocument(document, workspaceDocument) {
+        if (!vmWorkspaceExact(document, ['contract_version', 'document_kind', 'workspace_document_digest', 'workspaces', 'document_digest']) ||
+          document.contract_version !== 1 || document.document_kind !== 'vm-host-links' ||
+          !vmWorkspaceDigest(document.document_digest) || !vmWorkspaceDigest(document.workspace_document_digest) ||
+          document.workspace_document_digest !== workspaceDocument?.document_digest ||
+          !Array.isArray(document.workspaces) || document.workspaces.length > 256) return false;
+        const categories = ['canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc', 'network', 'runtime'];
+        const types = ['api_call', 'property_read', 'request_started', 'request_initiated', 'request_redirected', 'response_started', 'response_completed', 'request_completed', 'request_failed'];
+        const omissions = ['dispatch-samples-unavailable', 'dispatch-sample-retention-limit', 'host-link-limit', 'host-events-unavailable'];
+        const sources = new Set(); let total = 0;
+        for (const row of document.workspaces) {
+          if (!vmWorkspaceExact(row, ['interpreter_artifact_id', 'source_artifact_sha256', 'links', 'omissions']) ||
+            sources.has(row.interpreter_artifact_id) || !Array.isArray(row.links) || row.links.length > 256 ||
+            !Array.isArray(row.omissions) || row.omissions.length > 4 || new Set(row.omissions).size !== row.omissions.length ||
+            !row.omissions.every(reason => omissions.includes(reason))) return false;
+          sources.add(row.interpreter_artifact_id);
+          const workspace = workspaceDocument.workspaces.find(item => item.interpreter_artifact_id === row.interpreter_artifact_id &&
+            item.source_artifact_sha256 === row.source_artifact_sha256);
+          if (!workspace) return false;
+          const hosts = new Set();
+          for (const link of row.links) {
+            if (!vmWorkspaceExact(link, ['host_event', 'category', 'type', 'state', 'reason', 'guest_position']) ||
+              !vmSampleEvent(link.host_event) || !categories.includes(link.category) || !types.includes(link.type) ||
+              !['observed', 'correlated', 'unknown'].includes(link.state)) return false;
+            const key = vmSampleEventKey(link.host_event);
+            if (hosts.has(key)) return false;
+            hosts.add(key);
+            const position = link.guest_position;
+            if (link.state !== 'observed') {
+              if (position !== null || !['dispatch-samples-unavailable', 'guest-position-unproven'].includes(link.reason)) return false;
+              continue;
+            }
+            if (link.reason !== 'direct-dispatch-parent' || !vmWorkspaceExact(position, ['sample_event', 'invocation_event',
+              'invocation_id', 'instruction_pointer', 'instruction_pointer_units']) || !vmSampleEvent(position.sample_event) ||
+              !vmSampleEvent(position.invocation_event) || !isCanonicalInteger(position.invocation_id, 1n, uint64Max) ||
+              !['byte-offset', 'instruction-index'].includes(position.instruction_pointer_units) ||
+              !isSafeIntegerInRange(position.instruction_pointer, 0, 0xffffffff) ||
+              position.sample_event.session_id !== link.host_event.session_id || position.sample_event.process_id !== link.host_event.process_id ||
+              BigInt(position.sample_event.sequence_number) >= BigInt(link.host_event.sequence_number) ||
+              !workspace.samples.some(sample => vmSampleEventKey(sample.event) === vmSampleEventKey(position.sample_event) &&
+                sample.invocation_event && vmSampleEventKey(sample.invocation_event) === vmSampleEventKey(position.invocation_event) &&
+                sample.invocation_id === position.invocation_id && sample.instruction_pointer === position.instruction_pointer &&
+                sample.instruction_pointer_units === position.instruction_pointer_units)) return false;
+          }
+          total += row.links.length;
+        }
+        return total <= 4096;
+      }

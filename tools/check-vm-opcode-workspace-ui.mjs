@@ -8,12 +8,26 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
+import {workspaceUiCases} from './vm-workspace-ui-cases.mjs';
+import {ownedOpcodeExperimentUiCase, checkOwnedOpcodeExperimentUi} from './owned-opcode-experiment-ui-cases.mjs';
+import {pressRenderedEnter} from './rendered-keyboard.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const output = process.env.REB_VM_WORKSPACE_UI_OUTPUT || join(root, 'build/vm-workspace-ui-qa');
 const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
 const model = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const fixture = JSON.parse(await readFile(join(root, 'tests/research_ui/fixtures/vm-opcode-workspace-v2.json'), 'utf8'));
+const hostWorkspace = structuredClone(fixture), hostSource = hostWorkspace.workspaces[0], sample = hostSource.samples[0];
+const hostLinks = {contract_version: 1, document_kind: 'vm-host-links', workspace_document_digest: hostWorkspace.document_digest,
+  document_digest: 'e'.repeat(64), workspaces: [{interpreter_artifact_id: hostSource.interpreter_artifact_id,
+    source_artifact_sha256: hostSource.source_artifact_sha256, omissions: [], links: [{
+      host_event: {...sample.event, sequence_number: '50'}, category: 'runtime', type: 'api_call', state: 'observed',
+      reason: 'direct-dispatch-parent', guest_position: {sample_event: sample.event, invocation_event: sample.invocation_event,
+        invocation_id: sample.invocation_id, instruction_pointer: sample.instruction_pointer,
+        instruction_pointer_units: sample.instruction_pointer_units}}]}]};
+assert(runInNewContext(`${model}\nisVmHostLinksDocument(hostLinks, hostWorkspace)`, {hostLinks, hostWorkspace, TextEncoder}));
+const workspaceCases = await workspaceUiCases();
+await ownedOpcodeExperimentUiCase();
 const workspace = fixture.workspaces[0];
 workspace.runtime = 'webassembly'; workspace.model = 'unknown'; workspace.samples = []; workspace.sample_count = 0;
 workspace.handlers = [
@@ -29,11 +43,12 @@ assert(runInNewContext(`${model}\nisVmOpcodeWorkspaceDocument(fixture)`, {fixtur
 const helper = app.slice(app.indexOf('      function textElement('), app.indexOf('      function emptyListboxOption('));
 const renders = app.slice(app.indexOf('      function vmField('), app.indexOf('      function renderVmOpcodeWorkspaceInPlace('));
 assert(helper.includes('function textElement')); assert(renders.includes('function renderVmOpcodeWorkspace'));
-console.log('PASS authored WASM workspace fixture and shipped-renderer boundaries (model check, not rendered QA)');
+console.log('PASS authored WASM, host links, coverage, effects, traversal and experiment fixtures plus shipped-renderer boundaries (model check, not rendered QA)');
 
 if (process.argv.includes('--browser')) {
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
   const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
+const hostWorkspace=${JSON.stringify(hostWorkspace)},hostLinks=${JSON.stringify(hostLinks)};
 const state={vmOpcodeWorkspace:fixture,lastValidVmOpcodeWorkspace:fixture,vmOpcodeWorkspaceStatus:'ready',selectedVmHandlerKey:null,vmFindings:[selected],selectedVmFindingId:selected.findingId,
 vmAnalysisDocument:{document_digest:fixture.analysis_digest,capture_mode:'unknown'}};
 const elements={vmSessionStatus:document.querySelector('#status')};
@@ -41,7 +56,7 @@ function render(){document.querySelector('#workspace').replaceChildren(renderVmO
 render();`;
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/app.css"><style>html,body{overflow:auto;height:auto;min-height:100%}body{margin:0}main{padding:16px;max-width:1100px;margin:auto;min-width:0}</style>
-</head><body><main><p>Authored static WASM workspace. No module execution or browser capture.</p><div id="status" class="vm-session-status"></div><div id="workspace"></div></main>
+</head><body><main><p>Authored VM workspace states and experiment HTTP receipts. No captured source execution or browser capture.</p><div id="status" class="vm-session-status"></div><div id="workspace"></div></main>
 <script>${model}\n${helper}\n${renders}\n${setup}</script></body></html>`;
   const css = await readFile(join(root, 'apps/research-ui/app.css'));
   const server = createServer((request, response) => {
@@ -51,9 +66,11 @@ render();`;
   });
   const profile = await mkdtemp(join(tmpdir(), 'reb-vm-workspace-'));
   let browser, socket, closed = false, diagnostics = '', sequence = 0;
+  const startup = {executable: process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', pid: null,
+    elapsed_ms: 0, exit_code: null, signal: null, spawn_error: null, port_file: 'not checked'};
   const pending = new Map(), errors = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const until = async (test, label) => {
-    const end = Date.now() + 10000;
+  const until = async (test, label, timeoutMs = 10000) => {
+    const end = Date.now() + timeoutMs;
     while (Date.now() < end) { if (await test()) return; await pause(40); }
     throw Error(`Timed out: ${label}`);
   };
@@ -66,20 +83,46 @@ render();`;
     if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  const exerciseDisclosure = async selector => {
+    const row = `document.querySelector(${JSON.stringify(selector)})`;
+    await evaluate(`${row}.querySelector('summary').focus()`);
+    assert.equal(await evaluate(`${row}.open`), false, `${selector}: initially closed`);
+    for (const open of [true, false, true]) {
+      assert.equal(await evaluate(`document.activeElement === ${row}.querySelector('summary')`), true, `${selector}: keyboard focus`);
+      await pressRenderedEnter(send);
+      assert.equal(await evaluate(`${row}.open`), open, `${selector}: Enter toggles native disclosure`);
+    }
+  };
   await mkdir(output, {recursive: true});
   try {
     await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
-    browser = spawn(process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', ['--headless=new', '--remote-debugging-port=0',
+    const startupStarted = Date.now();
+    browser = spawn(startup.executable, ['--headless=new', '--remote-debugging-port=0',
       `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
       '--disable-component-update', '--disable-sync', 'about:blank'], {detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe']});
-    browser.once('close', () => { closed = true; }); browser.on('error', error => { diagnostics += String(error); });
+    startup.pid = browser.pid ?? null;
+    browser.once('close', () => { closed = true; });
+    browser.once('exit', (code, signal) => { startup.exit_code = code; startup.signal = signal; });
+    browser.on('error', error => { startup.spawn_error = String(error).slice(0, 2048); });
     browser.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8192); });
     let port;
     await until(async () => {
-      if (closed) throw Error(`Sandboxed Chromium startup failed: ${diagnostics}`);
-      try { port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; return !!port; }
-      catch { return false; }
-    }, 'sandboxed Chromium startup');
+      startup.elapsed_ms = Date.now() - startupStarted;
+      if (startup.spawn_error || closed || browser.exitCode !== null || browser.signalCode !== null) {
+        throw Error(`Sandboxed Chromium startup failed: ${JSON.stringify(startup)}; ${diagnostics}`);
+      }
+      try {
+        port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
+        const ready = /^[1-9][0-9]{0,4}$/.test(port) && Number(port) <= 65535;
+        startup.port_file = ready ? 'ready' : 'incomplete or invalid port';
+        return ready;
+      } catch (error) {
+        startup.port_file = String(error.code ?? error.message).slice(0, 256);
+        if (error.code !== 'ENOENT') throw error;
+        return false;
+      }
+    }, 'sandboxed Chromium startup', 30000);
+    console.log(`Sandboxed Chromium ready after ${startup.elapsed_ms} ms`);
     const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
     await new Promise((ready, reject) => { socket.addEventListener('open', ready, {once: true}); socket.addEventListener('error', reject, {once: true}); });
@@ -121,17 +164,71 @@ render();`;
       await evaluate("state.vmAnalysisDocument={document_digest:fixture.analysis_digest,capture_mode:'unknown'};renderVmSessionStatus()");
 
     }
-    await evaluate("retainVmOpcodeWorkspaceOnFailure(state,'malformed','synthetic malformed fixture');render()");
+    await evaluate("state.vmOpcodeWorkspace=hostWorkspace;state.vmHostLinks=hostLinks;state.vmHostLinksStatus='ready';render()");
+    assert((await evaluate('document.body.textContent')).includes('event 1:1:50'));
+    assert((await evaluate('document.body.textContent')).includes('exact request-value provenance'));
+    for (const width of [1440, 390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `host-links-${width}.png`), Buffer.from(data, 'base64'));
+    }
+    await evaluate("hostLinks.workspace_document_digest='stale';render()");
+    assert((await evaluate('document.body.textContent')).includes('Guest position unknown'));
+    for (const width of [1440, 390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      for (const [name, value] of Object.entries(workspaceCases).filter(([name]) => name !== 'malformed')) {
+        await evaluate(`state.vmOpcodeWorkspace=${JSON.stringify(value)};state.vmOpcodeWorkspaceStatus='ready';state.vmHostLinks=null;render()`);
+        const current = value.workspaces[0], coverage = current.coverage;
+        assert.equal(await evaluate("document.querySelector('.vm-coverage-line strong').textContent"),
+          `${coverage.characterized_bytes} / ${coverage.retained_snapshot_bytes}`);
+        assert.equal(await evaluate("document.querySelector('.vm-coverage-bar').getAttribute('aria-valuenow')"),
+          String(coverage.retained_snapshot_bytes ? coverage.characterized_bytes * 100 / coverage.retained_snapshot_bytes : 0));
+        const body = await evaluate('document.body.textContent');
+        assert(body.includes(`${coverage.uncharacterized_bytes} uncharacterized bytes`));
+        for (const omission of coverage.omissions) assert(body.includes(omission.reason));
+        if (name === 'contradicted') {
+          assert(body.includes('conflicting effects')); assert(body.includes('none is selected for traversal'));
+          assert(body.includes('register[unknown] = unknown'));
+          assert.equal(await evaluate("document.querySelectorAll('[aria-label=\"Declarative opcode effects\"] .vm-effect-row').length"), 3);
+          await exerciseDisclosure('[aria-label="Declarative opcode effects"] details');
+        }
+        if (name.startsWith('walk_')) {
+          assert.equal(await evaluate("document.querySelectorAll('.vm-reachable-list details').length"), current.traversal.instructions.length);
+          assert(body.includes(`branch_taken → ${name === 'walk_frontier' ? 99 : 2}`));
+          assert(body.includes('branch_not_taken → 2'));
+          assert(body.includes(name === 'walk_frontier' ? 'frontier remains' : 'walk complete'));
+          if (name === 'walk_frontier') assert(body.includes('byte 99: past-snapshot'));
+          await exerciseDisclosure('.vm-reachable-list details');
+          assert.equal(await evaluate("(()=>{const e=document.querySelector('.vm-reachable-list .vm-effect-detail');return e.getBoundingClientRect().height>0 && getComputedStyle(e).visibility==='visible';})()"), true);
+          const visibleEdges = await evaluate("document.querySelector('.vm-reachable-list .vm-effect-detail').innerText");
+          assert(visibleEdges.includes(`branch_taken → ${name === 'walk_frontier' ? 99 : 2}`));
+          assert(visibleEdges.includes('branch_not_taken → 2'));
+        }
+        assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+        await evaluate('scrollTo(0,0)');
+        const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+        await writeFile(join(output, `workspace-${name}-${width}.png`), Buffer.from(data, 'base64'));
+      }
+      await checkOwnedOpcodeExperimentUi({evaluate, send});
+      await evaluate('scrollTo(0,0)');
+      const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `owned-experiment-${width}.png`), Buffer.from(data, 'base64'));
+    }
+    await evaluate("state.vmOpcodeWorkspace=fixture;state.lastValidVmOpcodeWorkspace=fixture;state.vmHostLinks=null;render()");
+    await evaluate(`if(!isVmOpcodeWorkspaceDocument(${JSON.stringify(workspaceCases.malformed)})) retainVmOpcodeWorkspaceOnFailure(state,'malformed','synthetic malformed fixture');render()`);
+    assert.equal(await evaluate('state.vmOpcodeWorkspace === fixture'), true);
     assert((await evaluate('document.body.textContent')).includes('last valid workspace is retained'));
     await evaluate("state.vmOpcodeWorkspace={...fixture,workspaces:[]};state.vmOpcodeWorkspaceStatus='ready';render()");
     assert.equal(await evaluate("document.querySelectorAll('.vm-handler-row').length"), 0);
     assert((await evaluate('document.body.textContent')).includes('Workspace unavailable for this finding'));
     assert.deepEqual(errors, []);
-    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440, 390],
-      scope: 'Shipped workspace rendering with authored fixtures; no native capture, WASM execution or full-app polling acceptance'}, null, 2));
-    console.log(`PASS rendered WASM rows and persisted capture modes, keyboard selection, inert text, narrow layout, retained error and empty states: ${output}`);
+    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', startup, viewports: [1440, 390],
+      cases: ['wasm', 'capture-mode', 'host-links', ...Object.keys(workspaceCases), 'owned-experiment'],
+      scope: 'Shipped workspace rendering and authored experiment HTTP failures; no native execution, browser capture or full-app polling acceptance'}, null, 2));
+    console.log(`PASS rendered VM workspace states, authored experiment failure, keyboard selection, inert text, narrow layout, retained error and empty states: ${output}`);
   } catch (error) {
-    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'failed', error: String(error.stack || error), diagnostics, errors}, null, 2));
+    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'failed', error: String(error.stack || error), diagnostics, startup, errors}, null, 2));
     throw error;
   } finally {
     for (const request of pending.values()) clearTimeout(request.timer);

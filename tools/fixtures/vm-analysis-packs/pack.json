@@ -1,0 +1,17 @@
+{
+  "contract_version": 1,
+  "document_kind": "vm-analysis-pack",
+  "pack_id": "owned-comparison-fixture",
+  "version": "1.0.0",
+  "rules": [],
+  "families": [
+    {
+      "source_artifact_sha256": "438cc488f75da8fcea4075b5e1bd1a319dfac8acbf3dc8ce9c40a0154a332754",
+      "program_family": "owned-comparison-fixture"
+    },
+    {
+      "source_artifact_sha256": "c0ef2d912751c3ba60dc4ac1cee8a4e70ea381ebd66e75ab34de32de27419391",
+      "program_family": "owned-comparison-fixture"
+    }
+  ]
+}

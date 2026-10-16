@@ -26,6 +26,74 @@ class VmLabTests(unittest.TestCase):
         )
         return json.loads(completed.stdout)
 
+    def test_browser_startup_readiness_is_bounded_and_failures_are_visible(self) -> None:
+        harness = (UI_DIRECTORY.parents[1] / "tools/check-vm-opcode-workspace-ui.mjs").read_text(encoding="utf-8")
+        wait = harness[harness.index("  const until = async"):harness.index("  const send = ")]
+        startup = harness[harness.index("    let port;"):harness.index("    const pages = ")]
+        result = self.run_evidence_model(f"""
+const {{runInNewContext}} = require('node:vm');
+const waitSource = {json.dumps(wait)}, startupSource = {json.dumps(startup)};
+async function exercise(options) {{
+  let now = 0;
+  const browser = {{exitCode:null,signalCode:null}};
+  const startup = {{spawn_error:options.spawnError ?? null,port_file:'not checked',elapsed_ms:0}};
+  const context = {{startup,browser,closed:false,diagnostics:'',startupStarted:0,profile:'owned-profile',
+    Date:{{now:()=>now}},console:{{log:()=>{{}}}},join:()=>'',
+    pause:async ms=>{{now+=ms;if(options.exitAt !== undefined && now>=options.exitAt) browser.exitCode=1;}},
+    readFile:async()=>{{
+      if(options.readError) throw Object.assign(new Error(options.readError),{{code:options.readError}});
+      if(now<(options.readyAt ?? Infinity)) throw Object.assign(new Error('not ready'),{{code:'ENOENT'}});
+      return options.port ?? '9222\\n/devtools/browser/owned';
+    }} }};
+  try {{
+    await runInNewContext(waitSource+';(async()=>{{'+startupSource+'}})()',context);
+    return {{ready:true,now,startup}};
+  }} catch(error) {{return {{ready:false,now,startup,error:String(error)}};}}
+}}
+(async()=>{{
+  const delayed = await exercise({{readyAt:12000}}), absent = await exercise({{}});
+  const exited = await exercise({{exitAt:4000}}), failed = await exercise({{spawnError:'ENOENT: browser unavailable'}});
+  const unreadable = await exercise({{readError:'EACCES'}}), invalid = await exercise({{readyAt:0,port:'65536'}});
+  let now=0, uiError='';
+  try {{await runInNewContext(waitSource+';until(()=>false,"UI assertion")',
+    {{Date:{{now:()=>now}},pause:async ms=>{{now+=ms;}}}});}} catch(error) {{uiError=String(error);}}
+  process.stdout.write(JSON.stringify({{delayed,absent,exited,failed,unreadable,invalid,ui:{{now,error:uiError}}}}));
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+""")
+        self.assertTrue(result["delayed"]["ready"])
+        self.assertEqual(result["delayed"]["now"], 12000)
+        self.assertEqual(result["delayed"]["startup"]["port_file"], "ready")
+        for name in ("absent", "invalid"):
+            self.assertFalse(result[name]["ready"])
+            self.assertEqual(result[name]["now"], 30000)
+            self.assertIn("Timed out: sandboxed Chromium startup", result[name]["error"])
+        self.assertEqual(result["exited"]["now"], 4000)
+        self.assertIn("Sandboxed Chromium startup failed", result["exited"]["error"])
+        self.assertEqual(result["failed"]["now"], 0)
+        self.assertIn("ENOENT: browser unavailable", result["failed"]["error"])
+        self.assertEqual(result["unreadable"]["startup"]["port_file"], "EACCES")
+        self.assertEqual(result["unreadable"]["now"], 0)
+        self.assertEqual(result["ui"]["now"], 10000)
+        self.assertIn("Timed out: UI assertion", result["ui"]["error"])
+
+    def test_rendered_enter_produces_a_character_and_text_free_release(self) -> None:
+        helper = (UI_DIRECTORY.parents[1] / "tools/rendered-keyboard.mjs").as_uri()
+        result = self.run_evidence_model(f"""
+(async()=>{{
+  const {{pressRenderedEnter}} = await import({json.dumps(helper)});
+  const events=[];
+  await pressRenderedEnter(async(method,params)=>{{events.push({{method,params}});}});
+  process.stdout.write(JSON.stringify({{events}}));
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+""")
+        key = {"key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13}
+        self.assertEqual(result["events"], [
+            {"method": "Input.dispatchKeyEvent", "params": {
+                "type": "keyDown", **key, "text": "\r", "unmodifiedText": "\r",
+            }},
+            {"method": "Input.dispatchKeyEvent", "params": {"type": "keyUp", **key}},
+        ])
+
     def test_fixture_workspace_projects_rendered_handler_rows(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         result = self.run_evidence_model(
@@ -141,6 +209,65 @@ process.stdout.write(JSON.stringify({{rejected}}));
 """
         )
         self.assertEqual(result["rejected"], [True] * 14)
+
+    def test_host_links_require_bound_source_and_retained_sample_identity(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        result = self.run_evidence_model(f"""
+const workspace = {json.dumps(fixture)};
+const source = workspace.workspaces[0], sample = source.samples[0];
+const host = {{...sample.event, sequence_number:'50'}};
+const position = {{sample_event:sample.event, invocation_event:sample.invocation_event,
+  invocation_id:sample.invocation_id, instruction_pointer:sample.instruction_pointer,
+  instruction_pointer_units:sample.instruction_pointer_units}};
+const valid = {{contract_version:1, document_kind:'vm-host-links', workspace_document_digest:workspace.document_digest,
+  document_digest:'e'.repeat(64), workspaces:[{{interpreter_artifact_id:source.interpreter_artifact_id,
+  source_artifact_sha256:source.source_artifact_sha256, omissions:[], links:[{{host_event:host, category:'runtime', type:'api_call',
+  state:'observed', reason:'direct-dispatch-parent', guest_position:position}}]}}]}};
+const accepted = isVmHostLinksDocument(valid, workspace);
+const mutations = [
+  row => row.workspace_document_digest = 'f'.repeat(64),
+  row => row.workspaces[0].source_artifact_sha256 = 'f'.repeat(64),
+  row => row.workspaces[0].links[0].payload = 'not allowed',
+  row => row.workspaces[0].links[0].host_event.sequence_number = '1',
+  row => row.workspaces[0].links[0].guest_position.instruction_pointer = 999,
+  row => row.workspaces[0].links[0].guest_position.invocation_id = '999',
+  row => row.workspaces[0].links[0].guest_position.invocation_event = null,
+  row => row.workspaces[0].links.push(row.workspaces[0].links[0])
+];
+const rejected = mutations.map(mutate => {{const copy=structuredClone(valid);mutate(copy);return !isVmHostLinksDocument(copy,workspace);}});
+valid.workspaces[0].links[0].state='unknown';valid.workspaces[0].links[0].reason='dispatch-samples-unavailable';
+valid.workspaces[0].links[0].guest_position=null;
+process.stdout.write(JSON.stringify({{accepted,rejected,unknown:isVmHostLinksDocument(valid,workspace)}}));
+""")
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["unknown"])
+        self.assertEqual(result["rejected"], [True] * 8)
+
+    def test_host_link_refresh_preserves_matching_evidence_and_rejects_late_reply(self) -> None:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        app = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        helper = app[app.index("      async function refreshVmHostLinks("):app.index("      async function refreshVmAnalysis(")]
+        result = self.run_evidence_model(helper + f"""
+const workspace = {json.dumps(fixture)};
+const retained = {{contract_version:1, document_kind:'vm-host-links', workspace_document_digest:workspace.document_digest,
+  workspaces:[], document_digest:'e'.repeat(64)}};
+const state = {{vmOpcodeWorkspace:workspace,vmHostLinks:retained,vmHostLinksGeneration:0,vmHostLinksStatus:'ready'}};
+let complete;
+let fetch = () => new Promise(resolve => complete=resolve);
+(async () => {{
+ const pending = refreshVmHostLinks();
+ state.vmOpcodeWorkspace = {{...workspace, document_digest:'f'.repeat(64)}};
+ complete({{ok:true,json:async()=>retained}});await pending;
+ const lateRejected = state.vmHostLinks === retained && state.vmHostLinksStatus === 'ready';
+ state.vmOpcodeWorkspace = workspace;
+ fetch = async () => ({{ok:false,status:500}});await refreshVmHostLinks();
+ const failedRetained = state.vmHostLinks === retained && state.vmHostLinksStatus === 'unavailable';
+ fetch = async () => ({{ok:true,json:async()=>({{...retained,workspace_document_digest:'f'.repeat(64)}})}});
+ await refreshVmHostLinks();
+ process.stdout.write(JSON.stringify({{lateRejected,failedRetained,staleRetained:state.vmHostLinks===retained}}));
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+""")
+        self.assertTrue(all(result.values()))
 
     def test_webassembly_workspace_projects_dispatch_arms_and_non_vm_is_empty(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))

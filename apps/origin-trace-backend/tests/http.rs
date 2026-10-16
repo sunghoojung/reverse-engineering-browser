@@ -593,7 +593,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 36, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 37, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -775,7 +775,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 36);
+    assert_eq!(operation_count, 37);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -2027,6 +2027,69 @@ async fn vm_opcode_workspace_has_etag_and_failure_isolated_from_vm_analysis() {
     assert_eq!(blocked.get("/api/analysis/vm").await.status(), 200);
     assert_eq!(blocked.get("/api/analysis/vm/opcodes").await.status(), 500);
 }
+#[tokio::test]
+async fn vm_host_links_are_digest_bound_payload_free_and_failure_isolated() {
+    let server = Server::start().await;
+    vm_artifact(
+        &server.root.path().join("artifacts"),
+        include_bytes!("../../../tools/fixtures/vm-dynamic-debug/stack-vm.js"),
+        "3",
+    );
+    let mut host = vm_event("runtime", 1, 7, "1");
+    host["payload"] = json!("PRIVATE HOST PAYLOAD");
+    server.file("events.jsonl", &jsonl(&[host]));
+    let response = server.get("/api/analysis/vm/host-links").await;
+    assert_eq!(response.status(), 200);
+    let etag = response.headers()["etag"].clone();
+    let document: Value = response.json().await.unwrap();
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../protocol/vm-host-links-v1.schema.json"
+    ))
+    .unwrap();
+    jsonschema::validator_for(&schema)
+        .unwrap()
+        .validate(&document)
+        .unwrap();
+    assert!(!document.to_string().contains("PRIVATE HOST PAYLOAD"));
+    assert_eq!(document["workspaces"][0]["links"][0]["state"], "unknown");
+    assert!(document["workspaces"][0]["links"][0]["guest_position"].is_null());
+    let workspace: Value = server
+        .get("/api/analysis/vm/opcodes")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        document["workspace_document_digest"],
+        workspace["document_digest"]
+    );
+    assert_eq!(
+        server
+            .client
+            .get(format!("{}/api/analysis/vm/host-links", server.url))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        304
+    );
+    let blocked = Server::start().await;
+    std::fs::create_dir_all(
+        blocked
+            .root
+            .path()
+            .join("artifacts/analysis/vm-host-links-v1.json"),
+    )
+    .unwrap();
+    assert_eq!(blocked.get("/api/analysis/vm").await.status(), 200);
+    assert_eq!(blocked.get("/api/analysis/vm/opcodes").await.status(), 200);
+    assert_eq!(
+        blocked.get("/api/analysis/vm/host-links").await.status(),
+        500
+    );
+}
+
 #[tokio::test]
 async fn vm_capture_mode_is_persisted_digest_bound_and_refreshes_with_provenance() {
     let server = Server::start().await;
@@ -5922,14 +5985,17 @@ async fn workspace_http_held_lease_rejects_without_wait_or_changes() {
             200,
             "Atomic reads stay available"
         );
+        // Parallel subprocess startup can retain this file description until
+        // exec closes it. Keep an alias alive to exercise that lifetime without
+        // relying on fork timing; closing only `lock` would leave the lease held.
+        let inherited = lock.try_clone().unwrap();
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(lock);
-        assert_eq!(
-            server
-                .action(&action, workspace_change(kind, 1, 1))
-                .await
-                .status(),
-            200
-        );
+        let response = server.action(&action, workspace_change(kind, 1, 1)).await;
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(status, 200, "{kind} after release: {body}");
+        drop(inherited);
     }
 }
 #[cfg(unix)]

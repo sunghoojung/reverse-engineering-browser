@@ -87,6 +87,11 @@ VM documents persist exact session launch provenance from
 [`capture-provenance-v1`](../../protocol/capture-provenance-v1.md). Missing metadata
 stays unknown, and a current debugger connection never relabels saved findings.
 
+
+The offline `origin-trace-vm-pack apply` and `compare` commands add declarative
+relevance rankings or compare digest-bound workspace v2 documents. They preserve
+generic evidence and uncertainty, never execute source, and write private
+no-clobber reports. See [VM analysis packs v1](../../protocol/vm-analysis-pack-v1.md).
 Offline `reb-api describe OPERATION --action ACTION` also exposes source-backed
 advisory effects and prerequisites while retaining the operation's common
 guards. See the [execution metadata contract](../../protocol/http-api.md#execution-metadata).
@@ -302,3 +307,5 @@ PNG and DOM text/attributes are never retained in debugger state or written to
 files. The feature refuses observed form/private/editable content and frames,
 while explicitly retaining unknown pixel sensitivity, timing and occlusion.
 See [Element screenshot v1](../../protocol/element-screenshot-v1.md).
+
+VM Lab host positions are a separate digest-bound [host-links v1 report](../../protocol/vm-host-links-v1.md). Host payloads are not duplicated; missing dispatch evidence stays unknown.

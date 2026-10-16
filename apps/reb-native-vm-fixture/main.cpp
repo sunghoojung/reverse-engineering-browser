@@ -595,8 +595,10 @@ int ControlMain(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc > 1 && std::string_view(argv[1]) == "--emit-dispatch-events-v1")
-    return EmitOwnedVmDispatchEvents(argc, argv);
+  if (argc > 1 && (std::string_view(argv[1]) == "--emit-dispatch-events-v1" ||
+                   std::string_view(argv[1]) == "--emit-host-dispatch-events-v1"))
+    return EmitOwnedVmDispatchEvents(argc, argv,
+                                     std::string_view(argv[1]) == "--emit-host-dispatch-events-v1");
   if (argc > 1 && std::string_view(argv[1]) == "--control-owned-fixture-v1")
     return ControlMain(argc, argv);
   bool enabled = false;

@@ -1845,6 +1845,11 @@
       function isVmAnalysisDocument(document) {
         return isPlainObject(document) && document.contract_version === 1 &&
           document.document_kind === 'vm-analysis' &&
+          (document.capture_mode === undefined || vmWorkspaceMode(document.capture_mode)) &&
+          (document.inputs?.capture_provenance_digest === undefined ||
+            document.inputs.capture_provenance_digest === null ||
+            (typeof document.inputs.capture_provenance_digest === 'string' &&
+             /^[0-9a-f]{64}$/.test(document.inputs.capture_provenance_digest))) &&
           typeof document.document_digest === 'string' && /^[0-9a-f]{64}$/.test(document.document_digest) &&
           typeof document.profile_digest === 'string' && /^[0-9a-f]{64}$/.test(document.profile_digest) &&
           isPlainObject(document.profile) && document.profile.profile_id === 'anti-bot-vm-detection-v1' &&

@@ -170,6 +170,7 @@
         malformedVmFindings: 0,
         selectedVmFindingId: null,
         vmAnalysisStatus: 'loading',
+        vmAnalysisDocument: null,
         vmAnalysisError: null,
         vmAnalysisRequestId: null,
         vmAnalysisEtag: null,

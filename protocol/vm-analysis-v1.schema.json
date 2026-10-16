@@ -8,6 +8,7 @@
   "properties": {
     "contract_version": {"const": 1},
     "document_kind": {"const": "vm-analysis"},
+    "capture_mode": {"enum": ["native-stealth", "cdp-attached", "unknown"]},
     "producer": {
       "type": "object",
       "additionalProperties": false,
@@ -25,7 +26,8 @@
       "required": ["artifact_manifest_digest", "event_store_digest"],
       "properties": {
         "artifact_manifest_digest": {"$ref": "#/$defs/digest"},
-        "event_store_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+        "event_store_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "capture_provenance_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
       }
     },
     "input_coverage": {"$ref": "#/$defs/coverage"},

@@ -34,12 +34,14 @@ console.log('PASS authored WASM workspace fixture and shipped-renderer boundarie
 if (process.argv.includes('--browser')) {
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
   const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
-const state={vmOpcodeWorkspace:fixture,lastValidVmOpcodeWorkspace:fixture,vmOpcodeWorkspaceStatus:'ready',selectedVmHandlerKey:null};
-function render(){document.querySelector('#workspace').replaceChildren(renderVmOpcodeWorkspace(selected));}
+const state={vmOpcodeWorkspace:fixture,lastValidVmOpcodeWorkspace:fixture,vmOpcodeWorkspaceStatus:'ready',selectedVmHandlerKey:null,vmFindings:[selected],selectedVmFindingId:selected.findingId,
+vmAnalysisDocument:{document_digest:fixture.analysis_digest,capture_mode:'unknown'}};
+const elements={vmSessionStatus:document.querySelector('#status')};
+function render(){document.querySelector('#workspace').replaceChildren(renderVmOpcodeWorkspace(selected));renderVmSessionStatus();}
 render();`;
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/app.css"><style>html,body{overflow:auto;height:auto;min-height:100%}body{margin:0}main{padding:16px;max-width:1100px;margin:auto;min-width:0}</style>
-</head><body><main><p>Authored static WASM workspace. No module execution or browser capture.</p><div id="workspace"></div></main>
+</head><body><main><p>Authored static WASM workspace. No module execution or browser capture.</p><div id="status" class="vm-session-status"></div><div id="workspace"></div></main>
 <script>${model}\n${helper}\n${renders}\n${setup}</script></body></html>`;
   const css = await readFile(join(root, 'apps/research-ui/app.css'));
   const server = createServer((request, response) => {
@@ -105,6 +107,19 @@ render();`;
       await evaluate('scrollTo(0,0)');
       const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
       await writeFile(join(output, `wasm-${width}.png`), Buffer.from(data, 'base64'));
+      for (const [mode, label] of [['native-stealth', 'Native stealth'], ['cdp-attached', 'CDP attached'], ['unknown', 'Recorded evidence']]) {
+        await evaluate(`fixture.workspaces[0].capture_mode=${JSON.stringify(mode)};state.debuggerSession={state:'running',target:{}};renderVmSessionStatus()`);
+        assert.equal(await evaluate("document.querySelector('.vm-session-chip').textContent"), label);
+        assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+        const capture = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+        await writeFile(join(output, `capture-${mode}-${width}.png`), Buffer.from(capture.data, 'base64'));
+      }
+      await evaluate("fixture.workspaces[0].capture_mode='native-stealth';state.vmAnalysisDocument.document_digest='stale';renderVmSessionStatus()");
+      assert.equal(await evaluate("document.querySelector('.vm-session-chip').textContent"), 'Recorded evidence');
+      await evaluate("delete state.vmAnalysisDocument.capture_mode;state.broker='connected';state.sessionMode='live';renderVmSessionStatus()");
+      assert.equal(await evaluate("document.querySelector('.vm-session-chip').textContent"), 'Recorded evidence');
+      await evaluate("state.vmAnalysisDocument={document_digest:fixture.analysis_digest,capture_mode:'unknown'};renderVmSessionStatus()");
+
     }
     await evaluate("retainVmOpcodeWorkspaceOnFailure(state,'malformed','synthetic malformed fixture');render()");
     assert((await evaluate('document.body.textContent')).includes('last valid workspace is retained'));
@@ -114,7 +129,7 @@ render();`;
     assert.deepEqual(errors, []);
     await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440, 390],
       scope: 'Shipped workspace rendering with authored fixtures; no native capture, WASM execution or full-app polling acceptance'}, null, 2));
-    console.log(`PASS rendered WASM workspace rows, keyboard selection, inert text, narrow layout, retained error and empty states: ${output}`);
+    console.log(`PASS rendered WASM rows and persisted capture modes, keyboard selection, inert text, narrow layout, retained error and empty states: ${output}`);
   } catch (error) {
     await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'failed', error: String(error.stack || error), diagnostics, errors}, null, 2));
     throw error;

@@ -2028,6 +2028,96 @@ async fn vm_opcode_workspace_has_etag_and_failure_isolated_from_vm_analysis() {
     assert_eq!(blocked.get("/api/analysis/vm/opcodes").await.status(), 500);
 }
 #[tokio::test]
+async fn vm_capture_mode_is_persisted_digest_bound_and_refreshes_with_provenance() {
+    let server = Server::start().await;
+    let root = server.root.path().join("artifacts");
+    let artifact = vm_artifact(
+        &root,
+        include_bytes!("../../../tools/fixtures/vm-dynamic-debug/stack-vm.js"),
+        "0",
+    );
+    server.file("events.jsonl", b"");
+    let response = server.get("/api/analysis/vm").await;
+    let mut etag = response.headers()["etag"].clone();
+    let mut previous: Value = response.json().await.unwrap();
+    assert_eq!(previous["capture_mode"], "unknown");
+    assert!(previous["inputs"]["capture_provenance_digest"].is_null());
+    assert_vm_document(&previous);
+    for mode in ["native-stealth", "cdp-attached", "unknown"] {
+        server.file("artifacts/capture-provenance-v1.json",
+            format!(r#"{{"contract_version":1,"sessions":[{{"session_id":"1","capture_mode":"{mode}"}}]}}"#).as_bytes());
+        let response = server
+            .client
+            .get(format!("{}/api/analysis/vm", server.url))
+            .header("If-None-Match", &etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        etag = response.headers()["etag"].clone();
+        let document: Value = response.json().await.unwrap();
+        assert_vm_document(&document);
+        assert_eq!(document["capture_mode"], mode);
+        assert!(document["inputs"]["capture_provenance_digest"].is_string());
+        assert_ne!(document["document_digest"], previous["document_digest"]);
+        let workspace: Value = server
+            .get("/api/analysis/vm/opcodes")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(workspace["capture_mode"], mode);
+        assert_eq!(workspace["workspaces"][0]["capture_mode"], mode);
+        assert_eq!(workspace["analysis_digest"], document["document_digest"]);
+        let expected = workspace["document_digest"].clone();
+        let mut unsigned = workspace;
+        unsigned.as_object_mut().unwrap().remove("document_digest");
+        assert_eq!(
+            expected,
+            hex::encode(Sha256::digest(
+                origin_trace_backend::vm::canonical(&unsigned).unwrap()
+            ))
+        );
+        previous = document;
+    }
+    let mut other_session = artifact.clone();
+    other_session["artifact_id"] = json!("2");
+    other_session["session_id"] = json!("2");
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{other_session}\n").as_bytes(),
+    );
+    server.file("artifacts/capture-provenance-v1.json", br#"{"contract_version":1,"sessions":[{"session_id":"1","capture_mode":"native-stealth"},{"session_id":"2","capture_mode":"cdp-attached"}]}"#);
+    let mixed: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    assert_eq!(mixed["capture_mode"], "unknown");
+    let workspaces: Value = server
+        .get("/api/analysis/vm/opcodes")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(workspaces["capture_mode"], "unknown");
+    assert_eq!(workspaces["workspaces"].as_array().unwrap().len(), 2);
+    for workspace in workspaces["workspaces"].as_array().unwrap() {
+        let expected = if workspace["interpreter_artifact_id"] == "1" {
+            "native-stealth"
+        } else {
+            "cdp-attached"
+        };
+        assert_eq!(workspace["capture_mode"], expected);
+    }
+    std::fs::remove_file(root.join("capture-provenance-v1.json")).unwrap();
+    let unknown: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    assert_eq!(unknown["capture_mode"], "unknown");
+    assert!(unknown["inputs"]["capture_provenance_digest"].is_null());
+    server.file(
+        "artifacts/capture-provenance-v1.json",
+        br#"{"contract_version":1,"sessions":[{"session_id":"1","capture_mode":"undetectable"}]}"#,
+    );
+    assert_eq!(server.get("/api/analysis/vm").await.status(), 400);
+}
+
+#[tokio::test]
 async fn vm_http_refreshes_event_only_changes_and_agrees_with_cli() {
     let server = Server::start().await;
     let root = server.root.path().join("artifacts");

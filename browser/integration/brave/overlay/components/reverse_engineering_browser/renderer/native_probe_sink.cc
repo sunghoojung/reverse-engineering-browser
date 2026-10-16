@@ -197,7 +197,7 @@ void NativeProbeSink::CaptureRuntimeTypedArray(
   const std::uint64_t expires_at = expires_at_monotonic_ns_.load(std::memory_order_relaxed);
   const NativeGeneratedArtifactEmitter artifact_emitter =
       artifact_emitter_.load(std::memory_order_relaxed);
-  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != generation || !artifact_emitter ||
       !emitter || (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
@@ -218,7 +218,7 @@ void NativeProbeSink::CaptureRuntimeTypedArray(
       event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
       event.header.frame_id = frame_id;
       SetPayload(event, "runtime_typed_array_session_limit");
-      emitter(event);
+      emitter(event, generation);
     }
     return;
   }

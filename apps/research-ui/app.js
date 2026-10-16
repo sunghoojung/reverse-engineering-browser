@@ -1736,9 +1736,9 @@
             expected:{operation:candidate.effect.operation,value:fields.value.value,next_pc:fields.next_pc.value,branch_taken:candidate.opcode===7?branch.value==='true':null}};
           ownedExperimentPending=true;run.disabled=true;output.textContent='Running the disposable owned fixture. No automatic retry.';
           try {const response=await fetch('/api/analysis/vm/experiments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(30000)});
-            const row=await response.json();if(!response.ok || !isVmOwnedExperimentRecord(row) || row.request.command_id!==request.command_id) throw new Error('Outcome unknown or refused. Read saved results before trying another experiment.');
+            const row=await response.json();if(!response.ok || !isVmOwnedExperimentRecord(row) || row.request.command_id!==request.command_id || row.request.workspace_digest!==request.workspace_digest || row.request.source_artifact_sha256!==request.source_artifact_sha256 || row.request.effect_id!==request.effect_id || row.request.opcode!==request.opcode || row.request.inputs.left!==request.inputs.left || row.request.inputs.right!==request.inputs.right) throw new Error('Outcome unknown or refused. Read saved results before trying another experiment.');
             const rows=[...(ownedExperimentResults.get(key) ?? []),row].slice(-64);retain(rows);show(rows);
-          } catch(error) {output.textContent=error.message;} finally {ownedExperimentPending=false;run.disabled=false;}
+          } catch(error) {output.textContent=error.message;} finally {ownedExperimentPending=false;document.querySelectorAll('.vm-experiment-form button[type=submit]').forEach(button=>{button.disabled=false;});}
         });
         load.addEventListener('click',async()=>{load.disabled=true;try {const response=await fetch('/api/analysis/vm/experiments',{cache:'no-store',signal:AbortSignal.timeout(5000)});const doc=await response.json();
           if(!response.ok || doc.schema!=='reb-owned-opcode-experiments-v1' || !Array.isArray(doc.records) || doc.records.length>64 || !doc.records.every(isVmOwnedExperimentRecord)) throw new Error('Saved experiment results are unavailable or malformed.');

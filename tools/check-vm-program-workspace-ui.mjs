@@ -87,6 +87,15 @@ const server = createServer((request,response)=>{response.setHeader('content-typ
       assert.equal(await evaluate('document.activeElement.dataset.pc'),'8');
       await click('#vmp-declared'); assert.equal(await evaluate('document.querySelector("#vmp-step").disabled'),true);
       await click('#vmp-run'); await click('#vmp-reset');
+      assert.equal(await evaluate('document.querySelector(".vmp-row.pin").dataset.pc'), '2');
+      assert.equal(await evaluate('document.querySelector("#vmp-navigation-status").textContent'), 'Selected PC 2 · ↑ ↓ Home End');
+      await evaluate("document.querySelector('#vmp-address').value='7';document.querySelector('#vmp-goto').requestSubmit()");
+      await click('[data-act="tab"][data-tab="evidence"]');
+      assert((await evaluate("document.querySelector('#vmp-navigation-status').textContent")).includes('No instruction'));
+      await click('[data-act="row"][data-pc="3"]');
+      assert.equal(await evaluate('document.querySelector("#vmp-navigation-status").textContent'), 'Selected PC 3 · ↑ ↓ Home End');
+      await click('#vmp-reset');
+      assert.equal(await evaluate('document.querySelector("#vmp-navigation-status").textContent'), 'Selected PC 2 · ↑ ↓ Home End');
       await click('[data-act="tab"][data-tab="evidence"]');
       assert.equal(await evaluate('document.activeElement.dataset.tab'),'evidence');
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'),true);

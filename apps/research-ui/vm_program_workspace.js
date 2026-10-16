@@ -26,7 +26,7 @@
   const GOLDEN_SOURCE = '32f42d2408c8b2b77539c49ad458f3923d819fedc323e6529bbff7e83b14a52e';
   let executed = 3, pin = 2, filter = null, view = 'run', detailTab = 'state';
   const history = [2];
-  let historyIndex = 0;
+  let historyIndex = 0, navigationError = '';
   function shortDigest(value) {
     const hex = String(value || '').toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(hex)) return 'unrecognized';
@@ -92,7 +92,7 @@
     }
     if (executed < 5) items.push({id:'r2', kind:'run', title:'r2 unknown', detail:'Stored bits are 0. That is not an observed value.'});
     const ahead = steps.length - executed;
-    if (ahead) items.push({id:'ahead', kind:'run', title:ahead + (ahead === 1 ? ' instruction not sampled' : ' instructions not sampled'), detail:'Declared handlers ahead of the live PC.'});
+    if (ahead) items.push({id:'ahead', kind:'run', title:ahead + (ahead === 1 ? ' instruction not sampled' : ' instructions not sampled'), detail:'Declared handlers ahead of the replay PC.'});
     else items.push({id:'confirm', kind:'static', title:'Nothing confirmed', detail:'Halt was observed. Every effect is still inferred.'});
     return items;
   }
@@ -229,6 +229,7 @@
     const items = queueItems(attachment);
     $('vmp-qk').textContent = 'Open · ' + items.length;
     $('vmp-queue').innerHTML = items.map(item => '<div class="vmp-item ' + item.kind + '"><i></i><span><strong>' + item.title + '</strong><em>' + item.detail + '</em></span></div>').join('');
+    $('vmp-navigation-status').textContent = navigationError || 'Selected PC ' + pin + ' · ↑ ↓ Home End';
     $('vmp-back').disabled = historyIndex === 0;
     $('vmp-forward').disabled = historyIndex === history.length - 1;
     for (const [id, top] of scroll) $(id).scrollTop = top;
@@ -238,7 +239,7 @@
   function select(pc, remember = true) {
     if (!declared.some(item => item.pc === pc)) return;
     if (remember && pc !== pin) { history.splice(historyIndex + 1); history.push(pc); if (history.length > 24) history.shift(); historyIndex = history.length - 1; }
-    pin = pc; render();
+    navigationError = ''; pin = pc; render();
   }
   function reveal() {
     const row = root.querySelector('[data-act="row"][data-pc="' + pin + '"]');
@@ -261,7 +262,7 @@
   });
   $('vmp-step').addEventListener('click', () => { if (view === 'run' && executed < steps.length) { executed += 1; render(); } });
   $('vmp-follow').addEventListener('click', () => { if (view === 'run') { filter = null; select(livePc()); reveal(); } });
-  $('vmp-reset').addEventListener('click', () => { executed = 3; pin = 2; filter = null; view = 'run'; history.splice(0, history.length, 2); historyIndex = 0; render(); });
+  $('vmp-reset').addEventListener('click', () => { executed = 3; pin = 2; filter = null; view = 'run'; history.splice(0, history.length, 2); historyIndex = 0; navigationError = ''; render(); });
   $('vmp-run').addEventListener('click', () => { view = 'run'; render(); });
   $('vmp-declared').addEventListener('click', () => { view = 'declared'; filter = null; render(); });
   root.addEventListener('keydown', event => {
@@ -276,8 +277,8 @@
   $('vmp-forward').addEventListener('click', () => { if (historyIndex < history.length - 1) { filter = null; select(history[++historyIndex], false); } });
   $('vmp-goto').addEventListener('submit', event => {
     event.preventDefault(); const text = $('vmp-address').value.trim(); const pc = /^\d+$/.test(text) ? Number(text) : NaN;
-    if (!declared.some(item => item.pc === pc)) { $('vmp-navigation-status').textContent = 'No instruction at that index. Available: 0–6, 8, 10.'; return; }
-    filter = null; select(pc); reveal(); $('vmp-navigation-status').textContent = 'Selected PC ' + pc;
+    if (!declared.some(item => item.pc === pc)) { navigationError = 'No instruction at that index. Available: 0–6, 8, 10.'; $('vmp-navigation-status').textContent = navigationError; return; }
+    filter = null; select(pc); reveal();
   });
   render();
   const detail = document.querySelector('#vm-detail');

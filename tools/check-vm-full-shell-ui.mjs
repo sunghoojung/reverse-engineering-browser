@@ -7,7 +7,7 @@ import {mkdtemp, readFile, writeFile, rm, mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {runInNewContext} from 'node:vm';
+import {runInNewContext, Script} from 'node:vm';
 import ledgerModel from '../apps/research-ui/vm_opcode_ledger.js';
 import staticModel from '../apps/research-ui/vm_static.js';
 import staticView from '../apps/research-ui/vm_static_view.js';
@@ -16,6 +16,43 @@ import debuggerModel from '../apps/research-ui/vm_debugger.js';
 import {recordCompatibilityDemo} from './generate-vm-compatibility-demo.mjs';
 import {contextualFixture} from './check-vm-contextual-ui.mjs';
 import {candidateWaitForUIStartup} from './check-candidate-experiment-journey.mjs';
+
+// Decode source literals without evaluating their contents. Compile the cooked
+// browser expression: node --check alone cannot catch a second-level quote loss.
+function readExpressionLiteral(source, start) {
+  const quote = source[start]; let value = '', dynamic = false;
+  for (let index = start + 1; index < source.length; index++) {
+    const character = source[index];
+    if (character === quote) return {value, dynamic, end: index + 1};
+    if (quote === '`' && character === '$' && source[index + 1] === '{') dynamic = true;
+    if (character !== '\\') { value += character; continue; }
+    const escaped = source[++index];
+    if (escaped === '\n') continue;
+    if (escaped === '\r') { if (source[index + 1] === '\n') index++; continue; }
+    if (escaped === 'x' || escaped === 'u') {
+      const braced = escaped === 'u' && source[index + 1] === '{';
+      const end = braced ? source.indexOf('}', index + 2) : index + (escaped === 'x' ? 2 : 4) + 1;
+      const hex = source.slice(index + (braced ? 2 : 1), end);
+      assert(/^[0-9a-f]+$/i.test(hex) && (braced || hex.length === (escaped === 'x' ? 2 : 4)), 'Invalid source literal escape');
+      value += String.fromCodePoint(parseInt(hex, 16)); index = braced ? end : end - 1; continue;
+    }
+    assert(escaped !== undefined && !/[1-9]/.test(escaped) && !(escaped === '0' && /[0-9]/.test(source[index + 1] || '')), 'Unsupported source literal escape');
+    value += ({n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', 0: '\0'})[escaped] ?? escaped;
+  }
+  throw Error('Unterminated source literal');
+}
+function compileLiteralEvaluations(source) {
+  const calls = /\bevaluate\s*\(\s*(?=["'`])/g; let count = 0, call;
+  while ((call = calls.exec(source))) {
+    const literal = readExpressionLiteral(source, calls.lastIndex);
+    if (!literal.dynamic && /^\s*[),]/.test(source.slice(literal.end))) {
+      new Script(literal.value, {filename: 'full-shell-browser-expression-at-line-' + (source.slice(0, call.index).split('\n').length)});
+      count++;
+    }
+    calls.lastIndex = literal.end;
+  }
+  return count;
+}
 const root = fileURLToPath(new URL('..', import.meta.url));
 const output = process.env.REB_VM_FULL_SHELL_OUTPUT || join(root, 'build/vm-workspace-ui-qa/full-shell');
 const html = await readFile(join(root, 'apps/research-ui/index.html'), 'utf8');
@@ -109,6 +146,15 @@ const server = createServer(async (request, response) => {
   } catch { response.writeHead(500).end(); }
 });
 if (process.argv.includes('--fixture-only')) {
+  const brokenSelector = 'document.querySelectorAll("[data-vm-paged-rows="retained samples"] > details").length';
+  assert.throws(() => compileLiteralEvaluations('evaluate(' + JSON.stringify(brokenSelector) + ')'), SyntaxError);
+  assert.equal(compileLiteralEvaluations('evaluate("1 + 2"); evaluate(\'3 + 4\'); evaluate(`5 + 6`); evaluate(`${neverRun()}`);'), 3);
+  assert.equal(readExpressionLiteral("'line\\n\\x41\\u0042\\u{43}'", 0).value, 'line\nABC');
+  const source = await readFile(fileURLToPath(import.meta.url), 'utf8');
+  const browserStart = source.indexOf('\n  const profile =');
+  assert(browserStart >= 0, 'Browser journey source boundary must exist');
+  const compiledExpressions = compileLiteralEvaluations(source.slice(browserStart));
+  assert(compiledExpressions > 100, 'Preflight must cover the browser journey, not just one selector');
   liveView = populatedLiveView;
   for (const [method, url, status] of [['GET', '/api/unavailable', 503], ['POST', '/api/analysis/vm', 405], ['GET', '/api/analysis/vm', 200], ['GET', '/api/vm-debugger', 200], ['POST', '/api/vm-debugger/actions', 405]]) {
     const response = {statusCode: 200, headersSent: false, headers: {},
@@ -122,7 +168,7 @@ if (process.argv.includes('--fixture-only')) {
     if (url === '/api/vm-debugger') assert.deepEqual(JSON.parse(response.body), populatedLiveView);
   }
   server.close();
-  console.log('PASS full-shell authored HTTP contracts, populated execution/static/contextual/live inputs, read-only live refusal and response ordering (not rendered)');
+  console.log(`PASS full-shell ${compiledExpressions} static browser expressions, authored HTTP contracts, populated execution/static/contextual/live inputs, read-only live refusal and response ordering (not rendered)`);
   process.exit(0);
 }
   const profile = await mkdtemp(join(tmpdir(), 'reb-vm-workspace-'));
@@ -138,6 +184,7 @@ if (process.argv.includes('--fixture-only')) {
     pending.set(id, {resolve, reject, timer}); socket.send(JSON.stringify({id, method, params}));
   });
   const evaluate = async expression => {
+    new Script(expression, {filename: 'full-shell-expanded-browser-expression'});
     const result = await send('Runtime.evaluate', {expression, returnByValue: true, awaitPromise: true});
     if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
@@ -217,6 +264,21 @@ if (process.argv.includes('--fixture-only')) {
     };
     const assertReachable = async (selector, label) => {
       assert.equal(await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)}),r=n.getBoundingClientRect();let left=0,top=0,right=innerWidth,bottom=innerHeight;for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect(),s=getComputedStyle(p);if(['auto','scroll','hidden','clip'].includes(s.overflowX)){left=Math.max(left,b.left+p.clientLeft);right=Math.min(right,b.left+p.clientLeft+p.clientWidth);}if(['auto','scroll','hidden','clip'].includes(s.overflowY)){top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}}return r.width>0&&r.height>0&&r.left>=left-1&&r.right<=right+1&&r.top>=top-1&&r.bottom<=bottom+1&&n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})()`), true, label + ' is unclipped and hit-testable');
+    };
+    const inspectTableRightEdge = async (rootSelector, name) => {
+      const listing = rootSelector + ' .vm-review-listing';
+      await evaluate(`document.querySelector(${JSON.stringify(listing + ' .vm-tool-table')}).scrollIntoView({block:'center',inline:'nearest'})`);
+      await evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+      const point = await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(listing)}),r=n.getBoundingClientRect(),h=n.querySelector('thead th').getBoundingClientRect(),x=(Math.max(0,r.left+n.clientLeft)+Math.min(innerWidth,r.left+n.clientLeft+n.clientWidth))/2,y=h.y+h.height/2;return {x,y,hit:y>=0&&y<innerHeight&&n.contains(document.elementFromPoint(x,y)),overflow:n.scrollWidth-n.clientWidth};})()`);
+      assert(point.hit && point.overflow > 0, name + ' exposes its local horizontal scroll owner');
+      await send('Input.dispatchMouseEvent', {type:'mouseMoved', x:point.x, y:point.y});
+      await send('Input.dispatchMouseEvent', {type:'mouseWheel', x:point.x, y:point.y, deltaX:-10000, deltaY:0});
+      await until(() => evaluate(`document.querySelector(${JSON.stringify(listing)}).scrollLeft<=1`), name + ' native horizontal start');
+      await send('Input.dispatchMouseEvent', {type:'mouseWheel', x:point.x, y:point.y, deltaX:10000, deltaY:0});
+      await until(() => evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(listing)});return n.scrollLeft>0&&n.scrollLeft>=n.scrollWidth-n.clientWidth-1;})()`), name + ' native horizontal end');
+      await assertReachable(listing + ' thead th:last-child', name + ' rightmost header');
+      await assertReachable(listing + ' tbody tr:first-child td:last-child', name + ' rightmost retained cell');
+      await screenshot(name + '-right-edge-390');
     };
     const modes = await evaluate("[...document.querySelectorAll('.vm-workspace-switch button')].map(node=>[node.id.replace('vm-show-',''),node.getAttribute('aria-controls')])");
     for (const expected of ['findings','execution','owned','static','contextual']) assert(modes.some(([mode]) => mode === expected));
@@ -304,7 +366,7 @@ if (process.argv.includes('--fixture-only')) {
         assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
       }
       await click('.vm-handler-list .vm-handler-row:nth-child(2)');
-      assert.equal(await evaluate('document.querySelectorAll("[data-vm-paged-rows=\"retained samples\"] > details").length'), workspace.samples.length, 'Selected handler exposes every retained authored sample');
+      assert.equal(await evaluate(`document.querySelectorAll('[data-vm-paged-rows="retained samples"] > details').length`), workspace.samples.length, 'Selected handler exposes every retained authored sample');
       for (let index = 1; index <= workspace.samples.length; index++) {
         const selector = `[data-vm-paged-rows="retained samples"] > details:nth-child(${index})`;
         await click(selector + ' > summary');
@@ -455,6 +517,11 @@ if (process.argv.includes('--fixture-only')) {
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `Populated packs fit at ${width}`);
       assert.equal(await evaluate("(()=>{const panel=document.querySelector('#vm-packs-workspace .vm-tool-results'),row=panel.querySelector('tbody tr');return row.getBoundingClientRect().bottom<=panel.getBoundingClientRect().bottom;})()"), true, 'Comparison rows are not hidden in a shrunken result viewport');
       await screenshot(`vm-packs-populated-${width}`);
+      await clickLabel('#vm-packs-workspace .vm-review-tabs', 'Selected row');
+      await assertReachable('#vm-packs-workspace .vm-review-tabs button:first-child', 'Packs selected-row tab ' + width);
+      await assertReachable('#vm-packs-workspace .vm-review-detail h3', 'Packs selected-row detail ' + width);
+      await screenshot(`vm-packs-inspector-${width}`);
+      if (width === 390) await inspectTableRightEdge('#vm-packs-workspace', 'vm-packs');
     }
     await send('Emulation.setDeviceMetricsOverride', {width: 1440, height: 900, deviceScaleFactor: 1, mobile: false});
     await click('#vm-show-ledger');
@@ -486,6 +553,11 @@ if (process.argv.includes('--fixture-only')) {
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `Populated ledger fits at ${width}`);
       assert.equal(await evaluate("(()=>{const panel=document.querySelector('#vm-ledger-workspace .vm-tool-results'),row=panel.querySelector('tbody tr');return row.getBoundingClientRect().bottom<=panel.getBoundingClientRect().bottom;})()"), true, 'Ledger rows are not hidden in a shrunken result viewport');
       await screenshot(`vm-ledger-populated-${width}`);
+      await clickLabel('#vm-ledger-workspace .vm-review-tabs', 'Entry');
+      await assertReachable('#vm-ledger-workspace .vm-review-tabs button:first-child', 'Ledger Entry tab ' + width);
+      await assertReachable('#vm-ledger-workspace .vm-review-inspector [role="tabpanel"] h4', 'Ledger selected-entry detail ' + width);
+      await screenshot(`vm-ledger-inspector-${width}`);
+      if (width === 390) await inspectTableRightEdge('#vm-ledger-workspace', 'vm-ledger');
     }
     // Live presentation receives only the checked-in authored read response.
     // Every native action endpoint remains 405; selection never executes a VM.

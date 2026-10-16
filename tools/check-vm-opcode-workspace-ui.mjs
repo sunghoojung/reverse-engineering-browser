@@ -10,6 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
 import {workspaceUiCases} from './vm-workspace-ui-cases.mjs';
 import {ownedOpcodeExperimentUiCase, checkOwnedOpcodeExperimentUi} from './owned-opcode-experiment-ui-cases.mjs';
+import {pressRenderedEnter} from './rendered-keyboard.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const output = process.env.REB_VM_WORKSPACE_UI_OUTPUT || join(root, 'build/vm-workspace-ui-qa');
@@ -81,6 +82,16 @@ render();`;
     const result = await send('Runtime.evaluate', {expression, returnByValue: true, awaitPromise: true});
     if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
+  };
+  const exerciseDisclosure = async selector => {
+    const row = `document.querySelector(${JSON.stringify(selector)})`;
+    await evaluate(`${row}.querySelector('summary').focus()`);
+    assert.equal(await evaluate(`${row}.open`), false, `${selector}: initially closed`);
+    for (const open of [true, false, true]) {
+      assert.equal(await evaluate(`document.activeElement === ${row}.querySelector('summary')`), true, `${selector}: keyboard focus`);
+      await pressRenderedEnter(send);
+      assert.equal(await evaluate(`${row}.open`), open, `${selector}: Enter toggles native disclosure`);
+    }
   };
   await mkdir(output, {recursive: true});
   try {
@@ -180,9 +191,7 @@ render();`;
           assert(body.includes('conflicting effects')); assert(body.includes('none is selected for traversal'));
           assert(body.includes('register[unknown] = unknown'));
           assert.equal(await evaluate("document.querySelectorAll('[aria-label=\"Declarative opcode effects\"] .vm-effect-row').length"), 3);
-          await evaluate("document.querySelector('[aria-label=\"Declarative opcode effects\"] summary').focus()");
-          for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
-          assert.equal(await evaluate("document.querySelector('[aria-label=\"Declarative opcode effects\"] details').open"), true);
+          await exerciseDisclosure('[aria-label="Declarative opcode effects"] details');
         }
         if (name.startsWith('walk_')) {
           assert.equal(await evaluate("document.querySelectorAll('.vm-reachable-list details').length"), current.traversal.instructions.length);
@@ -190,9 +199,7 @@ render();`;
           assert(body.includes('branch_not_taken → 2'));
           assert(body.includes(name === 'walk_frontier' ? 'frontier remains' : 'walk complete'));
           if (name === 'walk_frontier') assert(body.includes('byte 99: past-snapshot'));
-          await evaluate("document.querySelector('.vm-reachable-list summary').focus()");
-          for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
-          assert.equal(await evaluate("document.querySelector('.vm-reachable-list details').open"), true);
+          await exerciseDisclosure('.vm-reachable-list details');
           assert.equal(await evaluate("(()=>{const e=document.querySelector('.vm-reachable-list .vm-effect-detail');return e.getBoundingClientRect().height>0 && getComputedStyle(e).visibility==='visible';})()"), true);
           const visibleEdges = await evaluate("document.querySelector('.vm-reachable-list .vm-effect-detail').innerText");
           assert(visibleEdges.includes(`branch_taken → ${name === 'walk_frontier' ? 99 : 2}`));

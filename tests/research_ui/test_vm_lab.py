@@ -76,6 +76,24 @@ async function exercise(options) {{
         self.assertEqual(result["ui"]["now"], 10000)
         self.assertIn("Timed out: UI assertion", result["ui"]["error"])
 
+    def test_rendered_enter_produces_a_character_and_text_free_release(self) -> None:
+        helper = (UI_DIRECTORY.parents[1] / "tools/rendered-keyboard.mjs").as_uri()
+        result = self.run_evidence_model(f"""
+(async()=>{{
+  const {{pressRenderedEnter}} = await import({json.dumps(helper)});
+  const events=[];
+  await pressRenderedEnter(async(method,params)=>{{events.push({{method,params}});}});
+  process.stdout.write(JSON.stringify({{events}}));
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+""")
+        key = {"key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13}
+        self.assertEqual(result["events"], [
+            {"method": "Input.dispatchKeyEvent", "params": {
+                "type": "keyDown", **key, "text": "\r", "unmodifiedText": "\r",
+            }},
+            {"method": "Input.dispatchKeyEvent", "params": {"type": "keyUp", **key}},
+        ])
+
     def test_fixture_workspace_projects_rendered_handler_rows(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         result = self.run_evidence_model(

@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
+import {pressRenderedEnter} from './rendered-keyboard.mjs';
 export async function ownedOpcodeExperimentUiCase() {
   const root=new URL('../',import.meta.url);
   const document=JSON.parse(await readFile(new URL('tests/research_ui/fixtures/vm-opcode-workspace-v2.json',root),'utf8'));
@@ -29,7 +30,8 @@ export async function checkOwnedOpcodeExperimentUi({evaluate,send}) {
     for(const type of ['rawKeyDown','keyUp']) await send('Input.dispatchKeyEvent',{type,key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
     assert.equal(await evaluate("document.activeElement===document.querySelectorAll('.vm-experiment-form input')[1]"),true);
     await evaluate("document.querySelector('.vm-experiment-form button[type=submit]').focus()");
-    for(const type of ['rawKeyDown','keyUp']) await send('Input.dispatchKeyEvent',{type,key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+    assert.equal(await evaluate("document.activeElement===document.querySelector('.vm-experiment-form button[type=submit]')"),true);
+    await pressRenderedEnter(send);
     assert.equal(await evaluate('window.__ownedRequests.length'),1);
     assert((await evaluate('document.body.textContent')).includes('Authored lost receipt; result unknown.'));
     assert.equal(await evaluate("document.querySelector('.vm-experiment-form button[type=submit]').disabled"),false);

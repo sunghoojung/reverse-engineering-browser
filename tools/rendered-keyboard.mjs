@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
 
+// Native summary/button activation needs Enter's character-producing event;
+// rawKeyDown alone only delivers keydown and cannot trigger that default action.
+export async function pressRenderedEnter(send) {
+  const key = {key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13};
+  await send('Input.dispatchKeyEvent', {type: 'keyDown', ...key, text: '\r', unmodifiedText: '\r'});
+  await send('Input.dispatchKeyEvent', {type: 'keyUp', ...key});
+}
+
 // macOS translates editing shortcuts in the native responder. CDP injects
 // renderer events, so include the same edit command without changing the DOM.
 export function platformEditEvent(event, platform = process.platform) {

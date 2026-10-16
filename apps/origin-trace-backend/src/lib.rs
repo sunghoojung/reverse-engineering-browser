@@ -25,6 +25,7 @@ mod vm_effects;
 mod vm_experiment;
 mod vm_host_links;
 mod vm_opcode;
+pub mod vm_pack;
 mod vm_reachability;
 pub mod wasm;
 mod worker;

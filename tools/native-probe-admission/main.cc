@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
@@ -264,8 +265,16 @@ void RuntimeScriptProvenance() {
   assert(reb::mojom::NativeProbeHost::artifacts == before + 2);
   Configure(queue, 43);
   assert(sink.RuntimeScriptSourceNeeded(7, 9));
+  script.capture_generation = sink.RuntimeCaptureGeneration();
+  Configure(queue, 44);
+  script.source = source;
+  sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", bytes, script);
+  assert(Drain(queue) == 0);
   transport.Disable();
   const auto allocation_count = allocations.load();
+  const auto clock_reads = base::test_clock_reads.load();
+  assert(sink.RuntimeCaptureGeneration() == 0);
+  assert(base::test_clock_reads == clock_reads);
   sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", bytes, script);
   assert(allocations == allocation_count && Drain(queue) == 0);
   std::cout << "PASS runtime script provenance, missing source, context/session isolation and "
@@ -449,6 +458,83 @@ void RuntimeSourceFeed() {
   std::cout << "PASS runtime source feed for candidate, likely-VM, dispatch and closed failures\n";
 }
 
+void RuntimeCheckpointQueue() {
+  struct Snapshot {
+    std::uint64_t generation;
+    std::uint64_t allocator_script;
+    std::shared_ptr<std::array<std::uint8_t, 32>> bytes;
+    bool detached = false;
+  };
+  reb::NativeRuntimeSnapshotQueue<Snapshot> pending;
+  NativeProbeQueue events;
+  Configure(events);
+  const auto generation = sink.RuntimeCaptureGeneration();
+  auto bytes = std::make_shared<std::array<std::uint8_t, 32>>();
+  std::weak_ptr<std::array<std::uint8_t, 32>> retained = bytes;
+  assert(pending.Push({generation, 100, bytes}, 32));
+  // Script A allocated the zero-filled array. Script B writes synchronously;
+  // the queued native payload retains A and observes the later byte contents.
+  for (std::size_t i = 0; i < bytes->size(); ++i)
+    (*bytes)[i] = static_cast<std::uint8_t>(i ^ 0x5a);
+  unsigned copies = 0;
+  pending.Drain([&](Snapshot item) {
+    assert(item.allocator_script == 100);
+    assert(item.generation == sink.RuntimeCaptureGeneration());
+    assert((*item.bytes)[1] == (1 ^ 0x5a));
+    ++copies;
+  });
+  assert(copies == 1 && pending.size() == 0 && pending.bytes() == 0);
+  assert(pending.Push({generation, 100, bytes}, 32));
+  transport.Disable();
+  pending.Drain([&](Snapshot item) {
+    if (item.generation == sink.RuntimeCaptureGeneration())
+      ++copies;
+  });
+  assert(copies == 1);
+  Configure(events, 98, 200);
+  const auto expiring = sink.RuntimeCaptureGeneration();
+  assert(pending.Push({expiring, 100, bytes}, 32));
+  base::test_now_ns = 200;
+  pending.Drain([&](Snapshot item) {
+    if (item.generation == sink.RuntimeCaptureGeneration())
+      ++copies;
+  });
+  base::test_now_ns = 100;
+  assert(copies == 1);
+  Configure(events, 99);
+  assert(pending.Push({generation, 100, bytes}, 32));
+  pending.Drain([&](Snapshot item) {
+    if (item.generation == sink.RuntimeCaptureGeneration())
+      ++copies;
+  });
+  assert(copies == 1);
+  const auto current = sink.RuntimeCaptureGeneration();
+  assert(pending.Push({current, 100, bytes, true}, 32));
+  pending.Drain([&](Snapshot item) {
+    if (item.detached) {
+      sink.RecordRuntimeBufferOmission(item.generation, 8, "runtime_buffer_checkpoint_invalid");
+      return;
+    }
+    ++copies;
+  });
+  assert(One(events).header.type == reb::NativeProbeType::kArtifactCaptureFailed && copies == 1);
+  for (unsigned i = 0; i < 16; ++i)
+    assert(pending.Push({current, 100, bytes}, 32));
+  assert(!pending.Push({current, 100, bytes}, 32));
+  // No checkpoint before teardown: omit, release all retained owners, no copy.
+  bytes.reset();
+  pending.Drain([&](Snapshot item) {
+    sink.RecordRuntimeBufferOmission(item.generation, 8, "runtime_buffer_checkpoint_unavailable");
+  });
+  assert(Drain(events) == 16 && retained.expired() && copies == 1);
+  assert(pending.Push({current, 100, {}}, pending.kMaxBytes));
+  assert(!pending.Push({current, 100, {}}, 1));
+  pending.Drain([](Snapshot) {});
+  transport.Disable();
+  std::cout << "PASS native checkpoint queue: later writes, allocator identity, disable/session, "
+               "detach, teardown and independent limits\n";
+}
+
 void DisabledExpiredAndMalformed() {
   transport.Disable();
   std::atomic<std::uint64_t> observed{0};
@@ -510,5 +596,6 @@ int main() {
   RuntimeScriptProvenance();
   RuntimeKeepList();
   RuntimeSourceFeed();
+  RuntimeCheckpointQueue();
   std::cout << "Renderer ring admission only; no full Chromium/Mojo/runtime validation.\n";
 }

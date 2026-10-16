@@ -1,0 +1,308 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index ecf090c..10ffeb5 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -25,6 +25,12 @@
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
+ 
++#include "base/location.h"
++#include "base/task/single_thread_task_runner.h"
++#include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
++#include "third_party/blink/renderer/platform/heap/persistent.h"
++#include "third_party/blink/renderer/platform/wtf/functional.h"
++
+ #include <algorithm>
+ #include <bit>
+ #include <cstdint>
+@@ -252,64 +258,232 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+                          UNSAFE_BUFFERS(base::span(bytes, size)));
+ }
+ 
++struct PendingRuntimeBuffer {
++  std::uint64_t generation = 0;
++  std::uint64_t execution_context_id = 0;
++  std::uint64_t frame_id = 0;
++  std::uint64_t script_id = 0;
++  bool is_eval = false;
++  std::size_t size = 0;
++  v8::Global<v8::Context> context;
++  v8::Global<v8::Value> buffer;
++  v8::Global<v8::String> source;
++  v8::Global<v8::String> name;
++};
++
++class RuntimeBufferSnapshots final : public V8PerIsolateData::UserData {
++ public:
++  explicit RuntimeBufferSnapshots(v8::Isolate* isolate) : isolate_(isolate) {}
++
++  void Enqueue(v8::Local<v8::Value> buffer,
++               std::size_t size,
++               std::size_t retained_buffer_size,
++               const v8::RuntimeBufferScript& allocator,
++               ExecutionContext& execution_context,
++               std::uint64_t generation) {
++    auto& sink = reb::NativeProbeSink::Get();
++    const auto context_id = StableExecutionContextId(execution_context);
++    const auto frame_id = StableFrameId(execution_context);
++    const auto script_id = static_cast<std::uint64_t>(allocator.script_id);
++    if (!sink.RuntimeBufferHasSignal(generation, context_id, frame_id, size,
++                                     script_id, allocator.is_eval))
++      return;
++    if (retained_buffer_size > reb::kNativeArtifactMaxContentBytes ||
++        !pending_.CanRetain(retained_buffer_size)) {
++      sink.RecordRuntimeBufferOmission(generation, frame_id,
++                                        "runtime_buffer_checkpoint_limit");
++      return;
++    }
++    if (allocator.name.IsEmpty() ||
++        allocator.name->Length() > static_cast<int>(reb::kNativeArtifactMaxUrlBytes) ||
++        allocator.name->Utf8Length(isolate_) > reb::kNativeArtifactMaxUrlBytes) {
++      sink.RecordRuntimeBufferOmission(generation, frame_id,
++                                        "allocating_script_url_unavailable");
++      return;
++    }
++    if (allocator.source->Length() >
++        static_cast<int>(reb::kNativeArtifactMaxContentBytes)) {
++      sink.RecordRuntimeBufferOmission(generation, frame_id,
++                                        "allocating_script_unavailable");
++      return;
++    }
++    const std::size_t source_bytes = allocator.source->Utf8Length(isolate_);
++    if (source_bytes == 0 ||
++        source_bytes > reb::kNativeArtifactMaxContentBytes ||
++        retained_buffer_size > reb::kNativeArtifactMaxContentBytes ||
++        !pending_.CanRetain(retained_buffer_size + source_bytes)) {
++      sink.RecordRuntimeBufferOmission(generation, frame_id,
++                                       "runtime_buffer_checkpoint_limit");
++      return;
++    }
++    PendingRuntimeBuffer pending;
++    pending.generation = generation;
++    pending.execution_context_id = context_id;
++    pending.frame_id = frame_id;
++    pending.script_id = script_id;
++    pending.is_eval = allocator.is_eval;
++    pending.size = size;
++    pending.context.Reset(isolate_, allocator.context);
++    pending.buffer.Reset(isolate_, buffer);
++    pending.source.Reset(isolate_, allocator.source);
++    if (!allocator.name.IsEmpty())
++      pending.name.Reset(isolate_, allocator.name);
++    pending_.Push(std::move(pending), retained_buffer_size + source_bytes);
++    if (!scheduled_) {
++      scheduled_ = true;
++      if (!base::SingleThreadTaskRunner::HasCurrentDefault() ||
++          !base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++              FROM_HERE, BindOnce(&RuntimeBufferSnapshots::Drain,
++                                  WrapWeakPersistent(this)))) {
++        Drop("runtime_buffer_checkpoint_unavailable");
++        scheduled_ = false;
++      }
++    }
++  }
++
++  void WillBeDestroyed() override {
++    // Release all V8 globals while the isolate is still alive. A queued weak
++    // task may survive teardown but must not dereference the disposed isolate.
++    Drop("runtime_buffer_checkpoint_unavailable");
++    isolate_ = nullptr;
++  }
++
++ private:
++  void Drop(std::string_view reason) {
++    pending_.Drain([&](PendingRuntimeBuffer pending) {
++      reb::NativeProbeSink::Get().RecordRuntimeBufferOmission(
++          pending.generation, pending.frame_id, reason);
++    });
++  }
++
++  void Drain() {
++    scheduled_ = false;
++    if (!isolate_)
++      return;
++    auto& sink = reb::NativeProbeSink::Get();
++    pending_.Drain([&](PendingRuntimeBuffer pending) {
++      // No handle access or byte copy after disable, expiry or session change.
++      if (pending.generation != sink.RuntimeCaptureGeneration())
++        return;
++      v8::HandleScope handle_scope(isolate_);
++      auto context = pending.context.Get(isolate_);
++      ScriptState* script_state = ScriptState::MaybeFrom(isolate_, context);
++      if (!script_state || !script_state->ContextIsValid()) {
++        sink.RecordRuntimeBufferOmission(pending.generation, pending.frame_id,
++                                         "runtime_buffer_context_destroyed");
++        return;
++      }
++      ExecutionContext* execution_context = ToExecutionContext(context);
++      if (!execution_context || execution_context->IsContextDestroyed() ||
++          StableExecutionContextId(*execution_context) !=
++              pending.execution_context_id) {
++        sink.RecordRuntimeBufferOmission(pending.generation, pending.frame_id,
++                                         "runtime_buffer_context_destroyed");
++        return;
++      }
++      auto value = pending.buffer.Get(isolate_);
++      v8::Local<v8::ArrayBuffer> buffer;
++      std::size_t offset = 0;
++      std::size_t size = 0;
++      if (value->IsArrayBuffer()) {
++        buffer = value.As<v8::ArrayBuffer>();
++        size = buffer->ByteLength();
++      } else if (value->IsUint8Array() || value->IsUint16Array() ||
++                 value->IsUint32Array()) {
++        auto view = value.As<v8::ArrayBufferView>();
++        buffer = view->Buffer();
++        offset = view->ByteOffset();
++        size = view->ByteLength();
++      } else {
++        sink.RecordRuntimeBufferOmission(pending.generation, pending.frame_id,
++                                         "runtime_buffer_checkpoint_invalid");
++        return;
++      }
++      auto backing = buffer->GetBackingStore();
++      if (buffer->WasDetached() || !backing || backing->IsShared() ||
++          backing->IsResizableByUserJavaScript() || size != pending.size ||
++          size < 32 || size > reb::kNativeArtifactMaxContentBytes ||
++          offset > backing->ByteLength() ||
++          size > backing->ByteLength() - offset) {
++        sink.RecordRuntimeBufferOmission(pending.generation, pending.frame_id,
++                                         "runtime_buffer_checkpoint_invalid");
++        return;
++      }
++      std::string source_url;
++      if (!pending.name.IsEmpty()) {
++        v8::String::Utf8Value name(isolate_, pending.name.Get(isolate_));
++        if (*name)
++          source_url.assign(*name, static_cast<std::size_t>(name.length()));
++      }
++      std::vector<std::uint8_t> source;
++      if (sink.RuntimeScriptSourceNeeded(pending.execution_context_id,
++                                         pending.script_id)) {
++        auto string = pending.source.Get(isolate_);
++        const std::size_t length = string->Utf8Length(isolate_);
++        source.resize(length);
++        if (string->WriteUtf8(
++                isolate_, reinterpret_cast<char*>(source.data()), length,
++                v8::String::WriteFlags::kReplaceInvalidUtf8) != length)
++          source.clear();
++      }
++      // Shared backing ownership stabilizes this pointer across host
++      // allocations. This samples the next task checkpoint, not "initialization
++      // complete".
++      const auto* bytes = static_cast<const std::uint8_t*>(backing->Data());
++      std::vector<std::uint8_t> retained(size);
++      UNSAFE_BUFFERS(
++          std::copy(bytes + offset, bytes + offset + size, retained.begin()));
++      reb::NativeRuntimeScript script{pending.script_id, pending.is_eval, source};
++      script.capture_generation = pending.generation;
++      sink.CaptureRuntimeTypedArray(pending.execution_context_id,
++                                    pending.frame_id, source_url, retained,
++                                    script);
++    });
++  }
++
++  v8::Isolate* isolate_;
++  bool scheduled_ = false;
++  reb::NativeRuntimeSnapshotQueue<PendingRuntimeBuffer> pending_;
++};
++
+ void CaptureRuntimeBuffer(v8::Local<v8::Context> context,
+                           const v8::RuntimeBufferKind kind,
+-                          const std::uint8_t* bytes,
+-                          const std::size_t size) {
+-  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
+-  if (!sink.IsVmCaptureEnabled()) {
++                          v8::Local<v8::Value> buffer,
++                          const std::size_t size,
++                          const std::size_t retained_buffer_size) {
++  auto& sink = reb::NativeProbeSink::Get();
++  const auto generation = sink.RuntimeCaptureGeneration();
++  if (generation == 0 || size < 32 ||
++      size > reb::kNativeArtifactMaxContentBytes)
+     return;
+-  }
+   if (kind != v8::RuntimeBufferKind::kArrayBuffer &&
+       kind != v8::RuntimeBufferKind::kUint8Array &&
+       kind != v8::RuntimeBufferKind::kUint16Array &&
+-      kind != v8::RuntimeBufferKind::kUint32Array) {
++      kind != v8::RuntimeBufferKind::kUint32Array)
+     return;
+-  }
+-  if (bytes == nullptr || size < 32 || size > reb::kNativeArtifactMaxContentBytes) {
++  auto* isolate = context->GetIsolate();
++  v8::RuntimeBufferScript allocator;
++  if (!isolate->GetRuntimeBufferAllocatingScript(&allocator)) {
++    sink.RecordRuntimeBufferOmission(generation, 0,
++                                     "allocating_script_unavailable");
+     return;
+   }
+-  // Copy before Blink URL conversion. On-heap typed arrays can move if
+-  // Utf8() allocates while the caller still holds DataPtr().
+-  std::vector<std::uint8_t> retained(size);
+-  std::copy(bytes, bytes + size, retained.begin());
+-  ExecutionContext* execution_context = ToExecutionContext(context);
+-  if (!execution_context) {
++  auto* execution_context = ToExecutionContext(allocator.context);
++  if (!execution_context || execution_context->IsContextDestroyed()) {
++    sink.RecordRuntimeBufferOmission(generation, 0, "runtime_buffer_context_destroyed");
+     return;
+   }
+-  v8::Isolate* isolate = context->GetIsolate();
+-  v8::RuntimeBufferScript allocator;
+-  reb::NativeRuntimeScript script;
+-  std::string source_url;
+-  std::vector<std::uint8_t> script_source;
+-  if (isolate->GetRuntimeBufferAllocatingScript(&allocator)) {
+-    // Cross-realm constructors retain the allocating frame's context, not the
+-    // realm which owns the borrowed TypedArray constructor.
+-    execution_context = ToExecutionContext(allocator.context);
+-    if (!execution_context) return;
+-    script.script_id = static_cast<std::uint64_t>(allocator.script_id);
+-    script.is_eval = allocator.is_eval;
+-    if (!allocator.name.IsEmpty()) {
+-      v8::String::Utf8Value name(isolate, allocator.name);
+-      if (*name) source_url.assign(*name, static_cast<std::size_t>(name.length()));
+-    }
+-    if (sink.RuntimeScriptSourceNeeded(StableExecutionContextId(*execution_context),
+-                                      script.script_id)) {
+-      const std::size_t source_size = allocator.source->Utf8Length(isolate);
+-      if (source_size > 0 && source_size <= reb::kNativeArtifactMaxContentBytes) {
+-        script_source.resize(source_size);
+-        const std::size_t written = allocator.source->WriteUtf8(
+-            isolate, reinterpret_cast<char*>(script_source.data()), source_size,
+-            v8::String::WriteFlags::kReplaceInvalidUtf8);
+-        if (written != source_size) script_source.clear();
+-      }
+-    }
+-    script.source = script_source;
++  auto* data = V8PerIsolateData::From(isolate);
++  constexpr auto key =
++      V8PerIsolateData::UserData::Key::kRebRuntimeBufferSnapshots;
++  auto* snapshots =
++      static_cast<RuntimeBufferSnapshots*>(data->GetUserData(key));
++  if (!snapshots) {
++    snapshots = MakeGarbageCollected<RuntimeBufferSnapshots>(isolate);
++    data->SetUserData(key, snapshots);
+   }
+-  sink.CaptureRuntimeTypedArray(
+-      StableExecutionContextId(*execution_context), StableFrameId(*execution_context),
+-      std::string_view(source_url.data(), source_url.length()),
+-      base::span<const std::uint8_t>(retained), script);
++  snapshots->Enqueue(buffer, size, retained_buffer_size, allocator,
++                     *execution_context, generation);
+ }
+ 
+ // NOTE: when editing this, please also edit the error messages we throw when
+diff --git a/third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h b/third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h
+index 731d4db..e25f612 100644
+--- a/third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h
++++ b/third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h
+@@ -219,6 +219,7 @@ class PLATFORM_EXPORT V8PerIsolateData final {
+     enum class Key : uint32_t {
+       kProfileGroup,
+       kCanvasResourceTracker,
++      kRebRuntimeBufferSnapshots,
+       kNumberOfKeys
+     };
+ 

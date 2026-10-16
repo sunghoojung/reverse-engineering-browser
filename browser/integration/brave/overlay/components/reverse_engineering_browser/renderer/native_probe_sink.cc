@@ -961,6 +961,8 @@ bool NativeProbeSink::RuntimeScriptSourceNeeded(const std::uint64_t execution_co
 }
 
 std::uint64_t NativeProbeSink::RuntimeCaptureGeneration() const noexcept {
+  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]]
+    return 0;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   return IsVmCaptureEnabled() && config_generation_.load(std::memory_order_acquire) == generation
              ? generation
@@ -1003,6 +1005,59 @@ bool NativeProbeSink::RegisterRuntimeScriptObservation(
   return true;
 }
 
+bool NativeProbeSink::RuntimeBufferHasSignal(const std::uint64_t generation,
+                                             const std::uint64_t execution_context_id,
+                                             const std::uint64_t frame_id,
+                                             const std::size_t bytes,
+                                             const std::uint64_t script_id,
+                                             const bool is_eval) noexcept {
+  if (generation == 0 || generation != RuntimeCaptureGeneration() || bytes < 32 ||
+      bytes > kNativeArtifactMaxContentBytes || execution_context_id == 0 || script_id == 0)
+    return false;
+  bool candidate = false;
+  bool dispatch = false;
+  if (runtime_observations.generation == generation) {
+    for (std::size_t index = 0; index < runtime_observations.count; ++index) {
+      const auto& observation = runtime_observations.observations[index];
+      if (observation.context == execution_context_id && observation.script == script_id) {
+        candidate = observation.candidate;
+        dispatch = observation.dispatch;
+      }
+    }
+  }
+  if (!candidate && !is_eval && !(bytes >= 256 && dispatch)) {
+    if (runtime_observations.generation != generation) {
+      runtime_observations = {};
+      runtime_observations.generation = generation;
+    }
+    if (!runtime_observations.no_signal_reported) {
+      runtime_observations.no_signal_reported =
+          RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                                   "runtime_buffer_no_vm_signal", generation) != 0;
+    }
+    return false;
+  }
+  auto count = runtime_typed_array_count_.load(std::memory_order_relaxed);
+  if (count >= kRuntimeTypedArrayMaxSnapshots) {
+    if (count == kRuntimeTypedArrayMaxSnapshots &&
+        RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                                 "runtime_typed_array_session_limit", generation) != 0) {
+      runtime_typed_array_count_.compare_exchange_strong(count, count + 1,
+                                                         std::memory_order_relaxed);
+    }
+    return false;
+  }
+  return true;
+}
+
+void NativeProbeSink::RecordRuntimeBufferOmission(const std::uint64_t generation,
+                                                  const std::uint64_t frame_id,
+                                                  const std::string_view reason) noexcept {
+  if (generation != 0 && generation == RuntimeCaptureGeneration()) {
+    RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id, reason, generation);
+  }
+}
+
 void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_context_id,
                                                const std::uint64_t frame_id,
                                                const std::string_view source_url,
@@ -1016,7 +1071,8 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
     return;
   }
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
-  if ((generation & 1U) != 0) {
+  if ((generation & 1U) != 0 ||
+      (script.capture_generation != 0 && script.capture_generation != generation)) {
     return;
   }
   const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
@@ -1062,29 +1118,9 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
                                              NativeRuntimeScriptObservation::kStaticDispatchLoop);
     }
   }
-  bool candidate = false;
-  bool dispatch = false;
-  if (runtime_observations.generation == generation) {
-    for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-      const auto& observation = runtime_observations.observations[index];
-      if (observation.context == execution_context_id && observation.script == script.script_id) {
-        candidate = observation.candidate;
-        dispatch = observation.dispatch;
-      }
-    }
-  }
-  if (!candidate && !script.is_eval && !(content.size() >= 256 && dispatch)) {
-    if (runtime_observations.generation != generation) {
-      runtime_observations = {};
-      runtime_observations.generation = generation;
-    }
-    if (!runtime_observations.no_signal_reported) {
-      runtime_observations.no_signal_reported =
-          RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
-                                   "runtime_buffer_no_vm_signal", generation) != 0;
-    }
+  if (!RuntimeBufferHasSignal(generation, execution_context_id, frame_id, content.size(),
+                              script.script_id, script.is_eval))
     return;
-  }
   const std::size_t snapshot_index =
       runtime_typed_array_count_.fetch_add(1, std::memory_order_relaxed);
   if (snapshot_index >= kRuntimeTypedArrayMaxSnapshots) {
@@ -1099,8 +1135,9 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   if (config_generation_.load(std::memory_order_acquire) != generation) {
     return;
   }
-  const std::uint64_t creator_event_id = RecordRuntimeBufferEvent(
-      NativeProbeType::kApiCall, frame_id, "runtime_typed_array_snapshot", generation);
+  const std::uint64_t creator_event_id =
+      RecordRuntimeBufferEvent(NativeProbeType::kApiCall, frame_id,
+                               "runtime_typed_array_task_checkpoint_snapshot", generation);
   artifact_emitter(NativeArtifactKind::kBytecodeBuffer,
                    NativeArtifactCaptureOrigin::kRuntimeTypedArray, creator_event_id,
                    execution_context_id, frame_id, sanitized_url, content, scoped_script);

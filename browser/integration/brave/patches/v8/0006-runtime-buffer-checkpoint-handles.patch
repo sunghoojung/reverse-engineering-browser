@@ -1,0 +1,67 @@
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 5307e36..db8ed4d 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -343,11 +343,13 @@ enum class RuntimeBufferKind {
+ };
+ 
+ // Called synchronously after a supported JavaScript runtime buffer has been
+-// initialized. Embedders that retain the bytes must copy them before return.
++// constructed. Retain the object with a Global for a later checkpoint.
++// No bytes are copied here, and later initialization is not complete.
+ using RuntimeBufferCallback = void (*)(Local<Context> context,
+                                        RuntimeBufferKind kind,
+-                                       const uint8_t* bytes,
+-                                       size_t size);
++                                       Local<Value> buffer,
++                                       size_t size,
++                                       size_t retained_buffer_size);
+ 
+ enum class WasmAsyncSuccess { kSuccess, kFail };
+ 
+diff --git a/src/builtins/builtins-arraybuffer.cc b/src/builtins/builtins-arraybuffer.cc
+index 3412bce..fe61183 100644
+--- a/src/builtins/builtins-arraybuffer.cc
++++ b/src/builtins/builtins-arraybuffer.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "src/api/api-inl.h"
+ #include "src/builtins/builtins-utils-inl.h"
+ #include "src/builtins/builtins.h"
+ #include "src/execution/protectors-inl.h"
+@@ -28,7 +29,8 @@ void NotifyRuntimeArrayBuffer(Isolate* isolate, Tagged<Object> value) {
+   }
+   callback(reinterpret_cast<v8::Isolate*>(isolate)->GetCurrentContext(),
+            RuntimeBufferKind::kArrayBuffer,
+-           static_cast<const uint8_t*>(buffer->backing_store()), buffer->GetByteLength());
++           Utils::ToLocal(direct_handle(buffer, isolate)), buffer->GetByteLength(),
++           buffer->GetByteLength());
+ }
+ 
+ }  // namespace
+diff --git a/src/runtime/runtime-typedarray.cc b/src/runtime/runtime-typedarray.cc
+index a24466b..a0ce80c 100644
+--- a/src/runtime/runtime-typedarray.cc
++++ b/src/runtime/runtime-typedarray.cc
+@@ -2,6 +2,9 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <algorithm>
++
++#include "src/api/api-inl.h"
+ #include "src/base/atomicops.h"
+ #include "src/common/message-template.h"
+ #include "src/execution/arguments-inl.h"
+@@ -97,7 +100,8 @@ RUNTIME_FUNCTION(Runtime_RebCaptureRuntimeBuffer) {
+ 
+   const size_t byte_length = typed_array->GetByteLength();
+   callback(reinterpret_cast<v8::Isolate*>(isolate)->GetCurrentContext(), kind,
+-           static_cast<const uint8_t*>(typed_array->DataPtr()), byte_length);
++           Utils::ToLocal(typed_array), byte_length,
++           std::max(byte_length, typed_array->buffer()->GetByteLength()));
+   return ReadOnlyRoots(isolate).undefined_value();
+ }
+ 

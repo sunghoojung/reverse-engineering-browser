@@ -89,5 +89,6 @@ let bomBody;
 const bomUi = harness({fetcher: async (_url, options) => { bomBody = options.body; return response(); }});
 await bomUi.load(0, '\ufeff{}'); await bomUi.load(1); await bomUi.ui.run('apply');
 assert(bomBody.includes('\ufeff{}'), 'File import preserves BOM for the exact strict backend parser to reject');
+await ui.load(0); await ui.load(1);
 next = response({...report, rankings: {length: 0}}); await ui.ui.run('apply');
 assert.match(ui.status.textContent, /Malformed pack report/);

@@ -60,6 +60,8 @@ try {
  for(const width of [1180,760,390]){
   await command('Emulation.setDeviceMetricsOverride',{width,height:790,deviceScaleFactor:1,mobile:false});
   assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),`no horizontal overflow at ${width}`);
+  assert(await evaluate(`(()=>{const status=document.querySelector('.vm-pack-status');return status.scrollWidth<=status.clientWidth;})()`),`complete status digest fits at ${width}`);
+  assert.equal(await evaluate(`getComputedStyle(document.querySelector('.vm-pack-inputs label')).display`),'grid');
   const {data}=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});await mkdir(join(root,'build/vm-pack-ui-qa'),{recursive:true});await writeFile(join(root,`build/vm-pack-ui-qa/packs-${width}.png`),Buffer.from(data,'base64'));
  }
  await click('input[aria-label="right interpreter artifact ID"]');await command('Input.insertText',{text:'2'});

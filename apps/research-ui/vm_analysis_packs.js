@@ -33,9 +33,9 @@ function mountVmAnalysisPacks(root) {
   const heading = node('h2', 'Analysis packs and build comparison');
   const help = node('p', 'Import local JSON. Packs are inert ranking and family declarations. No source or bytecode is executed, capture is unchanged, and no external service is contacted.');
   const limits = node('p', 'Pack: 64 KiB. Combined request: 16 MiB. Both workspace digests and exact interpreter IDs are verified. A family binding is your declaration, not proof of behavioral equivalence.');
-  const status = node('p', 'Select a pack and analysis, or two opcode workspace documents.', 'vm-static-notice');
+  const status = node('p', 'Select a pack and analysis, or two opcode workspace documents.', 'vm-static-notice vm-pack-status');
   status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-  const fields = node('div', '', 'vm-static-toolbar'), actions = node('div', '', 'vm-static-toolbar');
+  const fields = node('div', '', 'vm-static-toolbar vm-pack-inputs'), actions = node('div', '', 'vm-static-toolbar');
   const output = node('pre', '', 'vm-pack-output'); output.tabIndex = 0; output.setAttribute('aria-label', 'Analysis pack report preview');
   const invalidate = () => {
     generation++; controller?.abort(); controller = null; pending = false; reportText = null;

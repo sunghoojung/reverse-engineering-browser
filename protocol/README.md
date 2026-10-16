@@ -162,6 +162,25 @@ Detailed deterministic VM analysis uses the version 1 JSON contract in
 evidence under `artifacts/analysis/vm-analysis-v1.json`; it never replaces the
 immutable artifact bytes or the fixed-size timeline summary.
 
+## VM opcode workspace
+
+Inspector-free dynamic debugging writes the derived version 1 opcode workspace
+defined by [`vm-opcode-workspace-v1.schema.json`](vm-opcode-workspace-v1.schema.json)
+to `artifacts/analysis/vm-opcode-workspace-v1.json`. It is bound by digest to
+the detector profile, VM analysis document, artifact manifest, and event store.
+Integer switch cases and statically visible numeric handler tables are
+`inferred`. A matching `vm_dispatch_sample` event upgrades that opcode to
+`observed`; absent sampling remains the named `sampler-unavailable` omission.
+
+The `vm_dispatch_sample` v1 payload is the fixed 128-byte little-endian
+`VmDispatchSamplePayload`. Validators require protocol version `1`, payload
+size `128`, opcode at offset 8, zero reserved bytes, and nonzero finding and
+investigation identifiers. The event envelope carries the interpreter artifact
+ID. Runtime typed-array previews are SHA-256 verified and limited to 4096
+bytes. Static initializers are never relabeled as runtime observations. See
+[`vm-dynamic-debug-v1.md`](../docs/product/vm-dynamic-debug-v1.md) for the
+analysis boundary.
+
 The document names its producer, analyzer version, profile and profile digest,
 input digests, limits, rule weights, per-rule observations, separate VM and
 anti-bot scores, coverage omissions, residual unknowns, bytecode snapshots,

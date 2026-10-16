@@ -84,7 +84,7 @@ pub struct App {
     capture: Mutex<()>,
     io: Arc<Semaphore>,
     package_io: Arc<Semaphore>,
-    analysis: Mutex<Option<(String, Value)>>,
+    analysis: Mutex<Option<(String, Value, Result<Value>)>>,
 }
 impl App {
     pub async fn stop(&self) {
@@ -148,6 +148,28 @@ impl App {
         })
         .await
         .map_err(|e| Error::new(500, e.to_string()))?
+    }
+    async fn vm_documents(&self) -> Result<(Value, Result<Value>)> {
+        let signature = format!(
+            "{}:{}",
+            analysis_input_signature(&self.options.artifacts.join("manifest.jsonl")),
+            analysis_input_signature(&self.options.store),
+        );
+        let mut cache = self.analysis.lock().await;
+        if !cfg!(unix)
+            || cache
+                .as_ref()
+                .is_none_or(|(cached, _, _)| *cached != signature)
+        {
+            let root = self.options.artifacts.clone();
+            let store = self.options.store.clone();
+            let documents = self
+                .blocking(move || vm::store_documents(&root, &store))
+                .await?;
+            *cache = Some((signature, documents.analysis, documents.opcode_workspace));
+        }
+        let (_, analysis, opcode_workspace) = cache.as_ref().expect("VM analysis cache");
+        Ok((analysis.clone(), opcode_workspace.clone()))
     }
     async fn package_operation(
         &self,
@@ -528,19 +550,7 @@ impl App {
                 if request.is_some() {
                     q.number("request_id", None, 64, false)?;
                 }
-                let signature = format!(
-                    "{}:{}",
-                    analysis_input_signature(&self.options.artifacts.join("manifest.jsonl")),
-                    analysis_input_signature(&self.options.store),
-                );
-                let mut cache = self.analysis.lock().await;
-                if !cfg!(unix) || cache.as_ref().is_none_or(|(s, _)| *s != signature) {
-                    let root = self.options.artifacts.clone();
-                    let store = self.options.store.clone();
-                    let value = self.blocking(move || vm::store(&root, &store)).await?;
-                    *cache = Some((signature, value));
-                }
-                let mut value = cache.as_ref().unwrap().1.clone();
+                let (mut value, _) = self.vm_documents().await?;
                 if let Some(request) = request {
                     value["selection"] = json!({"kind":"request","request_id":request,"edge_semantics":"correlated-not-causal"});
                     value["results"].as_array_mut().unwrap().retain(|r| {
@@ -564,6 +574,22 @@ impl App {
                     "\"{}-{}\"",
                     value["document_digest"].as_str().unwrap(),
                     request.unwrap_or("all")
+                ));
+                value
+            }
+            "/api/analysis/vm/opcodes" => {
+                let (_, workspace) = self.vm_documents().await?;
+                let value = workspace.map_err(|error| {
+                    Error::new(
+                        error.status,
+                        format!("VM opcode workspace is unavailable: {}", error.message),
+                    )
+                })?;
+                etag = Some(format!(
+                    "\"{}\"",
+                    value["document_digest"]
+                        .as_str()
+                        .ok_or_else(|| Error::new(500, "VM opcode workspace is malformed"))?
                 ));
                 value
             }

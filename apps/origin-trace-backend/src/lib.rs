@@ -19,6 +19,7 @@ mod provenance;
 mod source_facts;
 mod validation;
 pub mod vm;
+mod vm_opcode;
 pub mod wasm;
 mod worker;
 mod workspace;

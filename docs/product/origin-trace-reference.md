@@ -378,7 +378,10 @@ visibly distinct.
 
 Captured JavaScript and WebAssembly artifacts are analyzed automatically on
 the cold path. The UI reads `/api/analysis/vm` for the automatic scan and
-`/api/analysis/vm?request_id=ID` for request-first correlation. Analysis is
+`/api/analysis/vm?request_id=ID` for request-first correlation. Inspector-free
+opcode characterization is available separately at
+`/api/analysis/vm/opcodes`; its derived workspace never replaces or hides the
+base VM analysis document. Analysis is
 bounded, deterministic, and stored at
 `ARTIFACT_STORE/analysis/vm-analysis-v1.json`. A failed or malformed analysis
 does not hide the last valid timeline evidence. The native live-session
@@ -389,6 +392,14 @@ partial-coverage records before content is read. Cached analysis is served only
 after its profile and document digests are verified. JavaScript function-region
 count and cumulative region work are also bounded; exhausting either limit
 produces a named partial-coverage omission.
+
+The opcode workspace is stored at
+`ARTIFACT_STORE/analysis/vm-opcode-workspace-v1.json`. It reports bounded
+integer switch and numeric handler-table candidates from the same JavaScript
+function region as `js.dispatch-loop`, joins matching `vm_dispatch_sample`
+events, and links verified `runtime-typed-array` snapshots when available.
+Static initializer bytes remain inferred evidence and are not presented as a
+runtime snapshot.
 
 The WebAssembly frontend decodes bounded function bodies and instruction
 immediates. It scores dispatch only when a decoded branch table or indirect

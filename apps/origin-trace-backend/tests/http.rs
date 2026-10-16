@@ -775,7 +775,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 33);
+    assert_eq!(operation_count, 34);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1063,6 +1063,7 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         "/api/events",
         "/api/artifacts",
         "/api/analysis/vm",
+        "/api/analysis/vm/opcodes",
     ] {
         let response = server.get(route).await;
         let etag = response.headers().get("etag").cloned();
@@ -1993,6 +1994,38 @@ fn vm_runtime_graph_limit_is_explicit_and_preserves_representative() {
         json!([{"reason":"runtime-graph-edge-limit","omitted_records":8}])
     );
     assert_eq!(result["related_request_ids"], json!([]));
+}
+#[tokio::test]
+async fn vm_opcode_workspace_has_etag_and_failure_isolated_from_vm_analysis() {
+    let server = Server::start().await;
+    let response = server.get("/api/analysis/vm/opcodes").await;
+    assert_eq!(response.status(), 200);
+    let etag = response.headers()["etag"].clone();
+    let workspace: Value = response.json().await.unwrap();
+    assert_eq!(workspace["document_kind"], "vm-opcode-workspace");
+    assert_eq!(workspace["summary"]["workspace_count"], 0);
+    assert_eq!(
+        server
+            .client
+            .get(format!("{}/api/analysis/vm/opcodes", server.url))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        304
+    );
+
+    let blocked = Server::start().await;
+    std::fs::create_dir_all(
+        blocked
+            .root
+            .path()
+            .join("artifacts/analysis/vm-opcode-workspace-v1.json"),
+    )
+    .unwrap();
+    assert_eq!(blocked.get("/api/analysis/vm").await.status(), 200);
+    assert_eq!(blocked.get("/api/analysis/vm/opcodes").await.status(), 500);
 }
 #[tokio::test]
 async fn vm_http_refreshes_event_only_changes_and_agrees_with_cli() {

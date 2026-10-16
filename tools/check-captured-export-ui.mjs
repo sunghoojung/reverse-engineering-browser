@@ -39,6 +39,41 @@ function harness(native=false){
   return {api,captured,selected,fields,dialog,triggers,downloads,clips,bridges,notices,filenames,workflow,document,set,open,
     expire(){selected=null;workflow.sync();},setBridge(value){bridgeResult=value;},setClipboardError(value){clipboardError=value;},holdBridge(promise){bridgeWait=promise;}};
 }
+// HTML dialog.close() queues its close event. A new opening can own the dialog
+// before that event arrives; the old event must not erase its capture or file.
+for(const native of [false,true]){
+  const h=harness(native),f=h.fields,closed=[];
+  h.dialog.close=()=>{h.dialog.open=false;closed.push(()=>h.dialog.events.close?.());};
+  const flushClose=()=>{assert(closed.length>0);closed.splice(0).forEach(deliver=>deliver());h.workflow.sync();};
+  const count=()=>h.downloads.length+h.clips.length+h.bridges.length;
+  const bytes=new TextEncoder().encode(JSON.stringify(schema));
+  h.open();h.set('format','sdl');h.set('source','file');
+  f.file.files=[{size:bytes.length,arrayBuffer:async()=>bytes.buffer}];await f.file.events.change();
+  await f.submit.click();assert.equal(count(),1);
+  h.open();assert.equal(f.format.value,'json');assert.equal(f.policy.value,'redacted_copy');
+  flushClose();
+  assert(h.dialog.open&&!f.submit.disabled,'A queued close cannot invalidate a reopened capture');
+  assert(f.format.options.every(option=>!option.disabled),'A reopened capture retains every export format');
+  assert.equal(f.status.textContent,'');
+  h.set('format','client');await f.submit.click();assert.equal(count(),2);
+  const project=native?Buffer.from(h.bridges.at(-1).base64,'base64'):Buffer.from(await h.downloads.at(-1).arrayBuffer());
+  assert(project.includes(Buffer.from('src/client.mjs')),'The reopened selection still exports a client project');
+
+  h.open();h.set('format','sdl');h.set('source','file');
+  let release;const file={size:bytes.length,arrayBuffer:()=>new Promise(resolve=>{release=resolve;})};
+  f.file.files=[file];const reading=f.file.events.change();assert(f.submit.disabled);
+  flushClose();assert.equal(f.file.files[0],file,'An old close cannot clear a new local file selection');
+  release(bytes.buffer);await reading;assert(!f.submit.disabled,'An old close cannot cancel a new local file read');
+  await f.submit.click();assert.equal(count(),3);
+
+  if(native){
+    h.open();h.set('format','client');let finish;h.holdBridge(new Promise(resolve=>{finish=resolve;}));
+    const saving=f.submit.click();assert(f.close.disabled&&f.cancel.disabled);
+    flushClose();assert(f.close.disabled&&f.cancel.disabled&&f.submit.disabled,'An old close cannot release an active native save');
+    finish();await saving;assert.match(f.status.textContent,/saved locally/);assert.equal(count(),4);
+  }
+  h.workflow.close();flushClose();assert(!h.dialog.open);assert.equal(f.file.files.length,0);
+}
 for(const native of [false,true]){
   const h=harness(native),f=h.fields,before=JSON.stringify(h.selected.captureRecord);
   const count=()=>h.downloads.length+h.clips.length+h.bridges.length;

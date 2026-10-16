@@ -1200,7 +1200,11 @@ function installCapturedExportDialog(options) {
   });
   fields.close.addEventListener('click',close); fields.cancel.addEventListener('click',close);
   dialog.addEventListener('cancel',event => { event.preventDefault(); close(); });
-  dialog.addEventListener('close',() => { revision++; fileRevision++; preparedFile = null; snapshot = null; busy = false; fields.file.value = ''; });
+  dialog.addEventListener('close',() => {
+    // close() queues this event; a new opening may already own the dialog.
+    if (dialog.open) return;
+    revision++; fileRevision++; preparedFile = null; snapshot = null; busy = false; fields.file.value = '';
+  });
   document.addEventListener('keydown',event => {
     if (!dialog.open) return;
     if (event.key === 'F8' || event.altKey && ['ArrowLeft','ArrowRight'].includes(event.key) ||

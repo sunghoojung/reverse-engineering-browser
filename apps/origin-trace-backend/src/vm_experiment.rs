@@ -262,11 +262,12 @@ fn bind(request: &Request, workspace: &Value) -> Result<String> {
     let rows = workspace["workspaces"]
         .as_array()
         .ok_or_else(|| Error::bad("Missing workspace rows"))?;
+    let interpreter_artifact_id = request.interpreter_artifact_id.0.to_string();
     let selected: Vec<_> = rows
         .iter()
         .filter(|row| {
             row["source_artifact_sha256"] == request.source_artifact_sha256
-                && row["interpreter_artifact_id"] == request.interpreter_artifact_id.0.to_string()
+                && row["interpreter_artifact_id"].as_str() == Some(interpreter_artifact_id.as_str())
                 && row["finding_id"] == request.finding_id
         })
         .collect();

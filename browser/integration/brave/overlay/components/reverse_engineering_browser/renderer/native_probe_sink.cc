@@ -57,6 +57,65 @@ struct RuntimeScriptCache final {
 };
 thread_local RuntimeScriptCache runtime_script_cache;
 
+struct RuntimeObservation final {
+  std::uint64_t context = 0;
+  std::uint64_t script = 0;
+  bool candidate = false;
+  bool dispatch = false;
+};
+struct RuntimeObservationCache final {
+  std::uint64_t generation = 0;
+  std::array<RuntimeObservation, 64> observations{};
+  std::size_t count = 0;
+  bool no_signal_reported = false;
+};
+thread_local RuntimeObservationCache runtime_observations;
+
+// Bounded, allocation-free metadata sanitization. Ambiguous/control-containing
+// URLs are unavailable; data/javascript URLs must never become source metadata.
+std::string_view SanitizeRuntimeSourceUrl(
+    std::string_view input,
+    std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
+  if (input.empty() || input.size() > output.size())
+    return {};
+  for (const char character : input) {
+    const auto ch = static_cast<unsigned char>(character);
+    if (ch <= 0x20 || ch == 0x7f || ch == '\\')
+      return {};
+  }
+  input = input.substr(0, input.find_first_of("?#"));
+  const auto scheme = input.find("://");
+  if (scheme == std::string_view::npos || scheme > 7)
+    return {};
+  std::array<char, 8> scheme_storage{};
+  for (std::size_t index = 0; index < scheme; ++index) {
+    const auto ch = input[index];
+    scheme_storage[index] = ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch + ('a' - 'A')) : ch;
+  }
+  const std::string_view scheme_name(scheme_storage.data(), scheme);
+  if (scheme_name != "http" && scheme_name != "https" && scheme_name != "fixture")
+    return {};
+  std::size_t cut_begin = 0;
+  std::size_t cut_end = 0;
+  if (scheme != std::string_view::npos) {
+    cut_begin = scheme + 3;
+    const auto authority_end = input.find('/', cut_begin);
+    const auto authority = input.substr(cut_begin, authority_end - cut_begin);
+    const auto at = authority.rfind('@');
+    if (at != std::string_view::npos)
+      cut_end = cut_begin + at + 1;
+    if (authority.empty() || cut_end == cut_begin + authority.size())
+      return {};
+  }
+  std::size_t length = 0;
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    if (cut_end != 0 && index >= cut_begin && index < cut_end)
+      continue;
+    output[length++] = input[index];
+  }
+  return {output.data(), length};
+}
+
 void SetPayload(NativeProbeEvent& event,
                 const std::string_view first,
                 const std::string_view second = {}) noexcept {
@@ -197,6 +256,49 @@ bool NativeProbeSink::RuntimeScriptSourceNeeded(const std::uint64_t execution_co
                                static_cast<std::ptrdiff_t>(runtime_script_cache.count);
 }
 
+std::uint64_t NativeProbeSink::RuntimeCaptureGeneration() const noexcept {
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  return IsVmCaptureEnabled() && config_generation_.load(std::memory_order_acquire) == generation
+             ? generation
+             : 0;
+}
+
+bool NativeProbeSink::RegisterRuntimeScriptObservation(
+    const std::uint64_t generation,
+    const std::uint64_t execution_context_id,
+    const std::uint64_t script_id,
+    const NativeRuntimeScriptObservation observation) noexcept {
+  if (generation == 0 || generation != RuntimeCaptureGeneration() || execution_context_id == 0 ||
+      script_id == 0)
+    return false;
+  if (observation != NativeRuntimeScriptObservation::kCapturedVmCandidate &&
+      observation != NativeRuntimeScriptObservation::kCapturedLikelyVm &&
+      observation != NativeRuntimeScriptObservation::kStaticDispatchLoop)
+    return false;
+  if (runtime_observations.generation != generation) {
+    runtime_observations = {};
+    runtime_observations.generation = generation;
+  }
+  auto* entry = static_cast<RuntimeObservation*>(nullptr);
+  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
+    auto& current = runtime_observations.observations[index];
+    if (current.context == execution_context_id && current.script == script_id)
+      entry = &current;
+  }
+  if (!entry) {
+    if (runtime_observations.count == runtime_observations.observations.size())
+      return false;
+    entry = &runtime_observations.observations[runtime_observations.count++];
+    entry->context = execution_context_id;
+    entry->script = script_id;
+  }
+  if (observation == NativeRuntimeScriptObservation::kStaticDispatchLoop)
+    entry->dispatch = true;
+  else
+    entry->candidate = true;
+  return true;
+}
+
 void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_context_id,
                                                const std::uint64_t frame_id,
                                                const std::string_view source_url,
@@ -232,10 +334,34 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
                              "allocating_script_unavailable", generation);
     return;
   }
-  if (execution_context_id == 0 || source_url.empty() ||
-      source_url.size() > kNativeArtifactMaxUrlBytes) {
+  std::array<char, kNativeArtifactMaxUrlBytes> sanitized_storage{};
+  const auto sanitized_url = SanitizeRuntimeSourceUrl(source_url, sanitized_storage);
+  if (execution_context_id == 0 || sanitized_url.empty()) {
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
                              "allocating_script_url_unavailable", generation);
+    return;
+  }
+  bool candidate = false;
+  bool dispatch = false;
+  if (runtime_observations.generation == generation) {
+    for (std::size_t index = 0; index < runtime_observations.count; ++index) {
+      const auto& observation = runtime_observations.observations[index];
+      if (observation.context == execution_context_id && observation.script == script.script_id) {
+        candidate = observation.candidate;
+        dispatch = observation.dispatch;
+      }
+    }
+  }
+  if (!candidate && !script.is_eval && !(content.size() >= 256 && dispatch)) {
+    if (runtime_observations.generation != generation) {
+      runtime_observations = {};
+      runtime_observations.generation = generation;
+    }
+    if (!runtime_observations.no_signal_reported) {
+      runtime_observations.no_signal_reported =
+          RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                                   "runtime_buffer_no_vm_signal", generation) != 0;
+    }
     return;
   }
   const std::size_t snapshot_index =
@@ -256,7 +382,7 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
       NativeProbeType::kApiCall, frame_id, "runtime_typed_array_snapshot", generation);
   artifact_emitter(NativeArtifactKind::kBytecodeBuffer,
                    NativeArtifactCaptureOrigin::kRuntimeTypedArray, creator_event_id,
-                   execution_context_id, frame_id, source_url, content, scoped_script);
+                   execution_context_id, frame_id, sanitized_url, content, scoped_script);
   if (!script.source.empty() && RuntimeScriptSourceNeeded(execution_context_id, script.script_id) &&
       runtime_script_cache.count < runtime_script_cache.keys.size()) {
     runtime_script_cache.keys[runtime_script_cache.count++] = {execution_context_id,

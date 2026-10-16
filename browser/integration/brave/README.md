@@ -217,3 +217,29 @@ are part of both renderer cache and browser registry keys, preventing a reused
 V8 script ID or frame token from selecting a previous document's source. Offline
 nonzero-navigation mismatch tests verify the workspace join contract, not a
 live navigation-ID producer.
+
+
+### Runtime byte-buffer admission
+
+The renderer keeps a buffer only when its exact allocating script has a trusted
+captured `candidate`/`likely-vm` observation, is captured eval/Function source, or
+has a static dispatch-loop observation and the buffer is at least 256 bytes.
+The independent 32-byte floor, 16-snapshot session cap, and VM opt-in remain.
+Rejected unrelated allocations do not consume the cap. Their
+`runtime_buffer_no_vm_signal` reason is coalesced once per configuration/thread;
+a full event ring does not mark the reason sent, so later rejections can retry. Source metadata drops
+credentials, query strings and fragments. Only hierarchical HTTP, HTTPS and
+owned-fixture URLs are supported; opaque, scheme-relative and other schemes
+fail closed. Missing/unsafe URLs produce
+`allocating_script_url_unavailable` rather than a document-URL guess.
+
+`RegisterRuntimeScriptObservation` is a bounded (64 entries), thread-local native
+integration seam keyed by configuration generation, execution context and V8
+script ID. Callers must retain the observation-time generation and register only
+trusted detector outputs for that exact captured source. A URL or a large buffer
+is never classification evidence. Stale observations and context mismatches fail
+closed. Native V8 eval/Function provenance is currently the live keep-list feed.
+The offline Rust detector has **no live renderer feedback path yet**; candidate
+and dispatch-observation rows are policy-tested, but no production caller feeds
+those rows. This is partial issue #200 integration, not a claim that ordinary
+script candidates are already admitted. The registration API is not page-facing.

@@ -4775,3 +4775,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #screen-vm .vm-review-workbench { height: auto; }
   #screen-vm .vm-review-inspector { max-height: 580px; }
 }
+
+/* Keep native state labels intact; wide values use the existing local scroller. */
+#screen-vm .owned-vm-debugger-table-scroll table { min-width: 520px; }
+#screen-vm .owned-vm-debugger-table-scroll th { white-space: nowrap; }
+#screen-vm .owned-vm-debugger-table-scroll :is(th, td) { overflow-wrap: normal; word-break: normal; }

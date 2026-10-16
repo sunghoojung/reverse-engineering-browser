@@ -265,9 +265,9 @@ if (process.argv.includes('--fixture-only')) {
     const assertReachable = async (selector, label) => {
       assert.equal(await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)}),r=n.getBoundingClientRect();let left=0,top=0,right=innerWidth,bottom=innerHeight;for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect(),s=getComputedStyle(p);if(['auto','scroll','hidden','clip'].includes(s.overflowX)){left=Math.max(left,b.left+p.clientLeft);right=Math.min(right,b.left+p.clientLeft+p.clientWidth);}if(['auto','scroll','hidden','clip'].includes(s.overflowY)){top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}}return r.width>0&&r.height>0&&r.left>=left-1&&r.right<=right+1&&r.top>=top-1&&r.bottom<=bottom+1&&n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})()`), true, label + ' is unclipped and hit-testable');
     };
-    const inspectTableRightEdge = async (rootSelector, name) => {
-      const listing = rootSelector + ' .vm-review-listing';
-      await evaluate(`document.querySelector(${JSON.stringify(listing + ' .vm-tool-table')}).scrollIntoView({block:'center',inline:'nearest'})`);
+    const inspectTableRightEdge = async (rootSelector, name, scrollSelector = '.vm-review-listing') => {
+      const listing = rootSelector + ' ' + scrollSelector;
+      await evaluate(`document.querySelector(${JSON.stringify(listing + ' table')}).scrollIntoView({block:'center',inline:'nearest'})`);
       await evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
       const point = await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(listing)}),r=n.getBoundingClientRect(),h=n.querySelector('thead th').getBoundingClientRect(),x=(Math.max(0,r.left+n.clientLeft)+Math.min(innerWidth,r.left+n.clientLeft+n.clientWidth))/2,y=h.y+h.height/2;return {x,y,hit:y>=0&&y<innerHeight&&n.contains(document.elementFromPoint(x,y)),overflow:n.scrollWidth-n.clientWidth};})()`);
       assert(point.hit && point.overflow > 0, name + ' exposes its local horizontal scroll owner');
@@ -279,6 +279,11 @@ if (process.argv.includes('--fixture-only')) {
       await assertReachable(listing + ' thead th:last-child', name + ' rightmost header');
       await assertReachable(listing + ' tbody tr:first-child td:last-child', name + ' rightmost retained cell');
       await screenshot(name + '-right-edge-390');
+    };
+    const assertLiveStateLabels = async (selector, label) => {
+      assert.deepEqual(await evaluate(`[...document.querySelectorAll(${JSON.stringify(selector + ' th')})].map(n=>n.textContent)`), ['Location','Before','After / snapshot','Change','Explicit accesses'], label + ' retains all state column labels');
+      assert.equal(await evaluate(`(()=>{const table=document.querySelector(${JSON.stringify(selector)}),headers=[...table.querySelectorAll('th')],cells=[...table.querySelectorAll('th,td')];return table.getBoundingClientRect().width>=520&&table.querySelectorAll('tbody tr').length>0&&headers.every(n=>getComputedStyle(n).whiteSpace==='nowrap')&&cells.every(n=>{const s=getComputedStyle(n);return s.overflowWrap==='normal'&&s.wordBreak==='normal';});})()`), true, label + ' keeps complete header words and normal value wrapping in its local table');
+      await assertFits('#vm-owned-debugger', label);
     };
     const modes = await evaluate("[...document.querySelectorAll('.vm-workspace-switch button')].map(node=>[node.id.replace('vm-show-',''),node.getAttribute('aria-controls')])");
     for (const expected of ['findings','execution','owned','static','contextual']) assert(modes.some(([mode]) => mode === expected));
@@ -584,12 +589,15 @@ if (process.argv.includes('--fixture-only')) {
       await clickLabel('#vm-owned-debugger .owned-vm-debugger-tabs', 'Registers');
       assert.match(await evaluate("document.querySelector('.owned-vm-debugger-registers').textContent"), /5 \(0x5; observed\)/);
       assert.match(await evaluate("document.querySelector('.owned-vm-debugger-registers').textContent"), /unknown/);
+      await assertLiveStateLabels('.owned-vm-debugger-registers', 'Live registers ' + width);
       await screenshot(`vm-live-authored-registers-${width}`);
       await click('[data-owned-vm-sequence="4"]');
       await clickLabel('#vm-owned-debugger .owned-vm-debugger-tabs', 'Memory');
       assert.match(await evaluate("document.querySelector('.owned-vm-debugger-memory').textContent"), /memory:16/);
       assert.match(await evaluate("document.querySelector('.owned-vm-debugger-memory').textContent"), /12 \(0xc; observed\)/);
+      await assertLiveStateLabels('.owned-vm-debugger-memory', 'Live memory ' + width);
       await screenshot(`vm-live-authored-memory-${width}`);
+      if (width === 390) await inspectTableRightEdge('#vm-owned-debugger .owned-vm-debugger-state-panel:not([hidden])', 'vm-live-authored-memory', '.owned-vm-debugger-table-scroll');
       await click('[data-owned-vm-initial]');
       assert.equal(await evaluate("document.querySelector('#vm-owned-debugger').dataset.ownedVmSelection"), 'initial');
       await click('[data-owned-vm-follow]');

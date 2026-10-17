@@ -420,7 +420,8 @@ jobs:
       - name: Verify multi-tab HTTP capture with installed Chrome
         if: matrix.os == 'ubuntu-latest'
         run: |
-          export ORIGIN_TRACE_TEST_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          ORIGIN_TRACE_TEST_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export ORIGIN_TRACE_TEST_BROWSER
           test -n "$ORIGIN_TRACE_TEST_BROWSER"
           node tools/check-debugger-initialization.mjs
           node tools/check-traffic-multitarget.mjs

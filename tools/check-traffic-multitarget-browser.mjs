@@ -312,6 +312,8 @@ try {
   throw error;
 } finally {
   console.log('Capture control lifecycle:',await readCaptureDiagnostics(directory));
+  for(const {response} of heldResponses.values())response.destroy();
+  heldResponses.clear();
   const cleanupErrors=[];
   for(const waiter of pending.values())clearTimeout(waiter.timer);
   // CDP shutdown lets Chrome finish profile writes before signal fallback.

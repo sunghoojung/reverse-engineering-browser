@@ -492,6 +492,10 @@ Expand **Advanced** for Backtraces, Memory, Experiments, Analyst, and Tools.
 Navigation into an advanced tool reveals its group automatically on desktop. On
 narrow windows navigation moves above the workspace and closes after selection.
 
+Returning to Traffic immediately redraws retained requests and the selection, even
+when the last capture arrived while another workspace was open and the backend
+has no newer events.
+
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
 the evidence order. The selected request opens Headers, Payload, Preview,

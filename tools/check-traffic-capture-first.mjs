@@ -370,14 +370,44 @@ if(process.argv[2]==='--browser') {
     await waitState(s=>s.network.capture_status.hold_timeouts>=1,'Hold timeout visible');
     console.log('PASS capture-first: cumulative initialization exceeds independent hold deadline; watchdog resumes and reports timeout');
   });
-  await fixture([info('a'),...Array.from({length:8},(_,i)=>info(`queued-${i}`,'other'))],{detachDelay:900},async({commands,until,waitState})=>{
-    const last=await until(()=>commands().find(c=>c.event==='attached'&&c.target==='queued-7'),'Held burst reaches owning transport');
+  await fixture([info('a'),...Array.from({length:24},(_,i)=>info(`queued-${i}`,'other'))],{detachDelay:900},async({commands,until,waitState})=>{
+    const last=await until(()=>commands().find(c=>c.event==='attached'&&c.target==='queued-23'),'Held cleanup burst reaches transport');
     const held=commands().filter(c=>c.event==='attached'&&c.waiting&&c.pid===last.pid);
-    await until(()=>held.every(c=>released(commands,c.sessionId)),'Cleanup saturation releases every exact-client startup hold',8000);
-    assert(held.every(c=>(commands().find(r=>r.event==='release'&&r.sessionId===c.sessionId)?.time??Date.now())-c.time<5500),'Cleanup saturation cannot postpone any held-target release');
-    assert(capture(commands).filter(c=>c.pid===last.pid&&c.method==='Target.detachFromTarget').length<=4,'Cleanup concurrency stays bounded to four commands');
-    await waitState(s=>s.network.capture_status.gaps>0,'Cleanup saturation remains a visible evidence gap');
-    console.log('PASS capture-first: saturated bounded cleanup closes the exact client and releases every startup hold');
+    await until(()=>held.every(c=>resumed(commands,c.target)),'Queued cleanup holds all acknowledged',8000);
+    assert(held.every(c=>resumed(commands,c.target).time-c.time<5500),'Every queued startup hold stays bounded from ingress');
+    await until(()=>commands().filter(c=>c.pid===last.pid&&c.event==='delayed-reply'&&c.method==='Target.detachFromTarget').length===24,'Queued cleanup acknowledges every rejected session',8000);
+    let active=0,max=0;
+    for(const row of commands().filter(c=>c.pid===last.pid)) {
+      if(row.event==='command'&&row.method==='Target.detachFromTarget')max=Math.max(max,++active);
+      if(row.event==='delayed-reply'&&row.method==='Target.detachFromTarget')active--;
+    }
+    assert(max<=4,'Only four queued cleanup commands may be in flight');
+    assert(!commands().some(c=>c.event==='transport-close'&&c.pid===last.pid),'Ordinary duplicate fan-out must not close capture');
+    await waitState(s=>s.network.capture_status.attached_targets===1&&s.network.capture_status.hold_timeouts>=1,'Healthy owner retained and queued hold watchdog visible');
+    console.log('PASS capture-first: bounded cleanup FIFO drains fan-out while independent watchdog releases queued startup holds');
+  });
+  await fixture([info('a')],{duplicates:true,detachDelay:900,failTarget:'pending',failMethod:'Network.enable',failure:'timeout'},async({commands,until,waitState,add,send})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Healthy owner before true cleanup saturation');
+    add(info('pending'));
+    const held=await until(()=>commands().find(c=>c.event==='attached'&&c.target==='pending'),'Registered startup hold pending');
+    await until(()=>capture(commands).some(c=>c.method==='Network.enable'&&c.sessionId===held.sessionId),'Held owner initialization pending');
+    for(let start=0;start<520;start+=20) {
+      for(let i=start;i<start+20;i++)send({raw:{method:'Target.attachedToTarget',params:{sessionId:`${held.pid}:overflow:${i}`,targetInfo:info(`unowned-${i}`,'other'),waitingForDebugger:false}}});
+      await delay(20);
+    }
+    await until(()=>released(commands,held.sessionId),'True cleanup queue saturation releases exact pending hold',8000);
+    const releasedAt=commands().find(c=>c.event==='release'&&c.sessionId===held.sessionId)?.time??Date.now();
+    assert(releasedAt-held.time<5500,'Queue overflow cannot leave the registered startup hold suspended');
+    await until(()=>commands().some(c=>c.event==='transport-close'&&c.pid===held.pid)||!alive(held.pid),'True saturation closes the exact owning transport');
+    await waitState(s=>s.network.capture_status.gaps>0&&/cleanup.*capacity/i.test(s.network.capture_status.last_error),'Cleanup-capacity reason remains explicit');
+    assert(!capture(commands).some(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId?.includes(':overflow:')),'Nonwaiting alternate sessions must never be resumed');
+    let active=0,max=0;
+    for(const row of commands().filter(c=>c.pid===held.pid)) {
+      if(row.event==='command'&&row.method==='Target.detachFromTarget')max=Math.max(max,++active);
+      if(row.event==='delayed-reply'&&row.method==='Target.detachFromTarget')active--;
+    }
+    assert(max<=4,'True queue overflow still bounds concurrent cleanup');
+    console.log('PASS capture-first: true cleanup saturation closes exact client and releases its pending registered hold');
   });
   await fixture([info('a'),info('overflow'),info('rejected','other')],{limit:1},async({commands,waitState,until})=>{
     await waitState(s=>s.network.capture_status.attached_targets===1&&s.network.capture_status.target_overflow===1,'Bounded capture owner');

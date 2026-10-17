@@ -448,6 +448,7 @@
           (network.target_id === null || isBoundedText(network.target_id, 4 * 1024)) &&
           Array.isArray(network.requests) && network.requests.length <= 1000 &&
           network.requests.every(isDebuggerNetworkRequest) &&
+          new Set(network.requests.map(request => request.id)).size === network.requests.length &&
           isSafeIntegerInRange(network.dropped, 0, Number.MAX_SAFE_INTEGER) &&
           isPlainObject(network.limits) && network.limits.requests === 1000 &&
           network.limits.body_bytes === 128 * 1024 && network.limits.headers === 128 &&
@@ -1723,7 +1724,9 @@
             method: record.method,
             status: record.state === 'failed' ? 'failed' : record.status ?? 'pending',
             time: terminal && record.duration_ms !== null ? record.duration_ms : 'pending',
-            type: typeMap.get(record.resource_type) ?? 'other',
+            // Response MIME identifies Wasm even when CDP calls its loader Fetch/XHR.
+            type: record.mime_type.split(';', 1)[0].trim().toLowerCase() === 'application/wasm'
+              ? 'wasm' : typeMap.get(record.resource_type) ?? 'other',
             origin: 'live',
             targetKind: 'url',
             hostOnly: false,

@@ -784,6 +784,44 @@ const truncatedMethodNetwork=networkSnapshot([networkRecord('method-truncated',{
 assert.equal(networkModels.requestsFromDebuggerNetwork(truncatedMethodNetwork)[0].methodTruncated,true);
 console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
 
+// Public row IDs own selection, search and body-cache entries. Raw CDP IDs may
+// legitimately repeat across targets and redirect hops, public row IDs may not.
+for (const patch of [{}, {target_id:'other-target'}, {protocol_request_id:'other-protocol-id'},
+  {started_monotonic_ms:101, url:'http://fixture.invalid/redirect'}]) {
+  assert.equal(networkModels.isDebuggerNetwork(networkSnapshot([
+    networkRecord('duplicate'), networkRecord('duplicate', patch)
+  ])), false, 'A duplicate public row ID must invalidate the snapshot');
+}
+const distinctOwners = networkSnapshot([
+  networkRecord('cdp:1:1', {protocol_request_id:'raw-shared'}),
+  networkRecord('cdp:2:2', {protocol_request_id:'raw-shared', target_id:'other-target'}),
+  networkRecord('cdp:1:3', {protocol_request_id:'raw-shared', started_monotonic_ms:101, url:'http://fixture.invalid/redirect'})
+]);
+assert.equal(networkModels.isDebuggerNetwork(distinctOwners), true);
+assert.equal(networkModels.isDebuggerNetwork(networkSnapshot([])), true);
+assert.equal(networkModels.isDebuggerNetwork(networkSnapshot(Array.from({length:1000}, (_,i)=>networkRecord(`row-${i}`)))), true);
+assert.equal(networkModels.isDebuggerNetwork(networkSnapshot(Array.from({length:1001}, (_,i)=>networkRecord(`row-${i}`)))), false);
+const types = new Map([['Fetch','xhr'],['XHR','xhr'],['Other','other'],['Document','doc'],
+  ['Script','js'],['Stylesheet','css'],['Image','img'],['Media','media'],['Font','font'],
+  ['WebSocket','socket'],['Manifest','other'],['Unknown','other']]);
+for (const [resource_type, fallback] of types) {
+  for (const [mime_type, expected] of [
+    ['application/wasm','wasm'],['APPLICATION/WASM','wasm'],[' application/wasm ; charset=binary ','wasm'],
+    ['',fallback],['application/wasm-extra',fallback],['application/wasm+json',fallback],
+    ['text/application/wasm',fallback],['application/octet-stream',fallback],['text/plain',fallback]
+  ]) {
+    const snapshot=networkSnapshot([networkRecord('mime', {resource_type,mime_type,url:'http://fixture.invalid/module.wasm'})]);
+    const original=JSON.stringify(snapshot);
+    assert.equal(networkModels.isDebuggerNetwork(snapshot),true);
+    const rows=networkModels.requestsFromDebuggerNetwork(snapshot);
+    assert.equal(rows[0].type,expected,`${resource_type}/${mime_type}: MIME token must match exactly`);
+    assert.equal(rows.filter(row=>row.type==='wasm').length,expected==='wasm'?1:0);
+    assert.equal(JSON.stringify(snapshot),original,'Classification cannot mutate captured evidence');
+  }
+}
+console.log('PASS exact Wasm MIME/resource-type filter matrix and duplicate-public-ID rejection with distinct owner/redirect IDs retained');
+
+
 // A minimal DOM verifies the real reconciliation code and bounded state, not
 // pixels. --traffic-ui-browser below is the separate rendered interaction path.
 class TrafficFixtureNode {

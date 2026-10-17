@@ -259,7 +259,10 @@ impl Debugger {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len();
-        let old = self.snapshot()["network"]["capture_status"].clone();
+        let old = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state["network"]["capture_status"].clone()
+        };
         let mut status = old.clone();
         status["state"] = json!(if eligible_count == 0 {
             "waiting"

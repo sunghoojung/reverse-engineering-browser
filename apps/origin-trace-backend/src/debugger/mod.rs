@@ -291,15 +291,22 @@ impl Debugger {
             .map(public_target)
             .collect::<Vec<_>>();
         let tabs = targets.iter().filter(|t| t["type"] == "page").count();
-        if self.snapshot()["targets"] != json!(public) || self.snapshot()["live_tab_count"] != tabs
-        {
+        let public = json!(public);
+        let targets_changed = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state["targets"] != public || state["live_tab_count"] != tabs
+        };
+        if targets_changed {
             self.update(|s| {
-                s["targets"] = json!(public);
+                s["targets"] = public;
                 s["live_tab_count"] = json!(tabs);
             });
         }
         let current = self.connection.lock().await.clone();
-        let current_target = self.snapshot()["target"]["id"].as_str().map(str::to_owned);
+        let current_target = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state["target"]["id"].as_str().map(str::to_owned)
+        };
         let preferred = self
             .preferred
             .lock()

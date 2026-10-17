@@ -1678,6 +1678,10 @@ Binding requires a unique complete UTF-8 digest match and strict synchronous-bod
 worker admission, never a copied script ID or URL match. Original evidence remains
 separate and returnable; no field values are saved to the notebook. See the
 [identity, consent, bounds and research contract](../../docs/product/candidate-experiment-v1.md).
+While Sources Runtime Hooks is open, visible Link context reserves a bounded, keyboard-
+focusable scroll area. Asynchronous expiry warnings remain readable without
+moving disposable action controls when the notice expands or wraps.
+
 Bind waits for pending debugger actions and for a fresh debugger snapshot to
 reconcile acknowledged changes. Its status explains the wait; reconciliation
 never automatically retries a binding or restores capture/arming consent.

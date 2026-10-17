@@ -102,6 +102,10 @@ fn auto_attach(hold: bool) -> Value {
     json!({"autoAttach":true,"waitForDebuggerOnStart":hold,"flatten":true,"filter":[{"type":"page"},{"type":"iframe"},{"type":"worker"},{"type":"shared_worker"},{"type":"service_worker"},{"exclude":true}]})
 }
 impl Debugger {
+    pub(super) fn capture_hold_error_is_current(&self, c: &Arc<Connection>) -> bool {
+        self.capture.browser.current(c)
+            && !self.capture.browser.cleanup_closing.load(Ordering::Acquire)
+    }
     pub(super) async fn close_browser_capture(&self) {
         let c = self
             .capture
@@ -704,12 +708,24 @@ impl Debugger {
                             }
                         }
                     };
-                    if d.capture.browser.current(&job.connection) && !job.connection.is_closed()
-                        && d.detach_capture_session(&job.connection, &job.session, job.parent.as_deref()).await
-                        && d.capture.browser.current(&job.connection) && !job.connection.is_closed()
+                    if d.capture.browser.current(&job.connection)
+                        && !job.connection.is_closed()
+                        && d.detach_capture_session(
+                            &job.connection,
+                            &job.session,
+                            job.parent.as_deref(),
+                        )
+                        .await
+                        && d.capture.browser.current(&job.connection)
+                        && !job.connection.is_closed()
                         && !d.stopping.load(Ordering::Acquire)
                         && let Some(id) = &job.recovery
-                        && d.capture.browser.targets.lock().unwrap_or_else(|e| e.into_inner()).contains_key(id)
+                        && d.capture
+                            .browser
+                            .targets
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .contains_key(id)
                     {
                         d.queue_capture_target(id.clone());
                         d.schedule_capture_admission(&job.connection);

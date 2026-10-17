@@ -107,7 +107,10 @@ impl Debugger {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len();
+        // Keep the first cleanup failure, and never replace a newer connection's
+        // diagnostics with an old session's eventual release result.
         self.update(|s| {
+            let report_error = self.capture_hold_error_is_current(c);
             let v = &mut s["network"]["capture_status"];
             v["held_targets"] = json!(count);
             v["hold_max_ms"] = json!(v["hold_max_ms"].as_u64().unwrap_or(0).max((elapsed + releasing.elapsed()).as_millis().min(u64::MAX as u128) as u64));
@@ -115,12 +118,14 @@ impl Debugger {
             v[counter] = json!(v[counter].as_u64().unwrap_or(0).saturating_add(1));
             if let Some(reason) = reason {
                 v["gaps"] = json!(v["gaps"].as_u64().unwrap_or(0).saturating_add(1));
-                v["last_error"] = json!(reason);
+                if report_error { v["last_error"] = json!(reason); }
             }
             if !acknowledged {
                 v["gaps"] = json!(v["gaps"].as_u64().unwrap_or(0).saturating_add(1));
-                v["last_error"] = json!("Startup resume was not acknowledged; capture transport closed to release its attachments. Early evidence may be missing.");
-                v["state"] = json!("partial");
+                if report_error {
+                    v["last_error"] = json!("Startup resume was not acknowledged; capture transport closed to release its attachments. Early evidence may be missing.");
+                    v["state"] = json!("partial");
+                }
             }
         });
         if !acknowledged {

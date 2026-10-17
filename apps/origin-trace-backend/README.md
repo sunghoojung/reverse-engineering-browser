@@ -49,7 +49,10 @@ process groups, validates bounded replies, and retires ambiguous exchanges. See
 [Native Console v2](../../protocol/native-console-v2.md).
 
 Each browser connection owns a native transport process, a bounded event queue,
-and command deadlines. Experiment actions verify browser-context ownership.
+and command deadlines. Failed domain initialization retires that connection so
+the next refresh retries the complete setup. `make backend-e2e` also exercises
+startup success, domain errors and timeouts, and disabled content capture using
+a synthetic local CDP transport before its browser checks. Experiment actions verify browser-context ownership.
 Disposal stops owned pages, workers, recipes, requests, and retained objects.
 Worker cancellation terminates its process group, including descendants. Network
 capture is opt-in for standalone sessions and enabled by the packaged research

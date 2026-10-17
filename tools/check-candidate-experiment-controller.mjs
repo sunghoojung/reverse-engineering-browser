@@ -99,6 +99,33 @@ export async function checkCandidateExperimentController(root) {
   assert.equal(c.elements.hooksFieldUrl.value,'','Actual creating-to-ready synchronizer erases value-test draft');assert.equal(c.elements.hooksFieldPointer.value,'');assert.equal(c.api.owner,retainedQuestion,'Original question survives ordinary new-lifetime draft clearing');assert.equal(c.calls.length,0);
   c.choose('disposable-page');c.setAction(async()=>{c.hooks.definitions=[c.definition()];return {runtime_hooks:c.hooks};});await c.api.bind();
   assert.equal(c.elements.hooksFieldUrl.value,c.selection.url,'Explicit Bind restores original field metadata after real lifetime transition');assert.equal(c.elements.hooksFieldPointer.value,'/payload');assert.equal(c.elements.hooksFieldConfirm.checked,false);assert.equal(c.elements.hooksConfirm.checked,false);assert.equal(c.calls.length,1);assert.equal(c.calls[0].action,'bind_runtime_candidate');assert(c.api.owner.bound);
+  // A mutation receipt can precede a previously started debugger poll. The
+  // real synchronizer preserves receipt groups but blocks another action until
+  // a current snapshot arrives; the candidate controls must expose that gate.
+  c=fixture();await c.api.start(c.site);c.disposable();c.choose('disposable-page');
+  c.state.debuggerSession.generation=10;
+  const previous=c.state.debuggerSession;
+  c.state.experimentReceipt={generation:11,groups:['runtime_hooks']};
+  c.state.debuggerSession=c.api.sync(previous,{...previous,generation:10},null);
+  assert.equal(c.state.experimentNeedsRefresh,true);
+  c.api.render();assert.equal(c.node('bind').disabled,true);assert.equal(c.node('target').disabled,true);
+  assert.match(c.node('status').textContent,/Waiting for a current debugger snapshot/);
+  c.api.owner.bound={id:999,context:'expired'};c.api.render();
+  assert.equal(c.api.owner.bound,null);assert.match(c.node('status').textContent,/Waiting for a current debugger snapshot/,'Expired binding still explains the active reconciliation gate');
+  await c.api.bind();assert.equal(c.calls.length,0,'Stale poll cannot dispatch Bind');
+  // The handler must also guard a stale rendered enabled control.
+  c.node('bind').disabled=false;const beforeDraft=c.elements.hooksFieldUrl.value;
+  await c.api.bind();assert.equal(c.calls.length,0);assert.equal(c.elements.hooksFieldUrl.value,beforeDraft);
+  c.state.debuggerSession=c.api.sync(c.state.debuggerSession,{...previous,generation:11},c.state.experimentReceipt);
+  c.api.render();assert.equal(c.state.experimentNeedsRefresh,false);assert.equal(c.node('bind').disabled,false);
+  assert.equal(c.calls.length,0,'Reconciliation does not automatically retry');
+  c.state.debuggerActionPending=true;c.api.render();assert.equal(c.node('bind').disabled,true);
+  assert.match(c.node('status').textContent,/Waiting for the current debugger action/);
+  c.node('bind').disabled=false;await c.api.bind();assert.equal(c.calls.length,0);
+  c.state.debuggerActionPending=false;c.api.render();
+  c.setAction(async()=>{c.hooks.definitions=[c.definition()];return {runtime_hooks:c.hooks};});
+  await c.api.bind();assert.equal(c.calls.length,1);assert(c.api.owner.bound,'Explicit Bind works after reconciliation');
+
   c=fixture({confirm:false});await c.api.start(c.site);c.disposable();c.choose('disposable-page');c.elements.hooksFieldUrl.value='http://127.0.0.1/user-draft';c.elements.hooksFieldPointer.value='/keep';c.elements.hooksFieldConfirm.checked=true;c.elements.hooksConfirm.checked=true;await c.api.bind();
   assert.equal(c.confirmations.length,1);assert.equal(c.calls.length,0,'Declining dirty metadata replacement must prevent binding POST');assert.equal(c.elements.hooksFieldUrl.value,'http://127.0.0.1/user-draft');assert.equal(c.elements.hooksFieldPointer.value,'/keep');assert.equal(c.elements.hooksFieldConfirm.checked,true);assert.equal(c.elements.hooksConfirm.checked,true);assert.equal(c.api.owner.bound,null);assert.match(c.api.owner.notice,/draft retained/);
   c.setConfirm(true);c.setAction(async()=>{c.hooks.definitions=[c.definition()];return {runtime_hooks:c.hooks};});await c.api.bind();assert.equal(c.calls.length,1,'Accepted explicit retry dispatches once');assert.equal(c.api.owner.selection.error,null,'Accepted original metadata replacement clears declined-draft warning');assert.equal(c.elements.hooksFieldUrl.value,c.selection.url);assert.equal(c.elements.hooksFieldPointer.value,'/payload');assert.equal(c.elements.hooksFieldConfirm.checked,false);assert.equal(c.elements.hooksConfirm.checked,false);

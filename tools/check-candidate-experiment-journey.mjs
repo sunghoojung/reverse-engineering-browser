@@ -3,7 +3,7 @@
 // installs hidden source identities. All fixture content is synthetic and owned.
 import assert from 'node:assert/strict';
 import {platformEditEvent, selectRenderedOption} from './rendered-keyboard.mjs';
-import {mkdir, writeFile} from 'node:fs/promises';
+import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
 
@@ -68,6 +68,20 @@ export function candidateRevealGeometry(rect,viewport,ancestors,margin=0) {
   }
   return {ready:false,blocked:true,clip,rect};
 }
+// A settled rectangle is only a planning hint. Revalidate the actual native
+// hit point after hover, immediately before press; never replay a pressed action.
+export function candidatePointerAdmission(snapshot, point) {
+  return snapshot.present && !snapshot.disabled && snapshot.ownsPoint &&
+    point.x >= snapshot.rect.left && point.x < snapshot.rect.right &&
+    point.y >= snapshot.rect.top && point.y < snapshot.rect.bottom;
+}
+// Native scrolling must have room in the chosen direction. A keyboard step
+// can finish at the bottom, so a fixed "another 40px down" is not a valid oracle.
+export function candidateWarningScrollPlan({top, max, ownsPoint}, distance=400) {
+  if (!ownsPoint || !Number.isFinite(top) || !Number.isFinite(max) || max<=0 || top<0 || top>max) return null;
+  const direction=top<=max/2?1:-1,room=direction>0?max-top:top;
+  return {delta:direction*Math.min(distance,room),direction};
+}
 export function candidateGeometryStability(previous,current,count) {return previous===current?count+1:0;}
 
 export function candidateTargetSelectionMatches(expected, snapshot) {
@@ -97,7 +111,19 @@ export function candidateBindResponseMatches(params, actionURL) {
   try{return JSON.parse(params.request.postData).action==='bind_runtime_candidate';}catch{return false;}
 }
 
+// Static guard complements (and does not replace) the rendered three-viewport
+// expansion/wheel regression below. Keep the reservation scoped to Hooks.
+export function checkCandidateNoticeLayoutContract(css, html) {
+  const rule=css.match(/\.main:has\(> #screen-sources\[data-hooks-open="true"\]:not\(\[hidden\]\)\) > \.investigation-navigation:not\(\[hidden\]\)\s*\{([^}]+)\}/);
+  assert(rule,'Sources hooks must reserve a bounded Link context area');
+  assert.match(rule[1],/flex:\s*0 0 min\(112px, 25vh\)/);
+  assert.match(rule[1],/height:\s*min\(112px, 25vh\)/);
+  assert.match(css,/\.investigation-navigation\s*\{[^}]*overflow:\s*auto/);
+  assert.match(html,/<section id="investigation-navigation"[^>]*tabindex="0"/);
+}
+
 export async function checkCandidateFixture() {
+  checkCandidateNoticeLayoutContract(await readFile(new URL('../apps/research-ui/app.css',import.meta.url),'utf8'),await readFile(new URL('../apps/research-ui/index.html',import.meta.url),'utf8'));
   for(const [key,text,code,vk] of [['Enter','\r','Enter',13],[' ',' ','Space',32]]){const events=candidateKeyEvents(key);assert.deepEqual(events,[{type:'keyDown',key,code,modifiers:0,windowsVirtualKeyCode:vk,text,unmodifiedText:text},{type:'keyUp',key,code,windowsVirtualKeyCode:vk}]);}
   for(const key of ['Tab','Escape','ArrowDown','ArrowUp','Home','End']){const [down,up]=candidateKeyEvents(key);assert.equal(down.type,'rawKeyDown');assert.equal(up.type,'keyUp');assert(!('text' in down));assert(!('text' in up));assert(Number.isInteger(down.windowsVirtualKeyCode));}
   assert.deepEqual(candidateKeyEvents('a',2),[{type:'rawKeyDown',key:'a',code:'KeyA',modifiers:2,windowsVirtualKeyCode:65},{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65}]);
@@ -105,6 +131,18 @@ export async function checkCandidateFixture() {
   assert.equal(candidateFocusMargin({outlineStyle:'solid',outlineWidth:'1px',outlineOffset:'-2px'}),0);assert.equal(candidateRevealGeometry({left:0,right:350,top:120,bottom:150},viewport,[pane],candidateFocusMargin({outlineStyle:'solid',outlineWidth:'1px',outlineOffset:'-2px'})).ready,true,'Full-width Traffic row with inset outline must not falsely require horizontal scrolling');assert.equal(candidateFocusMargin({outlineStyle:'solid',outlineWidth:'2px',outlineOffset:'2px'}),4);
   const clippedPlan=candidateRevealGeometry(clippedButton,viewport,[pane],4);assert.equal(clippedPlan.ready,false);assert.equal(clippedPlan.delta,20,'Center hit inside viewport is insufficient when control/focus extends beyond ancestor');assert.equal(candidateRevealGeometry({...clippedButton,top:665,bottom:696},viewport,[pane],4).ready,true);
   const outer={...pane,top:100,bottom:500,scrollTop:0,maxScrollTop:300};const nested={...pane,top:400,bottom:800,scrollTop:400,maxScrollTop:400};assert.equal(candidateRevealGeometry({left:10,right:100,top:600,bottom:630},viewport,[nested,outer],4).owner,1,'An exhausted inner pane must reveal through its actual outer scroll owner');assert.equal(candidateRevealGeometry(clippedButton,viewport,[{...pane,scrollableY:false}],4).blocked,true,'Non-scrollable ancestor clipping is a real blocked layout');
+  const oldPoint={x:1238,y:782},moved={present:true,disabled:false,ownsPoint:false,rect:{left:1078,right:1398,top:786,bottom:814}};
+  assert.equal(candidatePointerAdmission(moved,oldPoint),false,'A notice-driven 18px move invalidates the old planned click before press');
+  assert.equal(candidatePointerAdmission({...moved,ownsPoint:true},{x:1238,y:800}),true,'Only the newly hit-tested point can be pressed');
+  assert.equal(candidatePointerAdmission({...moved,ownsPoint:true,disabled:true},{x:1238,y:800}),false);
+  assert.equal(candidatePointerAdmission({...moved,ownsPoint:false},{x:1238,y:800}),false,'An overlay cannot be mistaken for the intended control');
+  assert.deepEqual(candidateWarningScrollPlan({top:40,max:40,ownsPoint:true}),{delta:-40,direction:-1},'A completed keyboard scroll at the bottom requires an upward wheel proof');
+  assert.equal(Math.min(40,40+400)>0+40,false,'Old fixed downstream threshold cannot pass when the key reaches a 40px maximum');
+  const bottomPlan=candidateWarningScrollPlan({top:40,max:40,ownsPoint:true});
+  assert((Math.max(0,40+bottomPlan.delta)-40)*bottomPlan.direction>0,'Fresh-direction wheel proof accepts actual movement away from the bottom');
+  assert.deepEqual(candidateWarningScrollPlan({top:0,max:18,ownsPoint:true}),{delta:18,direction:1},'Short overflow still has a real reachable wheel destination');
+  assert.equal(candidateWarningScrollPlan({top:0,max:0,ownsPoint:true}),null,'No overflow cannot prove wheel scrolling');
+  assert.equal(candidateWarningScrollPlan({top:0,max:100,ownsPoint:false}),null,'A stale or occluded point cannot prove owner scrolling');
   let stable=0,previous='';for(const current of ['moving1','moving2','still','still','still','still']){stable=candidateGeometryStability(previous,current,stable);previous=current;}assert.equal(stable,3,'Click waits for three unchanged native-frame geometry samples');
   const selected={value:'worker-A',type:'worker',lifetime:'session1/nav2'},targetSnapshot={selected:'worker-A',ownerTarget:'worker-A',lifetime:selected.lifetime,options:[{value:'worker-A',type:'worker',label:'Worker · updated title'}]};
   assert(candidateTargetSelectionMatches(selected,targetSnapshot),'Same exact worker may refresh its display title');
@@ -219,10 +257,20 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     throw Error(`Control did not become reachable: ${selector}`);
   };
   const click=async(selector,session=uiSession)=>{
-    const point=await reveal(selector,session),startedAt=performance.now();
-    const before=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});return {disabled:n.disabled===true,checked:n.type==='checkbox'?n.checked:null,focus:document.activeElement?.id};})()`,session);
-    receipts.push({phase,kind:'pointer-ready',selector,...before,geometry:point});assert.equal(before.disabled,false,'Native action control is disabled: '+selector);
-    await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:point.x,y:point.y},session);
+    let point,before,admitted=false;
+    for(let attempt=0;attempt<8;attempt++) {
+      point=await reveal(selector,session);
+      await command('Input.dispatchMouseEvent',{type:'mouseMoved',x:point.x,y:point.y},session);
+      // No foreground switch or paint wait between the final hit test and press.
+      const result=await command('Runtime.evaluate',{expression:`(()=>{const n=document.querySelector(${JSON.stringify(selector)}),r=n?.getBoundingClientRect();return {present:!!n,disabled:n?.disabled===true,checked:n?.type==='checkbox'?n.checked:null,focus:document.activeElement?.id,ownsPoint:!!n?.contains(document.elementFromPoint(${point.x},${point.y})),rect:r?{left:r.left,right:r.right,top:r.top,bottom:r.bottom}:null};})()`,returnByValue:true},session);
+      assert(!result.exceptionDetails,'Native pointer admission read failed');before=result.result.value;
+      admitted=candidatePointerAdmission(before,point);
+      receipts.push({phase,kind:admitted?'pointer-ready':'pointer-reposition-before-press',selector,...before,geometry:point});
+      if(admitted)break;
+      assert.equal(before.disabled,false,'Native action control is disabled: '+selector);
+    }
+    assert(admitted,'Native pointer point no longer belongs to intended control: '+selector);
+    const startedAt=performance.now();
     await command('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1},session);
     await command('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1},session);
     await evaluate('new Promise(resolve=>requestAnimationFrame(resolve))',session);
@@ -311,7 +359,56 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     assert.deepEqual(await quietState(),before,'Candidate handoff must not create, navigate, bind, capture or arm');
     assert.equal(await evaluate("document.querySelector('#hooks-field-confirm').checked||document.querySelector('#hooks-confirm').checked"),false);
     assert.equal(await evaluate("document.querySelector('#candidate-experiment-target').value"),'');
-    await recordForm('candidate handoff');phase='explicit disposable create/open';await click('#hooks-create');
+    await recordForm('candidate handoff');phase='candidate warning layout';
+    const beforeWarningLayout=await quietState();
+    // Display-only fixture: exercise the production notice renderer without
+    // issuing an action or changing evidence identities. Run before Create so
+    // its asynchronous target-retirement warning cannot replace fixture text.
+    // Restore the exact notice state after each viewport.
+    for(const [width,height] of [[1440,900],[760,560],[360,740]]) {
+      await viewport(width,height);
+      const savedNotice=await evaluate("(()=>{const bar=document.querySelector('#investigation-navigation');return {hidden:bar.hidden,status:bar.dataset.status,open:bar.querySelector('details').open,text:document.querySelector('#investigation-notice').textContent,scroll:bar.scrollTop};})()");
+      try {
+        const noticeGeometry=await evaluate(`(()=>{const bar=document.querySelector('#investigation-navigation'),details=bar.querySelector('details');const box=()=>{const r=document.querySelector('#hooks-navigate').getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};const before=box(),samples=[];for(const text of ['Evidence expired.',Array(80).fill('Retained evidence expired.').join(' ')]){investigationNotice(text,'stale');samples.push(box());}details.open=false;samples.push(box());details.open=true;bar.scrollTop=0;const r=bar.getBoundingClientRect();return {before,samples,height:r.height,overflow:getComputedStyle(bar).overflowY,tabIndex:bar.tabIndex,scrollHeight:bar.scrollHeight,clientHeight:bar.clientHeight,point:{x:r.left+r.width/2,y:r.top+r.height/2}};})()`);
+        for(const geometry of noticeGeometry.samples)assert.deepEqual(geometry,noticeGeometry.before,'Async Link context text/expansion must not shift the Open control');
+        assert(noticeGeometry.height<=height*.35&&noticeGeometry.overflow==='auto'&&noticeGeometry.tabIndex===0,'Warnings keep their own bounded keyboard-focusable scroll owner');
+        assert(noticeGeometry.scrollHeight>noticeGeometry.clientHeight,'Long warnings remain reachable by scrolling, not clipped away');
+        const noticeFocused="document.activeElement===document.querySelector('#investigation-navigation')&&document.activeElement.matches(':focus-visible')";
+        for(let tabs=0;tabs<220&&!await evaluate(noticeFocused);tabs++)await key('Tab');
+        assert(await evaluate(noticeFocused),'Native Tab must visibly focus the warning scroll owner');
+        assert(await evaluate("(()=>{const style=getComputedStyle(document.activeElement);return style.outlineStyle!=='none'&&parseFloat(style.outlineWidth)>0;})()"),'Warning scroll focus must have a visible outline');
+        const scrollSnapshot=()=>evaluate("(()=>{const n=document.querySelector('#investigation-navigation'),r=n.getBoundingClientRect(),point={x:r.left+r.width/2,y:r.top+r.height/2},hit=document.elementFromPoint(point.x,point.y);return {top:n.scrollTop,max:n.scrollHeight-n.clientHeight,ownsPoint:!!hit&&n.contains(hit),point,focus:document.activeElement?.id,fixtureText:document.querySelector('#investigation-notice').textContent===Array(80).fill('Retained evidence expired.').join(' ')};})()");
+        const settleWarning=()=>evaluate("new Promise((resolve,reject)=>{const n=document.querySelector('#investigation-navigation'),start=performance.now();let last=n.scrollTop,stable=0;function frame(){const top=n.scrollTop;stable=top===last?stable+1:0;last=top;if(stable>=3)return resolve(top);if(performance.now()-start>2000)return reject(Error('Warning scroll did not settle in native frames'));requestAnimationFrame(frame);}requestAnimationFrame(frame);})");
+        await settleWarning();
+        const beforeKey=await scrollSnapshot(),keyPlan=candidateWarningScrollPlan(beforeKey);
+        receipts.push({phase,kind:'warning-before-key',width,height,...beforeKey});
+        assert(beforeKey.fixtureText&&keyPlan,'Keyboard proof requires the owned overflowing fixture');
+        await key(keyPlan.direction>0?'ArrowDown':'ArrowUp');
+        await until(`(document.querySelector('#investigation-navigation').scrollTop-${beforeKey.top})*${keyPlan.direction}>0`,'Native arrow key must scroll the focused warning');
+        await settleWarning();
+        const beforeWheel=await scrollSnapshot(),wheelPlan=candidateWarningScrollPlan(beforeWheel);
+        assert((beforeWheel.top-beforeKey.top)*keyPlan.direction>0,'Settled keyboard movement must remain in the requested direction');
+        receipts.push({phase,kind:'warning-before-wheel',width,height,...beforeWheel,wheelPlan});
+        assert(beforeWheel.fixtureText&&wheelPlan,'Wheel proof requires a fresh hit-tested owner and available scroll distance');
+        await command('Input.dispatchMouseEvent',{type:'mouseMoved',...beforeWheel.point});
+        // Complete native mouse-wheel gesture, after keyboard smooth scrolling
+        // has settled. No DOM scrolling and no mutation is dispatched or retried.
+        await command('Input.synthesizeScrollGesture',{...beforeWheel.point,yDistance:-wheelPlan.delta,gestureSourceType:'mouse',speed:1200});
+        await until(`(document.querySelector('#investigation-navigation').scrollTop-${beforeWheel.top})*${wheelPlan.direction}>0`,'Native mouse wheel must move the overflowing warning from its fresh position');
+        await settleWarning();
+        const afterWheel=await scrollSnapshot();
+        receipts.push({phase,kind:'warning-after-wheel',width,height,...afterWheel});
+        assert(afterWheel.fixtureText,'Wheel proof must retain the same warning text');
+        assert((afterWheel.top-beforeWheel.top)*wheelPlan.direction>0,'Settled wheel movement must remain in the requested direction');
+        receipts.push({phase,kind:'dynamic-notice-stable-controls',width,height,...noticeGeometry});
+        await screenshot(`02-notice-stable-${width}`);
+      } finally {
+        await evaluate(`(()=>{const saved=${JSON.stringify(savedNotice)},bar=document.querySelector('#investigation-navigation');bar.hidden=saved.hidden;if(saved.status===undefined)delete bar.dataset.status;else bar.dataset.status=saved.status;bar.querySelector('details').open=saved.open;document.querySelector('#investigation-notice').textContent=saved.text;bar.scrollTop=saved.scroll;})()`);
+      }
+    }
+    await viewport(1440,900);
+    assert.deepEqual(await quietState(),beforeWarningLayout,'Warning layout/input proof must not issue experiment actions');
+    phase='explicit disposable create/open';await click('#hooks-create');
     await until("!document.querySelector('#hooks-navigate').disabled",'Explicit create did not enable disposable navigation');await recordForm('after explicit context creation');
     const openDisposable=async(path)=>{
       await fill('#hooks-page-url',fixtureURL+path);await click('#hooks-navigate');
@@ -390,6 +487,11 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await click('#hooks-definitions .hook-remove');
     await until("document.querySelectorAll('#hooks-definitions .hook-definition-row').length===0&&!document.querySelector('#candidate-experiment-bind').disabled",'Explicit Remove did not retire the backend-added definition');
     assert.equal((await quietState()).definitions,0);
+    // Removing the held-response definition acknowledges a mutation before an
+    // older in-flight GET may finish. Wait for the production poll to reconcile
+    // that receipt, not merely for the immediately updated definition list.
+    await until("!state.experimentReceipt&&!state.experimentNeedsRefresh&&!state.experimentPending&&!state.debuggerActionPending&&!document.querySelector('#candidate-experiment-bind').disabled",'Explicit Remove acknowledgement did not reconcile with a current debugger snapshot');
+    receipts.push({phase,kind:'remove-reconciled-before-bind',snapshot:await evaluate("({generation:state.debuggerSession.generation,receipt:state.experimentReceipt,needsRefresh:state.experimentNeedsRefresh,definitions:state.debuggerSession.runtime_hooks.definitions.length})")});
     phase='explicit exact-byte bind';receipts.push({phase,kind:'binding-start',snapshot:await evaluate(targetSnapshotExpression)});await keyboardTo('#candidate-experiment-bind');const bindStartedAt=performance.now();await key('Enter');
     await until("document.querySelector('#candidate-experiment-status').textContent.startsWith('Observation hook bound.')",'Exact byte binding did not finish');
     receipts.push({phase,kind:'binding-roundtrip',measurement:'Native Bind activation to rendered bound status; UI plus backend roundtrip, not pure source-scan time',elapsed_ms:Math.round(performance.now()-bindStartedAt),outcome:'bound'});

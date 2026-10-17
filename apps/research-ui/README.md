@@ -492,6 +492,10 @@ Expand **Advanced** for Backtraces, Memory, Experiments, Analyst, and Tools.
 Navigation into an advanced tool reveals its group automatically on desktop. On
 narrow windows navigation moves above the workspace and closes after selection.
 
+Returning to Traffic immediately redraws retained requests and the selection, even
+when the last capture arrived while another workspace was open and the backend
+has no newer events.
+
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
 the evidence order. The selected request opens Headers, Payload, Preview,
@@ -1674,6 +1678,13 @@ Binding requires a unique complete UTF-8 digest match and strict synchronous-bod
 worker admission, never a copied script ID or URL match. Original evidence remains
 separate and returnable; no field values are saved to the notebook. See the
 [identity, consent, bounds and research contract](../../docs/product/candidate-experiment-v1.md).
+While Sources Runtime Hooks is open, visible Link context reserves a bounded, keyboard-
+focusable scroll area. Asynchronous expiry warnings remain readable without
+moving disposable action controls when the notice expands or wraps.
+
+Bind waits for pending debugger actions and for a fresh debugger snapshot to
+reconcile acknowledged changes. Its status explains the wait; reconciliation
+never automatically retries a binding or restores capture/arming consent.
 
 Traffic includes a bounded read-only [WebSocket message inspector](../../protocol/websocket-capture-v1.md) for enabled CDP content captures. Text/base64 messages, exact connection lifetimes and drop counters stay separate from HTTP rows.
 

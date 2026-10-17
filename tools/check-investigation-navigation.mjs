@@ -115,13 +115,13 @@ export async function checkAdvancedNavigation(root) {
     document.querySelectorAll=selector=>selector==='.screen'?screens:selector==='.nav-button'?buttons:[];
     document.querySelector=selector=>selector==='#advanced-navigation'?group:selector.endsWith('.back-button')?destination:null;
     const noop=()=>{};
-    const context={document,state:{originTraceStatus:'idle',sourceHooksOpen:false},investigationRevision:0,
+    const context={document,state:{requests:[],selectedRequestId:null,originTraceStatus:'idle',sourceHooksOpen:false},investigationRevision:0,
       investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
       evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},
       evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
       window:{matchMedia:()=>({matches:narrow})},requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
       elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};
-    for(const name of ['renderFingerprintActivity','renderRuntimeHookTraffic','renderBacktrace','renderExperiment','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderDebugger','renderSources','renderMemory','renderVmLab'])context[name]=noop;
+    for(const name of ['renderRequests','updateSelectionSummary','renderInspector','renderFingerprintActivity','renderRuntimeHookTraffic','renderBacktrace','renderExperiment','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderDebugger','renderSources','renderMemory','renderVmLab'])context[name]=noop;
     const showScreen=runInNewContext(source+';showScreen',context);
     const flush=()=>{for(const callback of frames.splice(0))callback();};
     for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence','vm','field-provenance']) {
@@ -568,7 +568,7 @@ async function checkInvestigationReturns(root) {
     document.querySelectorAll=s=>s==='.screen'?screens:[];
     const context=createContext({document,state,CSS:{escape:s=>s},Promise,requestAnimationFrame:fn=>frames.push(fn),integerText:(e,k)=>String(e[k]),
       selectedSource:()=>null,sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
-      renderInspector:noop,renderRuntimeHookTraffic:noop,fieldSets:{body:[]},elements:{requestRows:{querySelectorAll:()=>[row]},requestFilter:row}});
+      renderRequests:noop,updateSelectionSummary:noop,renderInspector:noop,renderRuntimeHookTraffic:noop,fieldSets:{body:[]},elements:{requestRows:{querySelectorAll:()=>[row]},requestFilter:row}});
     const run=code=>runInContext(code,context);
     run(rootFunction+'\n'+nav+'\n'+section('      function showScreen(', '      async function refresh()'));
     context.entry={screen:'traffic',label:'Requests',request:run('investigationRequestIdentity(state.requests[0])'),inspectorTab:'evidence',fieldTab:'body',fieldPath:'',focus:'#trace-origin',scroll:[]};

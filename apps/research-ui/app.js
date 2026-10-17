@@ -11328,7 +11328,14 @@
         if (navigation.contains(document.activeElement)) navigation.querySelector('summary').focus({ preventScroll: true });
         navigation.open = false;
         if (screenName === 'signals') renderFingerprintActivity();
-        if (screenName === 'traffic') renderRuntimeHookTraffic();
+        if (screenName === 'traffic') {
+          // Hidden debugger refreshes update the model without painting Traffic.
+          // A quiet backend may return 304 indefinitely after we return here.
+          renderRequests();
+          updateSelectionSummary(state.requests.find(request => request.id === state.selectedRequestId) ?? null);
+          renderInspector();
+          renderRuntimeHookTraffic();
+        }
         if (screenName === 'backtrace') renderBacktrace();
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'api-collection') {

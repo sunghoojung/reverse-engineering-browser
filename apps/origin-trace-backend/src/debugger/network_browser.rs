@@ -213,7 +213,9 @@ impl Debugger {
             self.mark_capture_catalog_incomplete();
             return false;
         }
-        if !targets.contains_key(&id) {
+        // Owned startup belongs to root auto-attach. Only settled recovery
+        // paths enqueue explicit attachment; never race a newly held target.
+        if !targets.contains_key(&id) && !self.options.capture_first_owned {
             self.capture
                 .browser
                 .waiting
@@ -550,7 +552,12 @@ impl Debugger {
             }
         });
         if self.options.capture_first_owned {
-            c.command("Target.setAutoAttach", auto_attach(true), Duration::from_secs(3)).await?;
+            c.command(
+                "Target.setAutoAttach",
+                auto_attach(true),
+                Duration::from_secs(3),
+            )
+            .await?;
         } else {
             // Passive capture must never enable the browser-root popup throttle.
             self.schedule_capture_admission(&c);
@@ -802,8 +809,46 @@ impl Debugger {
                         d.initialize_browser_owner(c, owner).await;
                     });
                 } else {
-                    if let Some(id) = p["targetInfo"]["targetId"].as_str() {
-                        self.queue_capture_target(id.to_owned());
+                    let existing = self
+                        .capture
+                        .owners
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(p["targetInfo"]["targetId"].as_str().unwrap_or(""))
+                        .cloned();
+                    if waiting && let Some(existing) = existing {
+                        match self.defer_capture_hold(c, session) {
+                            Some(true) => {
+                                let d = self.clone();
+                                let c = c.clone();
+                                let session = session.to_owned();
+                                let parent = parent.map(str::to_owned);
+                                tokio::spawn(async move {
+                                    let deadline = Instant::now() + Duration::from_secs(4);
+                                    while !existing.ready.load(Ordering::Acquire)
+                                        && !existing.retired.load(Ordering::Acquire)
+                                        && !c.is_closed()
+                                        && d.capture.browser.current(&c)
+                                        && !d.stopping.load(Ordering::Acquire)
+                                        && Instant::now() < deadline
+                                    {
+                                        tokio::time::sleep(Duration::from_millis(10)).await;
+                                    }
+                                    let ready = existing.ready.load(Ordering::Acquire)
+                                        && !existing.retired.load(Ordering::Acquire)
+                                        && d.capture.browser.current(&c)
+                                        && !c.is_closed();
+                                    d.resume_capture_hold(&c, &session, if ready { None } else {
+                                        Some("Duplicate startup hold released before its exact capture owner became ready; evidence may be missing.")
+                                    }).await;
+                                    d.detach_capture_session(&c, &session, parent.as_deref())
+                                        .await;
+                                });
+                            }
+                            Some(false) => {} // The exact hold already has a bounded waiter.
+                            None => self.detach_capture_session(c, session, parent).await,
+                        }
+                        return;
                     }
                     if waiting {
                         self.resume_capture_hold(c, session, Some("Capture-first target rejected or over capacity; resumed without capture.")).await;
@@ -814,8 +859,13 @@ impl Debugger {
                             status["last_error"] = json!("Passive capture declined a target waiting for a debugger; startup ownership is unknown, so it was not resumed.");
                         });
                     }
-                    // Unknown startup ownership is not permission to resume a paused target.
-                    self.schedule_capture_detach(c, session, parent);
+                    // Never resume another controller's paused target in passive mode.
+                    self.detach_capture_session(c, session, parent).await;
+                    // Recovery becomes eligible only after rejected startup ownership
+                    // is released and its attachment has been detached.
+                    if let Some(id) = p["targetInfo"]["targetId"].as_str() {
+                        self.queue_capture_target(id.to_owned());
+                    }
                 }
                 self.browser_status();
             }

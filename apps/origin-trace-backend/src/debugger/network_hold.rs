@@ -11,6 +11,7 @@ use std::{
 pub(super) struct Hold {
     connection: Arc<Connection>,
     started: Instant,
+    deferred: bool,
 }
 #[derive(Default)]
 pub(super) struct Holds {
@@ -39,10 +40,24 @@ impl Debugger {
             Hold {
                 connection: c.clone(),
                 started: Instant::now(),
+                deferred: false,
             },
         );
         self.update(|s| s["network"]["capture_status"]["held_targets"] = json!(held.len()));
         true
+    }
+    // At most one bounded duplicate-owner waiter per registered hold.
+    pub(super) fn defer_capture_hold(&self, c: &Arc<Connection>, session: &str) -> Option<bool> {
+        let mut held = self
+            .capture
+            .holds
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let hold = held.get_mut(&(Arc::as_ptr(c) as usize, session.to_owned()))?;
+        let first = !hold.deferred;
+        hold.deferred = true;
+        Some(first)
     }
     pub(super) async fn resume_capture_hold(
         &self,

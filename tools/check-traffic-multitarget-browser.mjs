@@ -209,7 +209,10 @@ try {
   const workerScripts=['/dedicated.js','/shared.js','/service.js','/frame-worker.js','/nested-worker.js'];
   const workerTargets=await until(async()=>{
     const infos=(await command('Target.getTargets')).targetInfos;
-    const targets=workerScripts.map(path=>infos.find(t=>['worker','shared_worker','service_worker'].includes(t.type)&&t.url.endsWith(path)));
+    const targets=workerScripts.map(path=>{
+      const url=(path==='/frame-worker.js'?origin.replace('127.0.0.1','localhost'):origin)+path;
+      return infos.find(t=>['worker','shared_worker','service_worker'].includes(t.type)&&t.url===url);
+    });
     return targets.every(Boolean)&&targets;
   },'All fixture worker targets exist');
   await until(async()=>{

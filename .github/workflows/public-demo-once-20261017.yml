@@ -1,0 +1,50 @@
+name: One-shot concurrent public demo QA 20261017
+on:
+  push:
+    branches:
+      - qa/public-demo-once-20261017
+permissions:
+  contents: read
+jobs:
+  passive-smoke:
+    if: >-
+      github.repository == 'sunghoojung/reverse-engineering-browser' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/qa/public-demo-once-20261017' &&
+      github.event.created == true && github.event.deleted == false &&
+      github.run_number == '1' && github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify one-shot admission and offline privacy contracts
+        run: |
+          node tools/public-demo-once-guard.mjs --self-test
+          node tools/public-demo-once-guard.mjs
+          node tools/check-public-demo-passive-smoke.mjs
+      - name: Build real backend and debugger transport
+        run: make origin-trace-backend debugger-transport
+      - name: Observe concurrent demo tabs once
+        env:
+          REB_PUBLIC_DEMO_OPT_IN: passive-one-visit-per-demo
+          REB_PUBLIC_DEMO_REPORT: public-demo-summary.json
+        run: |
+          node tools/public-demo-once-guard.mjs
+          ORIGIN_TRACE_TEST_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export ORIGIN_TRACE_TEST_BROWSER
+          test -n "$ORIGIN_TRACE_TEST_BROWSER"
+          node tools/public-demo-passive-smoke.mjs
+      - name: Upload aggregate summary only
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: public-demo-once-aggregate-summary
+          path: public-demo-summary.json
+          if-no-files-found: ignore
+          retention-days: 3

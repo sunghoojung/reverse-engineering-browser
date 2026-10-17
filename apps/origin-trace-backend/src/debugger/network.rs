@@ -242,10 +242,11 @@ impl Debugger {
                 let _permit = permit;
                 let result = if let Some(connection) = connection {
                     connection
-                        .command(
+                        .command_session(
                             "Network.getResponseBody",
                             json!({"requestId":protocol}),
                             Duration::from_secs(5),
+                            owner.session.as_deref(),
                         )
                         .await
                         .and_then(|v| body(&v))

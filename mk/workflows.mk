@@ -85,6 +85,7 @@ origin-trace-backend:
 backend-e2e: origin-trace-backend debugger-transport heap-snapshot decoder deob-worker-build
 	node tools/check-debugger-initialization.mjs
 	node tools/check-traffic-multitarget.mjs
+	node tools/check-traffic-browser-sessions.mjs
 	node tools/check-traffic-multitarget-browser.mjs
 	node tools/check-origin-trace-debugger.mjs
 

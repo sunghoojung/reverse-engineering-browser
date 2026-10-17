@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdtemp, writeFile, readFile, symlink, rm} from 'node:fs/promises';
+import {mkdtemp, writeFile, readFile, symlink, rm, stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -72,6 +72,22 @@ try {
   const guard = join(dir, 'no-network.cjs');
   await writeFile(guard, "for (const p of ['node:http','node:https','node:net','node:tls']) { const m = require(p); for (const k of ['request','get','connect','createConnection']) if (m[k]) m[k] = () => { throw Error('network forbidden'); }; } global.fetch = () => { throw Error('network forbidden'); }; require('node:module').syncBuiltinESMExports();");
   const run = args => spawnSync(process.execPath, ['--require', guard, 'tools/vm-agent.mjs', ...args], {encoding: 'utf8'});
+  const created=run(['create-opcode-ledger','--definition',def]);assert.equal(created.status,0,created.stderr);assert.deepEqual(JSON.parse(created.stdout),empty);
+  assert.deepEqual(inspectLedger(created.stdout,definition).coverage.counts,{observed:0,inferred:0,unmodeled:3,missing_entries:3});
+  assert.equal(run(['create-opcode-ledger','--definition',def,'--output',join(dir,'unexpected.json')]).status,2);
+  const create=(source,output)=>spawnSync(process.execPath,['--require',guard,'tools/vm-semantics.mjs','create-ledger',source,output],{encoding:'utf8',timeout:10000});
+  const newLedger=join(dir,'new-ledger.json'),saved=create(def,newLedger);assert.equal(saved.status,0,saved.stderr);assert.equal(JSON.parse(saved.stdout).network_requests,0);
+  assert.deepEqual(JSON.parse(await readFile(newLedger,'utf8')),empty);assert.equal((await stat(newLedger)).mode&0o777,0o600);
+  const preserved=await readFile(newLedger,'utf8');assert.equal(create(def,newLedger).status,1);assert.equal(await readFile(newLedger,'utf8'),preserved);
+  const outputLink=join(dir,'output-link');await symlink(newLedger,outputLink);assert.equal(create(def,outputLink).status,1);assert.equal(await readFile(newLedger,'utf8'),preserved);
+  assert.equal(create(def,def).status,1);assert.equal(await readFile(def,'utf8'),definition);
+  const definitionLink=join(dir,'definition-link');await symlink(def,definitionLink);const refusedOutput=join(dir,'refused-ledger.json');
+  assert.equal(create(definitionLink,refusedOutput).status,1);assert.equal(run(['create-opcode-ledger','--definition',definitionLink]).status,2);
+  const malformed=join(dir,'malformed-definition');await writeFile(malformed,'{}');assert.equal(create(malformed,refusedOutput).status,1);assert.equal(run(['create-opcode-ledger','--definition',malformed]).status,2);
+  await assert.rejects(stat(refusedOutput),{code:'ENOENT'});
+  const pretty=join(dir,'pretty-definition.json');await writeFile(pretty,JSON.stringify(JSON.parse(definition),null,2));
+  assert.notEqual(JSON.parse(run(['create-opcode-ledger','--definition',pretty]).stdout).definition_source_sha256,empty.definition_source_sha256);
+  assert(JSON.parse(run(['capabilities']).stdout).opcode_evidence.commands.includes('create-opcode-ledger'));
   const args = ['opcode-ledger', '--definition', def, '--input', input];
   const out = run(args); assert.equal(out.status, 0, out.stderr);
   assert.deepEqual(JSON.parse(out.stdout), result);

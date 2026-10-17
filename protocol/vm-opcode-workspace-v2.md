@@ -99,8 +99,9 @@ These fields never promote a handler to universally confirmed semantics.
 
 The UI shows sampled PC with units, selected handler index and bytecode artifact
 ID on each matching handler row. It displays at most four position summaries
-per row and reports additional accepted/retained counts. The complete bounded
-sample prefix remains in the document. Missing positions are explicitly unknown.
+per row and reports additional accepted/retained counts. The selected-handler
+inspector pages through every retained sample in groups of 32 and exposes its
+complete recorded fields. Missing positions are explicitly unknown.
 Malformed refreshes retain the last valid workspace and detection findings.
 
 ## Validation
@@ -164,8 +165,8 @@ contradicted row or inconsistent known meanings prevents choosing one meaning.
 Unknown atomic groups and fused instructions stay null.
 
 The effects panel exposes every row's evidence class, operand layout, access
-sets and flow without interpreting captured code. At most 256 rows are rendered,
-with an explicit display-limit notice; all bounded rows remain in the document.
+sets and flow without interpreting captured code. All retained declarations are
+reachable through 32-row pages; paging does not change the bounded document.
 `tools/check-owned-vm-helper.py` verifies native declarations against the same
 independent fixed-fixture transition goldens used by the native semantics check.
 
@@ -190,7 +191,7 @@ still leave unreachable retained bytes uncharacterized, and sample/analysis
 omissions independently keep byte coverage partial.
 
 The UI renders static instruction positions and outgoing edges, followed by the
-unresolved frontier. The display caps instruction rows at 256 with a retained-row
-notice, while the document preserves the full bounded graph. Frontend validation
+unresolved frontier. Instruction positions use 32-row pages that expose the full
+bounded graph without changing the document. Frontend validation
 checks opcode bytes, effect identity, exact implied outgoing edges, nonoverlap,
 reachability from entries, complete snapshot entries and resolved destinations.

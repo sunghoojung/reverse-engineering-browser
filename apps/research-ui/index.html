@@ -97,7 +97,7 @@
                 <div class="request-table">
                   <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
-                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-api-catalog" type="button" aria-haspopup="dialog">API catalog</button></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-api-catalog" type="button" aria-haspopup="dialog">API catalog</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
                 </div>
               </div>
 
@@ -110,21 +110,11 @@
                   <button id="request-copy-url" class="secondary-button" type="button" title="Copy selected request URL">Copy URL</button>
                   <button id="request-evidence-toggle" class="secondary-button" type="button" aria-expanded="false">Evidence</button>
                   <details id="traffic-capture-export" class="exchange-options">
-                    <summary aria-label="Export selected capture">Export capture</summary>
+                    <summary aria-label="Selected capture actions">Capture actions</summary>
                     <div class="exchange-options-menu">
-                      <p>Raw values can contain credentials. Saved copies stay on this device; sharing is your choice.</p>
-                      <button class="exchange-button" type="button" data-traffic-export="raw" data-traffic-destination="download">Save raw capture</button>
-                      <button class="exchange-button" type="button" data-traffic-export="raw" data-traffic-destination="clipboard">Copy raw capture</button>
-                      <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="download">Save redacted copy</button>
-                      <button class="exchange-button" type="button" data-traffic-export="redacted_copy" data-traffic-destination="clipboard">Copy redacted copy</button>
-                      <button id="passive-security-open" class="exchange-button" type="button" aria-haspopup="dialog">Local passive security report</button>
-                      <button class="exchange-button" type="button" data-client-capture="draft">Review captured request in Repeater</button>
-                      <button class="exchange-button" type="button" data-client-capture="raw">Export raw client project</button>
-                      <button class="exchange-button" type="button" data-client-capture="redacted_copy">Export redacted client project</button>
-                      <p data-client-export-support></p>
-                      <p>Client projects contain one observed operation, source evidence, configuration and a dry-run example. Unsupported inputs remain explicit; no request is sent by export.</p>
-                      <p>Redacted copies remove header values and bodies, plus URL credentials, queries and fragments. Paths and other metadata may still contain secrets. Review before sharing.</p>
-                      <p data-traffic-export-status role="status" aria-live="polite"></p>
+                      <button class="exchange-button" type="button" data-client-capture="draft">Review in Repeater</button>
+                      <button id="passive-security-open" class="exchange-button" type="button" aria-haspopup="dialog">Passive security report</button>
+                      <p data-traffic-export-status role="status" aria-live="polite" hidden></p>
                     </div>
                   </details>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
@@ -416,9 +406,15 @@
 
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
             <header class="screen-head">
+              <nav class="vm-menu-bar" aria-label="VM application menus">
+                <details class="vm-menu"><summary>Analysis</summary><div class="vm-menu-items"><button type="button" data-vm-command="vm-show-contextual">Contextual analysis</button><button type="button" data-vm-command="vm-show-packs">Analysis packs</button><button type="button" data-vm-command="vm-show-ledger">Opcode ledger</button></div></details>
+                <details class="vm-menu"><summary>Navigation</summary><div class="vm-menu-items"><button type="button" data-vm-command="vm-handler-previous">Previous retained row</button><button type="button" data-vm-command="vm-handler-next">Next retained row</button><button type="button" data-vm-command="vm-return-traffic">Return to Traffic</button></div></details>
+                <details class="vm-menu"><summary>Search</summary><div class="vm-menu-items"><button type="button" data-vm-command="vm-handler-filter">Filter current listing</button></div></details>
+                <details class="vm-menu"><summary>Window</summary><div class="vm-menu-items"><button type="button" data-vm-command="vm-show-findings">Findings</button><button type="button" data-vm-command="vm-show-execution">Execution</button><button type="button" data-vm-command="vm-show-owned">Live fixture</button><button type="button" data-vm-command="vm-show-static">Static bytecode</button><button type="button" data-vm-command="native-console-toggle">Console</button></div></details>
+              </nav>
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>VM investigation</h1></div>
-              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution workspace</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live owned fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace">Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace">Contextual build</button></nav>
+              <div class="vm-window-title"><h1>VM workbench</h1></div>
+              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace"><span class="vm-tool-icon" aria-hidden="true">▤</span>Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow"><span class="vm-tool-icon" aria-hidden="true">▷</span>Execution</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger"><span class="vm-tool-icon" aria-hidden="true">◉</span>Live fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace"><span class="vm-tool-icon" aria-hidden="true">▦</span>Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace"><span class="vm-tool-icon" aria-hidden="true">⌘</span>Contextual</button><button id="vm-show-packs" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-packs-workspace"><span class="vm-tool-icon" aria-hidden="true">◇</span>Analysis packs</button><button id="vm-show-ledger" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-ledger-workspace"><span class="vm-tool-icon" aria-hidden="true">≡</span>Opcode ledger</button></nav>
               <div id="vm-session-status" class="vm-session-status" role="status" aria-live="polite"></div>
             </header>
             <div id="vm-owned-controls" hidden></div>
@@ -426,14 +422,18 @@
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
             <div class="vm-grid">
               <aside class="vm-list-pane" aria-label="VM findings">
-                <div class="vm-list-head">Findings <span id="vm-count">0</span></div>
+                <div class="vm-list-head">Program Trees <span id="vm-count">0</span></div>
                 <div id="vm-list" class="vm-list" role="listbox" aria-label="Captured VM findings"></div>
+                <section id="vm-symbol-dock" class="vm-symbol-dock" aria-label="Handler symbols"><div class="vm-list-head">Symbol Tree <span>Handlers</span></div><div id="vm-symbol-list" class="vm-symbol-list"><p>Select a finding to browse its retained handlers.</p></div></section>
               </aside>
               <div id="vm-detail" class="vm-detail" tabindex="0"></div>
             </div>
+            <details class="vm-program-example"><summary>Explore a deterministic owned VM example <span>Fixture replay · no capture or execution</span></summary><div id="vm-program-workspace" class="vm-program-workspace"></div></details>
             </div>
             <section id="vm-owned-debugger" aria-label="Live owned native fixture" hidden></section>
             <section id="vm-contextual-workspace" class="vm-contextual-workspace" aria-label="Per-build contextual VM analysis" hidden></section>
+            <section id="vm-packs-workspace" class="vm-static-workspace" aria-label="Analysis packs" hidden></section>
+            <section id="vm-ledger-workspace" class="vm-static-workspace" aria-label="Opcode ledger" hidden></section>
             <section id="vm-static-workspace" class="vm-static-workspace" aria-label="Static bytecode analysis" hidden></section>
             <section id="vm-semantics-workflow" class="vm-semantics-workflow" aria-label="VM execution workspace" hidden></section>
           </section>
@@ -680,7 +680,7 @@
                   <button id="repeater-create" class="secondary-button" type="button">Start session</button>
                   <button id="repeater-dispose" class="secondary-button" type="button" disabled>End session</button>
                   <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
-                  <details class="exchange-options" id="repeater-client-export"><summary>Export project</summary><div class="exchange-options-menu"><p>Export the selected retained run as a one-operation Node.js project. Raw evidence can contain private data. Sending the example requires explicit configuration and --send.</p><button class="exchange-button" type="button" data-client-run-export="raw" disabled>Download raw project</button><button class="exchange-button" type="button" data-client-run-export="redacted_copy" disabled>Download redacted project</button><p data-client-export-support></p></div></details>
+                  <button class="exchange-button" id="repeater-client-export" type="button" data-export-open="run" aria-haspopup="dialog" disabled>Export…</button>
                 </div>
               </div>
 
@@ -1432,6 +1432,24 @@
         <div id="api-catalog-content" class="api-catalog-content" tabindex="0" aria-label="Endpoint observations"></div>
       </dialog>
 
+      <dialog id="captured-export-dialog" class="captured-export-dialog" aria-labelledby="captured-export-title" aria-describedby="captured-export-context">
+        <header class="captured-export-header"><div><p class="captured-export-eyebrow">LOCAL EXPORT</p><h2 id="captured-export-title">Export capture</h2></div><button class="secondary-button" type="button" data-export-close aria-label="Close export">×</button></header>
+        <div class="captured-export-body">
+          <p id="captured-export-context" class="captured-export-context"></p>
+          <div class="captured-export-fields">
+            <label>Format<select data-export-format><option value="json">Capture JSON</option><option value="client">Client project · ZIP</option><option value="har">HAR · network archive</option><option value="sdl">GraphQL schema · SDL</option></select></label>
+            <label data-export-provider-field hidden>Client runtime<select data-export-provider><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label>
+            <label data-export-source-field hidden>Schema source<select data-export-source><option value="capture">Selected response</option><option value="file">Local introspection JSON</option></select></label>
+            <label data-export-file-field hidden>Introspection file<input type="file" accept=".json,application/json" data-export-file><span>Up to 1 MiB · complete __schema or data.__schema</span></label>
+            <label data-export-policy-field>Data policy<select data-export-policy><option value="redacted_copy">Redacted copy</option><option value="raw">Raw · includes private values</option></select></label>
+            <label>Destination<select data-export-destination><option value="save">Save file</option><option value="copy">Copy to clipboard</option></select></label>
+          </div>
+          <p class="captured-export-note" data-export-note></p>
+          <p class="captured-export-status" data-export-status role="status" aria-live="polite" hidden></p>
+        </div>
+        <footer class="captured-export-footer"><span>On this device only</span><button class="secondary-button" type="button" data-export-cancel>Cancel</button><button class="secondary-button captured-export-primary" type="button" data-export-submit>Export</button></footer>
+      </dialog>
+
       <dialog id="captured-client-review" class="api-catalog" aria-labelledby="captured-client-title">
         <header class="api-catalog-header"><h2 id="captured-client-title">Review captured request</h2><button class="secondary-button" type="button" data-client-close autofocus>Cancel</button></header>
         <div class="api-catalog-content captured-client-content" data-client-review-content tabindex="0" aria-label="Captured request and replay limitations"></div>
@@ -1461,6 +1479,7 @@
     <script src="traffic_view.js"></script>
     <script src="api_catalog.js"></script>
     <script src="captured_client.js"></script>
+    <script src="captured_export_formats.js"></script>
     <script src="passive_security.js"></script>
     <script src="vm_debugger.js"></script>
     <script src="vm_static.js"></script>
@@ -1468,6 +1487,9 @@
     <script src="vm_contextual.js"></script>
     <script src="vm_contextual_evidence.js"></script>
     <script src="vm_contextual_view.js"></script>
+    <script src="vm_analysis_packs.js"></script>
+    <script src="vm_opcode_ledger.js"></script>
+    <script src="vm_opcode_ledger_view.js"></script>
     <script src="vm_semantics.js"></script>
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>
@@ -1479,5 +1501,6 @@
     <script src="element_screenshot.js"></script>
     <script src="local_override_manager.js"></script>
     <script src="app.js"></script>
+    <script src="vm_program_workspace.js"></script>
   </body>
 </html>

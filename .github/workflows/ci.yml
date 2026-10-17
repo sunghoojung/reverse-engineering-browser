@@ -327,6 +327,34 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  vm-pack-ledger-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Build actual pack backend
+        env:
+          CARGO_PROFILE_DEV_DEBUG: 0
+        run: cargo build --locked --manifest-path apps/origin-trace-backend/Cargo.toml --bin origin-trace-backend
+      - name: Render pack and ledger workflows
+        run: |
+          CHROME_BIN="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export CHROME_BIN
+          test -n "$CHROME_BIN"
+          node tools/check-vm-analysis-packs-browser.mjs
+          node tools/check-vm-opcode-ledger-browser.mjs
+      - name: Upload pack workflow QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vm-pack-ledger-ui-${{ github.run_id }}
+          path: |
+            build/vm-pack-ui-qa
+            /tmp/reb-opcode-ledger-ui-*.png
+          if-no-files-found: ignore
+          retention-days: 3
+
   vm-workspace-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -340,6 +368,8 @@ jobs:
           export REB_UI_CHROMIUM
           test -n "$REB_UI_CHROMIUM"
           node tools/check-vm-opcode-workspace-ui.mjs --browser
+          REB_VMP_OUTPUT=build/vm-workspace-ui-qa/program node tools/check-vm-program-workspace-ui.mjs
+          node tools/check-vm-full-shell-ui.mjs
 
       - name: Upload rendered VM workspace QA
         if: always()

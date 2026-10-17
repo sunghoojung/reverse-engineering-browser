@@ -46,6 +46,16 @@ export async function checkVmStaticController() {
   await ui.importFile('image', file(fixture.image)); assert(ui.analyze.disabled); assert.equal(rows(ui).length, 0);
   await ui.importFile('definition', file(fixture.definition)); assert(!ui.analyze.disabled); assert.equal(rows(ui).length, 0, 'Import does not implicitly analyze or execute');
   await ui.analyzeInputs(); const report = ui.getReport(); assert.equal(report.coverage.instruction_count, 16); assert.equal(rows(ui).length, 16);
+  const capabilities = {}; root.events['vm-workspace-query']({detail: capabilities});
+  assert.equal(capabilities.search, true); assert.equal(capabilities.previous, false); assert.equal(capabilities.next, true);
+  root.events['vm-workspace-next'](); assert.equal(ui.getSelected(), report.instructions[1].offset);
+  root.events['vm-workspace-previous'](); assert.equal(ui.getSelected(), report.instructions[0].offset);
+  ui.changeLayout(390); ui.setPanel('details'); root.events['vm-workspace-search']();
+  assert.equal(root.getAttribute('data-panel'), 'listing'); assert.equal(document.activeElement, ui.filter);
+  ui.filter.value = 'no matching instruction'; ui.filter.events.input(); root.events['vm-workspace-query']({detail: capabilities});
+  assert.equal(capabilities.previous, false); assert.equal(capabilities.next, false);
+  root.events['vm-workspace-next'](); assert.equal(ui.getSelected(), report.instructions[0].offset);
+  ui.filter.value = ''; ui.filter.events.input(); ui.changeLayout(1440);
   assert.equal(report.provenance.definition_source_sha256, createHash('sha256').update(JSON.stringify(fixture.definition)).digest('hex'));
   ui.select(40); ui.setTab('instruction'); assert.match(ui.detail.textContent, /branch_zero.*unverified/); assert.match(ui.detail.textContent, /target: 47/);
   ui.setTab('pseudocode'); assert(descendants(ui.detail).some(element => element.getAttribute('data-vm-static-pseudocode') === '40' && element.getAttribute('aria-pressed') === 'true'));
@@ -113,6 +123,25 @@ export async function checkVmStaticController() {
   shell.showWorkspace('findings'); shell.showWorkspace('execution'); shell.showWorkspace('static'); assert.equal(shell.staticAnalysis.getSelected(),40);
   shell.setVisible(false); assert.equal(visible.at(-1),false,'Leaving VM pauses status polling through existing owner');
   shell.setVisible(true); onOwnedState({session:null}); assert.equal(shellNodes.get('#vm-owned-controls').hidden,true);
+  // Exercise the shipped menu dispatcher without permitting a workspace switch.
+  const appSource = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
+  const commandSource = appSource.slice(appSource.indexOf('      function vmWorkspaceCommand('), appSource.indexOf('      function updateVmNavigationMenus('));
+  let activeRoot = 'vm-static-workspace';
+  const calls = [];
+  const roots = new Map(['vm-static-workspace', 'vm-contextual-workspace', 'vm-packs-workspace', 'vm-ledger-workspace', 'vm-owned-debugger', 'vm-semantics-workflow'].map(id => [id, {id, dispatchEvent(event) {
+    calls.push([id, event.type]); if (event.type === 'vm-workspace-query') Object.assign(event.detail, {search: true, previous: false, next: true});
+  }}]));
+  const commands = runInNewContext(commandSource + ';vmWorkspaceCommand', {
+    document: {querySelector: () => ({getAttribute: () => activeRoot}), getElementById: id => roots.get(id)},
+    CustomEvent: class {constructor(type, options = {}) {this.type = type; this.detail = options.detail;}}
+  });
+  for (const id of roots.keys()) {
+    activeRoot = id; calls.length = 0;
+    assert.equal(commands('search', true), true); assert.deepEqual(calls, [[id, 'vm-workspace-query'], [id, 'vm-workspace-search']]);
+    calls.length = 0; assert.equal(commands('previous', true), false); assert.deepEqual(calls, [[id, 'vm-workspace-query']]);
+    calls.length = 0; assert.equal(commands('next', true), true); assert.deepEqual(calls, [[id, 'vm-workspace-query'], [id, 'vm-workspace-next']]);
+  }
+  activeRoot = 'missing'; assert.equal(commands('next', true), false);
   assert(!/\b(?:fetch|eval|Function|XMLHttpRequest|WebSocket)\s*\(/.test(source)); assert(!/innerHTML|outerHTML|insertAdjacentHTML/.test(source));
   console.log('PASS static VM controller: independent strict imports; raw/canonical hashes; declared pseudocode/CFG links; unavailable/unknown state;64-row/32-node bounds; keyboard/filter/focus; stale reads/analysis; inert text; no execution (not rendered acceptance)');
 }

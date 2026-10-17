@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vm-host-links-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "document_kind",
+    "workspace_document_digest",
+    "workspaces",
+    "document_digest"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 1
+    },
+    "document_kind": {
+      "const": "vm-host-links"
+    },
+    "workspace_document_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "workspaces": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/workspace"
+      }
+    },
+    "document_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "eventIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "process_id",
+        "sequence_number"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}$"
+        },
+        "process_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "sequence_number": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}$"
+        }
+      }
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_event",
+        "invocation_event",
+        "invocation_id",
+        "instruction_pointer",
+        "instruction_pointer_units"
+      ],
+      "properties": {
+        "sample_event": {
+          "$ref": "#/$defs/eventIdentity"
+        },
+        "invocation_event": {
+          "$ref": "#/$defs/eventIdentity"
+        },
+        "invocation_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}$"
+        },
+        "instruction_pointer": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "instruction_pointer_units": {
+          "enum": [
+            "byte-offset",
+            "instruction-index"
+          ]
+        }
+      }
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_event",
+        "category",
+        "type",
+        "state",
+        "reason",
+        "guest_position"
+      ],
+      "properties": {
+        "host_event": {
+          "$ref": "#/$defs/eventIdentity"
+        },
+        "category": {
+          "enum": [
+            "canvas",
+            "webgl",
+            "web_audio",
+            "navigator",
+            "permissions",
+            "storage",
+            "webrtc",
+            "network",
+            "runtime"
+          ]
+        },
+        "type": {
+          "enum": [
+            "api_call",
+            "property_read",
+            "request_started",
+            "request_initiated",
+            "request_redirected",
+            "response_started",
+            "response_completed",
+            "request_completed",
+            "request_failed"
+          ]
+        },
+        "state": {
+          "enum": [
+            "observed",
+            "correlated",
+            "unknown"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "direct-dispatch-parent",
+            "dispatch-samples-unavailable",
+            "guest-position-unproven"
+          ]
+        },
+        "guest_position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/position"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "observed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "guest_position": {
+                "$ref": "#/$defs/position"
+              },
+              "reason": {
+                "const": "direct-dispatch-parent"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "guest_position": {
+                "type": "null"
+              },
+              "reason": {
+                "enum": [
+                  "dispatch-samples-unavailable",
+                  "guest-position-unproven"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interpreter_artifact_id",
+        "source_artifact_sha256",
+        "links",
+        "omissions"
+      ],
+      "properties": {
+        "interpreter_artifact_id": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,19})$"
+        },
+        "source_artifact_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "links": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/link"
+          }
+        },
+        "omissions": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "enum": [
+              "dispatch-samples-unavailable",
+              "dispatch-sample-retention-limit",
+              "host-link-limit",
+              "host-events-unavailable"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

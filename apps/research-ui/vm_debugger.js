@@ -418,7 +418,7 @@ function mountOwnedVmDebugger(root, options = {}) {
     if (session) fixture.value = session.fixture;
     const pendingText = model.pending.map(item => `${item.action} requested; awaiting acknowledgment`).join('; ');
     const state = session?.state || 'idle';
-    status.textContent = !view ? 'Reading debugger capability…' : !view.available ? `Live fixture unavailable: ${view.unavailable_reason || 'this server does not provide native execution'}.` :
+    status.textContent = !view ? (model.notice ? 'Live fixture status unavailable.' : 'Reading debugger capability…') : !view.available ? `Live fixture unavailable: ${view.unavailable_reason || 'this server does not provide native execution'}.` :
       session ? `${state} · PC ${session.current_snapshot ? ownedVmPC(session.current_snapshot) : 'unavailable'} · executed ${session.executed_count} · retained ${session.retained_count}${session.execution_state_known ? '' : state === 'starting' ? ' · awaiting initial snapshot' : ' · execution state unknown'}${pendingText ? ` · ${pendingText}` : ''}${visible && doc.visibilityState !== 'hidden' ? '' : ' · last observed; details hidden'}` : 'Available · no fixture created · Create starts paused.';
     if (notice.textContent !== model.notice) notice.textContent = model.notice;
     const announced = session && !['running', 'starting', 'pausing', 'stepping', 'stopping'].includes(state) ? `${scope}:${state}:${session.last_command?.command_id || ''}` : '';
@@ -490,6 +490,17 @@ function mountOwnedVmDebugger(root, options = {}) {
     if (session.diagnostics.stderr_truncated) coverage.textContent += ' Native diagnostic stream was truncated.';
     auditText.textContent = JSON.stringify({view, selection: {mode: selection === 'live' || selection === 'initial' ? selection : 'retained', sequence: record?.sequence || null}, selected_record: record || null}, null, 2);
   }
+  const adjacent = direction => {
+    const retained = (controller.model().view?.session?.records || []).filter(record => opcodeFilter === null || record.opcode === opcodeFilter);
+    const index = retained.findIndex(record => record.sequence === selection);
+    return retained[index < 0 ? direction > 0 ? 0 : retained.length - 1 : index + direction];
+  };
+  root.addEventListener('vm-workspace-query', event => Object.assign(event.detail, {search: opcodeButtons.size > 0, previous: !!adjacent(-1), next: !!adjacent(1)}));
+  root.addEventListener('vm-workspace-search', () => { opcodeButtons.values().next().value?.focus(); });
+  for (const [action, direction] of [['previous', -1], ['next', 1]]) root.addEventListener(`vm-workspace-${action}`, () => {
+    const record = adjacent(direction); if (!record) return;
+    select(record.sequence); const target = rows.get(record.sequence)?.button; target?.focus(); target?.scrollIntoView?.({block: 'nearest'});
+  });
   controller = createOwnedVmController({...options, onChange: render});
   const visibility = () => { controller.setVisible(visible && doc.visibilityState !== 'hidden'); render(controller.model()); };
   doc.addEventListener?.('visibilitychange', visibility); render(controller.model()); visibility();

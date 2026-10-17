@@ -4,6 +4,7 @@ import {open, mkdtemp, writeFile, link, rm} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import client from '../apps/research-ui/captured_client.js';
 import traffic from '../apps/research-ui/traffic_view.js';
+import formats from '../apps/research-ui/captured_export_formats.js';
 
 const maxInput = 1048576;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -14,21 +15,7 @@ const finite = value => typeof value === 'number' && Number.isFinite(value) && v
 const invalid = () => { throw new Error('Input must be one complete reb-network-request-v1 response with matching exact identity and valid retained fields.'); };
 
 
-function timingEvidence(value) {
-  const clocks = ['request_monotonic_seconds','request_wall_seconds','response_monotonic_seconds','completion_monotonic_seconds'];
-  const flags = ['response_observed','completion_observed','duplicate_response','duplicate_completion','response_after_completion'];
-  if (!exact(value,['format',...clocks,...flags,'resource_timing','response_source','completion_source']) || value.format !== 'reb-network-timing-v1' ||
-      !flags.every(key => typeof value[key] === 'boolean') || !['none','redirectResponse','responseReceived'].includes(value.response_source) ||
-      !['none','redirectRequest','loadingFailed','loadingFinished'].includes(value.completion_source)) invalid();
-  const measurement = (item,offset = false) => exact(item,['state','value']) && item.state === 'available' && finite(item.value) && item.value <= 8640000000000 ||
-    exact(item,['state']) && (offset ? ['missing','invalid','unavailable'] : ['missing','invalid']).includes(item.state);
-  if (!clocks.every(key => measurement(value[key]))) invalid();
-  const resource = value.resource_timing;
-  if (exact(resource,['state']) && ['missing','invalid'].includes(resource.state)) return;
-  const fields = ['requestTime','proxyStart','proxyEnd','dnsStart','dnsEnd','connectStart','connectEnd','sslStart','sslEnd','sendStart','sendEnd','receiveHeadersStart','receiveHeadersEnd','workerStart'];
-  if (!exact(resource,['state','fields']) || resource.state !== 'available' || !exact(resource.fields,fields) ||
-      !fields.every(key => measurement(resource.fields[key],key !== 'requestTime'))) invalid();
-}
+const timingEvidence = value => formats.validateTimingEvidence(value,invalid);
 
 function selection(document, numbers) {
   if (!exact(document,['format','source','debugger_generation','request']) || document.format !== 'reb-network-request-v1' || !count(document.debugger_generation)) invalid();

@@ -152,6 +152,51 @@ def main():
             assert struct.unpack_from("<QQQQ", data, 24) == (105, 106, 107, 108)
             assert data[20:24] == bytes(4) and data[56] == 0 and data[58:] == bytes(70)
             assert data[57] == [1, 1, 2, 1, 1, 2, 1, 2, 0][index]
+        host_command = [*command]
+        host_command[1] = "--emit-host-dispatch-events-v1"
+        produced = subprocess.run(host_command, capture_output=True, check=True, timeout=10)
+        assert not produced.stderr
+        with tempfile.TemporaryDirectory(prefix="reb-owned-host-") as temporary:
+            root = Path(temporary)
+            store = root / "events.jsonl"
+            subprocess.run([args.broker, "--store", str(store)], input=produced.stdout,
+                           capture_output=True, check=True, timeout=10)
+            host_events = [json.loads(line) for line in store.read_text().splitlines()]
+            assert len(host_events) == 11
+            host = next(event for event in host_events if event["category"] == "runtime")
+            assert bytes.fromhex(host["payload"]) == b"owned.monotonic_clock.after_instruction"
+            assert host["type"] == "api_call" and host["sequence_number"] == "5"
+            assert host["parent_event_id"] == "4"
+            sample = next(event for event in host_events if event["sequence_number"] == "4")
+            assert struct.unpack_from("<I", bytes.fromhex(sample["payload"]), 4)[0] == 2
+            assert host["process_id"] == sample["process_id"]
+            if args.analyzer:
+                artifacts = root / "artifacts"
+                (artifacts / "blobs").mkdir(parents=True)
+                (artifacts / "blobs" / f"{digest}.bin").write_bytes(source)
+                (artifacts / "manifest.jsonl").write_text(json.dumps(artifact) + "\n")
+                def analyze(records):
+                    store.write_text("".join(json.dumps(event) + "\n" for event in records))
+                    subprocess.run([args.analyzer, "--artifacts", str(artifacts), "--events", str(store)],
+                                   capture_output=True, check=True, timeout=30)
+                    document = json.loads((artifacts / "analysis/vm-host-links-v1.json").read_text())
+                    workspace = json.loads((artifacts / "analysis/vm-opcode-workspace-v2.json").read_text())
+                    assert document["workspace_document_digest"] == workspace["document_digest"]
+                    assert "payload" not in json.dumps(document)
+                    return document["workspaces"][0]
+                link = analyze(host_events)["links"][0]
+                assert link["state"] == "observed" and link["guest_position"]["instruction_pointer"] == 2
+                assert link["guest_position"]["instruction_pointer_units"] == "instruction-index"
+                assert link["host_event"]["sequence_number"] == "5"
+                assert link["guest_position"]["sample_event"]["sequence_number"] == "4"
+                without_samples = [event for event in host_events if event["type"] != "vm_dispatch_sample"]
+                missing = analyze(without_samples)
+                assert missing["links"][0]["guest_position"] is None
+                assert "dispatch-samples-unavailable" in missing["omissions"]
+                unproven = dict(host, parent_event_id="1")
+                records = [unproven if event is host else event for event in host_events]
+                assert analyze(records)["links"][0]["state"] == "correlated"
+                assert analyze([*host_events, unproven])["links"] == []
         for invalid in (
             command[:-1], command + ["--session-id", "101"],
             command[:3] + ["unknown"] + command[4:],
@@ -161,7 +206,7 @@ def main():
         ):
             rejected = subprocess.run(invalid, capture_output=True, check=False, timeout=10)
             assert rejected.returncode == 2 and not rejected.stdout, invalid
-    print("Owned register/stack dispatch export: all 18 instructions stored by the broker")
+    print("Owned register/stack dispatch export: all 18 instructions and two real owned-clock calls stored by the broker")
     if args.analyzer:
         print("Actual analyzer UI selection: identical source findings retain separate session modes, samples and snapshot joins")
 

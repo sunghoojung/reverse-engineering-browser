@@ -32,7 +32,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 31] = [
+const UI_ASSETS: [&str; 36] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -47,14 +47,19 @@ const UI_ASSETS: [&str; 31] = [
     "traffic_view.js",
     "api_catalog.js",
     "captured_client.js",
+    "captured_export_formats.js",
     "passive_security.js",
     "vm_semantics.js",
     "vm_static.js",
     "vm_static_view.js",
+    "vm_analysis_packs.js",
+    "vm_opcode_ledger.js",
+    "vm_opcode_ledger_view.js",
     "vm_contextual.js",
     "vm_contextual_evidence.js",
     "vm_contextual_view.js",
     "vm_debugger.js",
+    "vm_program_workspace.js",
     "traffic_comparison.js",
     "request_value_test.js",
     "field_provenance.js",
@@ -71,6 +76,13 @@ enum PackageOperation {
     Export,
     Compare,
 }
+struct VmDocumentsCache {
+    signature: String,
+    analysis: Value,
+    opcode_workspace: Result<Value>,
+    host_links: Result<Value>,
+}
+
 pub struct App {
     options: Options,
     port: u16,
@@ -88,7 +100,7 @@ pub struct App {
     capture: Mutex<()>,
     io: Arc<Semaphore>,
     package_io: Arc<Semaphore>,
-    analysis: Mutex<Option<(String, Value, Result<Value>)>>,
+    analysis: Mutex<Option<VmDocumentsCache>>,
 }
 impl App {
     pub async fn stop(&self) {
@@ -172,17 +184,22 @@ impl App {
         if !cfg!(unix)
             || cache
                 .as_ref()
-                .is_none_or(|(cached, _, _)| *cached != signature)
+                .is_none_or(|cached| cached.signature != signature)
         {
             let root = self.options.artifacts.clone();
             let store = self.options.store.clone();
             let documents = self
                 .blocking(move || vm::store_documents(&root, &store))
                 .await?;
-            *cache = Some((signature, documents.analysis, documents.opcode_workspace));
+            *cache = Some(VmDocumentsCache {
+                signature,
+                analysis: documents.analysis,
+                opcode_workspace: documents.opcode_workspace,
+                host_links: documents.host_links,
+            });
         }
-        let (_, analysis, opcode_workspace) = cache.as_ref().expect("VM analysis cache");
-        Ok((analysis.clone(), opcode_workspace.clone()))
+        let cached = cache.as_ref().expect("VM analysis cache");
+        Ok((cached.analysis.clone(), cached.opcode_workspace.clone()))
     }
     async fn package_operation(
         &self,
@@ -591,6 +608,22 @@ impl App {
                 ));
                 value
             }
+            "/api/analysis/vm/host-links" => {
+                let _ = self.vm_documents().await?;
+                let value = self
+                    .analysis
+                    .lock()
+                    .await
+                    .as_ref()
+                    .expect("VM analysis cache")
+                    .host_links
+                    .clone()?;
+                etag = Some(format!(
+                    "\"{}\"",
+                    value["document_digest"].as_str().unwrap()
+                ));
+                value
+            }
             "/api/analysis/vm/opcodes" => {
                 let (_, workspace) = self.vm_documents().await?;
                 let value = workspace.map_err(|error| {
@@ -836,7 +869,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             // existing package permit before ingesting them, with no body queue.
             // Keep this permit through blocking work; body timeout/disconnect or
             // dispatch admission failure releases it without starting comparison.
-            let comparison_permit = if path == "/api/evidence/packages/compare" {
+            let comparison_permit = if matches!(
+                path,
+                "/api/evidence/packages/compare"
+                    | "/api/analysis/vm/packs/apply"
+                    | "/api/analysis/vm/packs/compare"
+            ) {
                 Some(
                     app.package_io
                         .clone()
@@ -884,7 +922,10 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             }
             if matches!(
                 path,
-                "/api/vm-debugger/actions" | "/api/analysis/vm/experiments"
+                "/api/vm-debugger/actions"
+                    | "/api/analysis/vm/experiments"
+                    | "/api/analysis/vm/packs/apply"
+                    | "/api/analysis/vm/packs/compare"
             ) {
                 let content_type = parts
                     .headers
@@ -906,6 +947,20 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                         415,
                         "Owned VM controls require application/json with optional UTF-8 charset",
                     ));
+                }
+                if matches!(
+                    path,
+                    "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
+                ) {
+                    let comparison = path.ends_with("/compare");
+                    let bytes = bytes.to_vec();
+                    return tokio::task::spawn_blocking(move || {
+                        let _permit = comparison_permit;
+                        crate::vm_pack::request(&bytes, comparison)
+                    })
+                    .await
+                    .map_err(|_| Error::new(500, "VM pack analysis failed"))?
+                    .map(|value| axum::Json(value).into_response());
                 }
                 if path == "/api/analysis/vm/experiments" {
                     let (_, workspace) = app.vm_documents().await?;

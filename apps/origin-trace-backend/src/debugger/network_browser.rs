@@ -7,13 +7,34 @@ use super::{
 use crate::error::{Error, Result};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
+
+type CleanupKey = (usize, String, Option<String>);
+struct CleanupJob {
+    connection: Arc<Connection>,
+    session: String,
+    parent: Option<String>,
+}
+impl CleanupJob {
+    fn key(&self) -> CleanupKey {
+        (
+            Arc::as_ptr(&self.connection) as usize,
+            self.session.clone(),
+            self.parent.clone(),
+        )
+    }
+}
+#[derive(Default)]
+struct CleanupQueue {
+    waiting: VecDeque<CleanupJob>,
+    keys: BTreeSet<CleanupKey>,
+}
 
 pub(super) struct BrowserCapture {
     connection: Mutex<Option<Arc<Connection>>>,
@@ -28,6 +49,7 @@ pub(super) struct BrowserCapture {
     catalog_epoch: AtomicU64,
     catalog_retry: Mutex<Instant>,
     cleanup: Arc<tokio::sync::Semaphore>,
+    cleanup_queue: Mutex<CleanupQueue>,
     cleanup_closing: AtomicBool,
 }
 impl BrowserCapture {
@@ -45,6 +67,7 @@ impl BrowserCapture {
             catalog_epoch: AtomicU64::new(0),
             catalog_retry: Mutex::new(Instant::now()),
             cleanup: Arc::new(tokio::sync::Semaphore::new(4)),
+            cleanup_queue: Mutex::new(CleanupQueue::default()),
             cleanup_closing: AtomicBool::new(false),
         }
     }
@@ -426,6 +449,17 @@ impl Debugger {
             .browser
             .cleanup_closing
             .store(false, Ordering::Release);
+        {
+            let mut queue = self
+                .capture
+                .browser
+                .cleanup_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            while let Some(job) = queue.waiting.pop_front() {
+                queue.keys.remove(&job.key());
+            }
+        }
         // Retire legacy fallback connections before enabling multiplexed capture.
         let old = std::mem::take(
             &mut *self
@@ -569,35 +603,88 @@ impl Debugger {
         if !self.capture.browser.current(c) || c.is_closed() {
             return;
         }
-        let permit = self.capture.browser.cleanup.clone().try_acquire_owned();
-        let c = c.clone();
-        match permit {
-            Ok(permit) => {
-                let d = self.clone();
-                let session = session.to_owned();
-                let parent = parent.map(str::to_owned);
+        let job = CleanupJob {
+            connection: c.clone(),
+            session: session.to_owned(),
+            parent: parent.map(str::to_owned),
+        };
+        let mut queue = self
+            .capture
+            .browser
+            .cleanup_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !self.capture.browser.current(c) || c.is_closed() {
+            return;
+        }
+        let key = job.key();
+        if queue.keys.contains(&key) {
+            return;
+        }
+        if queue.keys.len() >= 512 {
+            if !self
+                .capture
+                .browser
+                .cleanup_closing
+                .swap(true, Ordering::AcqRel)
+            {
+                self.retire_browser_owners(c, "Capture cleanup capacity exceeded; closing this client leaves an explicit gap.");
+                c.request_close();
+                let c = c.clone();
                 tokio::spawn(async move {
-                    let _permit = permit;
-                    d.detach_capture_session(&c, &session, parent.as_deref())
-                        .await;
+                    c.close().await;
                 });
             }
-            Err(_) => {
-                if !self
-                    .capture
-                    .browser
-                    .cleanup_closing
-                    .swap(true, Ordering::AcqRel)
-                {
-                    self.retire_browser_owners(&c, "Capture cleanup capacity exceeded; closing this client leaves an explicit gap.");
-                    c.request_close();
-                    tokio::spawn(async move {
-                        c.close().await;
-                    });
+            return;
+        }
+        queue.keys.insert(key);
+        queue.waiting.push_back(job);
+        // Ordinary shared-worker fan-out may produce many alternate sessions.
+        // Bound queued metadata independently from the four wire commands.
+        for _ in 0..4 {
+            let Ok(permit) = self.capture.browser.cleanup.clone().try_acquire_owned() else {
+                break;
+            };
+            let d = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    let job = {
+                        let mut queue = d
+                            .capture
+                            .browser
+                            .cleanup_queue
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        match queue.waiting.pop_front() {
+                            Some(job) => job,
+                            None => {
+                                // Release under the queue lock: a concurrent enqueue
+                                // must either see this slot or be drained by us.
+                                drop(permit);
+                                return;
+                            }
+                        }
+                    };
+                    if d.capture.browser.current(&job.connection) && !job.connection.is_closed() {
+                        d.detach_capture_session(
+                            &job.connection,
+                            &job.session,
+                            job.parent.as_deref(),
+                        )
+                        .await;
+                    }
+                    d.capture
+                        .browser
+                        .cleanup_queue
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .keys
+                        .remove(&job.key());
                 }
-            }
+            });
         }
     }
+
     async fn browser_capture_event(self: &Arc<Self>, c: &Arc<Connection>, m: Value) {
         let p = &m["params"];
         match m["method"].as_str().unwrap_or("") {

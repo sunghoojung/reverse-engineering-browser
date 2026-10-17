@@ -608,5 +608,6 @@ ready. Bounded reconciliation scans at most 4096 target descriptions per reply,
 retries at most every five seconds while incomplete, and becomes eligible on the
 next refresh after a catalog slot frees. Omitted stable targets can recover
 without another creation event. Rejected-session cleanup runs independently with
-four concurrent slots; overload closes that capture connection with an explicit
+a deduplicated FIFO of at most512 queued/in-flight session identities and four
+concurrent commands; queue overload closes that capture connection with an explicit
 gap rather than blocking healthy Network event dispatch indefinitely.

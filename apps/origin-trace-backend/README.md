@@ -80,6 +80,10 @@ The focused debugger's transport and buffers are additional in both modes.
 
 ### Optional capture-first disposable experiment
 
+The UI calls this a **pre-armed owned-browser experiment**; the existing
+`--capture-first-browser` option and `startup_mode: capture-first` value remain
+compatible identifiers, not a promise of lossless startup capture.
+
 Ordinary browser connections remain passive. For an explicitly authorized,
 timing-altering experiment, launch a separate browser instance from the backend:
 
@@ -94,8 +98,9 @@ are copied. `--capture-first-browser` cannot be combined with an existing
 `--devtools-active-port`; a supplied endpoint or claim flag cannot enable startup
 holds. `--capture-first-headless` is available for automated test sessions.
 The backend prints the experiment warning and Traffic labels the mode visibly.
-Wait for Traffic capture readiness before navigating this disposable browser;
-navigating its window during startup can still precede capture. The experiment
+Wait for the **exact target** to become capture-ready before navigating it.
+Readiness of one tab does not pre-arm newly created URL targets; navigating a
+new window during startup can still precede capture. The experiment
 expires after one hour. Stopping the backend closes its browser process group.
 If group termination cannot be verified, its private profile is preserved rather
 than deleting a potentially live profile.
@@ -129,7 +134,16 @@ an owned fake browser process. `check-traffic-capture-first-browser.mjs` uses
 actual Chromium and a controlled loopback server: expected request rows are
 checked independently from response-body availability, including immediate
 popups and worker startup. OOPIF initial-document coverage is reported explicitly.
-Native pre-CDP capture is separate future work.
+Actual Chrome 155.0.8059.39 CI (run 39075914308, revision
+`3ff7ac5a9224be9156d7f8703a06e22890aafd34`) captured a controlled
+blank-ready-then-navigate document and inline response, immediate popup request
+rows, and three later worker response bodies. It still missed initial document
+and inline rows from direct `Target.createTarget(url)` and early worker/frame
+requests spawned by a directly created page. The strict test retains these
+failures. Popup self-close made its response bodies unavailable or aborted.
+These observations do not establish universal popup or worker coverage; the
+bounded diagnostic relay can itself perturb timing. A backend-mediated opening
+API and native pre-CDP capture remain separate future work.
 
 `tools/check-traffic-multitarget-browser.mjs` exercises real Chromium with the
 native transport against synthetic loopback pages, including blank new tabs,

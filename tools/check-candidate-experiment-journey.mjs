@@ -409,7 +409,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await viewport(1440,900);
     assert.deepEqual(await quietState(),beforeWarningLayout,'Warning layout/input proof must not issue experiment actions');
     phase='explicit disposable create/open';await click('#hooks-create');
-    await until("!document.querySelector('#hooks-navigate').disabled",'Explicit create did not enable disposable navigation');await recordForm('after explicit context creation');
+    await until("!state.experimentReceipt&&!state.experimentNeedsRefresh&&!state.experimentPending&&!state.debuggerActionPending&&!document.querySelector('#hooks-navigate').disabled",'Explicit create acknowledgement did not reconcile before disposable navigation');await recordForm('after explicit context creation');
     const openDisposable=async(path)=>{
       await fill('#hooks-page-url',fixtureURL+path);await click('#hooks-navigate');
       await until("document.querySelector('#candidate-experiment-target').options.length>1&&!document.querySelector('#hooks-navigate').disabled",'Explicit open did not list targets');

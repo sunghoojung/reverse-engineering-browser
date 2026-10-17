@@ -1713,6 +1713,11 @@ While Sources Runtime Hooks is open, visible Link context reserves a bounded, ke
 focusable scroll area. Asynchronous expiry warnings remain readable without
 moving disposable action controls when the notice expands or wraps.
 
+Runtime Hooks mutation controls, including Open, Remove and Disarm, stay disabled
+until acknowledged changes reconcile with a current debugger snapshot. The
+visible status explains the wait; URL drafts are preserved and no navigation is
+retried automatically.
+
 Bind waits for pending debugger actions and for a fresh debugger snapshot to
 reconcile acknowledged changes. Its status explains the wait; reconciliation
 never automatically retries a binding or restores capture/arming consent.

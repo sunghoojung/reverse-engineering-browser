@@ -19,16 +19,19 @@ pub(super) struct Owner {
     pub id: String,
     pub target: Value,
     pub connection: Option<Arc<Connection>>,
+    pub session: Option<String>,
+    pub parent_session: Option<String>,
     pub retired: AtomicBool,
-    ready: AtomicBool,
+    pub(super) ready: AtomicBool,
 }
 pub(super) struct Capture {
-    owners: Mutex<BTreeMap<String, Arc<Owner>>>,
+    pub(super) owners: Mutex<BTreeMap<String, Arc<Owner>>>,
     retry: Mutex<BTreeMap<String, (u32, Instant)>>,
-    next_owner: AtomicU64,
+    pub(super) next_owner: AtomicU64,
     next_row: AtomicU64,
+    pub(super) browser: super::network_browser::BrowserCapture,
 }
-fn next_id(counter: &AtomicU64) -> Option<u64> {
+pub(super) fn next_id(counter: &AtomicU64) -> Option<u64> {
     let mut value = counter.load(Ordering::Relaxed);
     loop {
         let next = value.checked_add(1)?;
@@ -45,6 +48,7 @@ impl Capture {
             retry: Mutex::new(BTreeMap::new()),
             next_owner: AtomicU64::new(1),
             next_row: AtomicU64::new(1),
+            browser: super::network_browser::BrowserCapture::new(),
         }
     }
     pub fn row_id(&self, owner: &Owner) -> Option<String> {
@@ -58,13 +62,15 @@ impl Owner {
             id: id.into(),
             target,
             connection: None,
+            session: None,
+            parent_session: None,
             retired: AtomicBool::new(false),
             ready: AtomicBool::new(true),
         })
     }
 }
 impl Debugger {
-    fn retire_capture(&self, owner: &Owner, reason: &str) {
+    pub(super) fn retire_capture(&self, owner: &Owner, reason: &str) {
         if owner.retired.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -90,6 +96,7 @@ impl Debugger {
         });
     }
     pub(super) async fn close_captures(&self) {
+        self.close_browser_capture().await;
         let owners = std::mem::take(
             &mut *self
                 .capture
@@ -109,6 +116,9 @@ impl Debugger {
     }
     pub(super) async fn refresh_captures(self: &Arc<Self>, targets: &[Value]) {
         if !self.options.capture_network_content {
+            return;
+        }
+        if self.refresh_browser_capture().await {
             return;
         }
         let mut eligible = targets
@@ -296,6 +306,8 @@ impl Debugger {
             id: number.to_string(),
             target,
             connection: Some(connection.clone()),
+            session: None,
+            parent_session: None,
             retired: AtomicBool::new(false),
             ready: AtomicBool::new(false),
         });

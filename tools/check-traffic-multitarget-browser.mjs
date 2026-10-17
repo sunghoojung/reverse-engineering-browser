@@ -1,6 +1,6 @@
 // Real Chromium + native transport regression against authored loopback pages.
-// Fetches are issued only after capture readiness; this does not assert that
-// requests preceding attachment can be recovered.
+// Baseline readiness checks are followed by deliberately unsynchronized target
+// startup. Never wait for a capture owner before issuing those early requests.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {mkdtemp, readFile, rm} from 'node:fs/promises';
@@ -10,16 +10,54 @@ import {join, resolve} from 'node:path';
 import {stopBrowserTestProcess, waitForClose} from './browser-test-process.mjs';
 
 const root=resolve(process.argv[2]??'.');
+// Set to 1 for the requested lossless early-request acceptance gate. Passive
+// attachment can expose gaps here; diagnostics must never be called complete.
+const requireEarly=process.env.REB_TRAFFIC_REQUIRE_EARLY==='1';
 const browser=process.env.ORIGIN_TRACE_TEST_BROWSER||process.env.REB_UI_CHROMIUM||'chromium';
 const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
 const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'build/reb-debugger-transport'));
 const directory=await mkdtemp(join(tmpdir(),'reb-traffic-browser-'));
 const children=[];let socket,sequence=1,diagnostics='',failure;const pending=new Map();
+const served=new Set();
 const delay=ms=>new Promise(resolveDelay=>setTimeout(resolveDelay,ms));
 const fixture=createServer((request,response)=>{
+  const url=new URL(request.url,`http://${request.headers.host}`);
+  served.add(url.pathname);
   response.setHeader('Access-Control-Allow-Origin','*');
-  response.setHeader('Content-Type',request.url.startsWith('/page')?'text/html':'text/plain');
-  response.end(request.url.startsWith('/page')?'<title>Synthetic traffic page</title><link rel="icon" href="data:,">':`synthetic:${request.url}`);
+  response.setHeader('Cache-Control','no-store');
+  const html=script=>`<title>Synthetic traffic page</title><link rel="icon" href="data:,"><script>${script}</script>`;
+  let body=`synthetic:${request.url}`,type='text/plain';
+  if(url.pathname.startsWith('/page')){type='text/html';body=html('');}
+  if(url.pathname.startsWith('/early-tab/')) {
+    type='text/html';body=html(`fetch('/early-fetch/${url.pathname.split('/').at(-1)}');`);
+  }
+  if(url.pathname==='/popup') {
+    type='text/html';body=html("fetch('/popup-immediate',{keepalive:true});window.close();");
+  }
+  if(url.pathname==='/contexts') {
+    type='text/html';body=html(`
+      new Worker('/dedicated.js');
+      window.shared=new SharedWorker('/shared.js');window.shared.port.start();
+      navigator.serviceWorker.register('/service.js').catch(e=>fetch('/fixture-error?service='+encodeURIComponent(e.message)));
+      const f=document.createElement('iframe');f.src=location.origin.replace('127.0.0.1','localhost')+'/outer-frame';document.documentElement.append(f);
+    `);
+  }
+  if(url.pathname==='/outer-frame') {
+    type='text/html';body=html("fetch('/outer-frame-immediate');const f=document.createElement('iframe');f.src='/inner-frame';document.documentElement.append(f);");
+  }
+  if(url.pathname==='/inner-frame') {
+    type='text/html';body=html("fetch('/inner-frame-immediate');new Worker('/frame-worker.js');");
+  }
+  const workerFetches={'/dedicated.js':'/dedicated-immediate','/shared.js':'/shared-immediate','/frame-worker.js':'/frame-worker-immediate','/nested-worker.js':'/nested-worker-immediate'};
+  if(workerFetches[url.pathname]) {
+    type='text/javascript';body=`fetch('${workerFetches[url.pathname]}');setInterval(()=>{},1000);`;
+    if(url.pathname==='/shared.js')body+='onconnect=e=>e.ports[0].start();';
+    if(url.pathname==='/dedicated.js')body+="new Worker('/nested-worker.js');";
+  }
+  if(url.pathname==='/service.js') {
+    type='text/javascript';body="self.addEventListener('install',event=>event.waitUntil(fetch('/service-immediate').then(()=>self.skipWaiting())));";
+  }
+  response.setHeader('Content-Type',type);response.end(body);
 });
 await new Promise(resolveListen=>fixture.listen(0,'127.0.0.1',resolveListen));
 const origin=`http://127.0.0.1:${fixture.address().port}`;
@@ -40,7 +78,7 @@ async function until(read,label) {
   assert.fail(`${label} timed out: ${diagnostics}`);
 }
 try {
-  start(browser,['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-background-networking','--no-first-run',
+  start(browser,['--headless=new','--disable-dev-shm-usage','--site-per-process','--disable-popup-blocking','--disable-background-networking','--no-first-run',
     '--remote-debugging-port=0',`--user-data-dir=${directory}/profile`,`${origin}/page-a`]);
   const active=join(directory,'profile/DevToolsActivePort');
   const lines=await until(async()=>{const lines=(await readFile(active,'utf8')).trim().split('\n');return lines.length>=2&&lines;},'Browser startup');
@@ -54,7 +92,7 @@ try {
     const id=sequence++,timer=setTimeout(()=>{pending.delete(id);reject(Error(`${method} timeout`));},5000);
     pending.set(id,{resolve:resolveCommand,reject,timer});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));
   });
-  start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',transport,'--capture-network-content']);
+  const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',transport,'--capture-network-content']);
   const address=await until(async()=>(await readFile(join(directory,'endpoint'),'utf8')).trim(),'Backend startup');
   const state=async()=>await(await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)})).json();
   let snapshot=await until(async()=>{const s=await state();return s.state==='running'&&s.network.capture_status.attached_targets===1&&s;},'First capture owner');
@@ -85,6 +123,111 @@ try {
   snapshot=await until(async()=>{const s=await state();return s.network.capture_status.attached_targets===1&&s;},'Closed A owner');
   for(const row of rows)assert(snapshot.network.requests.some(retained=>retained.id===row.id),'Closing A must retain completed evidence');
   console.log('PASS real Chromium/native transport: blank new tab navigation, both-page bodies, background capture after focus switch, history retention and target closure');
+  // Early-traffic acceptance probe: these operations intentionally never wait
+  // for per-target discovery, Network.enable, or a target attachment counter.
+  const missing=[];
+  async function expectCaptured(paths,label,{body=true}={}) {
+    await until(()=>paths.every(path=>served.has(path)),`${label}: browser issued fixture requests`);
+    const deadline=Date.now()+15000;
+    let current;
+    do {
+      current=await state();
+      if(paths.every(path=>current.network.requests.some(row=>new URL(row.url).pathname===path&&(!body||row.response.body.state==='available'))))break;
+      await delay(50);
+    } while(Date.now()<deadline);
+    const absent=paths.filter(path=>!current.network.requests.some(row=>new URL(row.url).pathname===path&&(!body||row.response.body.state==='available')));
+    if(absent.length){
+      missing.push(`${label}: ${absent.join(', ')}`);console.log(`PARTIAL early capture: ${missing.at(-1)}`);
+      assert.equal(current.network.capture_status.startup_mode,'passive','Observed early gaps must not be advertised as complete startup coverage');
+    }
+    else console.log(`PASS ${label}`);
+    return current;
+  }
+  // Controlled navigation is a strict, usable first-request capture path.
+  // Unlike the early probes below, blank target readiness is intentional here.
+  const controlled=(await command('Target.createTarget',{url:'about:blank'})).targetId;
+  await until(async()=>(await state()).network.capture_status.attached_target_ids.includes(controlled),'Controlled blank tab capture ready');
+  const controlledSession=(await command('Target.attachToTarget',{targetId:controlled,flatten:true})).sessionId;
+  await command('Page.navigate',{url:origin+'/early-tab/controlled'},controlledSession);
+  await expectCaptured(['/early-tab/controlled','/early-fetch/controlled'],'controlled navigation: initial document and first inline fetch');
+  assert.equal(missing.length,0,'Controlled navigation must capture the first requests');
+  const earlyIds=await Promise.all(Array.from({length:10},(_,i)=>command('Target.createTarget',{url:`${origin}/early-tab/${i}`})));
+  snapshot=await expectCaptured(Array.from({length:10},(_,i)=>`/early-fetch/${i}`),'ten simultaneous tabs: first inline-script fetches');
+  await expectCaptured(Array.from({length:10},(_,i)=>`/early-tab/${i}`),'ten simultaneous tabs: initial document requests');
+  for(let i=0;i<earlyIds.length;i++) {
+    const row=snapshot.network.requests.find(row=>row.url===`${origin}/early-fetch/${i}`);
+    if(row)assert.equal(row.target_id,earlyIds[i].targetId,'Early request must retain exact tab identity');
+  }
+  assert.equal(snapshot.target.id,b,'New tabs must not change debugger focus');
+  await until(async()=>{
+    const s=await state();
+    return earlyIds.every(({targetId})=>s.network.capture_status.attached_target_ids.includes(targetId));
+  },'All ten new tabs become capture owners');
+  const beforeSteady=missing.length;
+  // Exercise ten owners without overflowing the independent eight-body job cap.
+  for(const [i,{targetId}] of earlyIds.entries()) {
+    const session=(await command('Target.attachToTarget',{targetId,flatten:true})).sessionId;
+    const result=await command('Runtime.evaluate',{expression:`fetch('${origin}/steady-tab/${i}').then(r=>r.text())`,awaitPromise:true},session);
+    assert(!result.exceptionDetails,JSON.stringify(result));
+    await expectCaptured([`/steady-tab/${i}`],`attached tab ${i}: response body`);
+  }
+  assert.equal(missing.length,beforeSteady,'More than eight attached tabs must all capture traffic');
+  // Run after >8 tabs remain open, not after freeing the original owner limit.
+  const popup=await command('Runtime.evaluate',{expression:`window.open('${origin}/popup');'opened'`},sessionB);
+  assert(!popup.exceptionDetails,JSON.stringify(popup));
+  await expectCaptured(['/popup-immediate'],'short-lived window.open fetch + immediate close',{body:false});
+  await until(async()=>!(await command('Target.getTargets')).targetInfos.some(t=>t.url===origin+'/popup'),'Popup really closed');
+  const contexts=(await command('Target.createTarget',{url:origin+'/contexts'})).targetId;
+  snapshot=await expectCaptured(['/dedicated-immediate','/shared-immediate','/service-immediate','/outer-frame-immediate','/inner-frame-immediate','/frame-worker-immediate','/nested-worker-immediate'],
+    'dedicated/shared/service worker and nested cross-site frame startup');
+  assert(!served.has('/fixture-error'),'Fixture worker registration failed');
+  const workerRows=['/dedicated-immediate','/shared-immediate','/service-immediate','/frame-worker-immediate','/nested-worker-immediate']
+    .map(path=>snapshot.network.requests.find(row=>new URL(row.url).pathname===path)).filter(Boolean);
+  for(const row of workerRows) {
+    assert(row.target_id&&row.target_id!==contexts,'Worker traffic must retain its own target identity');
+  }
+  assert.equal(new Set(workerRows.map(row=>row.target_id)).size,workerRows.length,'Distinct workers must not share target identity');
+  // Worker support is a strict requirement even when early startup is only
+  // measured. Do not downgrade unsupported targets to an early-race diagnostic.
+  const workerScripts=['/dedicated.js','/shared.js','/service.js','/frame-worker.js','/nested-worker.js'];
+  const workerTargets=await until(async()=>{
+    const infos=(await command('Target.getTargets')).targetInfos;
+    const targets=workerScripts.map(path=>infos.find(t=>['worker','shared_worker','service_worker'].includes(t.type)&&t.url.endsWith(path)));
+    return targets.every(Boolean)&&targets;
+  },'All fixture worker targets exist');
+  await until(async()=>{
+    const status=(await state()).network.capture_status;
+    return workerTargets.every(t=>status.attached_target_ids.includes(t.targetId));
+  },'Dedicated, shared, service and nested-frame workers all captured');
+  await Promise.all(workerTargets.map(async(target,i)=>{
+    const session=(await command('Target.attachToTarget',{targetId:target.targetId,flatten:true})).sessionId;
+    const url=new URL(`/steady-worker/${i}`,target.url).href;
+    const result=await command('Runtime.evaluate',{expression:`fetch(${JSON.stringify(url)}).then(r=>r.text())`,awaitPromise:true},session);
+    assert(!result.exceptionDetails,JSON.stringify(result));
+  }));
+  const beforeWorkers=missing.length;
+  snapshot=await expectCaptured(workerTargets.map((_target,i)=>`/steady-worker/${i}`),'all attached worker types: response bodies');
+  assert.equal(missing.length,beforeWorkers,'Worker traffic must be captured after attachment');
+  for(let i=0;i<workerTargets.length;i++) {
+    const row=snapshot.network.requests.find(row=>new URL(row.url).pathname===`/steady-worker/${i}`);
+    assert.equal(row.target_id,workerTargets[i].targetId,'Worker response belongs to its exact target');
+  }
+  // Disconnect during a fresh target burst. A capture connection that holds
+  // startup must release every target on teardown; the HTTP server, not CDP
+  // evaluation or another runIfWaitingForDebugger call, proves execution.
+  const shutdownCreates=Array.from({length:10},(_,i)=>command('Target.createTarget',{url:`${origin}/early-tab/shutdown-${i}`}));
+  backend.kill('SIGTERM');
+  await Promise.all(shutdownCreates);
+  assert(await waitForClose(children.find(entry=>entry.child===backend).closed,5000),'Backend process must close after SIGTERM');
+  assert(backend.exitCode!==null||backend.signalCode!==null,'Backend must terminate on SIGTERM');
+  const shutdownDeadline=Date.now()+15000;
+  while(!Array.from({length:10},(_,i)=>`/early-fetch/shutdown-${i}`).every(path=>served.has(path))&&Date.now()<shutdownDeadline)await delay(50);
+  assert(Array.from({length:10},(_,i)=>`/early-fetch/shutdown-${i}`).every(path=>served.has(path)),
+    'Backend shutdown must leave all concurrently created pages running');
+  console.log('PASS backend shutdown during target creation leaves browser pages running');
+  if(requireEarly)assert.deepEqual(missing,[],'Early request capture gaps (requests independently confirmed by fixture server)');
+  else if(missing.length)console.log('PARTIAL: early-request completeness is NOT established; rerun REB_TRAFFIC_REQUIRE_EARLY=1 for strict acceptance');
+
 } catch(error) {
   failure=error;
   throw error;

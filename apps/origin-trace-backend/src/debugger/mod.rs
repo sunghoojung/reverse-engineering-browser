@@ -9,6 +9,7 @@ mod heap;
 mod hooks;
 mod marker_fuzz;
 mod network;
+mod network_browser;
 mod network_capture;
 mod network_request;
 mod network_timing;
@@ -263,10 +264,12 @@ impl Debugger {
         if self.stopping.load(Ordering::Acquire) {
             return Err(Error::conflict("Debugger is stopping"));
         }
+        let browser_capture =
+            self.options.capture_network_content && self.refresh_browser_capture().await;
         let targets = match self.discover().await {
             Ok(targets) => targets,
             Err(error) => {
-                if self.options.capture_network_content {
+                if self.options.capture_network_content && !browser_capture {
                     self.update(|s| {
                         s["network"]["capture_status"]["state"] = json!("partial");
                         s["network"]["capture_status"]["discovery_stale"] = json!(true);
@@ -279,7 +282,9 @@ impl Debugger {
                 return Err(error);
             }
         };
-        self.refresh_captures(&targets).await;
+        if !browser_capture {
+            self.refresh_captures(&targets).await;
+        }
         let public = targets
             .iter()
             .take(128)

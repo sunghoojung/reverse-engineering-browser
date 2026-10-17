@@ -56,24 +56,28 @@ a synthetic local CDP transport before its browser checks. Experiment actions ve
 Disposal stops owned pages, workers, recipes, requests, and retained objects.
 Worker cancellation terminates its process group, including descendants. Network
 capture is opt-in for standalone sessions and enabled by the packaged research
-profile. HTTP Traffic uses up to eight independent, Network-only page connections.
-Changing debugger focus no longer clears HTTP rows or disconnects another page's
-capture. The shared ledger keeps its 1000-row limit and visible eviction count;
-response bodies are fetched through the exact connection that observed them.
-Closed/disconnected owners leave retained evidence and explicit unfinished-body
-errors. Requests sent before attachment and `Network.enable` are unavailable;
-existing one-second discovery is not a promise of first-navigation coverage.
-Short-lived popups can disappear before discovery; workers/service workers and
-out-of-process iframes are not independently covered by this page-only path.
-The Traffic coverage notice reports attached/eligible targets, overflow, retries
-and gaps. WebSockets remain on the selected debugger target under their v1
-contract. Focus changes still advance `network.capture_epoch` for selection and
-screenshot compatibility; that epoch is not the HTTP connection-owner token.
-Public HTTP request IDs are opaque and never reused within a backend instance.
-At the eight-owner cap, capture transport event budgets total at most 512 MiB
-(64 MiB each), and requested browser Network buffers total 128 MiB (16 MiB each),
-in addition to the focused debugger. Row titles are attachment-time metadata;
-request URLs and immutable target identities remain authoritative.
+profile. HTTP Traffic uses a single browser-level CDP transport with flattened
+sessions, passive Target events and recursive attachment for page, iframe and
+worker targets. `--capture-target-limit` defaults to 32 (range 1–128), covering
+initializing and ready targets with stable owners and oldest-waiting admission
+when slots free. The shared event budget is 64 MiB; requested browser Network
+buffers share a 128 MiB aggregate budget divided across the configured limit.
+The selected debugger remains separate, and the global ledger retains 1000 rows
+and eight body retrieval jobs. Exact owner/session-qualified bodies cannot cross
+focus switches, target replacement or reconnect. Retired owners leave retained
+history and explicit unfinished-evidence gaps. `network.capture_epoch` remains
+the focused debugger/selection identity, not the HTTP owner token.
+
+Passive capture does not pause startup or guarantee first navigation: requests
+before attachment/Network.enable and very short-lived targets can be absent.
+Worker attachment can affect lifecycle/timeouts. No baseline startup-hold mode
+is enabled. WebSocket v1 remains selected-target scoped. The coverage notice
+identifies attached/missing target IDs, failures, overflow and gaps. Browser Target
+setup failure visibly falls back to eight page-only polling connections (512 MiB
+aggregate event budget, 128 MiB requested browser buffers) and retries browser
+setup after 30 seconds. Independent worker/OOPIF capture is absent in fallback.
+The focused debugger's transport and buffers are additional in both modes.
+
 `tools/check-traffic-multitarget-browser.mjs` exercises real Chromium with the
 native transport against synthetic loopback pages, including blank new tabs,
 navigation, background fetches, focus changes and target closure; Linux CI runs

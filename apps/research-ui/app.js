@@ -260,14 +260,17 @@
           const coverage = state.debuggerSession.network.capture_status;
           if (coverage) {
             if (kind === 'active' && (coverage.state !== 'ready' || coverage.gaps > 0)) kind = 'gap';
-            messages.push(`HTTP capture: ${coverage.attached_targets} of ${coverage.eligible_targets} eligible page targets attached (limit ${coverage.target_limit}).`);
+            const earlyTargets = coverage.scope === 'http-browser-targets';
+            const targetKind = earlyTargets ? 'browser targets' : 'page targets';
+            messages.push(`HTTP capture: ${coverage.attached_targets} of ${coverage.eligible_targets} eligible ${targetKind} attached (limit ${coverage.target_limit}).`);
+            messages.push(earlyTargets ? 'Mode: passive browser auto-attach.' : 'Mode: page-target polling fallback; worker and out-of-process iframe targets are not attached.');
             if (coverage.discovery_stale) messages.push('Target discovery is unavailable; counts are last known and new tabs may not attach.');
-            if (coverage.target_overflow > 0) messages.push(`${coverage.target_overflow} page targets exceed the capture limit and are not attached.`);
-            if (coverage.failed_targets > 0) messages.push(`${coverage.failed_targets} page target attachments failed; retry is pending.`);
+            if (coverage.target_overflow > 0) messages.push(`${coverage.target_overflow} ${targetKind} exceed the capture limit and are not attached.`);
+            if (coverage.failed_targets > 0) messages.push(`${coverage.failed_targets} target attachments failed; retry is pending.`);
             if (coverage.gaps > 0) messages.push(`${coverage.gaps} HTTP capture owner losses or retirements recorded; coverage may be incomplete.`);
             const unattached = coverage.unattached_targets ?? [];
             if (unattached.length) {
-              const labels = unattached.slice(0, 3).map(target => `${target.title || 'Untitled page'} [${target.id.length > 48 ? target.id.slice(0, 48) + '…' : target.id}]`);
+              const labels = unattached.slice(0, 3).map(target => `${target.title || 'Untitled target'} [${target.id.length > 48 ? target.id.slice(0, 48) + '…' : target.id}]`);
               const remaining = unattached.length - labels.length + (coverage.unattached_targets_omitted ?? 0);
               messages.push(`Not attached: ${labels.join('; ')}${remaining ? `; ${remaining} more targets not listed here` : ''}.`);
             }
@@ -276,7 +279,8 @@
               if (kind === 'active') kind = 'gap';
               messages.push('The selected debugger page is not attached for HTTP capture; its new requests are not being recorded here.');
             }
-            messages.push('Page-target HTTP coverage only: worker and out-of-process iframe targets are not attached. Requests before attachment, including short-lived targets, are unavailable. Requests observed only by native probes are not included in this CDP list. WebSockets remain scoped to the selected debugger target.');
+            if (earlyTargets) messages.push('Supported page, worker and out-of-process iframe targets are attached without pausing startup. Initial requests can still precede Network.enable; first-request capture is not guaranteed. Attaching worker targets can affect their lifecycle and timeout behavior.');
+            messages.push('Requests before attachment, including short-lived targets, are unavailable. Requests observed only by native probes are not included in this CDP list. WebSockets remain scoped to the selected debugger target.');
           }
           const dropped = state.debuggerSession.network.dropped;
           if (dropped) {
@@ -2055,15 +2059,16 @@
 
       function renderRequestScopes() {
         const groups = requestTabGroups();
+        const targetScope = state.debuggerSession?.network?.capture_status?.scope === 'http-browser-targets';
         const availableTabs = new Set(groups.map(group => group.id));
         if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
         const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
-        const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
+        const buttons = [{id: 'all', label: targetScope ? 'All targets' : 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
           const domains = [...new Set(group.requests.map(requestDomain))];
           return {
             id: group.id,
-            label: group.id === 'unattributed' ? 'Unattributed' : `Tab ${index + 1}`,
+            label: group.id === 'unattributed' ? 'Unattributed' : `${targetScope ? 'Target' : 'Tab'} ${index + 1}`,
             count: group.requests.length,
             domains
           };
@@ -2082,9 +2087,9 @@
           button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
           if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
           if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
-          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab'
-            : scope.id === 'unattributed' ? 'Events without a browser tab identifier'
-              : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
+          button.title = scope.id === 'all' ? targetScope ? 'Show requests from every captured browser target' : 'Show requests from every captured browser tab'
+            : scope.id === 'unattributed' ? targetScope ? 'Events without a browser target identifier' : 'Events without a browser tab identifier'
+              : `${scope.label} · ${scope.domains.join(', ')} · ${targetScope ? 'target' : 'tab'} id ${scope.id}`;
           if (created) button.addEventListener('click', () => {
             state.requestTabId = scope.id;
             state.requestDomain = 'all';

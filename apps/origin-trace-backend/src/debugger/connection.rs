@@ -131,6 +131,16 @@ impl Connection {
                 let Some(connection) = weak.upgrade() else {
                     break Error::conflict("Debugger connection closed");
                 };
+                // Optional control observer runs before the bounded data queue:
+                // startup holds must have a deadline even when dispatch is busy.
+                if let Some(observer) = connection
+                    .observer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                {
+                    observer(&value);
+                }
                 if let Some(id) = value["id"].as_u64() {
                     if let Some(pending) = connection
                         .pending
@@ -141,16 +151,6 @@ impl Connection {
                         let _ = pending.send(Ok(value));
                     }
                 } else if value["method"].is_string() && value["params"].is_object() {
-                    // Optional control observer runs before the bounded data queue:
-                    // startup holds must have a deadline even when dispatch is busy.
-                    if let Some(observer) = connection
-                        .observer
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone()
-                    {
-                        observer(&value);
-                    }
                     let permit = match budget
                         .clone()
                         .try_acquire_many_owned(message.len().min(u32::MAX as usize) as u32)

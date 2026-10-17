@@ -269,6 +269,13 @@ impl Debugger {
                         json!({"active":self.snapshot()["settings"]["breakpoints_active"]}),
                     ),
                 ] {
+                    // The capture owner alone releases startup holds after
+                    // Network setup; a second worker client must not run ahead.
+                    if self.options.capture_first_owned
+                        && method == "Runtime.runIfWaitingForDebugger"
+                    {
+                        continue;
+                    }
                     session
                         .command(method, params, Duration::from_secs(3))
                         .await?;

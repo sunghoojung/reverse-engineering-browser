@@ -86,6 +86,8 @@ traffic-capture-check: origin-trace-backend debugger-transport broker
 	node tools/check-browser-test-process.mjs
 	node tools/check-traffic-multitarget.mjs
 	node tools/check-traffic-browser-sessions.mjs
+	node tools/check-traffic-capture-first.mjs
+	node tools/check-traffic-capture-first-browser.mjs
 	node tools/check-traffic-multitarget-browser.mjs
 
 backend-e2e: traffic-capture-check heap-snapshot decoder deob-worker-build

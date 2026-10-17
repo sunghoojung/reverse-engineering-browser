@@ -73,6 +73,12 @@ it.
   pages or exact selected page.
 - Experiments do not read or modify baseline tabs, production cookies, storage,
   or credentials. Never execute extracted code automatically.
+- The explicit `--capture-first-browser` workflow launches its own fresh browser
+  process/profile and changes startup timing by briefly holding new targets for
+  capture setup. It cannot be enabled on a supplied DevTools endpoint. It expires
+  after one hour, reports setup/resume failures, and does not promise complete
+  initial-request capture. Normal browser capture remains passive. See the
+  [backend workflow](apps/origin-trace-backend/README.md#optional-capture-first-disposable-experiment).
 
 - The native Console panel visibly opts into arbitrary JavaScript in a separate
   disposable browser profile. Expressions and primitive results may contain

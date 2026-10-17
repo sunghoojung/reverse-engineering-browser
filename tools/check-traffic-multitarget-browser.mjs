@@ -7,13 +7,14 @@ import {mkdtemp, readFile, rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
+import {stopBrowserTestProcess, waitForClose} from './browser-test-process.mjs';
 
 const root=resolve(process.argv[2]??'.');
 const browser=process.env.ORIGIN_TRACE_TEST_BROWSER||process.env.REB_UI_CHROMIUM||'chromium';
 const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
 const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'build/reb-debugger-transport'));
 const directory=await mkdtemp(join(tmpdir(),'reb-traffic-browser-'));
-const children=[];let socket,sequence=1,diagnostics='';const pending=new Map();
+const children=[];let socket,sequence=1,diagnostics='',failure;const pending=new Map();
 const delay=ms=>new Promise(resolveDelay=>setTimeout(resolveDelay,ms));
 const fixture=createServer((request,response)=>{
   response.setHeader('Access-Control-Allow-Origin','*');
@@ -24,12 +25,10 @@ await new Promise(resolveListen=>fixture.listen(0,'127.0.0.1',resolveListen));
 const origin=`http://127.0.0.1:${fixture.address().port}`;
 function start(executable,args) {
   const child=spawn(executable,args,{cwd:directory});
-  const exited=new Promise(resolveExit=>{
-    child.once('exit',resolveExit);
-    child.once('error',error=>{diagnostics+=error.message;resolveExit();});
-  });
+  const closed=new Promise(resolveClose=>child.once('close',resolveClose));
+  child.once('error',error=>{diagnostics+=error.message;});
   for(const pipe of [child.stdout,child.stderr])pipe.on('data',chunk=>diagnostics=(diagnostics+chunk).slice(-16384));
-  children.push({child,exited});return child;
+  children.push({child,closed});return child;
 }
 async function until(read,label) {
   const deadline=Date.now()+15000;
@@ -86,12 +85,36 @@ try {
   snapshot=await until(async()=>{const s=await state();return s.network.capture_status.attached_targets===1&&s;},'Closed A owner');
   for(const row of rows)assert(snapshot.network.requests.some(retained=>retained.id===row.id),'Closing A must retain completed evidence');
   console.log('PASS real Chromium/native transport: blank new tab navigation, both-page bodies, background capture after focus switch, history retention and target closure');
+} catch(error) {
+  failure=error;
+  throw error;
 } finally {
+  const cleanupErrors=[];
   for(const waiter of pending.values())clearTimeout(waiter.timer);
-  socket?.close();
-  for(const {child,exited} of children.reverse()) {
-    if(child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await Promise.race([exited,delay(3000)]);if(child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await exited;}}
+  // CDP shutdown lets Chrome finish profile writes before signal fallback.
+  if(socket?.readyState===WebSocket.OPEN) {
+    try {
+      socket.send(JSON.stringify({id:sequence++,method:'Browser.close'}));
+      await waitForClose(children[0].closed,3000);
+    } catch(error) {cleanupErrors.push(error);}
   }
-  await new Promise(resolveClose=>fixture.close(resolveClose));
-  await rm(directory,{recursive:true,force:true});
+  try {socket?.close();} catch(error) {cleanupErrors.push(error);}
+  let allClosed=true;
+  for(const process of [...children].reverse()) {
+    try {await stopBrowserTestProcess(process);}
+    catch(error){allClosed=false;cleanupErrors.push(error);}
+  }
+  try {await new Promise((resolveClose,reject)=>fixture.close(error=>error?reject(error):resolveClose()));}
+  catch(error) {cleanupErrors.push(error);}
+  if(allClosed) {
+    try {
+      // Recursive rm retries only Node's transient filesystem errors, including
+      // ENOTEMPTY from a final Chrome descendant write. It remains bounded.
+      await rm(directory,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+    } catch(error) {cleanupErrors.push(error);}
+  }
+  if(cleanupErrors.length) {
+    if(failure) console.error('Cleanup also failed; original test failure preserved:',...cleanupErrors);
+    else throw new AggregateError(cleanupErrors,'Browser fixture cleanup failed');
+  }
 }

@@ -425,6 +425,7 @@ jobs:
           test -n "$ORIGIN_TRACE_TEST_BROWSER"
           node tools/check-debugger-initialization.mjs
           node tools/check-traffic-multitarget.mjs
+          node tools/check-browser-test-process.mjs
           node tools/check-traffic-multitarget-browser.mjs
 
       - name: Run sanitizers

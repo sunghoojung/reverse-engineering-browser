@@ -424,7 +424,9 @@
       }
 
       function requestSignalRoot(request) {
-        if (!request || request.origin === 'sample') return null;
+        // Host/method/time correlation cannot identify an exact native request.
+        if (!request || request.origin === 'sample' || request.protocolRequestId ||
+            String(request.operation).startsWith('cdp_')) return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
@@ -907,6 +909,11 @@
 
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
+        if (selectedRequest?.protocolRequestId || String(selectedRequest?.operation).startsWith('cdp_')) {
+          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty',
+            'This CDP request has no exact native-event link. Host, method and timing matches cannot establish request-specific signal relationships.'));
+          return;
+        }
         if (state.signalProfileStatus === 'loading') {
           elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile...'));
           return;
@@ -2546,6 +2553,10 @@
           elements.prompt.textContent = 'Fingerprint activity before this request';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
+          if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
+            renderInspectorMessage('This CDP request has no exact native-event link. Host, method and timing matches cannot establish request-specific signal relationships. Raw fingerprint events remain available in Fingerprinting.');
+            return;
+          }
           if (state.signalProfileStatus === 'loading') {
             renderInspectorMessage('Building a bounded profile from retained browser-signal evidence.');
             return;
@@ -2596,6 +2607,9 @@
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
             const details = [{ key: 'correlation', value: request.id, type: 'id' }];
+            if (request.protocolRequestId || String(request.operation).startsWith('cdp_')) {
+              details.unshift({key: 'link confidence', value: 'Unverified host, method and timing match. These native identifiers may belong to another request or tab.', type: 'Correlated'});
+            }
             if (contextEvent) {
               details.push({ key: 'browser context', value: browserContextToken(contextEvent), type: 'token' });
             }
@@ -2631,7 +2645,7 @@
               { key: 'last event', value: request.lastTimestamp, type: 'ns' },
               { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
               { key: 'lifecycle', value: request.operation, type: 'state' },
-              { key: 'events', value: request.events.length, type: 'count' },
+              { key: request.protocolRequestId || String(request.operation).startsWith('cdp_') ? 'unverified native candidate events' : 'events', value: request.events.length, type: 'count' },
               { key: 'phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
             ]);
           } else if (request) {
@@ -11790,6 +11804,10 @@
       });
       elements.requestVmCandidates.addEventListener('click', async () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
+          investigationNotice('This CDP request has no exact native-event link. Host, method and timing matches cannot identify request-specific VM candidates.', 'unavailable');
+          return;
+        }
         const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;
         if (requestId) await refreshVmAnalysis(requestId);
         showScreen('vm', elements.requestVmCandidates);

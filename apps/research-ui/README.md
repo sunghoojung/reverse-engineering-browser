@@ -38,6 +38,18 @@ backend and serves them only to matching disposable-target requests; it performs
 no third-party/provider upload. Native macOS file-picker behavior requires native
 validation. See [Scoped local overrides v1](../../protocol/local-overrides-v1.md).
 
+## Traffic identity and resource filters
+
+Traffic classifies a CDP response as **Wasm** when its recorded MIME type is
+`application/wasm` (case-insensitive, ignoring surrounding whitespace and MIME
+parameters), including responses loaded by Fetch or XHR. A `.wasm` URL alone
+never establishes that type. Other responses retain their CDP resource category.
+
+Each retained CDP row must have a unique public ID. A snapshot with duplicate
+public IDs is rejected and the last valid evidence stays visible. Raw protocol
+request IDs may repeat across targets or redirect hops when the public row IDs
+remain distinct.
+
 ## Connected investigations
 
 **Advanced** is a manually opened workspace chooser. Completed workspace

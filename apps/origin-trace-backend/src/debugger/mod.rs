@@ -9,6 +9,7 @@ mod heap;
 mod hooks;
 mod marker_fuzz;
 mod network;
+mod network_capture;
 mod network_request;
 mod network_timing;
 pub(crate) use network_request::NetworkRequestSelection;
@@ -47,6 +48,7 @@ pub struct Debugger {
     refreshing: AsyncMutex<()>,
     stop: Notify,
     network_workers: Arc<Semaphore>,
+    capture: network_capture::Capture,
     watch_id: AtomicU64,
     console_id: AtomicU64,
     heap: heap::Heap,
@@ -72,6 +74,11 @@ impl Debugger {
         }
         state["network"]["capture_enabled"] = json!(options.capture_network_content);
         state["network"]["capture_epoch"] = json!(0);
+        state["network"]["capture_status"]["state"] = json!(if options.capture_network_content {
+            "waiting"
+        } else {
+            "disabled"
+        });
         state["network"]["instance_id"] = json!(format!(
             "{}:{}",
             std::process::id(),
@@ -95,6 +102,7 @@ impl Debugger {
             refreshing: AsyncMutex::new(()),
             stop: Notify::new(),
             network_workers: Arc::new(Semaphore::new(8)),
+            capture: network_capture::Capture::new(),
             watch_id: AtomicU64::new(1),
             console_id: AtomicU64::new(1),
             heap: heap::Heap::new(),
@@ -159,6 +167,7 @@ impl Debugger {
         self.stopping.store(true, Ordering::Release);
         self.stop.notify_waiters();
         let _refresh = self.refreshing.lock().await;
+        self.close_captures().await;
         if self.experiment.context().is_some() {
             let _ = self.dispose_experiment().await;
         }
@@ -254,7 +263,23 @@ impl Debugger {
         if self.stopping.load(Ordering::Acquire) {
             return Err(Error::conflict("Debugger is stopping"));
         }
-        let targets = self.discover().await?;
+        let targets = match self.discover().await {
+            Ok(targets) => targets,
+            Err(error) => {
+                if self.options.capture_network_content {
+                    self.update(|s| {
+                        s["network"]["capture_status"]["state"] = json!("partial");
+                        s["network"]["capture_status"]["discovery_stale"] = json!(true);
+                        s["network"]["capture_status"]["last_error"] = json!(validation::truncate(
+                            &format!("Target discovery unavailable: {}", error.message),
+                            512
+                        ));
+                    });
+                }
+                return Err(error);
+            }
+        };
+        self.refresh_captures(&targets).await;
         let public = targets
             .iter()
             .take(128)
@@ -326,9 +351,7 @@ impl Debugger {
                     .saturating_add(1)
             );
             s["network"]["target_id"] = target["id"].clone();
-            s["network"]["requests"] = json!([]);
             s["network"]["websockets"] = websocket::empty();
-            s["network"]["dropped"] = json!(0);
         });
         *self.connection.lock().await = Some(connection.clone());
         let weak = Arc::downgrade(self);
@@ -849,7 +872,15 @@ impl Debugger {
             "Inspector.targetCrashed"=>self.update(|s| {s["state"]=json!("crashed");s["paused"]=Value::Null;s["error"]=json!("Browser renderer crashed. Reload the browser tab to reconnect. Captured evidence is retained.");}),
             "Inspector.targetReloadedAfterCrash"=>self.set_state("running",None),
             "HeapProfiler.addHeapSnapshotChunk"=>self.heap_chunk(p).await,
-            _ if method.starts_with("Network.")=>{let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();if self.experiment.context().is_some()&&self.snapshot()["runtime_hooks"]["target_id"]==target {self.hook_network(&target,method,p).await;}self.network(method,p).await;},
+            _ if method.starts_with("Network.") => {
+                let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();
+                if self.experiment.context().is_some() && self.snapshot()["runtime_hooks"]["target_id"]==target {
+                    self.hook_network(&target,method,p).await;
+                }
+                if self.options.capture_network_content && method.starts_with("Network.webSocket") {
+                    self.update(|s|websocket::event(s,method,p));
+                }
+            },
             _=>(),
         }
     }

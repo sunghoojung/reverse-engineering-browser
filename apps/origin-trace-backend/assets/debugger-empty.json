@@ -38,6 +38,22 @@
         "frames": 512,
         "payload_bytes": 4096
       }
+    },
+    "capture_status": {
+      "scope": "http-page-targets",
+      "state": "disabled",
+      "attached_targets": 0,
+      "eligible_targets": 0,
+      "target_limit": 8,
+      "target_overflow": 0,
+      "failed_targets": 0,
+      "gaps": 0,
+      "last_error": null,
+      "message": "HTTP page capture starts after attachment; earlier requests, worker traffic and out-of-process iframe traffic may be unavailable. WebSockets remain scoped to the selected debugger target.",
+      "attached_target_ids": [],
+      "unattached_targets": [],
+      "unattached_targets_omitted": 0,
+      "discovery_stale": false
     }
   },
   "settings": {

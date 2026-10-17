@@ -222,6 +222,45 @@ Sources are inert metadata; this endpoint does not fetch URLs, read evidence, ru
 source, or write the VM cache. The [analysis catalog guide](../docs/product/analysis-catalog-v1.md)
 explains evidence levels and compatibility.
 
+## HTTP Traffic capture coverage
+
+`GET /api/debugger` retains one shared bounded HTTP ledger across debugger target
+selection. Up to eight eligible page targets have independent Network-only CDP
+connections; DevTools targets are excluded. Capture does not pause, reload, or
+navigate pages. Requests before discovery, attachment and `Network.enable` are
+unavailable. Short-lived targets may disappear before polling observes them.
+Workers, service workers and out-of-process iframes are not independently
+attached by this page-only path; their traffic is not guaranteed. WebSocket v1
+remains scoped to the selected debugger connection.
+
+`network.capture_status` reports `scope: http-page-targets`, `state` (`disabled`,
+`waiting`, `ready`, `partial`), `attached_targets`, `eligible_targets`,
+`target_limit` (8), `target_overflow`, `failed_targets`, cumulative `gaps`,
+`last_error` (null or bounded diagnostic) and a coverage `message`. Ready means
+all currently eligible pages have initialized capture; it never means historical
+or first-navigation completeness. Failed initialization retries with bounded
+2–30 second backoff. Existing healthy owners retain their slots at capacity. Selecting an overflow
+tab does not evict another page or attach its HTTP capture. `attached_target_ids`
+lists the page target IDs with ready capture owners; `unattached_targets` lists up to 16 uncaptured page
+IDs and bounded current titles, with `unattached_targets_omitted` for the rest.
+`discovery_stale` marks failed enumeration: healthy existing owners can continue,
+but coverage becomes partial because new pages cannot be confirmed or attached.
+
+Each new HTTP row receives an opaque, instance-unique public `id` and a string
+`capture_owner` token. Raw `protocol_request_id` values are only meaningful within
+that owner. Redirect hops and replacement connections never reuse public IDs,
+even after eviction. Asynchronous bodies are fetched from the original owner;
+closure marks unfinished evidence unavailable and rejects late owner events.
+The global 1000-row limit and eight concurrent body retrieval jobs remain.
+Eight owners bound their transport queues to 512 MiB total and their requested
+browser Network buffers to 128 MiB total, in addition to the focused debugger.
+Row titles are attachment-time metadata and may precede a later navigation.
+
+The existing `network.capture_epoch` still advances on debugger focus/reconnect
+for selection and screenshot compatibility. HTTP rows survive those changes;
+clients must obtain the current snapshot epoch when selecting a retained row.
+The epoch is not interchangeable with `capture_owner`.
+
 ## Exact retained Traffic request
 
 `GET /api/network/request` (`get_network_request`) returns one unchanged retained

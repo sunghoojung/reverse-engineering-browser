@@ -29,7 +29,7 @@ if(process.argv[2]==='--browser-wrapper') {
   const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'build/reb-debugger-transport'));
   const directory=await mkdtemp(join(tmpdir(),'reb-capture-first-browser-'));
-  const served=new Set(),observedPaths=new Set(),pending=new Map();let sequence=1,socket,backend,diagnostics='',failure;
+  const served=new Set(),observedPaths=new Set(),pending=new Map();let sequence=1,socket,backend,diagnostics='',failure,lastCaptureSnapshot,lastCaptureReadError='';
   const fixture=createServer((request,response)=>{
     const url=new URL(request.url,`http://${request.headers.host}`);served.add(url.pathname);
     response.setHeader('Access-Control-Allow-Origin','*');response.setHeader('Cache-Control','no-store');
@@ -67,7 +67,7 @@ if(process.argv[2]==='--browser-wrapper') {
       try{const value=await read();if(value)return value;}catch(error){if(error instanceof assert.AssertionError)throw error;}
       await delay(40);
     }
-    assert.fail(`${label} timed out: ${diagnostics}\n${await browserDiagnostics()}`);
+    assert.fail(`${label} timed out: ${diagnostics}\n${await browserDiagnostics()}\nLast capture snapshot: ${JSON.stringify(lastCaptureSnapshot)?.slice(0,16384)}\nLast capture read error: ${lastCaptureReadError}`);
   };
   try {
     await writeFile(join(directory,'browser-diagnostics'),'');
@@ -81,11 +81,21 @@ if(process.argv[2]==='--browser-wrapper') {
     const profile=args.find(arg=>arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
     const lines=await until(async()=>{const lines=(await readFile(join(profile,'DevToolsActivePort'),'utf8')).trim().split('\n');return lines.length>=2&&lines;},'Owned Chrome DevTools readiness');
     const address=await until(async()=>(await readFile(join(directory,'endpoint'),'utf8')).trim(),'Backend endpoint');
-    const state=async()=>(await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)})).json();
-    let snapshot=await until(async()=>{const s=await state();return s.state==='running'&&s.network.capture_status.attached_targets===1&&s;},'Blank capture owner ready');
-    assert.equal(snapshot.network.capture_status.startup_mode,'capture-first');
-    assert.equal(served.size,0,'No authored URL may load before capture is armed');
-    const first=snapshot.target.id;
+    const state=async()=>{
+      try {
+        const response=await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)});
+        const value=await response.json();
+        // Fresh owned fixture only. Keep bounded control-state diagnostics,
+        // excluding request/response bodies, script sources and credentials.
+        lastCaptureSnapshot={http_status:response.status,state:value.state,error:value.error,
+          target:value.target&&{id:value.target.id,type:value.target.type,url:value.target.url==='about:blank'?'about:blank':undefined},
+          target_count:value.targets?.length,
+          targets:value.targets?.slice(0,32).map(target=>({id:target.id,type:target.type})),
+          capture_status:value.network?.capture_status};
+        lastCaptureReadError='';
+        return value;
+      } catch(error) {lastCaptureReadError=String(error).slice(0,512);throw error;}
+    };
     socket=new WebSocket(`ws://127.0.0.1:${lines[0]}${lines[1]}`);
     await new Promise((resolveOpen,reject)=>{
       const timer=setTimeout(()=>reject(Error('Fixture control socket startup timeout')),5000);
@@ -99,6 +109,21 @@ if(process.argv[2]==='--browser-wrapper') {
       const id=sequence++,timer=setTimeout(()=>{pending.delete(id);reject(Error(`${method} timeout`));},8000);
       pending.set(id,{resolve:resolveCommand,reject,timer});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));
     });
+    // Installed Chrome may have ambient workers even in a fresh profile.
+    // Identify the owned launch page directly; a global owner count is not
+    // evidence that this exact page has completed Network initialization.
+    const first=await until(async()=>{
+      const pages=(await command('Target.getTargets')).targetInfos.filter(t=>t.type==='page'&&t.url==='about:blank');
+      assert(pages.length<=1,'Owned launch must have exactly one blank page');
+      return pages[0]?.targetId;
+    },'Owned blank page identity');
+    let snapshot=await until(async()=>{
+      const s=await state(),capture=s.network?.capture_status;
+      return s.state==='running'&&s.target?.id===first&&capture?.startup_mode==='capture-first'&&
+        capture.attached_target_ids?.includes(first)&&s;
+    },'Blank capture owner ready');
+    assert.equal(snapshot.network.capture_status.startup_mode,'capture-first');
+    assert.equal(served.size,0,'No authored URL may load before capture is armed');
     const rowFor=(s,path)=>s.network.requests.find(row=>{try{return new URL(row.url).pathname===path;}catch{return false;}});
     const reportRows=async(paths,label,{strict=true,requireBodies=false}={})=>{
       for(const path of paths)observedPaths.add(path);

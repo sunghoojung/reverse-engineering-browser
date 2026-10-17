@@ -3987,7 +3987,7 @@
             `${definition.target_type} ${definition.target_id.slice(0, 12)} · ${sourceName({url: definition.url, source_type: 'script', script_id: definition.script_id})}:${definition.line + 1}:${definition.column + 1} · ${location}${resolved} · ${behavior}${definition.url_truncated ? ' · source URL truncated' : ''}`);
           meta.title = definition.url;
           const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'hook-remove';
-          remove.textContent = 'Remove'; remove.disabled = active || state.experimentPending || state.debuggerActionPending;
+          remove.textContent = 'Remove'; remove.disabled = active || state.experimentPending || state.debuggerActionPending || state.experimentNeedsRefresh;
           remove.setAttribute('aria-label', `Remove ${definition.label}`);
           remove.addEventListener('click', () => runExperimentAction({action: 'remove_runtime_hook', hook_id: definition.id}));
           row.append(title, remove, phase, meta);
@@ -4156,7 +4156,7 @@
         const requestBusy = ['running', 'cancelling'].includes(repeaterState()?.state);
         const automationBusy = automationRecipesState()?.auto_armed ||
           ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
-        const contextWorking = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) ||
+        const contextWorking = state.experimentPending || state.experimentNeedsRefresh || ['creating', 'disposing'].includes(experiment?.state) ||
           objectBusy || requestBusy || automationBusy;
         const contextReady = attached && experiment?.isolated && hooks?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && hooks.target_id === state.debuggerSession?.target?.id &&
@@ -4191,6 +4191,7 @@
         elements.experimentTitle.textContent = 'Runtime Hooks';
         elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page or its worker.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
+        else if (state.experimentNeedsRefresh) setExperimentNotice('working', 'Waiting for a current debugger snapshot. Runtime Hooks controls are paused until reconciliation.');
         else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
         else if (hooks.last_failure) setExperimentNotice('error', hooks.last_failure);
@@ -4238,13 +4239,13 @@
           (functionMode && !elements.hooksFunctionExpression.value.trim()) || state.debuggerActionPending;
         elements.hooksConfirm.disabled = !contextReady || active || !hooks?.definitions.length || contextWorking;
         elements.hooksArm.disabled = !editable || !hooks?.definitions.length || !elements.hooksConfirm.checked || state.debuggerActionPending;
-        elements.hooksDisarm.disabled = !active || state.debuggerActionPending;
+        elements.hooksDisarm.disabled = !active || state.debuggerActionPending || state.experimentNeedsRefresh;
         renderRuntimeHookDefinitions(hooks, active);
         renderRuntimeHookHits(hooks);
         renderRuntimeFieldTest(hooks, editable, contextReady && !contextWorking &&
           !['arming', 'handling', 'stopping'].includes(hooks?.state));
         elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
-        elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentError && !hooks.last_failure
+        elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentNeedsRefresh && !state.experimentError && !hooks.last_failure
           ? `Armed · ${hooks.total_hits} ${hooks.total_hits === 1 ? 'hit' : 'hits'}`
           : elements.experimentNotice.textContent;
         elements.sourceHooksNotice.hidden = !state.sourceHooksOpen ||

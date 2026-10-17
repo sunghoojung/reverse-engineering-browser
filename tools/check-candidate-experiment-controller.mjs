@@ -8,6 +8,7 @@ import {webcrypto} from 'node:crypto';
 
 function deferred(){let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};}
 export async function checkCandidateExperimentController(root) {
+  await checkRuntimeHooksSnapshotReadiness(root);
   const source=await readFile(join(root,'apps/research-ui/field_provenance.js'),'utf8');
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const closeHooks=app.slice(app.indexOf('      function closeSourceHooks('),app.indexOf('      function pivotSourceToRuntimeHooks('));
@@ -191,3 +192,62 @@ export async function checkCandidateExperimentController(root) {
   console.log('PASS candidate bridge production controller: full UTF-8 ownership, unsupported source locations, inert handoff, dirty draft cancellation, late source/digest/bind rejection, explicit target/consent lifetime, exact baseline field/hook and return/close ownership (DOM model; not rendered QA)');
 }
 if(process.argv[1]===new URL(import.meta.url).pathname)await checkCandidateExperimentController(process.argv[2]||new URL('..',import.meta.url).pathname);
+
+// Exercise the actual poll reconciler, complete Hooks renderer, navigation
+// handler and fail-closed action dispatcher. Only DOM/transport are modeled.
+async function checkRuntimeHooksSnapshotReadiness(root) {
+  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const section=(start,end)=>app.slice(app.indexOf(start),app.indexOf(end,app.indexOf(start)));
+  const code=[
+    section('      function experimentLifetimeKey(', '      function experimentContextKey('),
+    section('      function clearExperimentLifetime(', '      async function runExperimentAction('),
+    section('      async function runExperimentAction(', '      async function configureExperimentRule('),
+    section('      function setExperimentNotice(', '      function renderActionScope('),
+    section('      function renderRuntimeHookDefinitions(', '      function renderRuntimeHookHits('),
+    section('      function renderRuntimeHooks(', '      function parseAutomationVariables('),
+    section('      async function navigateRuntimeHooks(', '      async function navigateAutomationRecipes(')
+  ].join('\n');
+  const node=()=>({dataset:{},value:'',checked:false,firstChild:{},children:[],querySelectorAll:()=>[],
+    replaceChildren(...children){this.children=children;},append(...children){this.children.push(...children);},setAttribute(){},addEventListener(){},focus(){}});
+  const elements=new Proxy({}, {get(target,key){return target[key]??=(node());}}),calls=[];
+  const state={sourceHooksOpen:true,experimentPending:false,debuggerActionPending:false,experimentNeedsRefresh:false,debuggerSession:{generation:10,state:'running',target:{id:'owned-page'},scripts:[],
+    request_interception:{isolated:true,target_id:'owned-page',state:'ready',experiment_id:1,created_at_ms:101,pending_requests:0},
+    object_experiment:{state:'ready',navigation_id:0,url:''},
+    runtime_hooks:{isolated:true,target_id:'owned-page',session_id:1,state:'ready',message:'Ready',definitions:[],hits:[{}],requests:[]}}};
+  let fieldReadiness;
+  const context={state,elements,document:{createElement:node},requestInterception:()=>state.debuggerSession.request_interception,
+    objectExperimentState:()=>state.debuggerSession.object_experiment,runtimeHooksState:()=>state.debuggerSession.runtime_hooks,
+    repeaterState:()=>null,automationRecipesState:()=>null,sourceName:item=>item.url,
+    textElement:()=>node(),renderRuntimeHookHits(){},renderRuntimeFieldTest:(hooks,editable,comparable)=>{fieldReadiness={editable,comparable};},
+    experimentActionGroups:()=>['object_experiment'],experimentContextKey:()=> 'owned-lifetime',currentExperimentReceipt:value=>value,
+    debuggerAction:async request=>{calls.push(request);return null;}};
+  const api=runInNewContext(code+'\n;renderExperiment=renderRuntimeHooks;({sync:syncExperimentSession,render:renderRuntimeHooks,navigate:navigateRuntimeHooks})',context);
+  const original=state.debuggerSession;
+  elements.hooksPageUrl.value='http://127.0.0.1/owned-page';
+  api.render();assert.equal(elements.hooksNavigate.disabled,false);
+  const receipt={generation:11,groups:['request_interception','runtime_hooks','object_experiment']};
+  state.experimentReceipt=receipt;
+  state.debuggerSession=api.sync(original,{...original,generation:10},null);
+  assert.equal(state.experimentNeedsRefresh,true);api.render();
+  for(const control of ['hooksNavigate','hooksCreate','hooksDispose','hooksClear','hooksAdd','hooksArm','hooksDisarm'])
+    assert.equal(elements[control].disabled,true,control+' must reflect the stale snapshot dispatch gate');
+  assert.equal(fieldReadiness.editable,false);assert.equal(fieldReadiness.comparable,false);
+  assert.equal(elements.sourceHooksNotice.hidden,false);
+  assert.match(elements.sourceHooksNotice.textContent,/Waiting for a current debugger snapshot/);
+  // Even a queued event from an earlier enabled rendering remains fail-closed.
+  await api.navigate();assert.equal(calls.length,0);assert.match(state.experimentError,/No request was sent/);
+  assert.equal(elements.hooksPageUrl.value,'http://127.0.0.1/owned-page','Refusal preserves the URL draft');
+  state.experimentError=null;
+  state.debuggerSession.runtime_hooks.state='armed';api.render();
+  assert.equal(elements.hooksDisarm.disabled,true);
+  assert.match(elements.sourceHooksNotice.textContent,/Waiting for a current debugger snapshot/,'Armed status must not conceal the refusal reason');
+  const hooks=state.debuggerSession.runtime_hooks;
+  hooks.state='ready';hooks.definitions=[{id:1,label:'Owned',function_kind:'ordinary',entry_mode:'function',function_expression:'owned',target_id:'owned-page',target_type:'page',return_mode:'none',url:'http://127.0.0.1/owned.js'}];
+  api.render();assert.equal(elements.hooksDefinitions.children[0].children[1].disabled,true,'Remove also refuses stale snapshots');
+  state.debuggerSession=api.sync(state.debuggerSession,{...state.debuggerSession,generation:11},receipt);
+  api.render();assert.equal(state.experimentNeedsRefresh,false);assert.equal(elements.hooksNavigate.disabled,false);
+  assert.equal(elements.hooksDefinitions.children[0].children[1].disabled,false);
+  assert.equal(calls.length,0,'Fresh reconciliation never retries a refused navigation');
+  await api.navigate();assert.equal(calls.length,1);assert.equal(calls[0].action,'navigate_object_experiment');
+  console.log('PASS Runtime Hooks stale-GET admission: all mutations disabled, visible reason, retained draft, fail-closed event and explicit recovery (DOM model)');
+}

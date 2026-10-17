@@ -1195,6 +1195,7 @@ mod tests {
         }
         assert_eq!(d.capture.browser.targets.lock().unwrap().len(), 512);
         assert_eq!(d.capture.browser.waiting.lock().unwrap().len(), 512);
-        assert_eq!(d.snapshot()["network"]["capture_status"]["gaps"], 88);
+        assert_eq!(d.snapshot()["network"]["capture_status"]["gaps"], 1);
+        assert!(d.capture.browser.catalog_incomplete.load(Ordering::Acquire));
     }
 }

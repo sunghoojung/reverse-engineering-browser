@@ -110,11 +110,13 @@ try {
       return value;
     } catch(error) {lastCaptureReadError=String(error).slice(0,512);throw error;}
   };
-  let snapshot=await until(async()=>{const s=await state();return s.state==='running'&&s.network.capture_status.attached_targets===1&&s;},'First capture owner');
-  const a=snapshot.target.id;
+  // Installed browsers may have unrelated service workers or background pages.
+  // Assert our authored page is ready instead of assuming a global owner count.
+  const a=await until(async()=>(await command('Target.getTargets')).targetInfos.find(t=>t.type==='page'&&t.url===origin+'/page-a')?.targetId,'Authored first page');
+  let snapshot=await until(async()=>{const s=await state();return s.state==='running'&&s.target.id===a&&s.network.capture_status.attached_target_ids.includes(a)&&s;},'First capture owner');
   // Include about:blank -> navigation, a common new-tab lifecycle.
   const b=(await command('Target.createTarget',{url:'about:blank'})).targetId;
-  await until(async()=>(await state()).network.capture_status.attached_targets===2,'New blank tab owner');
+  await until(async()=>{const ids=(await state()).network.capture_status.attached_target_ids;return ids.includes(a)&&ids.includes(b);},'New blank tab owner');
   const sessionA=(await command('Target.attachToTarget',{targetId:a,flatten:true})).sessionId;
   const sessionB=(await command('Target.attachToTarget',{targetId:b,flatten:true})).sessionId;
   await command('Page.navigate',{url:origin+'/page-b'},sessionB);
@@ -135,7 +137,7 @@ try {
   snapshot=await until(async()=>{const s=await state();return s.network.requests.some(row=>row.url===origin+'/after-switch-a'&&row.response.body.state==='available')&&s;},'Background A after focus switch');
   for(const row of rows)assert(snapshot.network.requests.some(retained=>retained.id===row.id),'Focus switch must retain earlier rows');
   await command('Target.closeTarget',{targetId:a});
-  snapshot=await until(async()=>{const s=await state();return s.network.capture_status.attached_targets===1&&s;},'Closed A owner');
+  snapshot=await until(async()=>{const s=await state(),ids=s.network.capture_status.attached_target_ids;return !ids.includes(a)&&ids.includes(b)&&s;},'Closed A owner');
   for(const row of rows)assert(snapshot.network.requests.some(retained=>retained.id===row.id),'Closing A must retain completed evidence');
   console.log('PASS real Chromium/native transport: blank new tab navigation, both-page bodies, background capture after focus switch, history retention and target closure');
   // Early-traffic acceptance probe: these operations intentionally never wait

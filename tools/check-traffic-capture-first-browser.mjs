@@ -9,6 +9,7 @@ import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {prepareCaptureDiagnosticTransport,readCaptureDiagnostics} from './traffic-capture-diagnostics.mjs';
 import {stopBrowserTestProcess} from './browser-test-process.mjs';
 
 const script=fileURLToPath(import.meta.url),delay=ms=>new Promise(r=>setTimeout(r,ms));
@@ -29,9 +30,9 @@ if(process.argv[2]==='--browser-wrapper') {
   const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'build/reb-debugger-transport'));
   const directory=await mkdtemp(join(tmpdir(),'reb-capture-first-browser-'));
-  const served=new Set(),servedCounts=new Map(),observedPaths=new Set(),pending=new Map();let sequence=1,socket,backend,diagnostics='',failure,lastCaptureSnapshot,lastCaptureReadError='';
+  const served=new Set(),servedCounts=new Map(),servedTimes=new Map(),observedPaths=new Set(),pending=new Map(),caseFailures=[];let sequence=1,socket,backend,diagnostics='',failure,lastCaptureSnapshot,lastCaptureReadError='';
   const fixture=createServer((request,response)=>{
-    const url=new URL(request.url,`http://${request.headers.host}`);served.add(url.pathname);servedCounts.set(url.pathname,(servedCounts.get(url.pathname)??0)+1);
+    const url=new URL(request.url,`http://${request.headers.host}`);served.add(url.pathname);servedCounts.set(url.pathname,(servedCounts.get(url.pathname)??0)+1);if(!servedTimes.has(url.pathname))servedTimes.set(url.pathname,Date.now());
     response.setHeader('Access-Control-Allow-Origin','*');response.setHeader('Cache-Control','no-store');
     const html=script=>`<title>Authored capture-first fixture</title><link rel="icon" href="data:,"><script>${script}</script>`;
     let body=`synthetic:${request.url}`,type='text/plain';
@@ -73,7 +74,8 @@ if(process.argv[2]==='--browser-wrapper') {
     await writeFile(join(directory,'browser-diagnostics'),'');
     const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
     await writeFile(join(directory,'browser-wrapper'),`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} --browser-wrapper "$@"\n`,{mode:0o700});
-    const child=spawn(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--capture-first-browser',join(directory,'browser-wrapper'),'--capture-first-headless','--debugger-transport',transport,'--capture-network-content'],{cwd:directory,env:{...process.env,REB_CAPTURE_FIRST_REAL_BROWSER:browser,REB_CAPTURE_FIRST_BROWSER_FIXTURE:directory}});
+    const diagnosticTransport=await prepareCaptureDiagnosticTransport(directory,transport);
+    const child=spawn(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--capture-first-browser',join(directory,'browser-wrapper'),'--capture-first-headless','--debugger-transport',diagnosticTransport,'--capture-network-content'],{cwd:directory,env:{...process.env,REB_CAPTURE_FIRST_REAL_BROWSER:browser,REB_CAPTURE_FIRST_BROWSER_FIXTURE:directory}});
     const closed=new Promise(r=>{child.once('close',r);child.once('error',error=>{diagnostics+=error.message;r();});});backend={child,closed};
     for(const pipe of [child.stdout,child.stderr])pipe.on('data',chunk=>diagnostics=(diagnostics+chunk).slice(-8192));
     const args=await until(async()=>JSON.parse(await readFile(join(directory,'browser-args'),'utf8')),'Owned browser launch');
@@ -109,6 +111,9 @@ if(process.argv[2]==='--browser-wrapper') {
       const id=sequence++,timer=setTimeout(()=>{pending.delete(id);reject(Error(`${method} timeout`));},8000);
       pending.set(id,{resolve:resolveCommand,reject,timer});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));
     });
+    const version=await command('Browser.getVersion');
+    console.log(`CAPTURE-FIRST browser version: ${JSON.stringify({product:version.product,revision:version.revision,protocolVersion:version.protocolVersion,jsVersion:version.jsVersion})}`);
+    const runCase=async(label,run)=>{try{await run();console.log(`COMPLETED capture-first case: ${label}`);}catch(error){caseFailures.push(new Error(`${label}: ${error.message}`,{cause:error}));console.error(`FAIL capture-first case: ${label}: ${error.message}`);}};
     // Installed Chrome may have ambient workers even in a fresh profile.
     // Identify the owned launch page directly; a global owner count is not
     // evidence that this exact page has completed Network initialization.
@@ -134,68 +139,91 @@ if(process.argv[2]==='--browser-wrapper') {
         if(paths.every(path=>{const row=rowFor(current,path);return row&&(!requireBodies||row.response.body.state==='available');}))break;
         await delay(50);
       }while(Date.now()<deadline);
-      const observations=paths.map(path=>{const row=rowFor(current,path);return {path,request_row:!!row,response_body:row?.response?.body?.state??'no-row',request_state:row?.state??null,status:row?.status??null,body_reason:String(row?.response?.body?.reason??'').slice(0,512),completion_source:row?.timing_evidence?.completion_source??null,target_id:row?.target_id??null};});
+      const observations=paths.map(path=>{const row=rowFor(current,path);return {path,server_count:servedCounts.get(path)??0,server_first_received_at:servedTimes.get(path)??null,request_row:!!row,response_body:row?.response?.body?.state??'no-row',request_state:row?.state??null,status:row?.status??null,body_reason:String(row?.response?.body?.reason??'').slice(0,512),completion_source:row?.timing_evidence?.completion_source??null,target_id:row?.target_id??null};});
       console.log(`CAPTURE-FIRST ${label}: ${JSON.stringify(observations)}`);
       if(strict)assert.deepEqual(observations.filter(o=>!o.request_row).map(o=>o.path),[],`${label}: expected request rows missing (server receipt independently confirmed)`);
       if(requireBodies)assert.deepEqual(observations.filter(o=>o.response_body!=='available').map(o=>o.path),[],`${label}: expected stable response bodies missing`);
       return current;
     };
     const firstSession=(await command('Target.attachToTarget',{targetId:first,flatten:true})).sessionId;
-    await command('Page.navigate',{url:origin+'/initial'},firstSession);
-    snapshot=await reportRows(['/initial','/initial-inline'],'controlled initial rows before body consumption');
-    const initialRow=rowFor(snapshot,'/initial-inline');
-    assert.equal(servedCounts.get('/initial-inline'),1,'Startup response is requested exactly once before consumption');
-    assert.equal(initialRow.target_id,first,'Initial inline fetch retains the exact owned page');
-    // A Fetch response is a stream: merely resolving its headers does not
-    // consume its body. Drain the SAME startup response before requiring CDP
-    // completion/body retrieval; no retry request or delayed startup is added.
-    const consumed=await command('Runtime.evaluate',{expression:'window.initialResponse.then(response=>response.text())',awaitPromise:true,returnByValue:true},firstSession);
-    assert(!consumed.exceptionDetails,JSON.stringify(consumed));
-    assert.equal(consumed.result?.value,'synthetic:/initial-inline','The original startup response is fully consumed');
-    snapshot=await reportRows(['/initial','/initial-inline'],'controlled initial document and inline fetch',{requireBodies:true});
-    assert.equal(servedCounts.get('/initial-inline'),1,'Consuming the original response must not replay the request');
-    assert.equal(rowFor(snapshot,'/initial-inline').id,initialRow.id,'Body completion must update the same captured startup row');
-    assert.equal(rowFor(snapshot,'/initial-inline').response.body.text,'synthetic:/initial-inline','Captured original body bytes match the consumed response');
+    await runCase('controlled initial response',async()=>{
+      await command('Page.navigate',{url:origin+'/initial'},firstSession);
+      snapshot=await reportRows(['/initial','/initial-inline'],'controlled initial rows before body consumption');
+      const initialRow=rowFor(snapshot,'/initial-inline');
+      assert.equal(servedCounts.get('/initial-inline'),1,'Startup response is requested exactly once before consumption');
+      assert.equal(initialRow.target_id,first,'Initial inline fetch retains the exact owned page');
+      // A Fetch response is a stream: merely resolving its headers does not
+      // consume its body. Drain the SAME startup response before requiring CDP
+      // completion/body retrieval; no retry request or delayed startup is added.
+      const consumed=await command('Runtime.evaluate',{expression:'window.initialResponse.then(response=>response.text())',awaitPromise:true,returnByValue:true},firstSession);
+      assert(!consumed.exceptionDetails,JSON.stringify(consumed));
+      assert.equal(consumed.result?.value,'synthetic:/initial-inline','The original startup response is fully consumed');
+      snapshot=await reportRows(['/initial','/initial-inline'],'controlled initial document and inline fetch',{requireBodies:true});
+      assert.equal(servedCounts.get('/initial-inline'),1,'Consuming the original response must not replay the request');
+      assert.equal(rowFor(snapshot,'/initial-inline').id,initialRow.id,'Body completion must update the same captured startup row');
+      assert.equal(rowFor(snapshot,'/initial-inline').response.body.text,'synthetic:/initial-inline','Captured original body bytes match the consumed response');
+    });
     // All subsequent creations issue their first requests immediately. Do not
     // wait on per-target attachment counters or inject an extra resume command.
-    const early=await Promise.all(Array.from({length:4},(_,i)=>command('Target.createTarget',{url:`${origin}/early-tab/${i}`})));
-    snapshot=await reportRows(Array.from({length:4},(_,i)=>`/early-tab/${i}`).concat(Array.from({length:4},(_,i)=>`/early-inline/${i}`)),'simultaneous direct-navigation startup rows');
-    for(const [i,target] of early.entries())assert.equal(rowFor(snapshot,`/early-inline/${i}`).target_id,target.targetId,'Direct-navigation fetch retains exact tab identity');
-    const popup=await command('Runtime.evaluate',{expression:`window.open('${origin}/popup');'opened'`},firstSession);
-    assert(!popup.exceptionDetails,JSON.stringify(popup));
-    await reportRows(['/popup','/popup-inline'],'immediate window.open and keepalive fetch before self-close');
-    await until(async()=>!(await command('Target.getTargets')).targetInfos.some(t=>t.url===origin+'/popup'),'Popup actually closed');
-    const contexts=(await command('Target.createTarget',{url:origin+'/contexts'})).targetId;
-    snapshot=await reportRows(['/contexts','/dedicated.js','/dedicated-inline','/nested-worker.js','/nested-inline','/outer-inline','/inner-inline','/frame-worker.js','/frame-worker-inline'],'immediate dedicated/nested/frame worker and frame-script rows');
+    await runCase('simultaneous direct navigation',async()=>{
+      const early=await Promise.all(Array.from({length:4},(_,i)=>command('Target.createTarget',{url:`${origin}/early-tab/${i}`})));
+      snapshot=await reportRows(Array.from({length:4},(_,i)=>`/early-tab/${i}`).concat(Array.from({length:4},(_,i)=>`/early-inline/${i}`)),'simultaneous direct-navigation startup rows');
+      for(const [i,target] of early.entries())assert.equal(rowFor(snapshot,`/early-inline/${i}`).target_id,target.targetId,'Direct-navigation fetch retains exact tab identity');
+    });
+    await runCase('immediate popup',async()=>{
+      const popup=await command('Runtime.evaluate',{expression:`window.open('${origin}/popup');'opened'`},firstSession);
+      assert(!popup.exceptionDetails,JSON.stringify(popup));
+      await reportRows(['/popup','/popup-inline'],'immediate window.open and keepalive fetch before self-close');
+      await until(async()=>!(await command('Target.getTargets')).targetInfos.some(t=>t.url===origin+'/popup'),'Popup actually closed');
+    });
+    let contexts;
     const workerPaths=['/dedicated-inline','/nested-inline','/frame-worker-inline'];
-    const workerIds=workerPaths.map(path=>rowFor(snapshot,path).target_id);
-    assert(workerIds.every(id=>id&&id!==contexts),'Worker startup rows need independent target identity');
-    assert.equal(new Set(workerIds).size,workerPaths.length,'Distinct startup workers retain distinct targets');
-    // OOPIF request emission can precede its new target's startup hold. Keep
-    // both observed document rows in the log; neither presence nor absence is
-    // extrapolated to general completeness across browser versions.
-    snapshot=await reportRows(['/outer-frame','/inner-frame'],'OOPIF/nested-frame initial-document measurement',{strict:false});
-    const missingFrameDocuments=['/outer-frame','/inner-frame'].filter(path=>!rowFor(snapshot,path));
-    console.log(`COVERAGE LIMIT: initial cross-site frame documents missing=${JSON.stringify(missingFrameDocuments)}; startup holds alter timing and do not establish 100% capture. Body availability remains separately bounded.`);
+    await runCase('worker and frame startup',async()=>{
+      contexts=(await command('Target.createTarget',{url:origin+'/contexts'})).targetId;
+      snapshot=await reportRows(['/contexts','/dedicated.js','/dedicated-inline','/nested-worker.js','/nested-inline','/outer-inline','/inner-inline','/frame-worker.js','/frame-worker-inline'],'immediate dedicated/nested/frame worker and frame-script rows');
+      const workerIds=workerPaths.map(path=>rowFor(snapshot,path).target_id);
+      assert(workerIds.every(id=>id&&id!==contexts),'Worker startup rows need independent target identity');
+      assert.equal(new Set(workerIds).size,workerPaths.length,'Distinct startup workers retain distinct targets');
+    });
+    await runCase('frame document measurement',async()=>{
+      // OOPIF request emission can precede its new target's startup hold. Keep
+      // both observed document rows in the log; neither presence nor absence is
+      // extrapolated to general completeness across browser versions.
+      snapshot=await reportRows(['/outer-frame','/inner-frame'],'OOPIF/nested-frame initial-document measurement',{strict:false});
+      const missingFrameDocuments=['/outer-frame','/inner-frame'].filter(path=>!rowFor(snapshot,path));
+      console.log(`COVERAGE LIMIT: initial cross-site frame documents missing=${JSON.stringify(missingFrameDocuments)}; startup holds alter timing and do not establish 100% capture. Body availability remains separately bounded.`);
+    });
     // Stable post-startup bodies are a separate strict contract. Their readiness
     // must not retroactively stand in for the startup-row assertions above.
-    for(const [i,id] of workerIds.entries()) {
+    for(const [i,path] of workerPaths.entries()) {
+      await runCase(`worker ${i} stable body`,async()=>{
+      const info=(await command('Target.getTargets')).targetInfos.find(t=>t.type==='worker'&&t.url===(i===2?origin.replace('127.0.0.1','localhost'):origin)+['/dedicated.js','/nested-worker.js','/frame-worker.js'][i]);
+      assert(info,`Authored worker for ${path} exists`);
+      const id=info.targetId;
       const session=(await command('Target.attachToTarget',{targetId:id,flatten:true})).sessionId;
       const result=await command('Runtime.evaluate',{expression:`fetch('${origin}/worker-steady/${i}').then(r=>r.text())`,awaitPromise:true},session);
       assert(!result.exceptionDetails,JSON.stringify(result));
       const s=await reportRows([`/worker-steady/${i}`],`worker ${i} stable response body`,{requireBodies:true});
       assert.equal(rowFor(s,`/worker-steady/${i}`).target_id,id);
+      });
     }
-    snapshot=await state();
-    assert.equal(snapshot.network.capture_status.startup_mode,'capture-first');
-    console.log(`FINAL row/body observations: ${JSON.stringify([...observedPaths].map(path=>{const row=rowFor(snapshot,path);return {path,request_row:!!row,response_body:row?.response?.body?.state??'no-row'};}))}`);
-    assert.equal(snapshot.target.id,first,'Capture-first background activity must not change debugger focus');
+    await runCase('final mode and focus',async()=>{
+      snapshot=await state();
+      assert.equal(snapshot.network.capture_status.startup_mode,'capture-first');
+      console.log(`FINAL row/body observations: ${JSON.stringify([...observedPaths].map(path=>{const row=rowFor(snapshot,path);return {path,request_row:!!row,response_body:row?.response?.body?.state??'no-row'};}))}`);
+      assert.equal(snapshot.target.id,first,'Capture-first background activity must not change debugger focus');
+    });
     socket.close();socket=undefined;
-    await stopBrowserTestProcess(backend,7000);
-    await assert.rejects(readFile(join(profile,'DevToolsActivePort')),{code:'ENOENT'},'Owned browser profile must be removed after shutdown');
+    await runCase('owned shutdown',async()=>{
+      await stopBrowserTestProcess(backend,7000);
+      await assert.rejects(readFile(join(profile,'DevToolsActivePort')),{code:'ENOENT'},'Owned browser profile must be removed after shutdown');
+    });
+    if(caseFailures.length)throw new AggregateError(caseFailures,`${caseFailures.length} strict capture-first cases failed`);
     console.log('PASS real capture-first: initial/unsynchronized tab, immediate popup, dedicated/nested worker rows, independent stable bodies, explicit frame-document limits and owned shutdown');
   } catch(error) {failure=error;throw error;}
   finally {
+    console.log(`CAPTURE-FIRST bounded lifecycle: ${await readCaptureDiagnostics(directory)}`);
+    console.log(`CAPTURE-FIRST server counts: ${JSON.stringify([...servedCounts].slice(0,64).map(([path,count])=>({path,count,first_received_at:servedTimes.get(path)})))}`);
     const errors=[];
     for(const waiter of pending.values())clearTimeout(waiter.timer);
     try{socket?.close();}catch(error){errors.push(error);}

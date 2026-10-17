@@ -23,6 +23,7 @@ pub enum Event {
     Message(Result<Value>, Option<OwnedSemaphorePermit>),
     Barrier(oneshot::Sender<()>),
 }
+type EventObserver = Arc<dyn Fn(&Value) + Send + Sync>;
 pub struct Connection {
     stdin: Mutex<ChildStdin>,
     child: Mutex<Child>,
@@ -30,6 +31,7 @@ pub struct Connection {
     next: AtomicU64,
     closed: watch::Sender<bool>,
     events: mpsc::Sender<Event>,
+    observer: StdMutex<Option<EventObserver>>,
 }
 struct Pending<'a> {
     connection: &'a Connection,
@@ -93,6 +95,7 @@ impl Connection {
             next: AtomicU64::new(1),
             closed,
             events: sender.clone(),
+            observer: StdMutex::new(None),
         });
         let weak = Arc::downgrade(&connection);
         let diagnostics = Arc::new(StdMutex::new(Vec::new()));
@@ -135,6 +138,16 @@ impl Connection {
                         let _ = pending.send(Ok(value));
                     }
                 } else if value["method"].is_string() && value["params"].is_object() {
+                    // Optional control observer runs before the bounded data queue:
+                    // startup holds must have a deadline even when dispatch is busy.
+                    if let Some(observer) = connection
+                        .observer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                    {
+                        observer(&value);
+                    }
                     let permit = match budget
                         .clone()
                         .try_acquire_many_owned(message.len().min(u32::MAX as usize) as u32)
@@ -186,6 +199,9 @@ impl Connection {
         });
         Ok((connection, events))
     }
+    pub(super) fn observe_events(&self, observer: EventObserver) {
+        *self.observer.lock().unwrap_or_else(|e| e.into_inner()) = Some(observer);
+    }
     pub async fn barrier(&self) -> Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.events
@@ -197,6 +213,9 @@ impl Connection {
             .map_err(|_| Error::conflict("Debugger event barrier timed out"))?
             .map_err(|_| Error::conflict("Debugger event stream closed"))?;
         Ok(())
+    }
+    pub(super) fn request_close(&self) {
+        let _ = self.closed.send(true);
     }
     pub fn is_closed(&self) -> bool {
         *self.closed.borrow()
@@ -333,9 +352,6 @@ impl Connection {
                 .with_reason(Reason::uncertain(Cause::InvalidReply))
             })?;
         Ok(Some(result.clone()))
-    }
-    pub fn request_close(&self) {
-        let _ = self.closed.send(true);
     }
     pub async fn close(&self) {
         self.request_close();

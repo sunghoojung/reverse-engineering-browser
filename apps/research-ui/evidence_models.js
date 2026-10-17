@@ -426,7 +426,8 @@
           ['disabled', 'waiting', 'ready', 'partial'].includes(status.state) &&
           (status.transport_mode === undefined ||
             status.transport_mode === (status.scope === 'http-browser-targets' ? 'browser-sessions' : 'page-fallback')) &&
-          (status.startup_mode === undefined || status.startup_mode === 'passive') &&
+          (status.startup_mode === undefined || ['passive', 'capture-first'].includes(status.startup_mode)) &&
+          (['held_targets', 'resumed_targets', 'hold_timeouts', 'resume_failures', 'hold_max_ms'].every(key => status[key] === undefined || isSafeIntegerInRange(status[key], 0, Number.MAX_SAFE_INTEGER))) &&
           (status.discovery_stale === undefined || typeof status.discovery_stale === 'boolean') &&
           (status.catalog_incomplete === undefined || typeof status.catalog_incomplete === 'boolean') &&
           isSafeIntegerInRange(status.attached_targets, 0, 128) &&

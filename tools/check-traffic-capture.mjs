@@ -152,7 +152,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   checks.renderNetworkNotice();
   assert.equal(notice.kind,'gap'); assert.match(notice.text,/2 page targets exceed the capture limit/);
   assert.match(notice.text,/1 target attachments failed; retry is pending/);
-  assert.match(notice.text,/3 HTTP capture owner losses or retirements/);
+  assert.match(notice.text,/3 HTTP capture gaps/);
   assert(!notice.text.includes(status.last_error),'Raw errors are not echoed into coverage notices');
   status.discovery_stale=true;checks.renderNetworkNotice();
   assert.match(notice.text,/Target discovery is unavailable; counts are last known and new tabs may not attach/);
@@ -175,6 +175,17 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   assert.match(notice.text,/Attaching worker targets can affect their lifecycle and timeout behavior/);
   assert.match(notice.text,/first-request capture is not guaranteed/);
   assert(!notice.text.includes('worker and out-of-process iframe targets are not attached'));
+  Object.assign(status,{startup_mode:'capture-first',held_targets:2,resumed_targets:7,hold_timeouts:1,resume_failures:0,hold_max_ms:4050});
+  assert.equal(checks.isDebuggerNetworkCaptureStatus(status),true);
+  for (const key of ['held_targets','resumed_targets','hold_timeouts','resume_failures','hold_max_ms']) {
+    assert.equal(checks.isDebuggerNetworkCaptureStatus({...status,[key]:-1}),false);
+  }
+  checks.renderNetworkNotice();
+  assert.match(notice.text,/capture-first experiment in a fresh disposable browser/);
+  assert.match(notice.text,/Startup pauses alter timing/);
+  assert.match(notice.text,/2 targets held for setup · 7 resumed · 1 setup timeouts/);
+  assert(!notice.text.includes('without pausing startup'));
+  status.startup_mode='passive';
   Object.assign(status,{state:'partial',target_limit:128,attached_targets:128,eligible_targets:130,target_overflow:2});
   checks.renderNetworkNotice();assert.equal(notice.kind,'gap');
   assert.match(notice.text,/2 browser targets exceed the capture limit/);

@@ -11,6 +11,7 @@ mod marker_fuzz;
 mod network;
 mod network_browser;
 mod network_capture;
+mod network_hold;
 mod network_request;
 mod network_timing;
 pub(crate) use network_request::NetworkRequestSelection;
@@ -80,6 +81,21 @@ impl Debugger {
         } else {
             "disabled"
         });
+        if options.capture_first_owned {
+            state["network"]["capture_status"]["startup_mode"] = json!("capture-first");
+            state["network"]["capture_status"]["message"] = json!(
+                "Capture-first disposable experiment is arming; wait before navigation. Startup pauses alter timing and do not guarantee complete capture."
+            );
+            for field in [
+                "held_targets",
+                "resumed_targets",
+                "hold_timeouts",
+                "resume_failures",
+                "hold_max_ms",
+            ] {
+                state["network"]["capture_status"][field] = json!(0);
+            }
+        }
         state["network"]["instance_id"] = json!(format!(
             "{}:{}",
             std::process::id(),

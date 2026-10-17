@@ -78,6 +78,59 @@ aggregate event budget, 128 MiB requested browser buffers) and retries browser
 setup after 30 seconds. Independent worker/OOPIF capture is absent in fallback.
 The focused debugger's transport and buffers are additional in both modes.
 
+### Optional capture-first disposable experiment
+
+Ordinary browser connections remain passive. For an explicitly authorized,
+timing-altering experiment, launch a separate browser instance from the backend:
+
+```sh
+apps/origin-trace-backend/target/debug/origin-trace-backend \
+  --capture-network-content --capture-first-browser /absolute/path/to/chromium
+```
+
+The launcher creates a fresh private temporary profile, owns the browser process
+group, and starts only `about:blank`. No normal profile, cookies or credentials
+are copied. `--capture-first-browser` cannot be combined with an existing
+`--devtools-active-port`; a supplied endpoint or claim flag cannot enable startup
+holds. `--capture-first-headless` is available for automated test sessions.
+The backend prints the experiment warning and Traffic labels the mode visibly.
+Wait for Traffic capture readiness before navigating this disposable browser;
+navigating its window during startup can still precede capture. The experiment
+expires after one hour. Stopping the backend closes its browser process group.
+If group termination cannot be verified, its private profile is preserved rather
+than deleting a potentially live profile.
+
+Only this owned process uses browser-root and recursive
+`Target.setAutoAttach(waitForDebuggerOnStart=true)`. A waiting attachment is
+registered at transport ingress, before the normal bounded event queue; capture
+then enables Network and recursive attachment before resuming execution. An
+independent watchdog starts release after a four-second setup deadline, with up
+to one further second for resume acknowledgement. Initialization failure,
+rejection, capacity overflow, shutdown and cancellation release the hold or close
+this client's transport. Disconnect cannot produce an acknowledged resume; the
+client attachment is instead torn down. The UI reports held/resumed targets,
+timeouts, unacknowledged resumes, maximum observed hold time and evidence gaps.
+The ordinary row/body/event capacity limits still apply.
+
+This is an intrusive experiment, not stealth or an anti-debugging bypass. It
+changes startup ordering and timing. Chromium can hold a `window.open` popup's
+main navigation before its first request, but its OOPIF throttle can begin only
+after an initial request has already started. No lossless-capture guarantee is
+made. The implementation follows CDP's
+[Target contract](https://chromedevtools.github.io/devtools-protocol/tot/Target/)
+and the DevTools
+[setup-then-resume pattern](https://github.com/ChromeDevTools/devtools-frontend/blob/main/front_end/core/sdk/ChildTargetManager.ts).
+Chromium's popup and frame timing paths are in
+[devtools_instrumentation.cc](https://github.com/chromium/chromium/blob/main/content/browser/devtools/devtools_instrumentation.cc)
+and [target_handler.cc](https://github.com/chromium/chromium/blob/main/content/browser/devtools/protocol/target_handler.cc).
+
+`check-traffic-capture-first.mjs` fault-injects setup/release/teardown paths using
+an owned fake browser process. `check-traffic-capture-first-browser.mjs` uses
+actual Chromium and a controlled loopback server: expected request rows are
+checked independently from response-body availability, including immediate
+popups and worker startup. OOPIF initial-document coverage is reported explicitly.
+Native pre-CDP capture is separate future work.
+
 `tools/check-traffic-multitarget-browser.mjs` exercises real Chromium with the
 native transport against synthetic loopback pages, including blank new tabs,
 navigation, background fetches, focus changes and target closure; Linux CI runs

@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+import {readFileSync} from 'node:fs';
+import {summarize,summarizeTargets,targets} from './public-demo-passive-smoke.mjs';
+const secret='DO_NOT_EXPORT';
+const rows=[{url:`https://demo.fingerprint.com/path?token=${secret}#${secret}`,resource_type:'Fetch',status:200,request:{headers:[secret],body:secret},response:{body:secret},target_title:secret},{url:`https://${secret}.example.test/`,resource_type:secret,status:secret},{url:'malformed',resource_type:'Fetch',status:200}];
+const report=summarize({network:{requests:rows,dropped:3,capture_status:{attached_targets:2,pending_targets:secret,failed_targets:-1,dropped_requests:3,error:secret}}});
+assert(!JSON.stringify(report).includes(secret));assert.equal(report.requests.reduce((a,r)=>a+r.count,0),3);assert.deepEqual(report.coverage,{transport:'unknown',attached:2,eligible:null,failed:null,overflow:null,gaps:null,dropped:3,state:'unknown',discovery_stale:null});
+assert.equal(summarize({}).requests.length,0);assert.deepEqual(targets,[['fingerprint','https://demo.fingerprint.com/playground'],['hcaptcha','https://accounts.hcaptcha.com/demo']]);
+const source=readFileSync(new URL('./public-demo-passive-smoke.mjs',import.meta.url),'utf8');
+assert.equal((source.match(/command\('Page.navigate'/g)||[]).length,1);
+assert(!source.includes("command('Runtime.evaluate'"));assert(!source.includes('--no-sandbox'));
+assert.deepEqual([...new Set([...source.matchAll(/command\('([^']+)'/g)].map(m=>m[1]))].sort(),['Page.navigate','Target.attachToTarget','Target.createTarget','Target.getTargets']);
+const env={...process.env};delete env.REB_PUBLIC_DEMO_OPT_IN;
+const refused=spawnSync(process.execPath,[new URL('./public-demo-passive-smoke.mjs',import.meta.url).pathname],{env,encoding:'utf8'});assert.equal(refused.status,2);assert.match(refused.stderr,/Explicit/);
+console.log('PASS public-demo fixed targets, explicit opt-in, single-navigation contract, aggregate privacy and no raw diagnostic output');
+
+const concurrent=summarizeTargets({network:{requests:[{target_id:'a',url:targets[0][1],resource_type:'Document',status:200},{target_id:'b',url:targets[1][1],resource_type:'Document',status:201},{target_id:'worker-secret',url:targets[0][1],resource_type:'Fetch',status:202}]}},['a','b']);
+assert.equal(concurrent.results[0].requests[0].status,200);assert.equal(concurrent.results[1].requests[0].status,201);
+assert(concurrent.results.every(r=>r.outcome==='request-observed'));assert.equal(concurrent.unattributed_requests,1);
+assert(!JSON.stringify(concurrent).includes('worker-secret'));
+assert.equal(summarizeTargets({network:{requests:[{target_id:'b',url:targets[0][1],resource_type:'Document',status:200}]}},['a','b']).results[0].outcome,'request-not-observed');
+console.log('PASS simultaneous top-level target aggregate separation, unknown child/worker attribution, no cross-target success');

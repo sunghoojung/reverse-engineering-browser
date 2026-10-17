@@ -1,0 +1,41 @@
+name: Optional public demo passive smoke
+on:
+  workflow_dispatch:
+    inputs:
+      authorization:
+        description: 'Type passive-one-visit-per-demo to authorize bounded requests/fingerprinting observation of the two documented demos'
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  passive-smoke:
+    if: inputs.authorization == 'passive-one-visit-per-demo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify offline privacy and opt-in contract
+        run: node tools/check-public-demo-passive-smoke.mjs
+      - name: Build real backend and debugger transport
+        run: make origin-trace-backend debugger-transport
+      - name: Observe concurrent demo tabs with one navigation each
+        env:
+          REB_PUBLIC_DEMO_OPT_IN: passive-one-visit-per-demo
+          REB_PUBLIC_DEMO_REPORT: public-demo-summary.json
+        run: |
+          ORIGIN_TRACE_TEST_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export ORIGIN_TRACE_TEST_BROWSER
+          test -n "$ORIGIN_TRACE_TEST_BROWSER"
+          node tools/public-demo-passive-smoke.mjs
+      - name: Upload aggregate summary only
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: public-demo-aggregate-summary
+          path: public-demo-summary.json
+          if-no-files-found: ignore
+          retention-days: 3

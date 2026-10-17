@@ -568,7 +568,7 @@ async function checkInvestigationReturns(root) {
     document.querySelectorAll=s=>s==='.screen'?screens:[];
     const context=createContext({document,state,CSS:{escape:s=>s},Promise,requestAnimationFrame:fn=>frames.push(fn),integerText:(e,k)=>String(e[k]),
       selectedSource:()=>null,sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
-      renderInspector:noop,renderRuntimeHookTraffic:noop,fieldSets:{body:[]},elements:{requestRows:{querySelectorAll:()=>[row]},requestFilter:row}});
+      renderRequests:noop,updateSelectionSummary:noop,renderInspector:noop,renderRuntimeHookTraffic:noop,fieldSets:{body:[]},elements:{requestRows:{querySelectorAll:()=>[row]},requestFilter:row}});
     const run=code=>runInContext(code,context);
     run(rootFunction+'\n'+nav+'\n'+section('      function showScreen(', '      async function refresh()'));
     context.entry={screen:'traffic',label:'Requests',request:run('investigationRequestIdentity(state.requests[0])'),inspectorTab:'evidence',fieldTab:'body',fieldPath:'',focus:'#trace-origin',scroll:[]};

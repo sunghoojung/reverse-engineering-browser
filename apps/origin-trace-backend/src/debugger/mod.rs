@@ -360,6 +360,28 @@ impl Debugger {
                 }
             }
         });
+        if let Err(error) = self.initialize_connection(&connection).await {
+            // A live transport is not a ready debugger. Retire a partially
+            // initialized owner so the next refresh retries every domain.
+            // A concurrent target selection may already have removed it.
+            {
+                let mut current = self.connection.lock().await;
+                if current
+                    .as_ref()
+                    .is_some_and(|c| Arc::ptr_eq(c, &connection))
+                {
+                    current.take();
+                }
+            }
+            connection.close().await;
+            return Err(error);
+        }
+        if self.snapshot()["paused"].is_null() && self.snapshot()["state"] != "crashed" {
+            self.set_state("running", None);
+        }
+        Ok(())
+    }
+    async fn initialize_connection(&self, connection: &Arc<Connection>) -> Result<()> {
         for (method, params) in [
             ("Inspector.enable", json!({})),
             ("Runtime.enable", json!({})),
@@ -376,9 +398,6 @@ impl Debugger {
             connection.command("Network.enable",json!({"maxTotalBufferSize":16777216,"maxResourceBufferSize":2097152,"maxPostDataSize":131072}),Duration::from_secs(3)).await?;
         }
         self.restore().await?;
-        if self.snapshot()["paused"].is_null() && self.snapshot()["state"] != "crashed" {
-            self.set_state("running", None);
-        }
         Ok(())
     }
     async fn command(&self, method: &str, params: Value) -> Result<Value> {

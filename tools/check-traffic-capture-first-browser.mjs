@@ -29,13 +29,13 @@ if(process.argv[2]==='--browser-wrapper') {
   const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'build/reb-debugger-transport'));
   const directory=await mkdtemp(join(tmpdir(),'reb-capture-first-browser-'));
-  const served=new Set(),observedPaths=new Set(),pending=new Map();let sequence=1,socket,backend,diagnostics='',failure,lastCaptureSnapshot,lastCaptureReadError='';
+  const served=new Set(),servedCounts=new Map(),observedPaths=new Set(),pending=new Map();let sequence=1,socket,backend,diagnostics='',failure,lastCaptureSnapshot,lastCaptureReadError='';
   const fixture=createServer((request,response)=>{
-    const url=new URL(request.url,`http://${request.headers.host}`);served.add(url.pathname);
+    const url=new URL(request.url,`http://${request.headers.host}`);served.add(url.pathname);servedCounts.set(url.pathname,(servedCounts.get(url.pathname)??0)+1);
     response.setHeader('Access-Control-Allow-Origin','*');response.setHeader('Cache-Control','no-store');
     const html=script=>`<title>Authored capture-first fixture</title><link rel="icon" href="data:,"><script>${script}</script>`;
     let body=`synthetic:${request.url}`,type='text/plain';
-    if(url.pathname==='/initial') {type='text/html';body=html("fetch('/initial-inline');");}
+    if(url.pathname==='/initial') {type='text/html';body=html("window.initialResponse=fetch('/initial-inline');");}
     if(url.pathname.startsWith('/early-tab/')) {
       type='text/html';body=html(`fetch('/early-inline/${url.pathname.split('/').at(-1)}');`);
     }
@@ -134,7 +134,7 @@ if(process.argv[2]==='--browser-wrapper') {
         if(paths.every(path=>{const row=rowFor(current,path);return row&&(!requireBodies||row.response.body.state==='available');}))break;
         await delay(50);
       }while(Date.now()<deadline);
-      const observations=paths.map(path=>{const row=rowFor(current,path);return {path,request_row:!!row,response_body:row?.response?.body?.state??'no-row',target_id:row?.target_id??null};});
+      const observations=paths.map(path=>{const row=rowFor(current,path);return {path,request_row:!!row,response_body:row?.response?.body?.state??'no-row',request_state:row?.state??null,status:row?.status??null,body_reason:String(row?.response?.body?.reason??'').slice(0,512),completion_source:row?.timing_evidence?.completion_source??null,target_id:row?.target_id??null};});
       console.log(`CAPTURE-FIRST ${label}: ${JSON.stringify(observations)}`);
       if(strict)assert.deepEqual(observations.filter(o=>!o.request_row).map(o=>o.path),[],`${label}: expected request rows missing (server receipt independently confirmed)`);
       if(requireBodies)assert.deepEqual(observations.filter(o=>o.response_body!=='available').map(o=>o.path),[],`${label}: expected stable response bodies missing`);
@@ -142,7 +142,20 @@ if(process.argv[2]==='--browser-wrapper') {
     };
     const firstSession=(await command('Target.attachToTarget',{targetId:first,flatten:true})).sessionId;
     await command('Page.navigate',{url:origin+'/initial'},firstSession);
-    await reportRows(['/initial','/initial-inline'],'controlled initial document and inline fetch',{requireBodies:true});
+    snapshot=await reportRows(['/initial','/initial-inline'],'controlled initial rows before body consumption');
+    const initialRow=rowFor(snapshot,'/initial-inline');
+    assert.equal(servedCounts.get('/initial-inline'),1,'Startup response is requested exactly once before consumption');
+    assert.equal(initialRow.target_id,first,'Initial inline fetch retains the exact owned page');
+    // A Fetch response is a stream: merely resolving its headers does not
+    // consume its body. Drain the SAME startup response before requiring CDP
+    // completion/body retrieval; no retry request or delayed startup is added.
+    const consumed=await command('Runtime.evaluate',{expression:'window.initialResponse.then(response=>response.text())',awaitPromise:true,returnByValue:true},firstSession);
+    assert(!consumed.exceptionDetails,JSON.stringify(consumed));
+    assert.equal(consumed.result?.value,'synthetic:/initial-inline','The original startup response is fully consumed');
+    snapshot=await reportRows(['/initial','/initial-inline'],'controlled initial document and inline fetch',{requireBodies:true});
+    assert.equal(servedCounts.get('/initial-inline'),1,'Consuming the original response must not replay the request');
+    assert.equal(rowFor(snapshot,'/initial-inline').id,initialRow.id,'Body completion must update the same captured startup row');
+    assert.equal(rowFor(snapshot,'/initial-inline').response.body.text,'synthetic:/initial-inline','Captured original body bytes match the consumed response');
     // All subsequent creations issue their first requests immediately. Do not
     // wait on per-target attachment counters or inject an extra resume command.
     const early=await Promise.all(Array.from({length:4},(_,i)=>command('Target.createTarget',{url:`${origin}/early-tab/${i}`})));

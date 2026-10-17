@@ -182,7 +182,17 @@ final class ClientProjectExportSmoke: NSObject {
 
   private func willWrite(_ url: URL) {
     stage("atomic-write")
-    require(url.resolvingSymlinksInPath() == destination.resolvingSymlinksInPath(), "unexpected write destination")
+    let actual = url.resolvingSymlinksInPath()
+    let expected = destination.resolvingSymlinksInPath()
+    // Keep the exact destination guard. Diagnose URL representation versus
+    // navigation/filename mismatches without recording arbitrary selected paths.
+    let mismatch = "unexpected write destination"
+      + " pathMatch=\(actual.path == expected.path)"
+      + " standardizedMatch=\(actual.standardizedFileURL == expected.standardizedFileURL)"
+      + " parentMatch=\(actual.deletingLastPathComponent().path == expected.deletingLastPathComponent().path)"
+      + " filenameMatch=\(actual.lastPathComponent == expected.lastPathComponent)"
+      + " ownedRoot=\(actual.pathComponents.starts(with: directory.resolvingSymlinksInPath().pathComponents))"
+    require(actual == expected, mismatch)
     if phase == .writeFailure {
       // Force a genuine atomic-write error after ordinary panel approval: a
       // directory cannot be replaced by file bytes. Only our new temp path is touched.

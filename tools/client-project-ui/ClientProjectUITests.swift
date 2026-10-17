@@ -34,7 +34,20 @@ final class ClientProjectUITests: XCTestCase {
       app.typeKey("g", modifierFlags: [.command, .shift])
       app.typeKey("a", modifierFlags: [.command])
       app.typeText(destination)
-      app.typeKey(.return, modifierFlags: [])
+      // Prove typing reached a separate path field, not Save As. Focus that
+      // exact field before Return rather than relying on the shortcut's focus.
+      let folder = app.textFields.matching(NSPredicate(format: "value == %@", destination)).firstMatch
+      XCTAssertTrue(folder.exists && folder.isHittable, "Go to Folder did not receive the exact owned path")
+      let filename = window.sheets.textFields.matching(
+        NSPredicate(format: "value == %@", "reb-client-project.raw.zip")).firstMatch
+      XCTAssertTrue(filename.exists, "Go to Folder unexpectedly changed the Save As filename")
+      folder.click()
+      XCTAssertTrue(folder.value as? String == destination, "Go to Folder path changed before Return")
+      let navigation = XCTAttachment(screenshot: app.screenshot())
+      navigation.name = phase + "-native-go-to-folder"
+      navigation.lifetime = .keepAlways
+      add(navigation)
+      folder.typeKey(.return, modifierFlags: [])
       let location = window.sheets.popUpButtons.matching(
         NSPredicate(format: "value == %@ OR label == %@", phase, phase)).firstMatch
       XCTAssertTrue(location.waitForExistence(timeout: 10),

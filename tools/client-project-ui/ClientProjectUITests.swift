@@ -25,6 +25,20 @@ final class ClientProjectUITests: XCTestCase {
       XCTAssertTrue(window.waitForExistence(timeout: 30), "Missing native phase " + phase)
       let save = window.sheets.buttons["Save"].firstMatch
       XCTAssertTrue(save.waitForExistence(timeout: 15), "Missing real Save button: " + app.debugDescription)
+      // NSSavePanel.directoryURL can report the new fixture while Apple's
+      // out-of-process panel still shows the previous phase's directory. Select
+      // the owned path through Go to Folder, then verify the rendered location
+      // before approving Save. Never accept an unexpected overwrite prompt.
+      let destination = URL(fileURLWithPath: output).appendingPathComponent("destinations")
+        .appendingPathComponent(phase, isDirectory: true).path
+      app.typeKey("g", modifierFlags: [.command, .shift])
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeText(destination)
+      app.typeKey(.return, modifierFlags: [])
+      let location = window.sheets.popUpButtons.matching(
+        NSPredicate(format: "value == %@ OR label == %@", phase, phase)).firstMatch
+      XCTAssertTrue(location.waitForExistence(timeout: 10),
+                    "Save panel did not select the owned phase directory: " + app.debugDescription)
       XCTAssertTrue(save.isEnabled, "Real Save button is disabled")
       let screenshot = app.screenshot()
       // The UI-test runner is sandboxed. XCTest owns screenshot persistence;

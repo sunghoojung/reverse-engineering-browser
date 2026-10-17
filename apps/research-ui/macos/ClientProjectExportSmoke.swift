@@ -42,8 +42,12 @@ final class ClientProjectExportSmoke: NSObject {
               "cannot retain native smoke diagnostics")
     }
     NSApp.activate(ignoringOtherApps: true)
-    directory = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("reb-client-project-smoke-" + UUID().uuidString,
-                                                                 isDirectory: true)
+    guard let output = ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT_OUTPUT"]
+    else { fail("native UI-test receipt destination is missing"); return }
+    // The driver owns a fresh output directory. Share this deterministic child
+    // with XCTest so it can select the exact fixture through the real panel UI.
+    directory = URL(fileURLWithPath: output).resolvingSymlinksInPath()
+      .appendingPathComponent("destinations", isDirectory: true)
     do { try manager.createDirectory(at: directory, withIntermediateDirectories: false) }
     catch { fail("cannot create owned temporary directory") }
     exporter.installSmokeObservers(panel: { [weak self] panel in self?.presented(panel) },

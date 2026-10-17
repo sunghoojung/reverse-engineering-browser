@@ -1273,6 +1273,41 @@ for (const unavailable of ['missing', 'sample', 'file']) {
   assert.equal(fixture.state.signalProfileStatus, 'ready', 'Unchanged exact tuples survive catalog object replacement');
 }
 console.log('PASS request signal profile late headers/bodies/errors, exact owner and response identity, cache recovery and unavailable states (production functions; not rendered QA)');
+// Same-host simultaneous requests in different tabs cannot establish an exact
+// native association. Preserve the candidate metadata but never query with it.
+{
+  const fixture = signalProfileFixture();
+  const native = fixture.state.requests.map((request, index) => ({...request,
+    path:'fixture.invalid', method:'GET', tabId:`native-tab-${index}`,
+    firstTimestamp:100_000_000n, event:request.events[0]}));
+  const cdp = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
+    networkRecord('cdp-tab-b', {target_id:'cdp-tab-b'})
+  ]), native)[0];
+  assert.equal(cdp.event, native[0].event, 'The heuristic can choose the first wrong-tab candidate');
+  assert.equal(cdp.events.length, 1, 'Raw candidate metadata is not silently removed');
+  await fixture.refresh(); const calls = fixture.calls.length;
+  fixture.state.requests = [cdp]; fixture.state.selectedRequestId = cdp.id;
+  assert.equal(fixture.selection(), null); await fixture.refresh();
+  assert.equal(fixture.calls.length, calls, 'CDP correlation must not fetch a native signal profile');
+  assert.equal(fixture.state.signalProfile, null, 'Prior exact profile must not label the CDP request');
+  delete cdp.protocolRequestId;
+  assert.equal(fixture.selection(), null, 'CDP operation marker independently rejects the native root');
+}
+{
+  let click; const queried = [], navigated = [], notices = [];
+  const state = {selectedRequestId:'cdp', requests:[{id:'cdp', protocolRequestId:'raw', operation:'cdp_complete', event:{request_id:'7'}}]};
+  const elements = {requestVmCandidates:{addEventListener(name, handler) {assert.equal(name,'click'); click=handler;}}};
+  runInNewContext(appSection("      elements.requestVmCandidates.addEventListener(", "      elements.sourceWindowPrevious.addEventListener("), {
+    state, elements, refreshVmAnalysis:async id => queried.push(id), showScreen:(...args) => navigated.push(args),
+    investigationNotice:(...args) => notices.push(args)
+  });
+  await click(); assert.equal(queried.length,0); assert.equal(navigated.length,0); assert.match(notices[0][0],/no exact native-event link/);
+  delete state.requests[0].protocolRequestId; await click(); assert.equal(queried.length,0); assert.equal(navigated.length,0);
+  state.requests[0] = {id:'native', event:{request_id:'7'}}; state.selectedRequestId='native';
+  await click(); assert.deepEqual(queried,['7']); assert.equal(navigated.length,1,'Native request pivot remains available');
+}
+console.log('PASS cross-tab heuristic candidates cannot become exact Signal/VM queries; native pivot and raw metadata preserved');
+
 
 // Additive machine-readable failure reasons must not make the bundled UI
 // reject its existing application result envelope. Exercise the actual validators.
@@ -1385,7 +1420,7 @@ console.log('PASS explicit Evidence tab selection preserves sticky selection whi
 
 
 const pivotProfile = {signals: [{category: "canvas", event_count: "1", confidence: "observed", relation: "parent_chain"}]};
-const pivotState = {requests: [uiRequest("selected")], selectedRequestId: "selected", signalProfile: pivotProfile,
+const pivotState = {requests: [uiRequest("selected", {protocolRequestId:undefined, operation:"request_started"})], selectedRequestId: "selected", signalProfile: pivotProfile,
   signalProfileStatus: "ready", trafficDetailOpen: false, inspectorTab: "headers"};
 const pivotElements = {signalRequestProfile: new TrafficFixtureNode(), signalDetail: new TrafficFixtureNode()};
 const signalTab = new TrafficFixtureNode("button");
@@ -1410,7 +1445,11 @@ for (const render of [() => signalPivots.renderSignalRequestProfile(), () => sig
   assert.equal(pivotState.inspectorTab, "signals");
   assert.equal(pivotState.signalProfile, pivotProfile, "Pivots retain the already loaded signal profile");
 }
-console.log("PASS Fingerprinting request-profile and event-detail pivots reopen dismissed Traffic details without resetting evidence");
+pivotState.requests[0].protocolRequestId = 'raw-cdp';
+signalPivots.renderSignalRequestProfile();
+assert.match(pivotElements.signalRequestProfile.textContent, /no exact native-event link/);
+assert.equal(pivotElements.signalRequestProfile.querySelector('button'), null, 'Stale native profile cannot render a CDP request pivot');
+console.log("PASS Fingerprinting native request-profile/event-detail pivots and explicit CDP correlation-only state");
 
 const sourceState = {liveScriptContent: new Map(), staleScriptIds: new Set(), openScriptIds: [], openArtifactIds: [],
   debuggerRefreshing: false, debuggerEtag: null, debuggerSession: null, selectedScriptId: null,

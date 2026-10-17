@@ -598,7 +598,8 @@ sessions. It does not enable browser-root auto-attachment: Chromium's browser-ro
 popup throttling can affect `window.open` even when `waitForDebuggerOnStart` is
 false. Admission runs immediately on discovery events with at most four attach
 commands in flight; the target capacity still includes pending attachments. The
-periodic refresh reconciles missed events and retries. First requests remain
+periodic refresh retries known targets; incomplete catalogs are reconciled as
+described below. First requests remain
 best-effort, and this change does not establish lossless early navigation capture.
 
 `catalog_incomplete` is true when the 512-target catalog omitted discovered

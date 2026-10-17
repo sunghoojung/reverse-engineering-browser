@@ -20,7 +20,7 @@ if(process.argv[2]==='--transport') {
   function attach(info,parent) {
     if(sessions.has(info.targetId))return sessions.get(info.targetId);
     const sessionId=`${process.pid}:${++serial}:${info.targetId}`;sessions.set(info.targetId,sessionId);
-    emit({method:'Target.attachedToTarget',params:{sessionId,targetInfo:info,waitingForDebugger:false},...(parent?{sessionId:parent}:{})});return sessionId;
+    emit({method:'Target.attachedToTarget',params:{sessionId,targetInfo:info,waitingForDebugger:info.waiting===true},...(parent?{sessionId:parent}:{})});return sessionId;
   }
   // Parent detach invalidates descendant sessions without fabricating child
   // detach events. This is the lifecycle edge the production cascade must own.
@@ -216,6 +216,13 @@ if(process.argv[2]==='--transport') {
     assert(browserCommands.findIndex(c=>c.method==='Target.setDiscoverTargets')<browserCommands.findIndex(c=>c.method==='Target.getTargets'),'Discovery must precede initial snapshot');
     assert(!browserCommands.some(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='ghost'),'Destroyed snapshot target must not become a retry ghost');
     console.log('PASS browser sessions: discovery subscription reconciles destruction during initial snapshot');
+  });
+  await fixture([info('a'),{...info('held'),waiting:true}],{},async({until,commands})=>{
+    const s=await until(s=>s.network.capture_status.attached_target_ids.includes('a')&&s.network.capture_status.gaps>=1,'Externally waiting target visibly declined');
+    assert.deepEqual(s.network.capture_status.attached_target_ids,['a']);
+    assert.match(s.network.capture_status.last_error,/waiting for a debugger/);
+    assert(!commands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Passive capture must not resume externally waiting targets');
+    console.log('PASS browser sessions: externally waiting rejection is visible and never resumed');
   });
   await fixture([info('a')],{capture:false},async({until,commands})=>{
     const s=await until(s=>s.state==='running','Metadata-only debugger');assert.equal(s.network.capture_status.state,'disabled');

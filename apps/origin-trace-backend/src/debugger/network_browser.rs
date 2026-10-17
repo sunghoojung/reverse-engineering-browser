@@ -557,7 +557,14 @@ impl Debugger {
                     if let Some(id) = p["targetInfo"]["targetId"].as_str() {
                         self.queue_capture_target(id.to_owned());
                     }
-                    // Never resume another controller's paused target in passive mode.
+                    if p["waitingForDebugger"] == true {
+                        self.update(|s| {
+                            let status = &mut s["network"]["capture_status"];
+                            status["gaps"] = json!(status["gaps"].as_u64().unwrap_or(0).saturating_add(1));
+                            status["last_error"] = json!("Passive capture declined a target waiting for a debugger; startup ownership is unknown, so it was not resumed.");
+                        });
+                    }
+                    // Unknown startup ownership is not permission to resume a paused target.
                     self.detach_capture_session(c, session, parent).await;
                 }
                 self.browser_status();

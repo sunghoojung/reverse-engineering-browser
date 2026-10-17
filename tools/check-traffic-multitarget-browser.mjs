@@ -18,19 +18,20 @@ const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-tr
 const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'build/reb-debugger-transport'));
 const directory=await mkdtemp(join(tmpdir(),'reb-traffic-browser-'));
 const children=[];let socket,sequence=1,diagnostics='',failure;const pending=new Map();
-const served=new Set();
+const served=new Set(),servedCounts=new Map();
 let lastCaptureSnapshot=null,lastCaptureReadError='';
 const delay=ms=>new Promise(resolveDelay=>setTimeout(resolveDelay,ms));
 const fixture=createServer((request,response)=>{
   const url=new URL(request.url,`http://${request.headers.host}`);
   served.add(url.pathname);
+  servedCounts.set(url.pathname,(servedCounts.get(url.pathname)??0)+1);
   response.setHeader('Access-Control-Allow-Origin','*');
   response.setHeader('Cache-Control','no-store');
   const html=script=>`<title>Synthetic traffic page</title><link rel="icon" href="data:,"><script>${script}</script>`;
   let body=`synthetic:${request.url}`,type='text/plain';
   if(url.pathname.startsWith('/page')){type='text/html';body=html('');}
   if(url.pathname.startsWith('/early-tab/')) {
-    type='text/html';body=html(`fetch('/early-fetch/${url.pathname.split('/').at(-1)}');`);
+    type='text/html';body=html(`fetch('/early-fetch/${url.pathname.split('/').at(-1)}').then(response=>response.text());`);
   }
   if(url.pathname==='/popup') {
     type='text/html';body=html("fetch('/popup-immediate',{keepalive:true});window.close();");
@@ -44,19 +45,19 @@ const fixture=createServer((request,response)=>{
     `);
   }
   if(url.pathname==='/outer-frame') {
-    type='text/html';body=html("fetch('/outer-frame-immediate');const f=document.createElement('iframe');f.src='/inner-frame';document.documentElement.append(f);");
+    type='text/html';body=html("fetch('/outer-frame-immediate').then(response=>response.text());const f=document.createElement('iframe');f.src='/inner-frame';document.documentElement.append(f);");
   }
   if(url.pathname==='/inner-frame') {
-    type='text/html';body=html("fetch('/inner-frame-immediate');new Worker('/frame-worker.js');");
+    type='text/html';body=html("fetch('/inner-frame-immediate').then(response=>response.text());new Worker('/frame-worker.js');");
   }
   const workerFetches={'/dedicated.js':'/dedicated-immediate','/shared.js':'/shared-immediate','/frame-worker.js':'/frame-worker-immediate','/nested-worker.js':'/nested-worker-immediate'};
   if(workerFetches[url.pathname]) {
-    type='text/javascript';body=`fetch('${workerFetches[url.pathname]}');setInterval(()=>{},1000);`;
+    type='text/javascript';body=`fetch('${workerFetches[url.pathname]}').then(response=>response.text());setInterval(()=>{},1000);`;
     if(url.pathname==='/shared.js')body+='onconnect=e=>e.ports[0].start();';
     if(url.pathname==='/dedicated.js')body+="new Worker('/nested-worker.js');";
   }
   if(url.pathname==='/service.js') {
-    type='text/javascript';body="self.addEventListener('install',event=>event.waitUntil(fetch('/service-immediate').then(()=>self.skipWaiting())));";
+    type='text/javascript';body="self.addEventListener('install',event=>event.waitUntil(fetch('/service-immediate').then(response=>response.text()).then(()=>self.skipWaiting())));";
   }
   response.setHeader('Content-Type',type);response.end(body);
 });
@@ -157,6 +158,11 @@ try {
     } while(Date.now()<deadline);
     const absent=paths.filter(path=>!current.network.requests.some(row=>new URL(row.url).pathname===path&&(!body||row.response.body.state==='available')));
     if(absent.length){
+      const evidence=absent.map(path=>{
+        const row=current.network.requests.find(row=>new URL(row.url).pathname===path);
+        return {path,server_requests:servedCounts.get(path)??0,request_row:Boolean(row),target_id:row?.target_id,body_state:row?.response.body.state,body_reason:row?.response.body.reason};
+      });
+      console.log(`Early capture evidence: ${JSON.stringify(evidence).slice(0,8192)}`);
       missing.push(`${label}: ${absent.join(', ')}`);console.log(`PARTIAL early capture: ${missing.at(-1)}`);
       assert.equal(current.network.capture_status.startup_mode,'passive','Observed early gaps must not be advertised as complete startup coverage');
     }
@@ -169,8 +175,13 @@ try {
   await until(async()=>(await state()).network.capture_status.attached_target_ids.includes(controlled),'Controlled blank tab capture ready');
   const controlledSession=(await command('Target.attachToTarget',{targetId:controlled,flatten:true})).sessionId;
   await command('Page.navigate',{url:origin+'/early-tab/controlled'},controlledSession);
-  await expectCaptured(['/early-tab/controlled','/early-fetch/controlled'],'controlled navigation: initial document and first inline fetch');
+  snapshot=await expectCaptured(['/early-tab/controlled','/early-fetch/controlled'],'controlled navigation: initial document and first inline fetch');
   assert.equal(missing.length,0,'Controlled navigation must capture the first requests');
+  for(const path of ['/early-tab/controlled','/early-fetch/controlled']) {
+    assert.equal(servedCounts.get(path),1,'Controlled fixture must issue each request exactly once');
+    assert.equal(snapshot.network.requests.find(row=>row.url===origin+path)?.target_id,controlled,'Controlled first request must retain exact owner identity');
+  }
+  assert.equal(snapshot.network.requests.find(row=>row.url===origin+'/early-fetch/controlled').response.body.text,'synthetic:/early-fetch/controlled','Controlled inline response bytes must match the single authored response');
   const earlyIds=await Promise.all(Array.from({length:10},(_,i)=>command('Target.createTarget',{url:`${origin}/early-tab/${i}`})));
   snapshot=await expectCaptured(Array.from({length:10},(_,i)=>`/early-fetch/${i}`),'ten simultaneous tabs: first inline-script fetches');
   await expectCaptured(Array.from({length:10},(_,i)=>`/early-tab/${i}`),'ten simultaneous tabs: initial document requests');

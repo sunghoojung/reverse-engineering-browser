@@ -24689,7 +24689,10 @@
         ],
         "properties": {
           "scope": {
-            "const": "http-page-targets"
+            "enum": [
+              "http-page-targets",
+              "http-browser-targets"
+            ]
           },
           "state": {
             "enum": [
@@ -24702,7 +24705,7 @@
           "attached_targets": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 8
+            "maximum": 128
           },
           "eligible_targets": {
             "type": "integer",
@@ -24710,17 +24713,19 @@
             "maximum": 512
           },
           "target_limit": {
-            "const": 8
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 128
           },
           "target_overflow": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 504
+            "maximum": 511
           },
           "failed_targets": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 8
+            "maximum": 512
           },
           "gaps": {
             "$ref": "#/components/schemas/SafeInteger"
@@ -24738,7 +24743,7 @@
           },
           "attached_target_ids": {
             "type": "array",
-            "maxItems": 8,
+            "maxItems": 128,
             "items": {
               "type": "string",
               "minLength": 1,
@@ -24773,12 +24778,25 @@
             "minimum": 0,
             "maximum": 512
           },
+          "catalog_incomplete": {
+            "type": "boolean",
+            "description": "Known-target catalog is incomplete; bounded reconciliation is pending and counts exclude unknown targets."
+          },
           "discovery_stale": {
             "type": "boolean",
             "description": "Target enumeration failed. Existing owners may continue, but new targets cannot be confirmed or attached."
+          },
+          "transport_mode": {
+            "enum": [
+              "page-fallback",
+              "browser-sessions"
+            ]
+          },
+          "startup_mode": {
+            "const": "passive"
           }
         },
-        "description": "HTTP page-owner coverage only. Ready does not imply pre-attachment or first-navigation completeness. WebSocket v1 remains selected-target scoped."
+        "description": "Bounded HTTP capture coverage. Passive browser sessions cover supported page, worker and out-of-process iframe targets; page polling is a compatibility fallback. Ready never promises first-navigation or pre-attachment completeness. WebSocket v1 remains selected-target scoped."
       }
     }
   },

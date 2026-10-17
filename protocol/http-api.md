@@ -225,26 +225,39 @@ explains evidence levels and compatibility.
 ## HTTP Traffic capture coverage
 
 `GET /api/debugger` retains one shared bounded HTTP ledger across debugger target
-selection. Up to eight eligible page targets have independent Network-only CDP
-connections; DevTools targets are excluded. Capture does not pause, reload, or
-navigate pages. Requests before discovery, attachment and `Network.enable` are
-unavailable. Short-lived targets may disappear before polling observes them.
-Workers, service workers and out-of-process iframes are not independently
-attached by this page-only path; their traffic is not guaranteed. WebSocket v1
-remains scoped to the selected debugger connection.
+selection. A single browser CDP connection uses flattened, owner-qualified
+sessions for supported page, dedicated/shared/service worker and out-of-process
+iframe targets. Browser Target events trigger bounded explicit root attachment;
+recursive attachment on captured owners discovers nested contexts. This avoids
+one-per-second admission while leaving earliest requests best-effort. No startup pause, reload,
+navigation or Runtime evaluation is requested. Passive attachment can still
+change worker lifecycle/timeouts, and requests before attachment or
+`Network.enable`, including short-lived popups, remain unavailable.
 
-`network.capture_status` reports `scope: http-page-targets`, `state` (`disabled`,
-`waiting`, `ready`, `partial`), `attached_targets`, `eligible_targets`,
-`target_limit` (8), `target_overflow`, `failed_targets`, cumulative `gaps`,
-`last_error` (null or bounded diagnostic) and a coverage `message`. Ready means
-all currently eligible pages have initialized capture; it never means historical
-or first-navigation completeness. Failed initialization retries with bounded
-2–30 second backoff. Existing healthy owners retain their slots at capacity. Selecting an overflow
-tab does not evict another page or attach its HTTP capture. `attached_target_ids`
-lists the page target IDs with ready capture owners; `unattached_targets` lists up to 16 uncaptured page
-IDs and bounded current titles, with `unattached_targets_omitted` for the rest.
-`discovery_stale` marks failed enumeration: healthy existing owners can continue,
-but coverage becomes partial because new pages cannot be confirmed or attached.
+`network.capture_status` reports `scope: http-browser-targets`,
+`transport_mode: browser-sessions`, and `startup_mode: passive`. Standalone
+`--capture-target-limit` defaults to 32 and accepts 1–128; the limit counts both
+initializing and ready capture sessions across all supported target types.
+Existing owners retain their slots, and waiting targets are admitted oldest-first
+as slots become free. Selection does not silently evict another target.
+A bounded 512-target catalog feeds `eligible_targets`; `attached_targets`,
+`target_limit`, `target_overflow`, `failed_targets`, cumulative `gaps`, bounded
+`last_error` and `message` describe current coverage. `state` is `disabled`,
+`waiting`, `ready` or `partial`. Ready means known eligible targets initialized
+capture, never first-navigation completeness. Failed target initialization
+retries after five seconds. `attached_target_ids` identifies ready owners;
+`unattached_targets` includes up to 16 missing target IDs/current titles and
+`unattached_targets_omitted` counts the remainder. Worker IDs are not page IDs
+and must not be assigned the selected page's identity.
+
+When browser Target setup fails, compatibility fallback reports
+`scope: http-page-targets`, `transport_mode: page-fallback`: the previous eight
+independent page connections and one-second discovery remain, without independent
+worker/OOPIF coverage. Browser setup is retried after 30 seconds. Transport
+changes retain completed history and explicitly retire unfinished owners.
+`discovery_stale` marks failed discovery; healthy owners may continue while new
+target coverage cannot be confirmed. Browser discovery is independent of the
+selected debugger's HTTP page enumeration.
 
 Each new HTTP row receives an opaque, instance-unique public `id` and a string
 `capture_owner` token. Raw `protocol_request_id` values are only meaningful within
@@ -252,8 +265,10 @@ that owner. Redirect hops and replacement connections never reuse public IDs,
 even after eviction. Asynchronous bodies are fetched from the original owner;
 closure marks unfinished evidence unavailable and rejects late owner events.
 The global 1000-row limit and eight concurrent body retrieval jobs remain.
-Eight owners bound their transport queues to 512 MiB total and their requested
-browser Network buffers to 128 MiB total, in addition to the focused debugger.
+Browser sessions share one 64 MiB event queue and a requested 128 MiB aggregate
+Network buffer budget divided by the configured session limit (not a total
+process-memory guarantee). The page fallback retains its former 512 MiB aggregate
+transport/128 MiB browser-buffer bounds. The focused debugger is additional.
 Row titles are attachment-time metadata and may precede a later navigation.
 
 The existing `network.capture_epoch` still advances on debugger focus/reconnect
@@ -576,3 +591,23 @@ selected.reb-evidence.json` with the usual endpoint option. See
 request shape, safe persistence, exact limits, lease compatibility and stable
 error reasons. Backend event clear now also requires matching exclusive guards
 for all existing configured outputs; legacy unguarded clear returns 503.
+
+Passive browser-session HTTP capture uses browser target discovery and bounded
+explicit root attachments, with recursive attachment on captured page/worker
+sessions. It does not enable browser-root auto-attachment: Chromium's browser-root
+popup throttling can affect `window.open` even when `waitForDebuggerOnStart` is
+false. Admission runs immediately on discovery events with at most four attach
+commands in flight; the target capacity still includes pending attachments. The
+periodic refresh retries known targets; incomplete catalogs are reconciled as
+described below. First requests remain
+best-effort, and this change does not establish lossless early navigation capture.
+
+`catalog_incomplete` is true when the 512-target catalog omitted discovered
+candidates. Counts then cover known targets only, and coverage cannot report
+ready. Bounded reconciliation scans at most 4096 target descriptions per reply,
+retries at most every five seconds while incomplete, and becomes eligible on the
+next refresh after a catalog slot frees. Omitted stable targets can recover
+without another creation event. Rejected-session cleanup runs independently with
+a deduplicated FIFO of at most512 queued/in-flight session identities and four
+concurrent commands; queue overload closes that capture connection with an explicit
+gap rather than blocking healthy Network event dispatch indefinitely.

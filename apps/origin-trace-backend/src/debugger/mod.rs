@@ -9,6 +9,7 @@ mod heap;
 mod hooks;
 mod marker_fuzz;
 mod network;
+mod network_browser;
 mod network_capture;
 mod network_request;
 mod network_timing;
@@ -263,10 +264,12 @@ impl Debugger {
         if self.stopping.load(Ordering::Acquire) {
             return Err(Error::conflict("Debugger is stopping"));
         }
+        let browser_capture =
+            self.options.capture_network_content && self.refresh_browser_capture().await;
         let targets = match self.discover().await {
             Ok(targets) => targets,
             Err(error) => {
-                if self.options.capture_network_content {
+                if self.options.capture_network_content && !browser_capture {
                     self.update(|s| {
                         s["network"]["capture_status"]["state"] = json!("partial");
                         s["network"]["capture_status"]["discovery_stale"] = json!(true);
@@ -279,22 +282,31 @@ impl Debugger {
                 return Err(error);
             }
         };
-        self.refresh_captures(&targets).await;
+        if !browser_capture {
+            self.refresh_captures(&targets).await;
+        }
         let public = targets
             .iter()
             .take(128)
             .map(public_target)
             .collect::<Vec<_>>();
         let tabs = targets.iter().filter(|t| t["type"] == "page").count();
-        if self.snapshot()["targets"] != json!(public) || self.snapshot()["live_tab_count"] != tabs
-        {
+        let public = json!(public);
+        let targets_changed = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state["targets"] != public || state["live_tab_count"] != tabs
+        };
+        if targets_changed {
             self.update(|s| {
-                s["targets"] = json!(public);
+                s["targets"] = public;
                 s["live_tab_count"] = json!(tabs);
             });
         }
         let current = self.connection.lock().await.clone();
-        let current_target = self.snapshot()["target"]["id"].as_str().map(str::to_owned);
+        let current_target = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state["target"]["id"].as_str().map(str::to_owned)
+        };
         let preferred = self
             .preferred
             .lock()

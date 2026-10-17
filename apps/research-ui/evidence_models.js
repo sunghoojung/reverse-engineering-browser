@@ -422,19 +422,23 @@
       }
 
       function isDebuggerNetworkCaptureStatus(status) {
-        return isPlainObject(status) && status.scope === 'http-page-targets' &&
+        return isPlainObject(status) && ['http-page-targets', 'http-browser-targets'].includes(status.scope) &&
           ['disabled', 'waiting', 'ready', 'partial'].includes(status.state) &&
+          (status.transport_mode === undefined ||
+            status.transport_mode === (status.scope === 'http-browser-targets' ? 'browser-sessions' : 'page-fallback')) &&
+          (status.startup_mode === undefined || status.startup_mode === 'passive') &&
           (status.discovery_stale === undefined || typeof status.discovery_stale === 'boolean') &&
-          isSafeIntegerInRange(status.attached_targets, 0, 8) &&
+          (status.catalog_incomplete === undefined || typeof status.catalog_incomplete === 'boolean') &&
+          isSafeIntegerInRange(status.attached_targets, 0, 128) &&
           (status.attached_target_ids === undefined || Array.isArray(status.attached_target_ids) &&
-            status.attached_target_ids.length <= 8 && status.attached_target_ids.every(id => isBoundedText(id, 4096))) &&
+            status.attached_target_ids.length <= 128 && status.attached_target_ids.every(id => isBoundedText(id, 4096))) &&
           (status.unattached_targets === undefined || Array.isArray(status.unattached_targets) &&
             status.unattached_targets.length <= 16 && status.unattached_targets.every(target =>
               isPlainObject(target) && isBoundedText(target.id, 4096) && isBoundedText(target.title, 128))) &&
           (status.unattached_targets_omitted === undefined || isSafeIntegerInRange(status.unattached_targets_omitted, 0, 512)) &&
-          isSafeIntegerInRange(status.eligible_targets, 0, 512) && status.target_limit === 8 &&
-          isSafeIntegerInRange(status.target_overflow, 0, 504) &&
-          isSafeIntegerInRange(status.failed_targets, 0, 8) &&
+          isSafeIntegerInRange(status.eligible_targets, 0, 512) && isSafeIntegerInRange(status.target_limit, 1, 128) &&
+          isSafeIntegerInRange(status.target_overflow, 0, 511) &&
+          isSafeIntegerInRange(status.failed_targets, 0, 512) &&
           isSafeIntegerInRange(status.gaps, 0, Number.MAX_SAFE_INTEGER) &&
           (status.last_error === null || isBoundedText(status.last_error, 512)) &&
           isBoundedText(status.message, 1024);

@@ -421,6 +421,23 @@ Rejected debugger actions, including a full Watch list, retain their own error
 without marking active network capture or the live tab count disconnected.
 Short windows keep at least one request row visible when status warnings wrap.
 
+HTTP coverage reports its active target mode and attached/eligible counts. Passive
+browser target discovery supports page, worker and out-of-process iframe targets
+without requesting startup holds. Browser-root auto-attach is disabled to avoid
+its popup-throttling side effect; captured owners retain recursive child attachment. Worker attachment can affect worker lifecycle and timeout
+behavior. It improves early discovery but cannot guarantee the first
+request: traffic preceding attachment and `Network.enable` remains unavailable.
+If browser target discovery is unavailable, the notice identifies page-target polling
+fallback and its missing worker/iframe coverage. Overflow and unattached targets
+remain explicit in either mode; native-only requests are not merged into this CDP
+list, and WebSockets retain their selected-debugger-target scope.
+
+The backend command-line option `--capture-target-limit` sets the HTTP owner cap
+(default 32, allowed range 1–128). This is a backend launch option, not an in-app
+setting. Raising it permits more capture owners; the existing 1,000-request window
+and 128 KiB per-side body limits still apply.
+
+
 The live launcher disables Brave background networking, component updates, and
 sync for its isolated research profile. Browser diagnostics are retained in the
 session's private `brave.log`, separate from coordinator failures. The native

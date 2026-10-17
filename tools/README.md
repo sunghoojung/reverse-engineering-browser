@@ -89,3 +89,10 @@ Use `node tools/vm-agent.mjs opcode-ledger --definition VM.json --input LEDGER.j
 for the [offline opcode evidence ledger](../protocol/vm-opcode-ledger-v1.md), including
 strict import validation, exportable entries and explicitly bounded definition-table
 coverage. Source references and test statuses remain unverified researcher assertions.
+
+`make traffic-capture-check` owns the HTTP capture regression gate used by CI
+and `make backend-e2e`. It checks owned-process cleanup, deterministic page
+discovery (including initialization errors/timeouts and retry), flattened CDP
+session lifecycle, and actual Chromium capture. Set `ORIGIN_TRACE_TEST_BROWSER`
+to the installed browser path for the real-browser check. Synthetic checks cover
+faults deterministically; they do not replace real-browser acceptance.

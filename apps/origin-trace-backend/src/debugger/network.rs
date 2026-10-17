@@ -192,7 +192,22 @@ impl Debugger {
                 self.update(|s| {
                     if owner.retired.load(Ordering::Acquire) {return;}
                     if p["redirectResponse"].is_object() {response(s,owner,&json!({"requestId":id,"response":p["redirectResponse"]}),true);finish(s,owner,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}
-                    let target=owner.target["id"].as_str().unwrap_or("unknown").to_owned();let title=owner.target["title"].clone();let initiator=provenance::project(&json!({"operation":"call_sites","initiator":p["initiator"],"target_id":target,"scripts":provenance::catalog(s)})).unwrap_or_else(|_|json!({"sites":[],"gaps":["initiator_unavailable"]}));let requests=s["network"]["requests"].as_array_mut().unwrap();
+                    let target = owner.target["id"].as_str().unwrap_or("unknown").to_owned();
+                    let title = owner.target["title"].clone();
+                    // No frame can resolve a script when the stack is absent or empty.
+                    let scripts = if p["initiator"]["stack"]["callFrames"]
+                        .as_array()
+                        .is_some_and(|frames| !frames.is_empty())
+                    {
+                        provenance::catalog(s)
+                    } else {
+                        Value::Null
+                    };
+                    let initiator = provenance::project(&json!({
+                        "operation":"call_sites", "initiator":p["initiator"],
+                        "target_id":target, "scripts":scripts
+                    })).unwrap_or_else(|_| json!({"sites":[],"gaps":["initiator_unavailable"]}));
+                    let requests = s["network"]["requests"].as_array_mut().unwrap();
                     let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":public,"capture_owner":owner.id,"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
                     if requests.len()>=1000 {requests.remove(0);let dropped=s["network"]["dropped"].as_u64().unwrap_or(0)+1;s["network"]["dropped"]=json!(dropped);}s["network"]["requests"].as_array_mut().unwrap().push(r);
                 });
@@ -242,10 +257,11 @@ impl Debugger {
                 let _permit = permit;
                 let result = if let Some(connection) = connection {
                     connection
-                        .command(
+                        .command_session(
                             "Network.getResponseBody",
                             json!({"requestId":protocol}),
                             Duration::from_secs(5),
+                            owner.session.as_deref(),
                         )
                         .await
                         .and_then(|v| body(&v))
@@ -328,6 +344,44 @@ mod tests {
             "headers":{"Authorization":"Bearer synthetic-auth","Cookie":"sid=synthetic-cookie",
                 "Proxy-Authorization":"Basic synthetic-proxy","X-Custom-Token":"synthetic-custom"}
         }})
+    }
+
+    #[tokio::test]
+    async fn capture_initiator_projection_preserves_missing_empty_and_resolved_stacks() {
+        let debugger = debugger(true);
+        debugger.update(|s| {
+            s["scripts"] = json!([{
+                "script_id":"public-script", "cdp_script_id":"raw-script",
+                "target_id":"synthetic", "hash":"synthetic-hash"
+            }]);
+        });
+        let cases = [
+            Value::Null,
+            json!({"stack":{"callFrames":[]}}),
+            json!({"stack":{"callFrames":[],"parentId":{"id":"unresolved"}}}),
+            json!({"stack":{"callFrames":[{
+                "scriptId":"raw-script", "lineNumber":0, "columnNumber":1,
+                "url":"http://localhost/synthetic.js", "functionName":"synthetic"
+            }]}}),
+        ];
+        for (index, initiator) in cases.into_iter().enumerate() {
+            let mut event = request(&index.to_string(), "");
+            event["initiator"] = initiator;
+            let expected = provenance::project(&json!({
+                "operation":"call_sites", "initiator":event["initiator"],
+                "target_id":"synthetic", "scripts":provenance::catalog(&debugger.snapshot())
+            }))
+            .unwrap();
+            debugger.network("Network.requestWillBeSent", &event).await;
+            assert_eq!(
+                debugger.snapshot()["network"]["requests"][index]["initiator"],
+                expected
+            );
+        }
+        assert_eq!(
+            debugger.snapshot()["network"]["requests"][3]["initiator"]["sites"][0]["script_id"],
+            "public-script"
+        );
     }
 
     #[tokio::test]

@@ -75,6 +75,13 @@ export function candidatePointerAdmission(snapshot, point) {
     point.x >= snapshot.rect.left && point.x < snapshot.rect.right &&
     point.y >= snapshot.rect.top && point.y < snapshot.rect.bottom;
 }
+// Native scrolling must have room in the chosen direction. A keyboard step
+// can finish at the bottom, so a fixed "another 40px down" is not a valid oracle.
+export function candidateWarningScrollPlan({top, max, ownsPoint}, distance=400) {
+  if (!ownsPoint || !Number.isFinite(top) || !Number.isFinite(max) || max<=0 || top<0 || top>max) return null;
+  const direction=top<=max/2?1:-1,room=direction>0?max-top:top;
+  return {delta:direction*Math.min(distance,room),direction};
+}
 export function candidateGeometryStability(previous,current,count) {return previous===current?count+1:0;}
 
 export function candidateTargetSelectionMatches(expected, snapshot) {
@@ -129,6 +136,13 @@ export async function checkCandidateFixture() {
   assert.equal(candidatePointerAdmission({...moved,ownsPoint:true},{x:1238,y:800}),true,'Only the newly hit-tested point can be pressed');
   assert.equal(candidatePointerAdmission({...moved,ownsPoint:true,disabled:true},{x:1238,y:800}),false);
   assert.equal(candidatePointerAdmission({...moved,ownsPoint:false},{x:1238,y:800}),false,'An overlay cannot be mistaken for the intended control');
+  assert.deepEqual(candidateWarningScrollPlan({top:40,max:40,ownsPoint:true}),{delta:-40,direction:-1},'A completed keyboard scroll at the bottom requires an upward wheel proof');
+  assert.equal(Math.min(40,40+400)>0+40,false,'Old fixed downstream threshold cannot pass when the key reaches a 40px maximum');
+  const bottomPlan=candidateWarningScrollPlan({top:40,max:40,ownsPoint:true});
+  assert((Math.max(0,40+bottomPlan.delta)-40)*bottomPlan.direction>0,'Fresh-direction wheel proof accepts actual movement away from the bottom');
+  assert.deepEqual(candidateWarningScrollPlan({top:0,max:18,ownsPoint:true}),{delta:18,direction:1},'Short overflow still has a real reachable wheel destination');
+  assert.equal(candidateWarningScrollPlan({top:0,max:0,ownsPoint:true}),null,'No overflow cannot prove wheel scrolling');
+  assert.equal(candidateWarningScrollPlan({top:0,max:100,ownsPoint:false}),null,'A stale or occluded point cannot prove owner scrolling');
   let stable=0,previous='';for(const current of ['moving1','moving2','still','still','still','still']){stable=candidateGeometryStability(previous,current,stable);previous=current;}assert.equal(stable,3,'Click waits for three unchanged native-frame geometry samples');
   const selected={value:'worker-A',type:'worker',lifetime:'session1/nav2'},targetSnapshot={selected:'worker-A',ownerTarget:'worker-A',lifetime:selected.lifetime,options:[{value:'worker-A',type:'worker',label:'Worker · updated title'}]};
   assert(candidateTargetSelectionMatches(selected,targetSnapshot),'Same exact worker may refresh its display title');
@@ -345,10 +359,12 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     assert.deepEqual(await quietState(),before,'Candidate handoff must not create, navigate, bind, capture or arm');
     assert.equal(await evaluate("document.querySelector('#hooks-field-confirm').checked||document.querySelector('#hooks-confirm').checked"),false);
     assert.equal(await evaluate("document.querySelector('#candidate-experiment-target').value"),'');
-    await recordForm('candidate handoff');phase='explicit disposable create/open';await click('#hooks-create');
-    await until("!document.querySelector('#hooks-navigate').disabled",'Explicit create did not enable disposable navigation');await recordForm('after explicit context creation');
+    await recordForm('candidate handoff');phase='candidate warning layout';
+    const beforeWarningLayout=await quietState();
     // Display-only fixture: exercise the production notice renderer without
-    // issuing an action or changing evidence identities. Restore its exact state.
+    // issuing an action or changing evidence identities. Run before Create so
+    // its asynchronous target-retirement warning cannot replace fixture text.
+    // Restore the exact notice state after each viewport.
     for(const [width,height] of [[1440,900],[760,560],[360,740]]) {
       await viewport(width,height);
       const savedNotice=await evaluate("(()=>{const bar=document.querySelector('#investigation-navigation');return {hidden:bar.hidden,status:bar.dataset.status,open:bar.querySelector('details').open,text:document.querySelector('#investigation-notice').textContent,scroll:bar.scrollTop};})()");
@@ -361,12 +377,29 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
         for(let tabs=0;tabs<220&&!await evaluate(noticeFocused);tabs++)await key('Tab');
         assert(await evaluate(noticeFocused),'Native Tab must visibly focus the warning scroll owner');
         assert(await evaluate("(()=>{const style=getComputedStyle(document.activeElement);return style.outlineStyle!=='none'&&parseFloat(style.outlineWidth)>0;})()"),'Warning scroll focus must have a visible outline');
-        const beforeKeyScroll=await evaluate("document.querySelector('#investigation-navigation').scrollTop");
-        await key('ArrowDown');await frame();
-        await until(`document.querySelector('#investigation-navigation').scrollTop>${beforeKeyScroll}`,'Native ArrowDown must scroll the focused warning');
-        await command('Input.dispatchMouseEvent',{type:'mouseMoved',...noticeGeometry.point});
-        await command('Input.dispatchMouseEvent',{type:'mouseWheel',...noticeGeometry.point,deltaX:0,deltaY:400});await frame();
-        await until(`document.querySelector('#investigation-navigation').scrollTop>${beforeKeyScroll+40}`,'Native wheel must reach farther into the overflowing warning');
+        const scrollSnapshot=()=>evaluate("(()=>{const n=document.querySelector('#investigation-navigation'),r=n.getBoundingClientRect(),point={x:r.left+r.width/2,y:r.top+r.height/2},hit=document.elementFromPoint(point.x,point.y);return {top:n.scrollTop,max:n.scrollHeight-n.clientHeight,ownsPoint:!!hit&&n.contains(hit),point,focus:document.activeElement?.id,fixtureText:document.querySelector('#investigation-notice').textContent===Array(80).fill('Retained evidence expired.').join(' ')};})()");
+        const settleWarning=()=>evaluate("new Promise((resolve,reject)=>{const n=document.querySelector('#investigation-navigation'),start=performance.now();let last=n.scrollTop,stable=0;function frame(){const top=n.scrollTop;stable=top===last?stable+1:0;last=top;if(stable>=3)return resolve(top);if(performance.now()-start>2000)return reject(Error('Warning scroll did not settle in native frames'));requestAnimationFrame(frame);}requestAnimationFrame(frame);})");
+        await settleWarning();
+        const beforeKey=await scrollSnapshot(),keyPlan=candidateWarningScrollPlan(beforeKey);
+        receipts.push({phase,kind:'warning-before-key',width,height,...beforeKey});
+        assert(beforeKey.fixtureText&&keyPlan,'Keyboard proof requires the owned overflowing fixture');
+        await key(keyPlan.direction>0?'ArrowDown':'ArrowUp');
+        await until(`(document.querySelector('#investigation-navigation').scrollTop-${beforeKey.top})*${keyPlan.direction}>0`,'Native arrow key must scroll the focused warning');
+        await settleWarning();
+        const beforeWheel=await scrollSnapshot(),wheelPlan=candidateWarningScrollPlan(beforeWheel);
+        assert((beforeWheel.top-beforeKey.top)*keyPlan.direction>0,'Settled keyboard movement must remain in the requested direction');
+        receipts.push({phase,kind:'warning-before-wheel',width,height,...beforeWheel,wheelPlan});
+        assert(beforeWheel.fixtureText&&wheelPlan,'Wheel proof requires a fresh hit-tested owner and available scroll distance');
+        await command('Input.dispatchMouseEvent',{type:'mouseMoved',...beforeWheel.point});
+        // Complete native mouse-wheel gesture, after keyboard smooth scrolling
+        // has settled. No DOM scrolling and no mutation is dispatched or retried.
+        await command('Input.synthesizeScrollGesture',{...beforeWheel.point,yDistance:-wheelPlan.delta,gestureSourceType:'mouse',speed:1200});
+        await until(`(document.querySelector('#investigation-navigation').scrollTop-${beforeWheel.top})*${wheelPlan.direction}>0`,'Native mouse wheel must move the overflowing warning from its fresh position');
+        await settleWarning();
+        const afterWheel=await scrollSnapshot();
+        receipts.push({phase,kind:'warning-after-wheel',width,height,...afterWheel});
+        assert(afterWheel.fixtureText,'Wheel proof must retain the same warning text');
+        assert((afterWheel.top-beforeWheel.top)*wheelPlan.direction>0,'Settled wheel movement must remain in the requested direction');
         receipts.push({phase,kind:'dynamic-notice-stable-controls',width,height,...noticeGeometry});
         await screenshot(`02-notice-stable-${width}`);
       } finally {
@@ -374,6 +407,9 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
       }
     }
     await viewport(1440,900);
+    assert.deepEqual(await quietState(),beforeWarningLayout,'Warning layout/input proof must not issue experiment actions');
+    phase='explicit disposable create/open';await click('#hooks-create');
+    await until("!document.querySelector('#hooks-navigate').disabled",'Explicit create did not enable disposable navigation');await recordForm('after explicit context creation');
     const openDisposable=async(path)=>{
       await fill('#hooks-page-url',fixtureURL+path);await click('#hooks-navigate');
       await until("document.querySelector('#candidate-experiment-target').options.length>1&&!document.querySelector('#hooks-navigate').disabled",'Explicit open did not list targets');

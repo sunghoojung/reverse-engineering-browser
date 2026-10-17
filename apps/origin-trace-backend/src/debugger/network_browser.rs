@@ -494,7 +494,7 @@ impl Debugger {
         let (c, mut events) = Connection::open(&self.transport, &url)
             .await
             .map_err(|e| BrowserSetupFailure::at(BrowserSetupStage::TransportOpen, e))?;
-        if let Err(error) = c
+        if let Err(mut error) = c
             .command(
                 "Target.setDiscoverTargets",
                 json!({"discover":true}),
@@ -503,6 +503,10 @@ impl Debugger {
             .await
         {
             c.close().await;
+            error.message = format!(
+                "Browser Target.setDiscoverTargets failed: {}",
+                error.message
+            );
             return Err(BrowserSetupFailure::at(
                 BrowserSetupStage::DiscoverTargets,
                 error,

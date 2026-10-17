@@ -462,7 +462,8 @@ function renderCandidateExperiment() {
     if (targets.some(target => target.id === owner.target)) candidateUI.target.value = owner.target;
     else owner.target = '';
   }
-  const busy = state.experimentPending || ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state);
+  const busy = state.experimentPending || state.debuggerActionPending || state.experimentNeedsRefresh ||
+    ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state);
   candidateUI.target.disabled = Boolean(owner.pending || busy || owner.bound);
   if (candidateUI.cancel) candidateUI.cancel.hidden = !owner.pending;
   candidateUI.bind.disabled = !ready || !owner.target || Boolean(owner.pending || busy || owner.bound);
@@ -484,11 +485,16 @@ function renderCandidateExperiment() {
         : 'Observation hook bound. Explicitly confirm Capture, then confirm Arm hooks and repeat your owned page action. No replay runs automatically.';
     }
   }
+  if (!owner.pending && !owner.bound) {
+    if (state.experimentNeedsRefresh) notice = 'Waiting for a current debugger snapshot. Bind becomes available after reconciliation; no request was sent.';
+    else if (state.debuggerActionPending) notice = 'Waiting for the current debugger action to finish before binding. No request was sent.';
+  }
   candidateUI.status.textContent = notice;
 }
 async function bindCandidateExperiment() {
   const owner = candidateExperiment;
-  if (!owner || owner.pending || candidateUI.bind.disabled || !owner.target) return;
+  if (!owner || owner.pending || candidateUI.bind.disabled || !owner.target ||
+      state.experimentPending || state.debuggerActionPending || state.experimentNeedsRefresh) return;
   // Creating a new disposable lifetime deliberately erases prior form drafts.
   // This explicit action restores only this question's field metadata, with the
   // existing replacement consent if the researcher entered a different draft.

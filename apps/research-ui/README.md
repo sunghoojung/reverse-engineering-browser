@@ -1678,6 +1678,9 @@ Binding requires a unique complete UTF-8 digest match and strict synchronous-bod
 worker admission, never a copied script ID or URL match. Original evidence remains
 separate and returnable; no field values are saved to the notebook. See the
 [identity, consent, bounds and research contract](../../docs/product/candidate-experiment-v1.md).
+Bind waits for pending debugger actions and for a fresh debugger snapshot to
+reconcile acknowledged changes. Its status explains the wait; reconciliation
+never automatically retries a binding or restores capture/arming consent.
 
 Traffic includes a bounded read-only [WebSocket message inspector](../../protocol/websocket-capture-v1.md) for enabled CDP content captures. Text/base64 messages, exact connection lifetimes and drop counters stay separate from HTTP rows.
 

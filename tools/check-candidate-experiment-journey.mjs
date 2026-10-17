@@ -390,6 +390,11 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     await click('#hooks-definitions .hook-remove');
     await until("document.querySelectorAll('#hooks-definitions .hook-definition-row').length===0&&!document.querySelector('#candidate-experiment-bind').disabled",'Explicit Remove did not retire the backend-added definition');
     assert.equal((await quietState()).definitions,0);
+    // Removing the held-response definition acknowledges a mutation before an
+    // older in-flight GET may finish. Wait for the production poll to reconcile
+    // that receipt, not merely for the immediately updated definition list.
+    await until("!state.experimentReceipt&&!state.experimentNeedsRefresh&&!state.experimentPending&&!state.debuggerActionPending&&!document.querySelector('#candidate-experiment-bind').disabled",'Explicit Remove acknowledgement did not reconcile with a current debugger snapshot');
+    receipts.push({phase,kind:'remove-reconciled-before-bind',snapshot:await evaluate("({generation:state.debuggerSession.generation,receipt:state.experimentReceipt,needsRefresh:state.experimentNeedsRefresh,definitions:state.debuggerSession.runtime_hooks.definitions.length})")});
     phase='explicit exact-byte bind';receipts.push({phase,kind:'binding-start',snapshot:await evaluate(targetSnapshotExpression)});await keyboardTo('#candidate-experiment-bind');const bindStartedAt=performance.now();await key('Enter');
     await until("document.querySelector('#candidate-experiment-status').textContent.startsWith('Observation hook bound.')",'Exact byte binding did not finish');
     receipts.push({phase,kind:'binding-roundtrip',measurement:'Native Bind activation to rendered bound status; UI plus backend roundtrip, not pure source-scan time',elapsed_ms:Math.round(performance.now()-bindStartedAt),outcome:'bound'});

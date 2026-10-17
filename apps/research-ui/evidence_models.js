@@ -428,6 +428,7 @@
             status.transport_mode === (status.scope === 'http-browser-targets' ? 'browser-sessions' : 'page-fallback')) &&
           (status.startup_mode === undefined || status.startup_mode === 'passive') &&
           (status.discovery_stale === undefined || typeof status.discovery_stale === 'boolean') &&
+          (status.catalog_incomplete === undefined || typeof status.catalog_incomplete === 'boolean') &&
           isSafeIntegerInRange(status.attached_targets, 0, 128) &&
           (status.attached_target_ids === undefined || Array.isArray(status.attached_target_ids) &&
             status.attached_target_ids.length <= 128 && status.attached_target_ids.every(id => isBoundedText(id, 4096))) &&

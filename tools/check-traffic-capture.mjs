@@ -119,7 +119,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
     assert.equal(checks.isDebuggerNetworkCaptureStatus(expanded),true,`Configured ${limit}-target scope is valid`);
   }
 
-  for (const invalid of [{startup_mode:'hold'},{transport_mode:'browser-sessions'},{discovery_stale:'true'},{unattached_targets:[{id:'page',title:'x'.repeat(129)}]},{unattached_targets_omitted:513},{attached_targets:129},{attached_target_ids:Array(129).fill('page')},{attached_target_ids:['x'.repeat(4097)]},{attached_target_ids:[1]},{eligible_targets:513},{target_limit:129},{target_limit:0},
+  for (const invalid of [{startup_mode:'hold'},{transport_mode:'browser-sessions'},{discovery_stale:'true'},{catalog_incomplete:'true'},{unattached_targets:[{id:'page',title:'x'.repeat(129)}]},{unattached_targets_omitted:513},{attached_targets:129},{attached_target_ids:Array(129).fill('page')},{attached_target_ids:['x'.repeat(4097)]},{attached_target_ids:[1]},{eligible_targets:513},{target_limit:129},{target_limit:0},
     {target_overflow:512},{failed_targets:-1},{gaps:NaN},{scope:'all-tabs'},
     {state:'complete'},{last_error:'x'.repeat(513)},{message:'x'.repeat(1025)}]) {
     assert.equal(checks.isDebuggerNetworkCaptureStatus({...status,...invalid}),false);
@@ -170,7 +170,8 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   checks.renderNetworkNotice();
   assert.equal(notice.kind,'active');assert.match(notice.text,/12 of 12 eligible browser targets attached \(limit 32\)/);
   assert.match(notice.text,/Mode: passive browser target discovery/);
-  assert.match(notice.text,/without pausing startup/);
+  status.catalog_incomplete=true;checks.renderNetworkNotice();assert.match(notice.text,/counts cover only known targets/);assert.equal(notice.kind,'gap');delete status.catalog_incomplete;
+  assert.match(notice.text,/without requesting startup pauses/);
   assert.match(notice.text,/Attaching worker targets can affect their lifecycle and timeout behavior/);
   assert.match(notice.text,/first-request capture is not guaranteed/);
   assert(!notice.text.includes('worker and out-of-process iframe targets are not attached'));

@@ -334,8 +334,11 @@ impl Connection {
             })?;
         Ok(Some(result.clone()))
     }
-    pub async fn close(&self) {
+    pub fn request_close(&self) {
         let _ = self.closed.send(true);
+    }
+    pub async fn close(&self) {
+        self.request_close();
         let mut child = self.child.lock().await;
         let _ = child.kill().await;
         let _ = child.wait().await;

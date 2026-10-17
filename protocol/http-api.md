@@ -600,3 +600,12 @@ false. Admission runs immediately on discovery events with at most four attach
 commands in flight; the target capacity still includes pending attachments. The
 periodic refresh reconciles missed events and retries. First requests remain
 best-effort, and this change does not establish lossless early navigation capture.
+
+`catalog_incomplete` is true when the 512-target catalog omitted discovered
+candidates. Counts then cover known targets only, and coverage cannot report
+ready. Bounded reconciliation scans at most 4096 target descriptions per reply,
+retries at most every five seconds while incomplete, and becomes eligible on the
+next refresh after a catalog slot frees. Omitted stable targets can recover
+without another creation event. Rejected-session cleanup runs independently with
+four concurrent slots; overload closes that capture connection with an explicit
+gap rather than blocking healthy Network event dispatch indefinitely.

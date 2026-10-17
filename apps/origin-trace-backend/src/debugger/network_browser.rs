@@ -24,6 +24,11 @@ pub(super) struct BrowserCapture {
     pending: Mutex<BTreeMap<String, Instant>>,
     admission: Arc<tokio::sync::Mutex<()>>,
     admission_epoch: AtomicU64,
+    catalog_incomplete: AtomicBool,
+    catalog_epoch: AtomicU64,
+    catalog_retry: Mutex<Instant>,
+    cleanup: Arc<tokio::sync::Semaphore>,
+    cleanup_closing: AtomicBool,
 }
 impl BrowserCapture {
     pub fn new() -> Self {
@@ -36,6 +41,11 @@ impl BrowserCapture {
             pending: Mutex::new(BTreeMap::new()),
             admission: Arc::new(tokio::sync::Mutex::new(())),
             admission_epoch: AtomicU64::new(0),
+            catalog_incomplete: AtomicBool::new(false),
+            catalog_epoch: AtomicU64::new(0),
+            catalog_retry: Mutex::new(Instant::now()),
+            cleanup: Arc::new(tokio::sync::Semaphore::new(4)),
+            cleanup_closing: AtomicBool::new(false),
         }
     }
     fn current(&self, c: &Arc<Connection>) -> bool {
@@ -136,7 +146,9 @@ impl Debugger {
             );
             v["unattached_targets"] = json!(missing.iter().take(16).collect::<Vec<_>>());
             v["unattached_targets_omitted"] = json!(missing.len().saturating_sub(16));
-            v["state"] = json!(if count == 0 {
+            let incomplete = self.capture.browser.catalog_incomplete.load(Ordering::Acquire);
+            v["catalog_incomplete"] = json!(incomplete);
+            v["state"] = json!(if incomplete { "partial" } else if count == 0 {
                 "waiting"
             } else if missing.is_empty() {
                 "ready"
@@ -157,15 +169,21 @@ impl Debugger {
             .targets
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        self.remember_capture_target_locked(&mut targets, id, t);
+    }
+    fn remember_capture_target_locked(
+        &self,
+        targets: &mut BTreeMap<String, Value>,
+        id: String,
+        t: Value,
+    ) -> bool {
+        self.capture
+            .browser
+            .catalog_epoch
+            .fetch_add(1, Ordering::AcqRel);
         if !targets.contains_key(&id) && targets.len() >= 512 {
-            drop(targets);
-            self.update(|s| {
-                let v = &mut s["network"]["capture_status"];
-                v["gaps"] = json!(v["gaps"].as_u64().unwrap_or(0).saturating_add(1));
-                v["last_error"] =
-                    json!("Browser target catalog capacity exceeded; some targets are unknown.");
-            });
-            return;
+            self.mark_capture_catalog_incomplete();
+            return false;
         }
         if !targets.contains_key(&id) {
             self.capture
@@ -176,6 +194,88 @@ impl Debugger {
                 .push_back(id.clone());
         }
         targets.insert(id, t);
+        true
+    }
+    fn mark_capture_catalog_incomplete(&self) {
+        self.capture
+            .browser
+            .catalog_epoch
+            .fetch_add(1, Ordering::AcqRel);
+        if !self
+            .capture
+            .browser
+            .catalog_incomplete
+            .swap(true, Ordering::AcqRel)
+        {
+            self.update(|s| {
+                let status = &mut s["network"]["capture_status"];
+                status["gaps"] = json!(status["gaps"].as_u64().unwrap_or(0).saturating_add(1));
+                status["last_error"] = json!("Browser target catalog capacity exceeded; counts exclude unknown targets until reconciliation.");
+            });
+        }
+    }
+    async fn reconcile_capture_catalog(&self, c: &Arc<Connection>) {
+        if !self
+            .capture
+            .browser
+            .catalog_incomplete
+            .load(Ordering::Acquire)
+        {
+            return;
+        }
+        {
+            let mut retry = self
+                .capture
+                .browser
+                .catalog_retry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if Instant::now() < *retry {
+                return;
+            }
+            *retry = Instant::now() + Duration::from_secs(5);
+        }
+        let epoch = self.capture.browser.catalog_epoch.load(Ordering::Acquire);
+        let result = c
+            .command("Target.getTargets", json!({}), Duration::from_secs(2))
+            .await;
+        if c.is_closed() || !self.capture.browser.current(c) {
+            return;
+        }
+        if let Ok(value) = result
+            && let Some(infos) = value["targetInfos"].as_array()
+        {
+            let mut targets = self
+                .capture
+                .browser
+                .targets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // Events processed while the snapshot was in flight take precedence.
+            // Apply atomically with catalog events so a destroyed target cannot
+            // be resurrected by an older snapshot.
+            if !c.is_closed()
+                && self.capture.browser.current(c)
+                && self.capture.browser.catalog_epoch.load(Ordering::Acquire) == epoch
+            {
+                let mut complete = infos.len() <= 4096;
+                for info in infos.iter().take(4096) {
+                    if let Some(t) = target(info).filter(eligible) {
+                        let id = t["id"].as_str().unwrap().to_owned();
+                        complete &= self.remember_capture_target_locked(&mut targets, id, t);
+                    }
+                }
+                if !complete {
+                    self.mark_capture_catalog_incomplete();
+                } else {
+                    self.capture
+                        .browser
+                        .catalog_incomplete
+                        .store(false, Ordering::Release);
+                }
+            }
+        }
+        self.browser_status();
     }
     fn queue_capture_target(&self, id: String) {
         let targets = self
@@ -206,6 +306,7 @@ impl Debugger {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         if let Some(c) = existing.filter(|c| !c.is_closed()) {
+            self.reconcile_capture_catalog(&c).await;
             let expired = {
                 let mut pending = self
                     .capture
@@ -223,28 +324,17 @@ impl Debugger {
                 }
                 expired
             };
-            if !expired.is_empty() {
-                self.update(|s| {
-                    let v = &mut s["network"]["capture_status"];
-                    v["gaps"] = json!(
-                        v["gaps"]
-                            .as_u64()
-                            .unwrap_or(0)
-                            .saturating_add(expired.len() as u64)
-                    );
-                    v["last_error"] = json!(
-                        "Capture attachment was acknowledged without a session event; retrying."
-                    );
-                });
-            }
             for id in expired {
-                self.capture
-                    .browser
-                    .failures
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(id.clone(), Instant::now() + Duration::from_secs(5));
-                self.queue_capture_target(id);
+                if self.record_capture_admission_failure(
+                    &c,
+                    &id,
+                    "Capture attachment was acknowledged without a session event; retrying.",
+                ) {
+                    self.update(|s| {
+                        let v = &mut s["network"]["capture_status"];
+                        v["gaps"] = json!(v["gaps"].as_u64().unwrap_or(0).saturating_add(1));
+                    });
+                }
             }
             self.schedule_capture_admission(&c);
             return true;
@@ -320,7 +410,7 @@ impl Debugger {
             .command("Target.getTargets", json!({}), Duration::from_secs(3))
             .await
         {
-            Ok(v) if v["targetInfos"].as_array().is_some_and(|a| a.len() <= 512) => v,
+            Ok(v) if v["targetInfos"].is_array() => v,
             _ => {
                 c.close().await;
                 return Err(Error::conflict(
@@ -328,6 +418,14 @@ impl Debugger {
                 ));
             }
         };
+        self.capture
+            .browser
+            .catalog_incomplete
+            .store(false, Ordering::Release);
+        self.capture
+            .browser
+            .cleanup_closing
+            .store(false, Ordering::Release);
         // Retire legacy fallback connections before enabling multiplexed capture.
         let old = std::mem::take(
             &mut *self
@@ -369,8 +467,11 @@ impl Debugger {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        for info in initial["targetInfos"].as_array().unwrap() {
+        for info in initial["targetInfos"].as_array().unwrap().iter().take(4096) {
             self.remember_capture_target(info);
+        }
+        if initial["targetInfos"].as_array().unwrap().len() > 4096 {
+            self.mark_capture_catalog_incomplete();
         }
         *self
             .capture
@@ -453,6 +554,44 @@ impl Debugger {
             // repeated retries. Closing this one client releases all its sessions.
             self.retire_browser_owners(c, &format!("Capture detach failed: {}", error.message));
             c.close().await;
+        }
+    }
+    fn schedule_capture_detach(
+        self: &Arc<Self>,
+        c: &Arc<Connection>,
+        session: &str,
+        parent: Option<&str>,
+    ) {
+        if !self.capture.browser.current(c) || c.is_closed() {
+            return;
+        }
+        let permit = self.capture.browser.cleanup.clone().try_acquire_owned();
+        let c = c.clone();
+        match permit {
+            Ok(permit) => {
+                let d = self.clone();
+                let session = session.to_owned();
+                let parent = parent.map(str::to_owned);
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    d.detach_capture_session(&c, &session, parent.as_deref())
+                        .await;
+                });
+            }
+            Err(_) => {
+                if !self
+                    .capture
+                    .browser
+                    .cleanup_closing
+                    .swap(true, Ordering::AcqRel)
+                {
+                    self.retire_browser_owners(&c, "Capture cleanup capacity exceeded; closing this client leaves an explicit gap.");
+                    c.request_close();
+                    tokio::spawn(async move {
+                        c.close().await;
+                    });
+                }
+            }
         }
     }
     async fn browser_capture_event(self: &Arc<Self>, c: &Arc<Connection>, m: Value) {
@@ -569,7 +708,7 @@ impl Debugger {
                         });
                     }
                     // Unknown startup ownership is not permission to resume a paused target.
-                    self.detach_capture_session(c, session, parent).await;
+                    self.schedule_capture_detach(c, session, parent);
                 }
                 self.browser_status();
             }
@@ -634,12 +773,11 @@ impl Debugger {
                     self.queue_capture_target(id);
                     self.retire_capture(&owner,"Capture target crashed; unfinished evidence is unavailable and attachment will retry.");
                 }
-                self.detach_capture_session(
+                self.schedule_capture_detach(
                     c,
                     root.session.as_deref().unwrap(),
                     root.parent_session.as_deref(),
-                )
-                .await;
+                );
                 self.browser_status();
             }
             "Target.detachedFromTarget" | "Target.targetDestroyed" => {
@@ -718,6 +856,16 @@ impl Debugger {
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(id);
                     targets.remove(id);
+                    self.capture
+                        .browser
+                        .catalog_epoch
+                        .fetch_add(1, Ordering::AcqRel);
+                    *self
+                        .capture
+                        .browser
+                        .catalog_retry
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Instant::now();
                     self.capture
                         .browser
                         .waiting
@@ -854,6 +1002,63 @@ impl Debugger {
             }
         });
     }
+    fn record_capture_admission_failure(
+        &self,
+        c: &Arc<Connection>,
+        id: &str,
+        reason: &str,
+    ) -> bool {
+        let targets = self
+            .capture
+            .browser
+            .targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if c.is_closed() || !self.capture.browser.current(c) || !targets.contains_key(id) {
+            return false;
+        }
+        let owners = self
+            .capture
+            .owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // The event can establish a valid owner before its command reply arrives.
+        // Owner initialization, not a stale attach ACK, controls its health.
+        if owners.get(id).is_some_and(|o| {
+            !o.retired.load(Ordering::Acquire)
+                && o.connection
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, c))
+        }) {
+            return false;
+        }
+        self.capture
+            .browser
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+        self.capture
+            .browser
+            .failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_owned(), Instant::now() + Duration::from_secs(5));
+        let mut waiting = self
+            .capture
+            .browser
+            .waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if waiting.len() < 512 && !waiting.iter().any(|v| v == id) {
+            waiting.push_back(id.to_owned());
+        }
+        self.update(|s| {
+            s["network"]["capture_status"]["last_error"] =
+                json!(crate::validation::truncate(reason, 512))
+        });
+        true
+    }
     async fn promote_capture_target(&self, c: &Arc<Connection>) -> bool {
         if !self.capture.browser.current(c) || c.is_closed() {
             return false;
@@ -918,40 +1123,7 @@ impl Debugger {
                 return false;
             }
             if let Err(error) = result {
-                let targets = self
-                    .capture
-                    .browser
-                    .targets
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if c.is_closed() || !self.capture.browser.current(c) || !targets.contains_key(&id) {
-                    return false;
-                }
-                self.capture
-                    .browser
-                    .pending
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&id);
-                self.capture
-                    .browser
-                    .failures
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(id.clone(), Instant::now() + Duration::from_secs(5));
-                let mut waiting = self
-                    .capture
-                    .browser
-                    .waiting
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if waiting.len() < 512 && !waiting.contains(&id) {
-                    waiting.push_back(id);
-                }
-                self.update(|s| {
-                    s["network"]["capture_status"]["last_error"] =
-                        json!(crate::validation::truncate(&error.message, 512))
-                });
+                self.record_capture_admission_failure(c, &id, &error.message);
             }
             true
         } else {

@@ -24778,6 +24778,10 @@
             "minimum": 0,
             "maximum": 512
           },
+          "catalog_incomplete": {
+            "type": "boolean",
+            "description": "Known-target catalog is incomplete; bounded reconciliation is pending and counts exclude unknown targets."
+          },
           "discovery_stale": {
             "type": "boolean",
             "description": "Target enumeration failed. Existing owners may continue, but new targets cannot be confirmed or attached."

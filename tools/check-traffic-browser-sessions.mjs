@@ -15,7 +15,7 @@ if(process.argv[2]==='--transport') {
   const emit=value=>{const body=value===null?Buffer.alloc(0):Buffer.from(JSON.stringify(value));const header=Buffer.from([82,69,66,1,0,0,0,0]);header.writeUInt32BE(body.length,4);process.stdout.write(Buffer.concat([header,body]));};
   const targets=()=>JSON.parse(readFileSync(join(directory,'targets'),'utf8'));
   const options=JSON.parse(readFileSync(join(directory,'options'),'utf8'));
-  const sessions=new Map(),autoParents=new Set();let serial=0,pending=Buffer.alloc(0),discovering=false,delayedAdmission=false;
+  const sessions=new Map(),autoParents=new Set();let snapshots=0;let serial=0,pending=Buffer.alloc(0),discovering=false,delayedAdmission=false;
   let cursor=readFileSync(join(directory,'events'),'utf8').split('\n').filter(Boolean).length;
   function attach(info,parent) {
     if(sessions.has(info.targetId))return sessions.get(info.targetId);
@@ -41,7 +41,12 @@ if(process.argv[2]==='--transport') {
       }
       if(m.method==='Target.setDiscoverTargets') {discovering=m.params.discover;reply({});}
       else if(m.method==='Target.getTargets') {
-        const snapshot=targets().filter(t=>!options.snapshotRootsOnly||!t.parent);reply({targetInfos:snapshot});
+        const snapshot=targets().filter(t=>!options.snapshotRootsOnly||!t.parent);snapshots++;
+        if(options.reconcileDestroy&&snapshots===2) {
+          writeFileSync(join(directory,'targets'),JSON.stringify(snapshot.filter(t=>t.targetId!=='z509')));
+          emit({method:'Target.targetDestroyed',params:{targetId:'z509'}});
+          setTimeout(()=>{log({event:'stale-reconcile-reply'});reply({targetInfos:snapshot});},300);
+        } else reply({targetInfos:snapshot});
         if(options.snapshotDestroy&&snapshot.some(t=>t.targetId==='ghost')) {
           writeFileSync(join(directory,'targets'),JSON.stringify(snapshot.filter(t=>t.targetId!=='ghost')));
           if(discovering)emit({method:'Target.targetDestroyed',params:{targetId:'ghost'}});
@@ -49,7 +54,8 @@ if(process.argv[2]==='--transport') {
       }
       else if(m.method==='Target.attachToTarget') {
         const info=targets().find(t=>t.targetId===m.params.targetId);
-        if(options.lateFailure&&info?.targetId==='doomed') {
+        if(options.slowReply&&info?.targetId==='slow-reply') {const sessionId=attach(info);setTimeout(()=>reply({sessionId}),2500);}
+        else if(options.lateFailure&&info?.targetId==='doomed') {
           setTimeout(()=>emit({id:m.id,error:{code:-32000,message:'synthetic late attach failure'}}),400);
         } else if(options.slowAdmission&&info?.targetId==='slow-admission') {
           setTimeout(()=>reply({sessionId:attach(info)}),1500);
@@ -60,6 +66,7 @@ if(process.argv[2]==='--transport') {
           setTimeout(()=>reply({sessionId:attach(info)}),350);
         } else reply({sessionId:info?attach(info):'missing'});
       }
+      else if(m.method==='Target.detachFromTarget'&&options.slowDetach) {setTimeout(()=>{log({event:'delayed-detach-reply'});reply({});},800);}
       else if(m.method==='Network.getResponseBody')setTimeout(()=>reply({body:`body:${m.sessionId}:${m.params.requestId}`,base64Encoded:false}),m.params.requestId==='slow'?1500:0);
       else reply({});
       if(browser&&m.method==='Target.setAutoAttach'&&m.params.autoAttach) {
@@ -263,6 +270,58 @@ if(process.argv[2]==='--transport') {
     await delay(5500);
     assert.equal(commands().filter(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='doomed').length,1,'Destroyed target must not retry after late attach failure');
     console.log('PASS browser sessions: late admission error cannot resurrect destroyed target failures or retries');
+  });
+  for(const initialOverflow of [false,true]) {
+    const initial=[info('a'),...Array.from({length:511},(_,i)=>info(`z${i}`)),...(initialOverflow?[info('!recover')]:[])];
+    await fixture(initial,{limit:1},async({until,commands,add,destroy})=>{
+      await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Healthy owner with full bounded catalog');
+      if(!initialOverflow)add(info('!recover'));
+      const full=await until(s=>s.network.capture_status.catalog_incomplete===true,'Catalog overflow remains explicitly incomplete');
+      assert.equal(full.network.capture_status.eligible_targets,512);assert.equal(full.network.capture_status.state,'partial');
+      destroy('z510');
+      const recovered=await until(s=>s.network.capture_status.catalog_incomplete===false&&s.network.capture_status.unattached_targets.some(t=>t.id==='!recover'),'Omitted stable target recovered after catalog slot frees');
+      assert.equal(recovered.network.capture_status.eligible_targets,512);
+      assert(commands().filter(c=>c.method==='Target.getTargets').length>=2,'Overflow recovery requires an actual catalog reconciliation');
+      console.log(`PASS browser sessions: ${initialOverflow?'initial':'incremental'}513-target catalog remains bounded and recovers omitted target`);
+    });
+  }
+  await fixture([info('a'),...Array.from({length:511},(_,i)=>info(`z${i}`)),info('!recover')],{limit:1,reconcileDestroy:true},async({until,commands,destroy})=>{
+    await until(s=>s.network.capture_status.catalog_incomplete===true,'Overflow before concurrent reconciliation');
+    destroy('z510');
+    await until(()=>commands().some(c=>c.event==='stale-reconcile-reply'),'Snapshot reply after target destruction');
+    await until(s=>s.network.capture_status.catalog_incomplete===false&&s.network.capture_status.eligible_targets===511,'Fresh reconciliation excludes target destroyed during stale snapshot');
+    assert(!commands().some(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='z509'),'Destroyed queued target never becomes an owner');
+    console.log('PASS browser sessions: concurrent destruction cannot be resurrected by catalog reconciliation');
+  });
+  await fixture([info('a')],{limit:1,slowDetach:true},async({until,commands,add,send})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Healthy owner before rejected teardown');
+    add(info('overflow','worker','a'));
+    await until(()=>commands().some(c=>c.method==='Target.detachFromTarget'),'Overflow detach awaiting delayed reply');
+    request(send,'a','during-overflow-detach');finish(send,'a','during-overflow-detach');
+    await until(s=>s.network.requests.some(row=>row.protocol_request_id==='during-overflow-detach'&&row.response.body.state==='available'),'Healthy traffic progresses during rejected cleanup',3000);
+    const log=commands(),body=log.findIndex(c=>c.method==='Network.getResponseBody'&&c.params.requestId==='during-overflow-detach'),reply=log.findIndex(c=>c.event==='delayed-detach-reply');
+    assert(body>=0&&(reply<0||body<reply),'Healthy owner body command precedes delayed rejected-session cleanup reply');
+    console.log('PASS browser sessions: rejected-session cleanup never blocks healthy owner traffic');
+  });
+  await fixture([info('a')],{limit:1,slowDetach:true},async({until,commands,add})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Healthy owner before cleanup saturation');
+    for(let i=0;i<5;i++)add(info(`overflow-${i}`,'worker','a'));
+    const s=await until(s=>String(s.network.capture_status.last_error).includes('cleanup capacity exceeded'),'Bounded cleanup saturation is explicit');
+    assert.equal(s.network.capture_status.discovery_stale,true);
+    assert.equal(s.network.capture_status.state,'partial');
+    assert(s.network.capture_status.gaps>0);
+    assert(commands().filter(c=>c.method==='Target.detachFromTarget').length<=4,'Cleanup tasks remain bounded');
+    console.log('PASS browser sessions: cleanup saturation closes capture with a persistent explicit gap');
+  });
+  await fixture([info('a')],{slowReply:true},async({until,commands,add})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Initial owner before delayed ACK');
+    add(info('slow-reply'));
+    await until(s=>s.network.capture_status.attached_target_ids.includes('slow-reply'),'Event-established owner is ready before command ACK');
+    await delay(2600);add(info('refresh-status'));
+    const s=await until(s=>s.network.capture_status.attached_targets===3,'Status recomputed after delayed ACK timeout');
+    assert.equal(s.network.capture_status.failed_targets,0,'Late command timeout cannot mark established owner failed');
+    assert.equal(commands().filter(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='slow-reply').length,1);
+    console.log('PASS browser sessions: delayed attach ACK cannot poison established owner health');
   });
   await fixture([info('a')],{capture:false},async({until,commands})=>{
     const s=await until(s=>s.state==='running','Metadata-only debugger');assert.equal(s.network.capture_status.state,'disabled');

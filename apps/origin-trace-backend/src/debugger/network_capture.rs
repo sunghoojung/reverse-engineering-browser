@@ -276,6 +276,7 @@ impl Debugger {
         status["target_overflow"] = json!(eligible_count.saturating_sub(TARGET_LIMIT));
         status["failed_targets"] = json!(failed);
         status["discovery_stale"] = json!(false);
+        status["catalog_incomplete"] = json!(false);
         status["attached_target_ids"] = json!(attached_ids);
         status["unattached_targets"] = json!(unattached.iter().take(16).collect::<Vec<_>>());
         status["unattached_targets_omitted"] = json!(unattached.len().saturating_sub(16));
@@ -290,6 +291,7 @@ impl Debugger {
                     "target_overflow",
                     "failed_targets",
                     "discovery_stale",
+                    "catalog_incomplete",
                     "attached_target_ids",
                     "unattached_targets",
                     "unattached_targets_omitted",

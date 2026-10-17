@@ -7,6 +7,7 @@ import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {stopBrowserTestProcess} from './browser-test-process.mjs';
 const script=fileURLToPath(import.meta.url);
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 if(process.argv[2]==='--transport') {
@@ -22,6 +23,11 @@ if(process.argv[2]==='--transport') {
     while(pending.length>=8&&pending.length>=8+pending.readUInt32BE(4)) {
       const size=pending.readUInt32BE(4),m=JSON.parse(pending.subarray(8,8+size));pending=pending.subarray(8+size);
       firstMethod??=m.method;log({event:'command',method:m.method,role:firstMethod==='Network.enable'?'capture':'focus'});
+      if(firstMethod==='Inspector.enable'&&m.method===process.env.REB_INIT_FIXTURE_METHOD&&!existsSync(join(directory,'failed-once'))) {
+        writeFileSync(join(directory,'failed-once'),'failed',{mode:0o600});
+        if(process.env.REB_INIT_FIXTURE_MODE!=='timeout')emit({id:m.id,error:{code:-32000,message:'Synthetic initialization failure'}});
+        continue;
+      }
       if(firstMethod==='Network.enable'&&m.method==='Network.enable'&&target==='retry'&&!existsSync(join(directory,'failed-once'))) {
         writeFileSync(join(directory,'failed-once'),'failed',{mode:0o600});emit({id:m.id,error:{code:-32000,message:'Synthetic capture attach failure'}});continue;
       }
@@ -29,7 +35,10 @@ if(process.argv[2]==='--transport') {
         const wait=m.params.requestId==='slow'?1200:0;
         setTimeout(()=>emit({id:m.id,result:{body:`body:${target}:${m.params.requestId}`,base64Encoded:false}}),wait);
       } else {emit({id:m.id,result:{}});}
-      if(m.method==='Network.enable')enabled=true;
+      if(m.method==='Network.enable') {
+        enabled=true;
+        if(process.env.REB_INIT_FIXTURE_MODE)emit({method:'Network.requestWillBeSent',params:{requestId:'synthetic-request',timestamp:1,wallTime:1,type:'Fetch',request:{url:'http://localhost/synthetic',method:'GET',headers:{}}}});
+      }
     }
   });
   setInterval(()=>{
@@ -45,18 +54,18 @@ if(process.argv[2]==='--transport') {
   const root=resolve(process.argv[2]??'.');
   const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
-  async function fixture(capture,run) {
+  async function fixture(capture,run,initialization={}) {
     const directory=await mkdtemp(join(tmpdir(),'reb-traffic-multitarget-'));
-    const targets=['a'];let discoveryFailure=false;let backend,exited,diagnostics='',address;
+    const targets=['a'];let discoveryFailure=false;let backend,closed,diagnostics='',address,discoveries=0;
     await writeFile(join(directory,'events.jsonl'),'');
     const server=createServer((_req,res)=>{
+      discoveries++;
       if(discoveryFailure){res.writeHead(503);res.end('synthetic discovery failure');return;}
       res.setHeader('Content-Type','application/json');
       res.end(JSON.stringify(targets.map(id=>({id,type:'page',title:id,url:`http://localhost/${id}`,webSocketDebuggerUrl:`ws://127.0.0.1:${server.address().port}/devtools/page/${id}`}))));
     });
     await new Promise(r=>server.listen(0,'127.0.0.1',r));
-    const events=[];
-    const send=(target,method,params)=>{events.push({target,method,params});appendFileSync(join(directory,'events.jsonl'),JSON.stringify({target,method,params})+'\n');};
+    const send=(target,method,params)=>appendFileSync(join(directory,'events.jsonl'),JSON.stringify({target,method,params})+'\n');
     const disconnect=target=>appendFileSync(join(directory,'events.jsonl'),JSON.stringify({target,disconnect:true})+'\n');
     const get=async()=>{address??=(await readFile(join(directory,'endpoint'),'utf8')).trim();return await(await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)})).json();};
     async function until(predicate,label,ms=15000) {
@@ -71,16 +80,46 @@ if(process.argv[2]==='--transport') {
     try {
       await writeFile(join(directory,'active'),`${server.address().port}\n/devtools/browser/fixture\n`,{mode:0o600});
       await writeFile(join(directory,'transport'),`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} --transport "$@"\n`,{mode:0o700});
-      backend=spawn(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',join(directory,'active'),'--debugger-transport',join(directory,'transport'),...(capture?['--capture-network-content']:[])],{cwd:directory,env:{...process.env,REB_CAPTURE_FIXTURE:directory}});
-      exited=new Promise(r=>{backend.once('exit',r);backend.once('error',e=>{diagnostics+=e.message;r();});});
+      backend=spawn(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',join(directory,'active'),'--debugger-transport',join(directory,'transport'),...(capture?['--capture-network-content']:[])],{cwd:directory,env:{...process.env,REB_CAPTURE_FIXTURE:directory,REB_INIT_FIXTURE_METHOD:initialization.method||'',REB_INIT_FIXTURE_MODE:initialization.mode||''}});
+      closed=new Promise(r=>backend.once('close',r));
+      backend.once('error',e=>{diagnostics+=e.message;});
       for(const stream of [backend.stdout,backend.stderr])stream.on('data',chunk=>diagnostics=(diagnostics+chunk).slice(-16384));
       const select=async target=>{const response=await fetch(new URL('/api/debugger/actions',address),{method:'POST',headers:{'Content-Type':'application/json',Origin:address},body:JSON.stringify({action:'select_target',target_id:target})});assert(response.ok,await response.text());};
-      await run({targets,send,disconnect,get,until,select,directory,setDiscoveryFailure:value=>{discoveryFailure=value;}});
+      await run({targets,send,disconnect,get,until,select,directory,discoveries:()=>discoveries,setDiscoveryFailure:value=>{discoveryFailure=value;}});
     } finally {
-      if(backend&&backend.exitCode===null){backend.kill('SIGTERM');await Promise.race([exited,delay(5000)]);if(backend.exitCode===null&&backend.signalCode===null){backend.kill('SIGKILL');await exited;}}
-      await new Promise(r=>server.close(r));await rm(directory,{recursive:true,force:true});
+      try {if(backend)await stopBrowserTestProcess({child:backend,closed},5000);}
+      finally {await new Promise(r=>server.close(r));}
+      await rm(directory,{recursive:true,force:true});
     }
   }
+  // Initialization and page capture share the same discovery/transport fixture.
+  for(const {name,method='',mode='error',capture=true} of [
+    {name:'successful initialization'},
+    {name:'Network.enable error retry',method:'Network.enable'},
+    {name:'early domain error retry',method:'Runtime.enable'},
+    {name:'Network.enable timeout retry',method:'Network.enable',mode:'timeout'},
+    {name:'restore settings error retry',method:'Debugger.setPauseOnExceptions'},
+    {name:'disabled content capture',capture:false},
+  ])await fixture(capture,async({until,directory,discoveries})=>{
+    const state=await until(s=>s.state==='running',`${name}: initialization recovers`);
+    assert.equal(state.error,null,`${name}: successful recovery clears error`);
+    assert.equal(state.network.capture_enabled,capture);
+    assert.equal(state.network.requests.length,capture?1:0);
+    const before=discoveries();
+    await until(()=>discoveries()>=before+2,`${name}: refresh remains live`);
+    const commands=(await readFile(join(directory,'commands.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+    const owners=commands.filter(command=>command.method==='Inspector.enable');
+    const focused=new Set(owners.map(owner=>owner.pid));
+    const focusedCommands=commands.filter(command=>focused.has(command.pid));
+    assert.equal(owners.length,method?2:1,`${name}: exactly one retry, no reconnect loop`);
+    if(method) {
+      assert.equal(focusedCommands.filter(command=>command.method===method).length,2,`${name}: failed domain is retried`);
+      assert.throws(()=>process.kill(owners[0].pid,0),{code:'ESRCH'},`${name}: failed transport must be reaped`);
+      assert.equal(state.network.capture_epoch,2);
+    }
+    if(!capture)assert(!commands.some(command=>command.method==='Network.enable'),'Disabled content capture must never enable Network');
+    console.log(`PASS debugger initialization: ${name}`);
+  },{method,mode});
   const request=(id,url='synthetic')=>({requestId:id,timestamp:1,wallTime:1,type:'Fetch',request:{url:`http://localhost/${url}`,method:'GET',headers:{}}});
   const complete=(send,target,id,status=200)=>{send(target,'Network.responseReceived',{requestId:id,response:{status,headers:{}}});send(target,'Network.loadingFinished',{requestId:id,timestamp:2,encodedDataLength:10});};
   await fixture(true,async({targets,send,disconnect,get,until,select,directory,setDiscoveryFailure})=>{

@@ -44,7 +44,7 @@ if(process.argv[2]==='--browser') {
     const header=Buffer.from([82,69,66,1,0,0,0,0]);header.writeUInt32BE(body.length,4);
     process.stdout.write(Buffer.concat([header,body]));
   };
-  const sessions=new Map(),held=new Set();let serial=0,pending=Buffer.alloc(0),rootHold=false,capturing=false,closed=false;
+  const sessions=new Map(),held=new Set(),autoParents=new Set();let serial=0,pending=Buffer.alloc(0),rootHold=false,rootAuto=false,capturing=false,closed=false;
   let cursor=records(join(fixtureDirectory,'events')).length;
   function release(sessionId,reason) {
     if(held.delete(sessionId))log({event:'release',browser,sessionId,reason});
@@ -90,13 +90,15 @@ if(process.argv[2]==='--browser') {
       }
       if(options.experiment&&m.method==='Target.createBrowserContext')reply({browserContextId:'owned-context'});
       else if(options.experiment&&m.method==='Target.createTarget')reply({targetId:'a'});
+      else if(m.method==='Target.setDiscoverTargets'){if(browser)capturing=m.params.discover;reply({});}
       else if(m.method==='Target.getTargets')reply({targetInfos:targets()});
       else if(m.method==='Target.attachToTarget')reply({sessionId:attach(targets().find(t=>t.targetId===m.params.targetId),undefined,false)});
       else if(m.method==='Runtime.runIfWaitingForDebugger') {
         release(m.sessionId,'acknowledged-resume');reply({});
       } else if(m.method==='Target.setAutoAttach') {
         reply({});
-        if(browser&&!m.sessionId){capturing=m.params.autoAttach;rootHold=capturing&&m.params.waitForDebuggerOnStart;}
+        if(browser&&!m.sessionId){rootAuto=m.params.autoAttach;capturing||=rootAuto;rootHold=rootAuto&&m.params.waitForDebuggerOnStart;}
+        if(m.sessionId){if(m.params.autoAttach)autoParents.add(m.sessionId);else autoParents.delete(m.sessionId);}
         if(browser&&m.params.autoAttach)for(const info of targets().filter(t=>m.sessionId?t.parent===target:!t.parent))attach(info,m.sessionId,m.params.waitForDebuggerOnStart);
       } else if(m.method==='Target.detachFromTarget') {
         const entry=[...sessions].find(([,sid])=>sid===m.params.sessionId);
@@ -109,12 +111,17 @@ if(process.argv[2]==='--browser') {
     const events=records(join(fixtureDirectory,'events'));
     while(cursor<events.length) {
       const event=events[cursor++];if(!browser||!capturing)continue;
-      if(event.raw){emit(event.raw);continue;}
+      if(event.raw){
+        const p=event.raw.params;
+        if(event.raw.method==='Target.attachedToTarget'&&p?.waitingForDebugger===true&&typeof p.sessionId==='string')held.add(p.sessionId);
+        emit(event.raw);continue;
+      }
       if(event.disconnect)close('injected-disconnect');
       if(event.add) {
         const info=targets().find(t=>t.targetId===event.add);
         emit({method:'Target.targetCreated',params:{targetInfo:info}});
-        attach(info,info.parent?sessions.get(info.parent):undefined,event.hold??rootHold);continue;
+        const parent=info.parent?sessions.get(info.parent):undefined;
+        if(rootAuto||autoParents.has(parent)||event.hold!==undefined)attach(info,parent,event.hold??rootHold);continue;
       }
       if(event.detach) {
         const sessionId=sessions.get(event.detach);detach(event.detach,'ancestor-detach');
@@ -124,13 +131,13 @@ if(process.argv[2]==='--browser') {
   },15);
 } else {
   const selected=process.env.REB_CAPTURE_FIRST_CASES;
-  assert(!selected||['worker-controller','malformed-attachments'].includes(selected),'Unknown REB_CAPTURE_FIRST_CASES selector');
+  assert(!selected||['worker-controller','malformed-attachments','duplicate-owners'].includes(selected),'Unknown REB_CAPTURE_FIRST_CASES selector');
   const root=resolve(process.argv[2]??'.');
   const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:type==='page'?'about:blank':`http://localhost/${id}.js`,...(parent?{parent}:{})});
   const alive=pid=>{try{process.kill(pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;throw error;}};
   async function fixture(initial,options,run) {
-    if(selected==='worker-controller'&&!options.experiment||selected==='malformed-attachments'&&!options.malformed)return;
+    if(selected==='worker-controller'&&!options.experiment||selected==='malformed-attachments'&&!options.malformed||selected==='duplicate-owners'&&!options.duplicates)return;
     const directory=await mkdtemp(join(tmpdir(),'reb-capture-first-'));
     let owned,external,address,diagnostics='',failure;
     let catalog=initial;
@@ -224,6 +231,39 @@ if(process.argv[2]==='--browser') {
     await until(()=>!alive(launched.pid)&&!alive(launched.descendant),'Owned browser process group terminated');
     assert(!existsSync(launched.profile),'Owned fresh profile must be removed on shutdown');
     console.log('PASS capture-first: fresh blank browser, recursive startup hold, enable-before-resume, browser/process-group/profile cleanup');
+  });
+  for(const firstHeld of [false,true])await fixture([info('a')],{duplicates:true,delayTarget:'dup',delays:{'Network.enable':1500}},async({commands,waitState,until,add,send})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Initial owned owner');
+    assert(!capture(commands).some(c=>c.method==='Target.attachToTarget'),'Owned initial discovery must not race root auto-attachment');
+    send({raw:{method:'Target.targetCreated',params:{targetInfo:info('discovered-only')}}});
+    add(info('dup'),firstHeld);
+    const enable=await until(()=>capture(commands).find(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':dup')),'Delayed duplicate owner setup');
+    const duplicate=`${enable.sessionId.split(':')[0]}:duplicate:dup`;
+    send({raw:{method:'Target.attachedToTarget',params:{sessionId:duplicate,targetInfo:info('dup'),waitingForDebugger:!firstHeld}}});
+    add(info('other'));
+    await until(()=>resumed(commands,'other'),'Dispatcher progresses while duplicate owner initializes');
+    const held=firstHeld?enable.sessionId:duplicate;
+    assert(!capture(commands).some(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId===held),'Held target cannot resume before the exact existing owner is ready');
+    if(firstHeld)await until(()=>capture(commands).some(c=>c.method==='Target.detachFromTarget'&&c.params.sessionId===duplicate),'Nonwaiting duplicate detached');
+    const resume=await until(()=>capture(commands).find(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId===held),'Held owner resumed after setup');
+    assert(resume.time-enable.time>=1400,'Delayed Network.enable must settle before held duplicate release');
+    await waitState(s=>s.network.capture_status.attached_targets===3,'Exactly three independent owners remain');
+    assert(!capture(commands).some(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='discovered-only'),'Owned first-seen catalog must not enter explicit admission');
+    assert.equal(capture(commands).filter(c=>c.method==='Network.enable'&&c.sessionId===duplicate).length,0,'Duplicate never becomes a second capture owner');
+    if(!firstHeld)await until(()=>capture(commands).some(c=>c.method==='Target.detachFromTarget'&&c.params.sessionId===duplicate),'Released duplicate detached');
+    console.log(`PASS capture-first duplicate ownership: ${firstHeld?'held':'nonwaiting'} first, exact-owner setup barrier, independent dispatcher, no eager explicit race`);
+  });
+  await fixture([info('a')],{duplicates:true,failTarget:'dup',failMethod:'Network.enable',failure:'timeout'},async({commands,waitState,until,add,send})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Initial owner before failed duplicate');
+    add(info('dup'),false);
+    const enable=await until(()=>capture(commands).find(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':dup')),'Failing owner setup');
+    const duplicate=`${enable.sessionId.split(':')[0]}:duplicate:dup`;
+    send({raw:{method:'Target.attachedToTarget',params:{sessionId:duplicate,targetInfo:info('dup'),waitingForDebugger:true}}});
+    const resume=await until(()=>capture(commands).find(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId===duplicate),'Failed exact-owner duplicate released',8000);
+    assert(resume.time-enable.time>=2500,'Failure release must await failed setup rather than prematurely resume');
+    await waitState(s=>s.network.capture_status.gaps>0,'Failed duplicate reports an evidence gap');
+    await until(()=>capture(commands).some(c=>c.method==='Target.detachFromTarget'&&c.params.sessionId===duplicate),'Failed duplicate detached');
+    console.log('PASS capture-first duplicate failure: bounded exact-owner failure release and visible gap');
   });
   async function assertOwnedCleanup(commands,until,label) {
     const launched=commands().find(c=>c.event==='browser-launch');
@@ -345,7 +385,7 @@ if(process.argv[2]==='--browser') {
       await waitState(s=>s.state==='running'&&s.network.capture_status.attached_targets===1,'Experiment baseline ready');
       await action({action:'create_request_interception_experiment'});
       await waitState(s=>s.request_interception.isolated===true&&s.request_interception.target_id==='a','Disposable context established through public action');
-      const capturePid=capture(commands).find(c=>c.method==='Target.setAutoAttach'&&!c.sessionId&&c.params.autoAttach).pid;
+      const capturePid=capture(commands).find(c=>c.method==='Target.setDiscoverTargets'&&c.params.discover).pid;
       add(context(info('experiment-worker','worker','a')));
       const controller=await until(()=>capture(commands).find(c=>c.pid!==capturePid&&c.method==='Debugger.enable'&&c.sessionId?.endsWith(':experiment-worker')),'Independent experiment-worker controller initializes');
       const controlCommands=()=>capture(commands).filter(c=>c.pid===controller.pid&&c.sessionId===controller.sessionId);

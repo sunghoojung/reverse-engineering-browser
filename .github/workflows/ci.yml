@@ -423,11 +423,7 @@ jobs:
           ORIGIN_TRACE_TEST_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           export ORIGIN_TRACE_TEST_BROWSER
           test -n "$ORIGIN_TRACE_TEST_BROWSER"
-          node tools/check-debugger-initialization.mjs
-          node tools/check-traffic-multitarget.mjs
-          node tools/check-browser-test-process.mjs
-          node tools/check-traffic-browser-sessions.mjs
-          node tools/check-traffic-multitarget-browser.mjs
+          make traffic-capture-check
 
       - name: Run sanitizers
         if: matrix.os == 'ubuntu-latest'

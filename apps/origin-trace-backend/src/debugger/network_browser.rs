@@ -497,7 +497,9 @@ impl Debugger {
                         d.browser_capture_event(&event_connection, m).await
                     }
                     Event::Message(Err(error), _permit) => {
-                        d.retire_browser_owners(&event_connection, &error.message);
+                        if !d.capture.browser.cleanup_closing.load(Ordering::Acquire) {
+                            d.retire_browser_owners(&event_connection, &error.message);
+                        }
                         break;
                     }
                 }
@@ -552,7 +554,9 @@ impl Debugger {
         {
             // An uncertain detach must not leave Network buffers accumulating on
             // repeated retries. Closing this one client releases all its sessions.
-            self.retire_browser_owners(c, &format!("Capture detach failed: {}", error.message));
+            if !self.capture.browser.cleanup_closing.load(Ordering::Acquire) {
+                self.retire_browser_owners(c, &format!("Capture detach failed: {}", error.message));
+            }
             c.close().await;
         }
     }

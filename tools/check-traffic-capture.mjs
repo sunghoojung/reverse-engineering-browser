@@ -181,8 +181,10 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
     assert.equal(checks.isDebuggerNetworkCaptureStatus({...status,[key]:-1}),false);
   }
   checks.renderNetworkNotice();
-  assert.match(notice.text,/capture-first experiment in a fresh disposable browser/);
+  assert.match(notice.text,/pre-armed owned-browser experiment in a fresh disposable browser/);
   assert.match(notice.text,/Startup pauses alter timing/);
+  assert.match(notice.text,/that exact target is capture-ready/);
+  assert.match(notice.text,/directly created URL targets, early worker\/frame requests/);
   assert.match(notice.text,/2 targets held for setup · 7 resumed · 1 setup timeouts/);
   assert(!notice.text.includes('without pausing startup'));
   status.startup_mode='passive';

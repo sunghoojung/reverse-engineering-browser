@@ -264,7 +264,7 @@
             const targetKind = earlyTargets ? 'browser targets' : 'page targets';
             messages.push(`HTTP capture: ${coverage.attached_targets} of ${coverage.eligible_targets} eligible ${targetKind} attached (limit ${coverage.target_limit}).`);
             messages.push(coverage.startup_mode === 'capture-first'
-              ? 'Mode: capture-first experiment in a fresh disposable browser. Startup pauses alter timing; wait for capture readiness before navigating. Initial OOPIF requests and bounded content can still be missing.'
+              ? 'Mode: pre-armed owned-browser experiment in a fresh disposable browser. Startup pauses alter timing. Navigate only after that exact target is capture-ready; directly created URL targets, early worker/frame requests and bounded content can still be missing.'
               : earlyTargets ? 'Mode: passive browser target discovery.' : 'Mode: page-target polling fallback; worker and out-of-process iframe targets are not attached.');
             if (coverage.startup_mode === 'capture-first') messages.push(`${coverage.held_targets ?? 0} targets held for setup · ${coverage.resumed_targets ?? 0} resumed · ${coverage.hold_timeouts ?? 0} setup timeouts · ${coverage.resume_failures ?? 0} unacknowledged resumes (transport closed).`);
 

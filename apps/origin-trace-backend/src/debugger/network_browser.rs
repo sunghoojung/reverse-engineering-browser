@@ -20,6 +20,7 @@ struct CleanupJob {
     connection: Arc<Connection>,
     session: String,
     parent: Option<String>,
+    recovery: Option<String>,
 }
 impl CleanupJob {
     fn key(&self) -> CleanupKey {
@@ -272,6 +273,7 @@ impl Debugger {
         if c.is_closed() || !self.capture.browser.current(c) {
             return;
         }
+        let mut recovered = Vec::new();
         if let Ok(value) = result
             && let Some(infos) = value["targetInfos"].as_array()
         {
@@ -292,7 +294,14 @@ impl Debugger {
                 for info in infos.iter().take(4096) {
                     if let Some(t) = target(info).filter(eligible) {
                         let id = t["id"].as_str().unwrap().to_owned();
-                        complete &= self.remember_capture_target_locked(&mut targets, id, t);
+                        let newly_recovered =
+                            self.options.capture_first_owned && !targets.contains_key(&id);
+                        let remembered =
+                            self.remember_capture_target_locked(&mut targets, id.clone(), t);
+                        if remembered && newly_recovered {
+                            recovered.push(id);
+                        }
+                        complete &= remembered;
                     }
                 }
                 if !complete {
@@ -303,6 +312,13 @@ impl Debugger {
                         .catalog_incomplete
                         .store(false, Ordering::Release);
                 }
+            }
+        }
+        // Reconciliation is recovery, unlike initial/live discovery. A late held
+        // duplicate still waits for the exact explicit owner's setup barrier.
+        if self.capture.browser.current(c) && !c.is_closed() {
+            for id in recovered {
+                self.queue_capture_target(id);
             }
         }
         self.browser_status();
@@ -594,7 +610,8 @@ impl Debugger {
         c: &Arc<Connection>,
         session: &str,
         parent: Option<&str>,
-    ) {
+    ) -> bool {
+        self.resume_capture_hold(c, session, Some("Capture-first attachment released during cleanup; startup evidence may be incomplete.")).await;
         if let Err(error) = c
             .command_session(
                 "Target.detachFromTarget",
@@ -610,13 +627,16 @@ impl Debugger {
                 self.retire_browser_owners(c, &format!("Capture detach failed: {}", error.message));
             }
             c.close().await;
+            return false;
         }
+        true
     }
     fn schedule_capture_detach(
         self: &Arc<Self>,
         c: &Arc<Connection>,
         session: &str,
         parent: Option<&str>,
+        recovery: Option<String>,
     ) {
         if !self.capture.browser.current(c) || c.is_closed() {
             return;
@@ -625,6 +645,7 @@ impl Debugger {
             connection: c.clone(),
             session: session.to_owned(),
             parent: parent.map(str::to_owned),
+            recovery,
         };
         let mut queue = self
             .capture
@@ -683,13 +704,16 @@ impl Debugger {
                             }
                         }
                     };
-                    if d.capture.browser.current(&job.connection) && !job.connection.is_closed() {
-                        d.detach_capture_session(
-                            &job.connection,
-                            &job.session,
-                            job.parent.as_deref(),
-                        )
-                        .await;
+                    if d.capture.browser.current(&job.connection) && !job.connection.is_closed()
+                        && d.detach_capture_session(&job.connection, &job.session, job.parent.as_deref()).await
+                        && d.capture.browser.current(&job.connection) && !job.connection.is_closed()
+                        && !d.stopping.load(Ordering::Acquire)
+                        && let Some(id) = &job.recovery
+                        && d.capture.browser.targets.lock().unwrap_or_else(|e| e.into_inner()).contains_key(id)
+                    {
+                        d.queue_capture_target(id.clone());
+                        d.schedule_capture_admission(&job.connection);
+                        d.browser_status();
                     }
                     d.capture
                         .browser
@@ -841,31 +865,34 @@ impl Debugger {
                                     d.resume_capture_hold(&c, &session, if ready { None } else {
                                         Some("Duplicate startup hold released before its exact capture owner became ready; evidence may be missing.")
                                     }).await;
-                                    d.detach_capture_session(&c, &session, parent.as_deref())
-                                        .await;
+                                    d.schedule_capture_detach(
+                                        &c,
+                                        &session,
+                                        parent.as_deref(),
+                                        None,
+                                    );
                                 });
                             }
                             Some(false) => {} // The exact hold already has a bounded waiter.
-                            None => self.detach_capture_session(c, session, parent).await,
+                            None => self.schedule_capture_detach(c, session, parent, None),
                         }
                         return;
                     }
-                    if waiting {
-                        self.resume_capture_hold(c, session, Some("Capture-first target rejected or over capacity; resumed without capture.")).await;
-                    } else if p["waitingForDebugger"] == true {
+                    if !waiting && p["waitingForDebugger"] == true {
                         self.update(|s| {
                             let status = &mut s["network"]["capture_status"];
                             status["gaps"] = json!(status["gaps"].as_u64().unwrap_or(0).saturating_add(1));
                             status["last_error"] = json!("Passive capture declined a target waiting for a debugger; startup ownership is unknown, so it was not resumed.");
                         });
                     }
-                    // Never resume another controller's paused target in passive mode.
-                    self.detach_capture_session(c, session, parent).await;
-                    // Recovery becomes eligible only after rejected startup ownership
-                    // is released and its attachment has been detached.
-                    if let Some(id) = p["targetInfo"]["targetId"].as_str() {
-                        self.queue_capture_target(id.to_owned());
-                    }
+                    // Recovery is eligible only after registered holds are released
+                    // and exact-session cleanup succeeds on this connection.
+                    self.schedule_capture_detach(
+                        c,
+                        session,
+                        parent,
+                        p["targetInfo"]["targetId"].as_str().map(str::to_owned),
+                    );
                 }
                 self.browser_status();
             }
@@ -934,6 +961,7 @@ impl Debugger {
                     c,
                     root.session.as_deref().unwrap(),
                     root.parent_session.as_deref(),
+                    None,
                 );
                 self.browser_status();
             }

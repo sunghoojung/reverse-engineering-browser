@@ -79,7 +79,7 @@ if(process.argv[2]==='--browser') {
         const message={id:m.id,result,...(m.sessionId?{sessionId:m.sessionId}:{})};
         const replyDelay=options.delayCaptureOnly&&!capturing?0:m.method==='Target.detachFromTarget'&&options.detachDelay?options.detachDelay:
           options.delays?.[m.method]&&m.sessionId?.endsWith(':'+options.delayTarget)?options.delays[m.method]:0;
-        if(replyDelay)setTimeout(()=>emit(message),replyDelay);else emit(message);
+        if(replyDelay)setTimeout(()=>{log({event:'delayed-reply',browser,method:m.method,sessionId:m.sessionId});emit(message);},replyDelay);else emit(message);
       };
       const reject=message=>emit({id:m.id,error:{code:-32000,message},...(m.sessionId?{sessionId:m.sessionId}:{})});
       const target=[...sessions].find(([,sid])=>sid===m.sessionId)?.[0];
@@ -187,7 +187,7 @@ if(process.argv[2]==='--browser') {
         return {code:owned.child.exitCode,signal:owned.child.signalCode,diagnostics};
       },stop:async()=>{
         await stopBrowserTestProcess(owned,5000);owned=null;
-      },add:(t,hold)=>{catalog.push(t);save();send({add:t.targetId,hold});}});
+      },discover:t=>{catalog.push(t);save();send({raw:{method:'Target.targetCreated',params:{targetInfo:t}}});},remove:id=>{catalog=catalog.filter(t=>t.targetId!==id);save();send({raw:{method:'Target.targetDestroyed',params:{targetId:id}}});},add:(t,hold)=>{catalog.push(t);save();send({add:t.targetId,hold});}});
     } catch(error) {failure=error;throw error;}
     finally {
       const errors=[];
@@ -265,6 +265,37 @@ if(process.argv[2]==='--browser') {
     await until(()=>capture(commands).some(c=>c.method==='Target.detachFromTarget'&&c.params.sessionId===duplicate),'Failed duplicate detached');
     console.log('PASS capture-first duplicate failure: bounded exact-owner failure release and visible gap');
   });
+  await fixture([info('a')],{duplicates:true,limit:1,detachDelay:800},async({commands,waitState,until,add,send})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Healthy owner before rejected hold');
+    const sessionId=capture(commands).find(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':a')).sessionId;
+    add(info('overflow'));
+    await until(()=>capture(commands).some(c=>c.method==='Target.detachFromTarget'&&c.params.sessionId?.endsWith(':overflow')),'Rejected held session awaits detach');
+    for(const [method,params] of [
+      ['Network.requestWillBeSent',{requestId:'during-detach',request:{url:'http://localhost/during-detach',method:'GET',headers:{}},timestamp:1,type:'Fetch'}],
+      ['Network.responseReceived',{requestId:'during-detach',response:{status:200,headers:{},mimeType:'text/plain'}}],
+      ['Network.loadingFinished',{requestId:'during-detach',timestamp:2,encodedDataLength:10}],
+    ])send({raw:{method,params,sessionId}});
+    await until(()=>capture(commands).some(c=>c.method==='Network.getResponseBody'&&c.params.requestId==='during-detach'),'Healthy owner progresses during rejected hold cleanup');
+    const rows=commands(),body=rows.findIndex(c=>c.method==='Network.getResponseBody'&&c.params?.requestId==='during-detach');
+    const detached=rows.findIndex(c=>c.event==='delayed-reply'&&c.method==='Target.detachFromTarget');
+    assert(body>=0&&(detached<0||body<detached),'Healthy body request must precede delayed rejected-session detach acknowledgment');
+    await assertResumeBeforeDetach(commands,'overflow');
+    console.log('PASS capture-first cleanup: rejected hold resumes before detach without blocking healthy-owner evidence');
+  });
+  await fixture([info('a')],{duplicates:true,limit:1},async({commands,waitState,until,add,discover,remove})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Owned owner before quiet catalog overflow');
+    for(let i=0;i<511;i++)discover(info(`catalog-${i}`));
+    await waitState(s=>s.network.capture_status.eligible_targets===512,'Owned catalog fills without eager explicit attachment');
+    add(info('omitted'));
+    await until(()=>resumed(commands,'omitted'),'Uncatalogued held target safely released');
+    await waitState(s=>s.network.capture_status.catalog_incomplete===true,'Owned incomplete catalog visible');
+    assert(!capture(commands).some(c=>c.method==='Target.attachToTarget'),'Initial/live discovery never races root hold authority');
+    remove('a');
+    await waitState(s=>s.network.capture_status.attached_target_ids.includes('omitted'),'Quiet reconciliation recovers omitted owned target',12000);
+    assert(capture(commands).some(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='omitted'),'Only reconciliation makes omitted target eligible for explicit recovery');
+    assert(!capture(commands).some(c=>c.method==='Target.attachToTarget'&&c.params.targetId.startsWith('catalog-')),'Known first-seen targets do not leak into explicit recovery');
+    console.log('PASS capture-first catalog: quiet overflow target is released, then explicitly recovered after catalog and owner capacity free');
+  });
   async function assertOwnedCleanup(commands,until,label) {
     const launched=commands().find(c=>c.event==='browser-launch');
     assert(launched,`${label}: owned browser really launched`);
@@ -340,11 +371,13 @@ if(process.argv[2]==='--browser') {
     console.log('PASS capture-first: cumulative initialization exceeds independent hold deadline; watchdog resumes and reports timeout');
   });
   await fixture([info('a'),...Array.from({length:8},(_,i)=>info(`queued-${i}`,'other'))],{detachDelay:900},async({commands,until,waitState})=>{
-    const held=await until(()=>commands().find(c=>c.event==='attached'&&c.target==='queued-7'),'Attachment delivered behind slow event handlers');
-    const release=await until(()=>resumed(commands,'queued-7'),'Ingress hold watchdog bypasses event-consumer backlog',8000);
-    assert(release.time-held.time<5500,'Queued attachment hold must be timed from ingress, not eventual event handling');
-    await waitState(s=>s.network.capture_status.hold_timeouts>=1,'Starved event-loop hold deadline visible');
-    console.log('PASS capture-first: slow detach/event-consumer backlog cannot postpone ingress hold watchdog');
+    const last=await until(()=>commands().find(c=>c.event==='attached'&&c.target==='queued-7'),'Held burst reaches owning transport');
+    const held=commands().filter(c=>c.event==='attached'&&c.waiting&&c.pid===last.pid);
+    await until(()=>held.every(c=>released(commands,c.sessionId)),'Cleanup saturation releases every exact-client startup hold',8000);
+    assert(held.every(c=>(commands().find(r=>r.event==='release'&&r.sessionId===c.sessionId)?.time??Date.now())-c.time<5500),'Cleanup saturation cannot postpone any held-target release');
+    assert(capture(commands).filter(c=>c.pid===last.pid&&c.method==='Target.detachFromTarget').length<=4,'Cleanup concurrency stays bounded to four commands');
+    await waitState(s=>s.network.capture_status.gaps>0,'Cleanup saturation remains a visible evidence gap');
+    console.log('PASS capture-first: saturated bounded cleanup closes the exact client and releases every startup hold');
   });
   await fixture([info('a'),info('overflow'),info('rejected','other')],{limit:1},async({commands,waitState,until})=>{
     await waitState(s=>s.network.capture_status.attached_targets===1&&s.network.capture_status.target_overflow===1,'Bounded capture owner');

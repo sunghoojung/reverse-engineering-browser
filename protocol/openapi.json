@@ -24822,7 +24822,10 @@
             "description": "Optional cumulative failed cleanup jobs on the current browser connection at observation; not a missing-request count."
           },
           "startup_mode": {
-            "const": "passive"
+            "enum": [
+              "passive",
+              "capture-first"
+            ]
           },
           "browser_setup_failure": {
             "description": "Last failed browser setup attempt; survives page fallback and clears after successful browser setup. Not a claim of unsupported capability.",
@@ -24875,9 +24878,34 @@
           "status_extra_info_overflow": {
             "type": "boolean",
             "description": "Sticky saturation of the bounded 2048-entry ExtraInfo identity history; disables ExtraInfo attribution without discarding HTTP rows or authoritative response status."
+          },
+          "held_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "resumed_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "hold_timeouts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "resume_failures": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "hold_max_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
-        "description": "Bounded HTTP capture coverage. Passive browser sessions cover supported page, worker and out-of-process iframe targets; page polling is a compatibility fallback. Ready never promises first-navigation or pre-attachment completeness. WebSocket v1 remains selected-target scoped."
+        "description": "Bounded HTTP capture coverage. Passive browser sessions are the default. Capture-first pauses startup only in a fresh browser process/profile launched and owned by this backend; it alters timing. Ready never promises OOPIF initial-request, pre-attachment or bounded-body completeness. WebSocket v1 remains selected-target scoped."
       }
     }
   },

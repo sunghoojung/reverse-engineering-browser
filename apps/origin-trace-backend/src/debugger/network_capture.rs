@@ -34,6 +34,7 @@ pub(super) struct Capture {
     pub(super) next_owner: AtomicU64,
     next_row: AtomicU64,
     pub(super) browser: super::network_browser::BrowserCapture,
+    pub(super) holds: super::network_hold::Holds,
 }
 pub(super) fn next_id(counter: &AtomicU64) -> Option<u64> {
     let mut value = counter.load(Ordering::Relaxed);
@@ -57,6 +58,7 @@ impl Capture {
             next_owner: AtomicU64::new(1),
             next_row: AtomicU64::new(1),
             browser: super::network_browser::BrowserCapture::new(),
+            holds: super::network_hold::Holds::default(),
         }
     }
     pub fn row_id(&self, owner: &Owner) -> Option<String> {

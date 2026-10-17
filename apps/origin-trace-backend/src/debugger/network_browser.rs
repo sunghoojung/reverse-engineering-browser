@@ -150,8 +150,8 @@ fn target(info: &Value) -> Option<Value> {
     }
     Some(json!({"id":id,"type":kind,"title":title,"url":url}))
 }
-fn auto_attach() -> Value {
-    json!({"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true,"filter":[{"type":"page"},{"type":"iframe"},{"type":"worker"},{"type":"shared_worker"},{"type":"service_worker"},{"exclude":true}]})
+fn auto_attach(hold: bool) -> Value {
+    json!({"autoAttach":true,"waitForDebuggerOnStart":hold,"flatten":true,"filter":[{"type":"page"},{"type":"iframe"},{"type":"worker"},{"type":"shared_worker"},{"type":"service_worker"},{"exclude":true}]})
 }
 impl Debugger {
     pub(super) async fn close_browser_capture(&self) {
@@ -163,6 +163,7 @@ impl Debugger {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(c) = c {
+            self.release_capture_holds(&c).await;
             c.close().await;
         }
     }
@@ -205,8 +206,12 @@ impl Debugger {
             let v = &mut s["network"]["capture_status"];
             v["scope"] = json!("http-browser-targets");
             v["transport_mode"] = json!("browser-sessions");
-            v["startup_mode"] = json!("passive");
-            v["message"]=json!("Passive browser target capture starts after attachment and Network.enable; first requests are not guaranteed. WebSockets remain selected-target scoped.");
+            v["startup_mode"] = json!(if self.options.capture_first_owned { "capture-first" } else { "passive" });
+            v["message"] = json!(if self.options.capture_first_owned {
+                "Capture-first experiment in a fresh disposable browser: startup is briefly paused for Network setup, altering timing. Wait for readiness before navigation. OOPIF initial requests, early navigation and bounded content can still be missing. WebSockets remain selected-target scoped."
+            } else {
+                "Passive browser target capture starts after attachment and Network.enable; first requests are not guaranteed. WebSockets remain selected-target scoped."
+            });
             v["target_limit"] = json!(limit);
             v["attached_targets"] = json!(ids.len());
             v["eligible_targets"] = json!(count);
@@ -606,6 +611,7 @@ impl Debugger {
                 .store(false, Ordering::Release);
             *current = Some(c.clone());
         }
+        self.start_capture_hold_watchdog(c.clone());
         let weak = Arc::downgrade(self);
         let event_connection = c.clone();
         tokio::spawn(async move {
@@ -632,11 +638,12 @@ impl Debugger {
                 }
             }
         });
-        // Browser-root auto-attach can throttle window.open even with
-        // waitForDebuggerOnStart=false. Passive capture must not enable it.
-        // Discovery plus explicit attachment keeps startup best-effort without
-        // requiring a Runtime resume on targets whose startup we do not own.
-        self.schedule_capture_admission(&c);
+        if self.options.capture_first_owned {
+            c.command("Target.setAutoAttach", auto_attach(true), Duration::from_secs(3)).await?;
+        } else {
+            // Passive capture must never enable the browser-root popup throttle.
+            self.schedule_capture_admission(&c);
+        }
         self.browser_status();
         self.update(|s| {
             s["network"]["capture_status"]["browser_setup_failure"] = Value::Null;
@@ -884,6 +891,9 @@ impl Debugger {
                     c.close().await;
                     return;
                 };
+                // The ingress observer already registered waiting sessions before
+                // dispatch. Never re-register: its watchdog may have released one.
+                let waiting = p["waitingForDebugger"] == true && self.options.capture_first_owned;
                 let parent = match m.get("sessionId") {
                     None => None,
                     Some(v) if v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 4096) => {
@@ -940,7 +950,7 @@ impl Debugger {
                     }
                     info.filter(eligible)
                         .filter(|t| {
-                            p["waitingForDebugger"] != true
+                            (p["waitingForDebugger"] != true || waiting)
                                 && owners.len() + pending.len() < limit
                                 && !owners.contains_key(t["id"].as_str().unwrap())
                         })
@@ -973,7 +983,9 @@ impl Debugger {
                     if let Some(id) = p["targetInfo"]["targetId"].as_str() {
                         self.queue_capture_target(id.to_owned());
                     }
-                    if p["waitingForDebugger"] == true {
+                    if waiting {
+                        self.resume_capture_hold(c, session, Some("Capture-first target rejected or over capacity; resumed without capture.")).await;
+                    } else if p["waitingForDebugger"] == true {
                         self.update(|s| {
                             let status = &mut s["network"]["capture_status"];
                             status["gaps"] = json!(status["gaps"].as_u64().unwrap_or(0).saturating_add(1));
@@ -1193,9 +1205,19 @@ impl Debugger {
         let budget = 134217728u64 / u64::from(self.options.capture_target_limit);
         let result=async {
             c.command_session("Network.enable",json!({"maxTotalBufferSize":budget,"maxResourceBufferSize":budget.min(2097152),"maxPostDataSize":131072}),Duration::from_secs(3),session).await?;
-            c.command_session("Target.setAutoAttach",auto_attach(),Duration::from_secs(3),session).await?;
+            c.command_session("Target.setAutoAttach",auto_attach(self.options.capture_first_owned),Duration::from_secs(3),session).await?;
             Ok::<_,Error>(())
         }.await;
+        if let Some(session) = session {
+            self.resume_capture_hold(
+                &c,
+                session,
+                result.as_ref().err().map(
+                    |_| "Capture-first initialization failed; target resumed with a capture gap.",
+                ),
+            )
+            .await;
+        }
         if self.stopping.load(Ordering::Acquire)
             || !self.capture.browser.current(&c)
             || owner.retired.load(Ordering::Acquire)
@@ -1512,7 +1534,7 @@ mod tests {
                     .is_err()
             );
         }
-        assert_eq!(auto_attach()["waitForDebuggerOnStart"], false);
+        assert_eq!(auto_attach(false)["waitForDebuggerOnStart"], false);
     }
     #[test]
     fn waiting_catalog_cannot_grow_past_target_bound() {

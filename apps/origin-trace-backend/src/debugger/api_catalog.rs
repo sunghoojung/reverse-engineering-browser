@@ -697,7 +697,15 @@ mod tests {
             first["coverage"]["capture_epoch"],
             second["coverage"]["capture_epoch"]
         );
-        assert_eq!(first["endpoints"], second["endpoints"]);
+        // Public IDs are never reused, even after ledger eviction/reset.
+        assert_ne!(
+            first["endpoints"][0]["observations"][0]["source"]["request_id"],
+            second["endpoints"][0]["observations"][0]["source"]["request_id"]
+        );
+        let mut second_endpoints = second["endpoints"].clone();
+        second_endpoints[0]["observations"][0]["source"]["request_id"] =
+            first["endpoints"][0]["observations"][0]["source"]["request_id"].clone();
+        assert_eq!(first["endpoints"], second_endpoints);
         for (id, method, url) in [
             (2, "GET", "https://example.test/same"),
             (3, "get", "https://example.test/same"),
@@ -1122,11 +1130,11 @@ mod tests {
         assert_eq!(observations.len(), MAX_RECORDS);
         assert_eq!(
             observations[0]["source"]["request_id"],
-            "cdp:synthetic-target:1001"
+            debugger.snapshot()["network"]["requests"][999]["id"]
         );
         assert_eq!(
             observations[MAX_RECORDS - 1]["source"]["request_id"],
-            "cdp:synthetic-target:938"
+            debugger.snapshot()["network"]["requests"][936]["id"]
         );
         debugger.update(|state| {
             let rows = state["network"]["requests"].as_array_mut().unwrap();

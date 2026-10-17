@@ -56,7 +56,28 @@ a synthetic local CDP transport before its browser checks. Experiment actions ve
 Disposal stops owned pages, workers, recipes, requests, and retained objects.
 Worker cancellation terminates its process group, including descendants. Network
 capture is opt-in for standalone sessions and enabled by the packaged research
-profile. Captured Traffic values are raw by default; sensitive field selection
+profile. HTTP Traffic uses up to eight independent, Network-only page connections.
+Changing debugger focus no longer clears HTTP rows or disconnects another page's
+capture. The shared ledger keeps its 1000-row limit and visible eviction count;
+response bodies are fetched through the exact connection that observed them.
+Closed/disconnected owners leave retained evidence and explicit unfinished-body
+errors. Requests sent before attachment and `Network.enable` are unavailable;
+existing one-second discovery is not a promise of first-navigation coverage.
+Short-lived popups can disappear before discovery; workers/service workers and
+out-of-process iframes are not independently covered by this page-only path.
+The Traffic coverage notice reports attached/eligible targets, overflow, retries
+and gaps. WebSockets remain on the selected debugger target under their v1
+contract. Focus changes still advance `network.capture_epoch` for selection and
+screenshot compatibility; that epoch is not the HTTP connection-owner token.
+Public HTTP request IDs are opaque and never reused within a backend instance.
+At the eight-owner cap, capture transport event budgets total at most 512 MiB
+(64 MiB each), and requested browser Network buffers total 128 MiB (16 MiB each),
+in addition to the focused debugger. Row titles are attachment-time metadata;
+request URLs and immutable target identities remain authoritative.
+`tools/check-traffic-multitarget-browser.mjs` exercises real Chromium with the
+native transport against synthetic loopback pages, including blank new tabs,
+navigation, background fetches, focus changes and target closure; Linux CI runs
+it in addition to the fault-injected HTTP/CDP lifecycle regressions. Captured Traffic values are raw by default; sensitive field selection
 for disposable experiments still requires confirmation.
 
 The API CLI embeds the versioned OpenAPI document and requires an explicit

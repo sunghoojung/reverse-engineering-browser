@@ -417,6 +417,17 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: make e2e
 
+      - name: Verify multi-tab HTTP capture with installed Chrome
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          ORIGIN_TRACE_TEST_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export ORIGIN_TRACE_TEST_BROWSER
+          test -n "$ORIGIN_TRACE_TEST_BROWSER"
+          node tools/check-debugger-initialization.mjs
+          node tools/check-traffic-multitarget.mjs
+          node tools/check-browser-test-process.mjs
+          node tools/check-traffic-multitarget-browser.mjs
+
       - name: Run sanitizers
         if: matrix.os == 'ubuntu-latest'
         run: make sanitize

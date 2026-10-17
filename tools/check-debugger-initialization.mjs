@@ -22,15 +22,17 @@ if (process.argv[2] === '--transport') {
   log({event: 'open', pid: process.pid});
   emit(null);
   let pending = Buffer.alloc(0);
+  let firstMethod;
   process.stdin.on('data', chunk => {
     pending = Buffer.concat([pending, chunk]);
     while (pending.length >= 8 && pending.length >= 8 + pending.readUInt32BE(4)) {
       const size = pending.readUInt32BE(4);
       const message = JSON.parse(pending.subarray(8, 8 + size));
       pending = pending.subarray(8 + size);
+      firstMethod ??= message.method;
       log({event: 'command', pid: process.pid, method: message.method});
       const failed = join(directory, 'failed-once');
-      if (message.method === process.env.REB_INIT_FIXTURE_METHOD && !existsSync(failed)) {
+      if (firstMethod === 'Inspector.enable' && message.method === process.env.REB_INIT_FIXTURE_METHOD && !existsSync(failed)) {
         writeFileSync(failed, 'failed', {mode: 0o600});
         if (process.env.REB_INIT_FIXTURE_MODE !== 'timeout') {
           emit({id: message.id, error: {code: -32000, message: 'Synthetic initialization failure'}});
@@ -103,10 +105,12 @@ if (process.argv[2] === '--transport') {
       while (discoveries < before + 2 && Date.now() < deadline) await delay(50);
       assert(discoveries >= before + 2, `${name}: refresh must remain live`);
       const commands = (await readFile(join(directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-      const owners = commands.filter(command => command.event === 'open');
+      const owners = commands.filter(command => command.method === 'Inspector.enable');
+      const focused = new Set(owners.map(owner => owner.pid));
+      const focusedCommands = commands.filter(command => focused.has(command.pid));
       assert.equal(owners.length, method ? 2 : 1, `${name}: exactly one retry, no reconnect loop`);
       if (method) {
-        assert.equal(commands.filter(command => command.method === method).length, 2, `${name}: failed domain is retried`);
+        assert.equal(focusedCommands.filter(command => command.method === method).length, 2, `${name}: failed domain is retried`);
         assert.throws(() => process.kill(owners[0].pid, 0), {code: 'ESRCH'}, `${name}: failed transport must be reaped`);
         assert.equal(state.network.capture_epoch, 2);
       }

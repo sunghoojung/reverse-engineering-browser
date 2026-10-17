@@ -14104,7 +14104,12 @@
           },
           "network": {
             "type": "object",
-            "additionalProperties": true
+            "additionalProperties": true,
+            "properties": {
+              "capture_status": {
+                "$ref": "#/components/schemas/HttpTrafficCaptureStatus"
+              }
+            }
           },
           "heap_diff_baseline": {
             "anyOf": [
@@ -22387,6 +22392,12 @@
           },
           "timing_evidence": {
             "$ref": "#/components/schemas/NetworkTimingEvidence"
+          },
+          "capture_owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "description": "Opaque immutable HTTP connection-owner token; never substitute it for capture_epoch."
           }
         },
         "x-schema-completeness": "partial",
@@ -24660,6 +24671,114 @@
             ]
           }
         }
+      },
+      "HttpTrafficCaptureStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "state",
+          "attached_targets",
+          "eligible_targets",
+          "target_limit",
+          "target_overflow",
+          "failed_targets",
+          "gaps",
+          "last_error",
+          "message"
+        ],
+        "properties": {
+          "scope": {
+            "const": "http-page-targets"
+          },
+          "state": {
+            "enum": [
+              "disabled",
+              "waiting",
+              "ready",
+              "partial"
+            ]
+          },
+          "attached_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8
+          },
+          "eligible_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "target_limit": {
+            "const": 8
+          },
+          "target_overflow": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 504
+          },
+          "failed_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8
+          },
+          "gaps": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "attached_target_ids": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "unattached_targets": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "title"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 128
+                }
+              }
+            }
+          },
+          "unattached_targets_omitted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "discovery_stale": {
+            "type": "boolean",
+            "description": "Target enumeration failed. Existing owners may continue, but new targets cannot be confirmed or attached."
+          }
+        },
+        "description": "HTTP page-owner coverage only. Ready does not imply pre-attachment or first-navigation completeness. WebSocket v1 remains selected-target scoped."
       }
     }
   },

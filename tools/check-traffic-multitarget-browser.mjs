@@ -19,7 +19,8 @@ const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'
 const directory=await mkdtemp(join(tmpdir(),'reb-traffic-browser-'));
 const children=[];let socket,sequence=1,diagnostics='',failure;const pending=new Map();
 const served=new Set(),servedCounts=new Map();
-let lastCaptureSnapshot=null,lastCaptureReadError='';
+let lastCaptureSnapshot=null,lastCaptureReadError='',refreshFailureSnapshot;
+let lastControlCommand=null;
 const delay=ms=>new Promise(resolveDelay=>setTimeout(resolveDelay,ms));
 const fixture=createServer((request,response)=>{
   const url=new URL(request.url,`http://${request.headers.host}`);
@@ -91,9 +92,12 @@ try {
     if(waiter){pending.delete(message.id);clearTimeout(waiter.timer);message.error?waiter.reject(Error(message.error.message)):waiter.resolve(message.result);}
   };
   const command=(method,params={},sessionId)=>new Promise((resolveCommand,reject)=>{
+    lastControlCommand={method,session_id:sessionId??null};
     const id=sequence++,timer=setTimeout(()=>{pending.delete(id);reject(Error(`${method} timeout`));},5000);
     pending.set(id,{resolve:resolveCommand,reject,timer});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));
   });
+  const version=await command('Browser.getVersion');
+  console.log('Fixture browser version:',JSON.stringify({product:version.product,protocolVersion:version.protocolVersion}).slice(0,512));
   const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',transport,'--capture-network-content']);
   const address=await until(async()=>(await readFile(join(directory,'endpoint'),'utf8')).trim(),'Backend startup');
   const state=async()=>{
@@ -105,12 +109,15 @@ try {
       lastCaptureSnapshot={http_status:response.status,state:value.state,error:value.error,
         target:value.target&&{id:value.target.id,type:value.target.type},
         target_count:value.targets?.length,
-        targets:value.targets?.slice(0,32).map(target=>({id:target.id,type:target.type})),
+        paused:value.paused?{reason:String(value.paused.reason??'').slice(0,128)}:null,
+        targets:value.targets?.slice(0,32).map(target=>({id:target.id,type:target.type,
+          fixture_path:typeof target.url==='string'&&target.url.startsWith(origin+'/')?new URL(target.url).pathname.slice(0,128):null})),
         capture_status:value.network?.capture_status};
       lastCaptureReadError='';
       return value;
     } catch(error) {lastCaptureReadError=String(error).slice(0,512);throw error;}
   };
+  refreshFailureSnapshot=state;
   // Installed browsers may have unrelated service workers or background pages.
   // Assert our authored page is ready instead of assuming a global owner count.
   const a=await until(async()=>(await command('Target.getTargets')).targetInfos.find(t=>t.type==='page'&&t.url===origin+'/page-a')?.targetId,'Authored first page');
@@ -204,7 +211,9 @@ try {
   }
   assert.equal(missing.length,beforeSteady,'More than eight attached tabs must all capture traffic');
   // Run after >8 tabs remain open, not after freeing the original owner limit.
+  console.log('PHASE popup: issuing synchronous window.open on authored B');
   const popup=await command('Runtime.evaluate',{expression:`window.open('${origin}/popup');'opened'`},sessionB);
+  console.log('PHASE popup: window.open evaluation returned');
   assert(!popup.exceptionDetails,JSON.stringify(popup));
   await expectCaptured(['/popup-immediate'],'short-lived window.open fetch + immediate close',{body:false});
   await until(async()=>!(await command('Target.getTargets')).targetInfos.some(t=>t.url===origin+'/popup'),'Popup really closed');
@@ -264,6 +273,11 @@ try {
 
 } catch(error) {
   failure=error;
+  // Snapshot again after the failed operation; the previous polling result can
+  // predate a popup or renderer state transition by several seconds.
+  try {await refreshFailureSnapshot?.();} catch {}
+  console.error('Failed control command:',JSON.stringify(lastControlCommand));
+  console.error('Popup fixture receipts:',JSON.stringify(['/popup','/popup-immediate'].map(path=>({path,server_requests:servedCounts.get(path)??0}))));
   console.error('Capture failure snapshot:',JSON.stringify(lastCaptureSnapshot)?.slice(0,16384));
   console.error('Capture read failure:',lastCaptureReadError);
   throw error;

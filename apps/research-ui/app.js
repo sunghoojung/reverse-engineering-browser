@@ -1311,7 +1311,9 @@
         renderFingerprintDetail(orderedEvents.find(event => signalEventKey(event) === state.selectedSignalEventKey) ?? null);
       }
 
-      function rebuildTrafficRequests() {
+      function rebuildTrafficRequests(previousSession = null) {
+        const previousSelection = state.selectedCaptureIdentity
+          ? apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record : null;
         const cdpRequests = requestsFromDebuggerNetwork(
           state.debuggerSession?.network, state.nativeRequests, state.debuggerNetworkBodyCache
         );
@@ -1321,8 +1323,21 @@
         } else {
           state.requests = state.nativeRequests;
         }
+        const oldOwner = trafficHttpSnapshotOwner(previousSession, state.sessionMode);
+        const newOwner = trafficHttpSnapshotOwner(state.debuggerSession, state.sessionMode);
+        const snapshotReset = previousSession && previousSelection && !trafficHttpSnapshotContinues(oldOwner, newOwner);
+        const retainedSelection = previousSelection && trafficRetainedFocusRequest(previousSelection, state.requests, oldOwner, newOwner);
+        if (retainedSelection) {
+          state.selectedCaptureIdentity = apiCatalogRequestIdentity(retainedSelection);
+          // Old-epoch asynchronous details must not relabel the renewed selection.
+          state.originTraceController?.abort();
+          state.originTraceGeneration += 1;
+          state.signalProfileGeneration += 1;
+        }
         syncTrafficComparison();
-        if (state.selectedCaptureIdentity && !apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record) {
+        const selected = apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record;
+        const previousRetention = trafficRetainedHttpIdentity(previousSelection);
+        if (state.selectedCaptureIdentity && (snapshotReset || !selected || previousRetention && trafficRetainedHttpIdentity(selected) !== previousRetention)) {
           resetRequestSelection();
           state.trafficSelectionNotice = 'The selected captured request expired or its exact source changed. Choose another request.';
           investigationNotice(state.trafficSelectionNotice, 'stale');
@@ -11159,7 +11174,7 @@
           const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
           body = syncExperimentSession(previousSession, body, experimentReceiptAtStart);
           state.debuggerSession = body;
-          rebuildTrafficRequests();
+          rebuildTrafficRequests(previousSession);
           syncMemorySession(previousSession, body);
           applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = state.experimentNeedsRefresh ? null : response.headers.get('ETag');

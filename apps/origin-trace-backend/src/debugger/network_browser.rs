@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -22,6 +22,8 @@ pub(super) struct BrowserCapture {
     retry: Mutex<Option<Instant>>,
     failures: Mutex<BTreeMap<String, Instant>>,
     pending: Mutex<BTreeMap<String, Instant>>,
+    admission: Arc<tokio::sync::Mutex<()>>,
+    admission_epoch: AtomicU64,
 }
 impl BrowserCapture {
     pub fn new() -> Self {
@@ -32,6 +34,8 @@ impl BrowserCapture {
             retry: Mutex::new(None),
             failures: Mutex::new(BTreeMap::new()),
             pending: Mutex::new(BTreeMap::new()),
+            admission: Arc::new(tokio::sync::Mutex::new(())),
+            admission_epoch: AtomicU64::new(0),
         }
     }
     fn current(&self, c: &Arc<Connection>) -> bool {
@@ -242,7 +246,7 @@ impl Debugger {
                     .insert(id.clone(), Instant::now() + Duration::from_secs(5));
                 self.queue_capture_target(id);
             }
-            self.promote_capture_target(&c).await;
+            self.schedule_capture_admission(&c);
             return true;
         }
         if self
@@ -398,12 +402,11 @@ impl Debugger {
                 }
             }
         });
-        c.command(
-            "Target.setAutoAttach",
-            auto_attach(),
-            Duration::from_secs(3),
-        )
-        .await?;
+        // Browser-root auto-attach can throttle window.open even with
+        // waitForDebuggerOnStart=false. Passive capture must not enable it.
+        // Discovery plus explicit attachment keeps startup best-effort without
+        // requiring a Runtime resume on targets whose startup we do not own.
+        self.schedule_capture_admission(&c);
         self.browser_status();
         Ok(())
     }
@@ -457,6 +460,7 @@ impl Debugger {
         match m["method"].as_str().unwrap_or("") {
             "Target.targetCreated" | "Target.targetInfoChanged" => {
                 self.remember_capture_target(&p["targetInfo"]);
+                self.schedule_capture_admission(c);
                 self.browser_status();
             }
             "Target.attachedToTarget" => {
@@ -693,6 +697,14 @@ impl Debugger {
                     );
                 }
                 if destroyed && let Some(id) = id {
+                    // Admission failures use this same catalog lock so a late
+                    // attach error cannot resurrect a destroyed target's state.
+                    let mut targets = self
+                        .capture
+                        .browser
+                        .targets
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     self.capture
                         .browser
                         .pending
@@ -705,12 +717,7 @@ impl Debugger {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(id);
-                    self.capture
-                        .browser
-                        .targets
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(id);
+                    targets.remove(id);
                     self.capture
                         .browser
                         .waiting
@@ -719,7 +726,7 @@ impl Debugger {
                         .retain(|v| v != id);
                 }
                 if was_owned || destroyed {
-                    self.promote_capture_target(c).await;
+                    self.schedule_capture_admission(c);
                 }
                 self.browser_status();
             }
@@ -803,9 +810,53 @@ impl Debugger {
         }
         self.browser_status();
     }
-    async fn promote_capture_target(&self, c: &Arc<Connection>) {
-        if !self.capture.browser.current(c) || c.is_closed() {
+    fn schedule_capture_admission(self: &Arc<Self>, c: &Arc<Connection>) {
+        self.capture
+            .browser
+            .admission_epoch
+            .fetch_add(1, Ordering::AcqRel);
+        let Ok(admission) = self.capture.browser.admission.clone().try_lock_owned() else {
             return;
+        };
+        let weak = Arc::downgrade(self);
+        let c = c.clone();
+        tokio::spawn(async move {
+            let Some(d) = weak.upgrade() else {
+                return;
+            };
+            let mut observed = d.capture.browser.admission_epoch.load(Ordering::Acquire);
+            // One independent pump, four commands in flight. Never block the
+            // event dispatcher on attach replies or startup handshakes.
+            for _ in 0..d.options.capture_target_limit.div_ceil(4) {
+                observed = d.capture.browser.admission_epoch.load(Ordering::Acquire);
+                let attempts = tokio::join!(
+                    d.promote_capture_target(&c),
+                    d.promote_capture_target(&c),
+                    d.promote_capture_target(&c),
+                    d.promote_capture_target(&c)
+                );
+                if !attempts.0
+                    && !attempts.1
+                    && !attempts.2
+                    && !attempts.3
+                    && d.capture.browser.admission_epoch.load(Ordering::Acquire) == observed
+                {
+                    break;
+                }
+            }
+            drop(admission);
+            // An event racing the final batch/lock release must not lose its
+            // wakeup. Closed/replaced connections are rejected by promotion.
+            if d.capture.browser.current(&c)
+                && d.capture.browser.admission_epoch.load(Ordering::Acquire) != observed
+            {
+                d.schedule_capture_admission(&c);
+            }
+        });
+    }
+    async fn promote_capture_target(&self, c: &Arc<Connection>) -> bool {
+        if !self.capture.browser.current(c) || c.is_closed() {
+            return false;
         }
         let id = {
             let owners = self
@@ -820,7 +871,7 @@ impl Debugger {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if owners.len() + pending.len() >= self.options.capture_target_limit as usize {
-                return;
+                return false;
             }
             let mut waiting = self
                 .capture
@@ -855,10 +906,27 @@ impl Debugger {
                     Duration::from_secs(2),
                 )
                 .await;
-            if !self.capture.browser.current(c) {
-                return;
+            if !self.capture.browser.current(c)
+                || !self
+                    .capture
+                    .browser
+                    .targets
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&id)
+            {
+                return false;
             }
             if let Err(error) = result {
+                let targets = self
+                    .capture
+                    .browser
+                    .targets
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if c.is_closed() || !self.capture.browser.current(c) || !targets.contains_key(&id) {
+                    return false;
+                }
                 self.capture
                     .browser
                     .pending
@@ -871,12 +939,23 @@ impl Debugger {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(id.clone(), Instant::now() + Duration::from_secs(5));
-                self.queue_capture_target(id);
+                let mut waiting = self
+                    .capture
+                    .browser
+                    .waiting
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if waiting.len() < 512 && !waiting.contains(&id) {
+                    waiting.push_back(id);
+                }
                 self.update(|s| {
                     s["network"]["capture_status"]["last_error"] =
                         json!(crate::validation::truncate(&error.message, 512))
                 });
             }
+            true
+        } else {
+            false
         }
     }
 }

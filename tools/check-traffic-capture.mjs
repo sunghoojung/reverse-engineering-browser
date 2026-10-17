@@ -169,7 +169,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
     attached_targets:12,eligible_targets:12,target_overflow:0,failed_targets:0,gaps:0});
   checks.renderNetworkNotice();
   assert.equal(notice.kind,'active');assert.match(notice.text,/12 of 12 eligible browser targets attached \(limit 32\)/);
-  assert.match(notice.text,/Mode: passive browser auto-attach/);
+  assert.match(notice.text,/Mode: passive browser target discovery/);
   assert.match(notice.text,/without pausing startup/);
   assert.match(notice.text,/Attaching worker targets can affect their lifecycle and timeout behavior/);
   assert.match(notice.text,/first-request capture is not guaranteed/);
@@ -180,7 +180,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   Object.assign(status,{scope:'http-page-targets',state:'ready',attached_targets:32,eligible_targets:32,target_limit:32,target_overflow:0});
   checks.renderNetworkNotice();assert.match(notice.text,/Mode: page-target polling fallback/);
   assert.match(notice.text,/worker and out-of-process iframe targets are not attached/);
-  assert(!notice.text.includes('Mode: passive browser auto-attach'));
+  assert(!notice.text.includes('Mode: passive browser target discovery'));
   delete state.debuggerSession.network.capture_status;
   state.debuggerSession.state='running';assert.equal(checks.networkContentCaptureActive(),true);
   state.debuggerSession.network.capture_enabled=false;assert.equal(checks.networkContentCaptureActive(),false);

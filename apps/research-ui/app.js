@@ -263,7 +263,7 @@
             const earlyTargets = coverage.scope === 'http-browser-targets';
             const targetKind = earlyTargets ? 'browser targets' : 'page targets';
             messages.push(`HTTP capture: ${coverage.attached_targets} of ${coverage.eligible_targets} eligible ${targetKind} attached (limit ${coverage.target_limit}).`);
-            messages.push(earlyTargets ? 'Mode: passive browser auto-attach.' : 'Mode: page-target polling fallback; worker and out-of-process iframe targets are not attached.');
+            messages.push(earlyTargets ? 'Mode: passive browser target discovery.' : 'Mode: page-target polling fallback; worker and out-of-process iframe targets are not attached.');
             if (coverage.discovery_stale) messages.push('Target discovery is unavailable; counts are last known and new tabs may not attach.');
             if (coverage.target_overflow > 0) messages.push(`${coverage.target_overflow} ${targetKind} exceed the capture limit and are not attached.`);
             if (coverage.failed_targets > 0) messages.push(`${coverage.failed_targets} target attachments failed; retry is pending.`);

@@ -15,7 +15,7 @@ if(process.argv[2]==='--transport') {
   const emit=value=>{const body=value===null?Buffer.alloc(0):Buffer.from(JSON.stringify(value));const header=Buffer.from([82,69,66,1,0,0,0,0]);header.writeUInt32BE(body.length,4);process.stdout.write(Buffer.concat([header,body]));};
   const targets=()=>JSON.parse(readFileSync(join(directory,'targets'),'utf8'));
   const options=JSON.parse(readFileSync(join(directory,'options'),'utf8'));
-  const sessions=new Map();let serial=0,pending=Buffer.alloc(0),discovering=false,delayedAdmission=false;
+  const sessions=new Map(),autoParents=new Set();let serial=0,pending=Buffer.alloc(0),discovering=false,delayedAdmission=false;
   let cursor=readFileSync(join(directory,'events'),'utf8').split('\n').filter(Boolean).length;
   function attach(info,parent) {
     if(sessions.has(info.targetId))return sessions.get(info.targetId);
@@ -41,7 +41,7 @@ if(process.argv[2]==='--transport') {
       }
       if(m.method==='Target.setDiscoverTargets') {discovering=m.params.discover;reply({});}
       else if(m.method==='Target.getTargets') {
-        const snapshot=targets();reply({targetInfos:snapshot});
+        const snapshot=targets().filter(t=>!options.snapshotRootsOnly||!t.parent);reply({targetInfos:snapshot});
         if(options.snapshotDestroy&&snapshot.some(t=>t.targetId==='ghost')) {
           writeFileSync(join(directory,'targets'),JSON.stringify(snapshot.filter(t=>t.targetId!=='ghost')));
           if(discovering)emit({method:'Target.targetDestroyed',params:{targetId:'ghost'}});
@@ -49,16 +49,21 @@ if(process.argv[2]==='--transport') {
       }
       else if(m.method==='Target.attachToTarget') {
         const info=targets().find(t=>t.targetId===m.params.targetId);
-        if(options.delayedAdmission&&info?.targetId==='c'&&!delayedAdmission) {
+        if(options.lateFailure&&info?.targetId==='doomed') {
+          setTimeout(()=>emit({id:m.id,error:{code:-32000,message:'synthetic late attach failure'}}),400);
+        } else if(options.slowAdmission&&info?.targetId==='slow-admission') {
+          setTimeout(()=>reply({sessionId:attach(info)}),1500);
+        } else if(options.delayedAdmission&&info?.targetId==='c'&&!delayedAdmission) {
           delayedAdmission=true;log({event:'reservation-race'});
           // The newer auto-attachment arrives before the reserved manual one.
-          attach(targets().find(t=>t.targetId==='d'));
+          attach(targets().find(t=>t.targetId==='d'),sessions.get('b'));
           setTimeout(()=>reply({sessionId:attach(info)}),350);
         } else reply({sessionId:info?attach(info):'missing'});
       }
       else if(m.method==='Network.getResponseBody')setTimeout(()=>reply({body:`body:${m.sessionId}:${m.params.requestId}`,base64Encoded:false}),m.params.requestId==='slow'?1500:0);
       else reply({});
       if(browser&&m.method==='Target.setAutoAttach'&&m.params.autoAttach) {
+        if(m.sessionId)autoParents.add(m.sessionId);
         for(const info of targets().filter(t=>m.sessionId?t.parent===target:!t.parent))attach(info,m.sessionId);
       }
       if(browser&&m.method==='Target.detachFromTarget') {
@@ -72,7 +77,7 @@ if(process.argv[2]==='--transport') {
     while(cursor<events.length) {
       const event=JSON.parse(events[cursor++]);if(!browser)continue;
       if(event.disconnect)process.exit(0);
-      if(event.add) {const info=targets().find(t=>t.targetId===event.add);emit({method:'Target.targetCreated',params:{targetInfo:info}});attach(info,info.parent?sessions.get(info.parent):undefined);continue;}
+      if(event.add) {const info=targets().find(t=>t.targetId===event.add);emit({method:'Target.targetCreated',params:{targetInfo:info}});const parent=info.parent?sessions.get(info.parent):undefined;if(parent&&autoParents.has(parent))attach(info,parent);continue;}
       if(event.destroy){const sid=sessions.get(event.destroy);sessions.delete(event.destroy);emit({method:'Target.targetDestroyed',params:{targetId:event.destroy}});if(sid)emit({method:'Target.detachedFromTarget',params:{sessionId:sid,targetId:event.destroy}});continue;}
       if(event.detach){const sid=sessions.get(event.detach);invalidate(event.detach);emit({method:'Target.detachedFromTarget',params:{sessionId:sid,targetId:event.detach}});continue;}
       const sessionId=sessions.get(event.target);if(sessionId)emit({method:event.method,params:event.params,sessionId});
@@ -117,10 +122,11 @@ if(process.argv[2]==='--transport') {
   await fixture([info('a'),info('w','worker','a'),info('f','iframe','a'),info('shared','shared_worker'),info('service','service_worker'),...Array.from({length:6},(_,i)=>info(`extra${i}`))],{},async({send,until,commands,add})=>{
     let s=await until(s=>s.network.capture_status.attached_targets===11,'Eleven flattened owners');
     assert.equal(s.network.capture_status.target_limit,32);assert.equal(s.network.capture_status.startup_mode,'passive');assert.equal(s.network.capture_status.transport_mode,'browser-sessions');
-    for(const target of ['a','w','f']){request(send,target,'same',target);finish(send,target,'same');}
+    for(const target of ['a','w','f'])request(send,target,'same',target);
+    for(const target of ['f','a','w'])finish(send,target,'same');
     s=await until(s=>s.network.requests.filter(r=>r.response.body.state==='available').length===3,'Session-qualified bodies');
     assert.equal(new Set(s.network.requests.map(r=>r.id)).size,3);
-    for(const row of s.network.requests){const command=commands().find(c=>c.method==='Network.getResponseBody'&&c.sessionId?.endsWith(`:${row.target_id}`));assert(command);assert.equal(row.response.body.text,`body:${command.sessionId}:same`);}
+    for(const row of s.network.requests){assert.equal(row.url,`http://localhost/${row.target_id}`,'Identical raw IDs preserve exact owner/path mapping');const command=commands().find(c=>c.method==='Network.getResponseBody'&&c.sessionId?.endsWith(`:${row.target_id}`));assert(command);assert.equal(row.response.body.text,`body:${command.sessionId}:same`);}
     const retained=s.network.requests.map(r=>r.id);
     request(send,'w','slow','retired');finish(send,'w','slow');
     await until(s=>s.network.requests.some(r=>r.url.endsWith('/retired')&&r.response.body.state==='loading'),'Old body pending');
@@ -152,7 +158,7 @@ if(process.argv[2]==='--transport') {
     assert(capture.filter(c=>c.method==='Target.setAutoAttach').every(c=>c.params.waitForDebuggerOnStart===false),'Capture must never hold startup');
     console.log('PASS browser sessions: >8 owners, nested worker/frame, exact bodies, retired late body, initialization retry, reconnect and passive commands');
   });
-  await fixture([info('a'),info('w','worker','a'),info('grandchild','worker','w')],{},async({send,until,commands})=>{
+  await fixture([info('a'),info('w','worker','a'),info('grandchild','worker','w')],{snapshotRootsOnly:true},async({send,until,commands})=>{
     await until(s=>s.network.capture_status.attached_targets===3,'Recursive three-level startup');
     const original=new Map(commands().filter(c=>c.method==='Network.enable').map(c=>[c.sessionId.split(':').at(-1),c.sessionId]));
     for(const target of ['w','grandchild']){request(send,target,'slow',`parent-retired-${target}`);finish(send,target,'slow');}
@@ -166,7 +172,7 @@ if(process.argv[2]==='--transport') {
     console.log('PASS browser sessions: parent-only detach cascades transitively and late bodies stay retired');
   });
   for(const method of ['Target.targetCrashed','Inspector.targetCrashed']) {
-    await fixture([info('a'),info('w','worker','a'),info('grandchild','worker','w')],{},async({send,until})=>{
+    await fixture([info('a'),info('w','worker','a'),info('grandchild','worker','w')],{snapshotRootsOnly:true},async({send,until})=>{
       let s=await until(s=>s.network.capture_status.attached_targets===3,'Fresh nested tree for crash');
       const path=`crash-${method}`;request(send,'grandchild','slow',path);finish(send,'grandchild','slow');
       s=await until(s=>s.network.requests.some(r=>r.url.endsWith('/'+path)&&r.response.body.state==='loading'),'Crash descendant body pending');
@@ -197,7 +203,7 @@ if(process.argv[2]==='--transport') {
     await until(s=>s.network.capture_status.attached_target_ids.includes('d'),'Second queued target promoted');
     console.log('PASS browser sessions: configurable capacity and fair overflow promotion');
   });
-  await fixture(['a','b','c','d'].map(id=>info(id)),{limit:2,delayedAdmission:true},async({until,commands,destroy})=>{
+  await fixture([...['a','b','c'].map(id=>info(id)),info('d','iframe','b')],{limit:2,delayedAdmission:true},async({until,commands,destroy})=>{
     await until(s=>s.network.capture_status.attached_targets===2,'Reservation race baseline');
     destroy('a');
     let s=await until(s=>commands().some(c=>c.event==='reservation-race')&&s.network.capture_status.attached_target_ids.includes('c'),'Reserved FIFO target admitted');
@@ -214,7 +220,12 @@ if(process.argv[2]==='--transport') {
     assert.equal(s.network.capture_status.failed_targets,0);
     const browserCommands=commands().filter(c=>c.browser&&c.event==='command');
     assert(browserCommands.findIndex(c=>c.method==='Target.setDiscoverTargets')<browserCommands.findIndex(c=>c.method==='Target.getTargets'),'Discovery must precede initial snapshot');
-    assert(!browserCommands.some(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='ghost'),'Destroyed snapshot target must not become a retry ghost');
+    const ghostAttempts=()=>commands().filter(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='ghost').length;
+    const initialAttempts=ghostAttempts();
+    assert(initialAttempts<=1,'At most one explicit attach may race the queued destruction event');
+    await delay(5500);
+    assert.equal(ghostAttempts(),initialAttempts,'Destroyed snapshot target must never be retried');
+    await until(s=>s.network.capture_status.eligible_targets===1&&s.network.capture_status.failed_targets===0,'Destroyed target leaves no stale failure');
     console.log('PASS browser sessions: discovery subscription reconciles destruction during initial snapshot');
   });
   await fixture([info('a'),{...info('held'),waiting:true}],{},async({until,commands})=>{
@@ -223,6 +234,35 @@ if(process.argv[2]==='--transport') {
     assert.match(s.network.capture_status.last_error,/waiting for a debugger/);
     assert(!commands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Passive capture must not resume externally waiting targets');
     console.log('PASS browser sessions: externally waiting rejection is visible and never resumed');
+  });
+  await fixture([info('a')],{},async({until,commands,add})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Initial explicitly attached page');
+    for(let i=0;i<12;i++)add(info(`burst${i}`));
+    await until(s=>Array.from({length:12},(_,i)=>`burst${i}`).every(id=>s.network.capture_status.attached_target_ids.includes(id)),'Event-driven burst admitted without per-target polling delay',5000);
+    const controls=commands().filter(c=>c.browser&&c.event==='command');
+    assert(!controls.some(c=>c.method==='Target.setAutoAttach'&&!c.sessionId),'Passive browser root must never enable auto-attach');
+    assert(controls.some(c=>c.method==='Target.setAutoAttach'&&c.sessionId),'Per-owner recursive attachment remains enabled');
+    assert(!controls.some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Explicit passive admission never resumes targets');
+    console.log('PASS browser sessions: discovery events promptly admit a bounded burst without browser-root auto-attach or resume');
+  });
+  await fixture([info('a')],{slowAdmission:true},async({until,commands,add,send})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Initial owner before slow admission');
+    add(info('slow-admission'));
+    await until(()=>commands().some(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='slow-admission'),'Admission command is awaiting delayed reply');
+    request(send,'a','while-admitting');finish(send,'a','while-admitting');
+    await until(s=>s.network.requests.some(row=>row.protocol_request_id==='while-admitting'&&row.response.body.state==='available'),'Existing owner Network events progress during slow admission',1000);
+    await until(s=>s.network.capture_status.attached_target_ids.includes('slow-admission'),'Delayed owner eventually admitted');
+    console.log('PASS browser sessions: delayed target admission never blocks existing-owner Network events');
+  });
+  await fixture([info('a')],{lateFailure:true},async({until,commands,add,destroy})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Initial owner before destroyed admission');
+    add(info('doomed'));
+    await until(()=>commands().some(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='doomed'),'Doomed attach in flight');
+    destroy('doomed');await delay(600);
+    await until(s=>s.network.capture_status.eligible_targets===1&&s.network.capture_status.failed_targets===0,'Late failure cannot resurrect destroyed target');
+    await delay(5500);
+    assert.equal(commands().filter(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='doomed').length,1,'Destroyed target must not retry after late attach failure');
+    console.log('PASS browser sessions: late admission error cannot resurrect destroyed target failures or retries');
   });
   await fixture([info('a')],{capture:false},async({until,commands})=>{
     const s=await until(s=>s.state==='running','Metadata-only debugger');assert.equal(s.network.capture_status.state,'disabled');

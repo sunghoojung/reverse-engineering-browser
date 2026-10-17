@@ -8,6 +8,7 @@ import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {stopBrowserTestProcess, waitForClose} from './browser-test-process.mjs';
+import {prepareCaptureDiagnosticTransport,readCaptureDiagnostics} from './traffic-capture-diagnostics.mjs';
 
 const root=resolve(process.argv[2]??'.');
 // Set to 1 for the requested lossless early-request acceptance gate. Passive
@@ -18,7 +19,7 @@ const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-tr
 const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'build/reb-debugger-transport'));
 const directory=await mkdtemp(join(tmpdir(),'reb-traffic-browser-'));
 const children=[];let socket,sequence=1,diagnostics='',failure;const pending=new Map();
-const served=new Set(),servedCounts=new Map();
+const served=new Set(),servedCounts=new Map(),heldResponses=new Map();
 let lastCaptureSnapshot=null,lastCaptureReadError='',refreshFailureSnapshot;
 let lastControlCommand=null;
 const delay=ms=>new Promise(resolveDelay=>setTimeout(resolveDelay,ms));
@@ -60,7 +61,13 @@ const fixture=createServer((request,response)=>{
   if(url.pathname==='/service.js') {
     type='text/javascript';body="self.addEventListener('install',event=>event.waitUntil(fetch('/service-immediate').then(response=>response.text()).then(()=>self.skipWaiting())));";
   }
-  response.setHeader('Content-Type',type);response.end(body);
+  response.setHeader('Content-Type',type);
+  if(url.pathname.startsWith('/overlap/')) {
+    heldResponses.set(url.pathname,{response,body});
+    response.once('close',()=>heldResponses.delete(url.pathname));
+    return;
+  }
+  response.end(body);
 });
 await new Promise(resolveListen=>fixture.listen(0,'127.0.0.1',resolveListen));
 const origin=`http://127.0.0.1:${fixture.address().port}`;
@@ -98,7 +105,8 @@ try {
   });
   const version=await command('Browser.getVersion');
   console.log('Fixture browser version:',JSON.stringify({product:version.product,protocolVersion:version.protocolVersion}).slice(0,512));
-  const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',transport,'--capture-network-content']);
+  const diagnosticTransport=await prepareCaptureDiagnosticTransport(directory,transport);
+  const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',diagnosticTransport,'--capture-network-content']);
   const address=await until(async()=>(await readFile(join(directory,'endpoint'),'utf8')).trim(),'Backend startup');
   const state=async()=>{
     try {
@@ -138,6 +146,13 @@ try {
   const rows=snapshot.network.requests.filter(row=>row.url.endsWith('/request-a')||row.url.endsWith('/request-b'));
   assert.equal(rows.find(row=>row.target_id===a).response.body.text,'synthetic:/request-a');
   assert.equal(rows.find(row=>row.target_id===b).response.body.text,'synthetic:/request-b');
+  // Server-held responses establish real overlap, not merely ready owners.
+  for(const [session,suffix] of [[sessionA,'a'],[sessionB,'b']]) {
+    const result=await command('Runtime.evaluate',{expression:`globalThis.overlapBody=fetch('${origin}/overlap/${suffix}').then(r=>r.text());'started'`},session);
+    assert(!result.exceptionDetails,JSON.stringify(result));
+  }
+  await until(()=>heldResponses.has('/overlap/a')&&heldResponses.has('/overlap/b'),'Both tab requests simultaneously outstanding at server');
+  await until(async()=>(await state()).network.requests.filter(row=>row.url.startsWith(origin+'/overlap/')&&row.response.body.state==='loading').length===2,'Both overlapping owner rows retained before selection');
   // HTTP owners attach from browser events before the selected-debugger's
   // independently polled catalog necessarily exposes the page as selectable.
   await until(async()=>(await state()).targets.some(target=>target.id===b),'B appears in selectable debugger catalog');
@@ -146,10 +161,24 @@ try {
   await until(async()=>(await state()).target.id===b,'Focus B');
   await command('Runtime.evaluate',{expression:`fetch('${origin}/after-switch-a').then(r=>r.text())`,awaitPromise:true},sessionA);
   snapshot=await until(async()=>{const s=await state();return s.network.requests.some(row=>row.url===origin+'/after-switch-a'&&row.response.body.state==='available')&&s;},'Background A after focus switch');
+  assert(heldResponses.has('/overlap/a')&&heldResponses.has('/overlap/b'),'Both original responses stay outstanding across selection and background activity');
   for(const row of rows)assert(snapshot.network.requests.some(retained=>retained.id===row.id),'Focus switch must retain earlier rows');
   await command('Target.closeTarget',{targetId:a});
   snapshot=await until(async()=>{const s=await state(),ids=s.network.capture_status.attached_target_ids;return !ids.includes(a)&&ids.includes(b)&&s;},'Closed A owner');
+  const heldB=heldResponses.get('/overlap/b');assert(heldB,'B response remains outstanding when A closes');heldB.response.end(heldB.body);
+  snapshot=await until(async()=>{const s=await state();return s.network.requests.some(row=>row.url===origin+'/overlap/b'&&row.response.body.state==='available')&&s.network.requests.some(row=>row.url===origin+'/overlap/a'&&row.response.body.state==='error')&&s;},'B completes while closed A retains explicit incomplete evidence');
+  const overlapA=snapshot.network.requests.find(row=>row.url===origin+'/overlap/a');
+  const overlapB=snapshot.network.requests.find(row=>row.url===origin+'/overlap/b');
+  assert.equal(overlapA.target_id,a);assert.equal(overlapA.response.body.state,'error');
+  assert.equal(overlapB.target_id,b);assert.equal(overlapB.response.body.text,'synthetic:/overlap/b');
+  assert.notEqual(overlapA.id,overlapB.id,'Overlapping owners have distinct public row IDs');
+  assert.equal(servedCounts.get('/overlap/a'),1);assert.equal(servedCounts.get('/overlap/b'),1);
   for(const row of rows)assert(snapshot.network.requests.some(retained=>retained.id===row.id),'Closing A must retain completed evidence');
+  await command('Runtime.evaluate',{expression:`fetch('${origin}/after-close-b').then(r=>r.text())`,awaitPromise:true},sessionB);
+  snapshot=await until(async()=>{const s=await state();return s.network.requests.some(row=>row.url===origin+'/after-close-b'&&row.response.body.state==='available')&&s;},'Surviving B captures after A closes');
+  assert.equal(snapshot.network.requests.find(row=>row.url===origin+'/after-close-b').target_id,b);
+  assert(snapshot.network.requests.some(row=>row.id===overlapA.id&&row.response.body.state==='error'),'Incomplete closed-owner history stays explicit');
+  console.log('PASS real concurrent tabs: server-held requests overlap, selection switches while pending, closing A preserves its incomplete row and B exact body, survivor continues');
   console.log('PASS real Chromium/native transport: blank new tab navigation, both-page bodies, background capture after focus switch, history retention and target closure');
   // Early-traffic acceptance probe: these operations intentionally never wait
   // for per-target discovery, Network.enable, or a target attachment counter.
@@ -282,6 +311,7 @@ try {
   console.error('Capture read failure:',lastCaptureReadError);
   throw error;
 } finally {
+  console.log('Capture control lifecycle:',await readCaptureDiagnostics(directory));
   const cleanupErrors=[];
   for(const waiter of pending.values())clearTimeout(waiter.timer);
   // CDP shutdown lets Chrome finish profile writes before signal fallback.

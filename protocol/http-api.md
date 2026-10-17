@@ -227,8 +227,9 @@ explains evidence levels and compatibility.
 `GET /api/debugger` retains one shared bounded HTTP ledger across debugger target
 selection. A single browser CDP connection uses flattened, owner-qualified
 sessions for supported page, dedicated/shared/service worker and out-of-process
-iframe targets. Browser Target events and recursive passive auto-attachment
-avoid the former one-second page polling delay. No startup pause, reload,
+iframe targets. Browser Target events trigger bounded explicit root attachment;
+recursive attachment on captured owners discovers nested contexts. This avoids
+one-per-second admission while leaving earliest requests best-effort. No startup pause, reload,
 navigation or Runtime evaluation is requested. Passive attachment can still
 change worker lifecycle/timeouts, and requests before attachment or
 `Network.enable`, including short-lived popups, remain unavailable.
@@ -590,3 +591,12 @@ selected.reb-evidence.json` with the usual endpoint option. See
 request shape, safe persistence, exact limits, lease compatibility and stable
 error reasons. Backend event clear now also requires matching exclusive guards
 for all existing configured outputs; legacy unguarded clear returns 503.
+
+Passive browser-session HTTP capture uses browser target discovery and bounded
+explicit root attachments, with recursive attachment on captured page/worker
+sessions. It does not enable browser-root auto-attachment: Chromium's browser-root
+popup throttling can affect `window.open` even when `waitForDebuggerOnStart` is
+false. Admission runs immediately on discovery events with at most four attach
+commands in flight; the target capacity still includes pending attachments. The
+periodic refresh reconciles missed events and retries. First requests remain
+best-effort, and this change does not establish lossless early navigation capture.

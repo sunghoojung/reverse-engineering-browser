@@ -19,6 +19,7 @@ const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'
 const directory=await mkdtemp(join(tmpdir(),'reb-traffic-browser-'));
 const children=[];let socket,sequence=1,diagnostics='',failure;const pending=new Map();
 const served=new Set();
+let lastCaptureSnapshot=null,lastCaptureReadError='';
 const delay=ms=>new Promise(resolveDelay=>setTimeout(resolveDelay,ms));
 const fixture=createServer((request,response)=>{
   const url=new URL(request.url,`http://${request.headers.host}`);
@@ -75,7 +76,7 @@ async function until(read,label) {
     try {const value=await read();if(value)return value;}catch(error){if(error instanceof assert.AssertionError)throw error;}
     await delay(50);
   }
-  assert.fail(`${label} timed out: ${diagnostics}`);
+  assert.fail(`${label} timed out: ${diagnostics}\nLast capture snapshot: ${JSON.stringify(lastCaptureSnapshot)?.slice(0,16384)}\nLast capture read error: ${lastCaptureReadError}`);
 }
 try {
   start(browser,['--headless=new','--disable-dev-shm-usage','--site-per-process','--disable-popup-blocking','--disable-background-networking','--no-first-run',
@@ -94,7 +95,21 @@ try {
   });
   const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',transport,'--capture-network-content']);
   const address=await until(async()=>(await readFile(join(directory,'endpoint'),'utf8')).trim(),'Backend startup');
-  const state=async()=>await(await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)})).json();
+  const state=async()=>{
+    try {
+      const response=await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)});
+      const value=await response.json();
+      // Authored loopback fixtures only; bound failure diagnostics and exclude
+      // response bodies, source bytes, credentials and unrelated browser data.
+      lastCaptureSnapshot={http_status:response.status,state:value.state,error:value.error,
+        target:value.target&&{id:value.target.id,type:value.target.type},
+        target_count:value.targets?.length,
+        targets:value.targets?.slice(0,32).map(target=>({id:target.id,type:target.type})),
+        capture_status:value.network?.capture_status};
+      lastCaptureReadError='';
+      return value;
+    } catch(error) {lastCaptureReadError=String(error).slice(0,512);throw error;}
+  };
   let snapshot=await until(async()=>{const s=await state();return s.state==='running'&&s.network.capture_status.attached_targets===1&&s;},'First capture owner');
   const a=snapshot.target.id;
   // Include about:blank -> navigation, a common new-tab lifecycle.
@@ -230,6 +245,8 @@ try {
 
 } catch(error) {
   failure=error;
+  console.error('Capture failure snapshot:',JSON.stringify(lastCaptureSnapshot)?.slice(0,16384));
+  console.error('Capture read failure:',lastCaptureReadError);
   throw error;
 } finally {
   const cleanupErrors=[];

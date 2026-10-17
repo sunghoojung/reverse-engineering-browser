@@ -77,13 +77,61 @@ impl Connection {
             .stderr
             .take()
             .ok_or_else(|| Error::conflict("Debugger transport diagnostics are unavailable"))?;
-        let ready = tokio::time::timeout(Duration::from_secs(3), frame(&mut stdout))
+        let diagnostics = Arc::new(StdMutex::new(Vec::new()));
+        let retained = diagnostics.clone();
+        let mut diagnostic_reader = tokio::spawn(async move {
+            let mut buffer = [0; 4096];
+            while let Ok(size) = stderr.read(&mut buffer).await {
+                if size == 0 {
+                    break;
+                }
+                let mut kept = retained.lock().unwrap_or_else(|e| e.into_inner());
+                let size = size.min(4096usize.saturating_sub(kept.len()));
+                kept.extend_from_slice(&buffer[..size]);
+            }
+        });
+        let startup = tokio::time::timeout(Duration::from_secs(3), frame(&mut stdout))
             .await
-            .map_err(|_| Error::conflict("Native debugger transport startup timed out"))??;
-        if !ready.is_empty() {
-            return Err(Error::protocol(
-                "Native debugger transport returned a malformed startup frame",
-            ));
+            .map_err(|_| Error::conflict("Native debugger transport startup timed out"))
+            .and_then(|result| result)
+            .and_then(|ready| {
+                if ready.is_empty() {
+                    Ok(())
+                } else {
+                    Err(Error::protocol(
+                        "Native debugger transport returned a malformed startup frame",
+                    ))
+                }
+            });
+        if let Err(mut error) = startup {
+            // The transport can fail during its WebSocket handshake, before its
+            // ready frame. Drain bounded stderr from process start so that EOF
+            // does not discard the native cause or get replaced by cleanup.
+            let _ = child.start_kill();
+            let exit = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+            if tokio::time::timeout(Duration::from_millis(100), &mut diagnostic_reader)
+                .await
+                .is_err()
+            {
+                diagnostic_reader.abort();
+            }
+            let detail =
+                String::from_utf8_lossy(&diagnostics.lock().unwrap_or_else(|e| e.into_inner()))
+                    .trim()
+                    .to_owned();
+            error.message = format!(
+                "Native debugger transport startup failed: {}; exit={:?}{}",
+                error.message,
+                exit.ok()
+                    .and_then(|result| result.ok())
+                    .map(|status| status.to_string()),
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", validation::truncate(&detail, 4096))
+                }
+            );
+            return Err(error);
         }
         let (closed, mut stopped) = watch::channel(false);
         let (sender, events) = mpsc::channel(512);
@@ -98,19 +146,6 @@ impl Connection {
             observer: StdMutex::new(None),
         });
         let weak = Arc::downgrade(&connection);
-        let diagnostics = Arc::new(StdMutex::new(Vec::new()));
-        let retained = diagnostics.clone();
-        tokio::spawn(async move {
-            let mut buffer = [0; 4096];
-            while let Ok(size) = stderr.read(&mut buffer).await {
-                if size == 0 {
-                    break;
-                }
-                let mut kept = retained.lock().unwrap_or_else(|e| e.into_inner());
-                let size = size.min(4096usize.saturating_sub(kept.len()));
-                kept.extend_from_slice(&buffer[..size]);
-            }
-        });
         tokio::spawn(async move {
             let failure = loop {
                 let message = tokio::select! {
@@ -418,6 +453,34 @@ pub fn local_websocket(value: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn startup_eof_retains_bounded_native_failure_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("transport");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf 'synthetic handshake rejected\n{}discarded-suffix' >&2\nexit 7\n", "x".repeat(8192)),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = match Connection::open(&executable, "ws://127.0.0.1:1").await {
+            Ok(_) => panic!("Startup without a ready frame must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("startup failed"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("synthetic handshake rejected"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.len() < 4352);
+        assert!(!error.message.contains("discarded-suffix"));
+    }
 
     // This fixture consumes one full command and acknowledges its receipt.
     // It never starts a browser or evaluates the submitted synthetic expression.

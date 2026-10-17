@@ -423,7 +423,7 @@ impl Debugger {
     async fn open_browser_capture(self: &Arc<Self>) -> Result<()> {
         let (_, url) = self.endpoint()?;
         let (c, mut events) = Connection::open(&self.transport, &url).await?;
-        if let Err(error) = c
+        if let Err(mut error) = c
             .command(
                 "Target.setDiscoverTargets",
                 json!({"discover":true}),
@@ -432,6 +432,10 @@ impl Debugger {
             .await
         {
             c.close().await;
+            error.message = format!(
+                "Browser Target.setDiscoverTargets failed: {}",
+                error.message
+            );
             return Err(error);
         }
         let initial = match c

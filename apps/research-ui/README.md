@@ -80,7 +80,9 @@ is a copied template, never captured evidence; no request is sent.
 Console URL links open a bounded, explicitly unverified source search. The
 separate disposable browser is not assigned a captured-artifact identity, and
 Console line offsets are never applied to search candidates. Debugger/native
-host-and-time correlations likewise cannot become exact captured trace links.
+host-and-time correlations likewise cannot become exact captured trace links,
+request-specific signal profiles, or request-filtered VM candidates. CDP content
+and raw native events remain available independently.
 See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
 for the identity boundary, retained limits and integration points.
 

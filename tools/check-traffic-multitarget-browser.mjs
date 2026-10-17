@@ -130,6 +130,9 @@ try {
   const rows=snapshot.network.requests.filter(row=>row.url.endsWith('/request-a')||row.url.endsWith('/request-b'));
   assert.equal(rows.find(row=>row.target_id===a).response.body.text,'synthetic:/request-a');
   assert.equal(rows.find(row=>row.target_id===b).response.body.text,'synthetic:/request-b');
+  // HTTP owners attach from browser events before the selected-debugger's
+  // independently polled catalog necessarily exposes the page as selectable.
+  await until(async()=>(await state()).targets.some(target=>target.id===b),'B appears in selectable debugger catalog');
   const selected=await fetch(new URL('/api/debugger/actions',address),{method:'POST',headers:{'Content-Type':'application/json',Origin:address},body:JSON.stringify({action:'select_target',target_id:b})});
   assert(selected.ok,await selected.text());
   await until(async()=>(await state()).target.id===b,'Focus B');

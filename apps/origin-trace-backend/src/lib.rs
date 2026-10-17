@@ -1,6 +1,7 @@
 mod analysis_catalog;
 mod analyst;
 mod app;
+mod capture_first_browser;
 mod config;
 mod debugger;
 mod decoder;
@@ -30,6 +31,7 @@ mod worker;
 mod workspace;
 mod workspace_lease;
 pub use app::App;
+pub use capture_first_browser::CaptureFirstBrowser;
 pub use config::Options;
 pub use endpoint::PublishedEndpoint;
 

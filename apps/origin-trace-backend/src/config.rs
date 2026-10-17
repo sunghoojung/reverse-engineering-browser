@@ -52,6 +52,19 @@ pub struct Options {
     pub devtools_active_port: Option<PathBuf>,
     #[arg(long)]
     pub capture_network_content: bool,
+    /// Explicit timing-altering experiment: launch and own a fresh disposable browser.
+    #[arg(
+        long,
+        requires = "capture_network_content",
+        conflicts_with = "devtools_active_port"
+    )]
+    pub capture_first_browser: Option<PathBuf>,
+    /// Run the owned capture-first experiment without browser windows (test use).
+    #[arg(long, requires = "capture_first_browser")]
+    pub capture_first_headless: bool,
+    // Never accepted from CLI/environment or inferred from a supplied endpoint.
+    #[arg(skip)]
+    pub(crate) capture_first_owned: bool,
     /// Maximum multiplexed HTTP capture sessions; shares a fixed browser buffer budget.
     #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=128))]
     pub capture_target_limit: u16,
@@ -94,6 +107,7 @@ impl Options {
             &mut self.native_console,
             &mut self.owned_vm_fixture,
             &mut self.brave_binary,
+            &mut self.capture_first_browser,
             &mut self.heap_snapshot,
             &mut self.deobfuscator,
             &mut self.analyst_runner,

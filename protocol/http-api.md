@@ -229,13 +229,27 @@ selection. A single browser CDP connection uses flattened, owner-qualified
 sessions for supported page, dedicated/shared/service worker and out-of-process
 iframe targets. Browser Target events trigger bounded explicit root attachment;
 recursive attachment on captured owners discovers nested contexts. This avoids
-one-per-second admission while leaving earliest requests best-effort. No startup pause, reload,
+one-per-second admission while leaving earliest requests best-effort. In the default passive mode no startup pause, reload,
+
 navigation or Runtime evaluation is requested. Passive attachment can still
 change worker lifecycle/timeouts, and requests before attachment or
 `Network.enable`, including short-lived popups, remain unavailable.
 
 `network.capture_status` reports `scope: http-browser-targets`,
-`transport_mode: browser-sessions`, and `startup_mode: passive`. Standalone
+`transport_mode: browser-sessions`, and `startup_mode: passive`. The explicit
+`--capture-first-browser` launch instead reports `startup_mode: capture-first`
+only for a fresh backend-owned disposable browser process/profile. Its root and
+recursive auto-attachments wait for capture initialization; this changes timing,
+is displayed as a pre-armed owned-browser experiment, and requires the exact
+target to be capture-ready before navigation. Direct URL target creation and
+early worker/frame requests can precede setup; initial-request capture is not
+guaranteed. `held_targets`, `resumed_targets`, `hold_timeouts`,
+`resume_failures`, and `hold_max_ms` report release diagnostics. An acknowledged
+Runtime resume is distinguished from transport teardown after a failed resume;
+the observed hold maximum includes command acknowledgement time, not exact
+browser execution timing. Supplied browser endpoints cannot enable this mode.
+See the [capture-first workflow](../apps/origin-trace-backend/README.md#optional-capture-first-disposable-experiment).
+Standalone
 `--capture-target-limit` defaults to 32 and accepts 1–128; the limit counts both
 initializing and ready capture sessions across all supported target types.
 Existing owners retain their slots, and waiting targets are admitted oldest-first

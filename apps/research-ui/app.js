@@ -263,12 +263,16 @@
             const earlyTargets = coverage.scope === 'http-browser-targets';
             const targetKind = earlyTargets ? 'browser targets' : 'page targets';
             messages.push(`HTTP capture: ${coverage.attached_targets} of ${coverage.eligible_targets} eligible ${targetKind} attached (limit ${coverage.target_limit}).`);
-            messages.push(earlyTargets ? 'Mode: passive browser target discovery.' : 'Mode: page-target polling fallback; worker and out-of-process iframe targets are not attached.');
+            messages.push(coverage.startup_mode === 'capture-first'
+              ? 'Mode: pre-armed owned-browser experiment in a fresh disposable browser. Startup pauses alter timing. Navigate only after that exact target is capture-ready; directly created URL targets, early worker/frame requests and bounded content can still be missing.'
+              : earlyTargets ? 'Mode: passive browser target discovery.' : 'Mode: page-target polling fallback; worker and out-of-process iframe targets are not attached.');
+            if (coverage.startup_mode === 'capture-first') messages.push(`${coverage.held_targets ?? 0} targets held for setup · ${coverage.resumed_targets ?? 0} resumed · ${coverage.hold_timeouts ?? 0} setup timeouts · ${coverage.resume_failures ?? 0} unacknowledged resumes (transport closed).`);
+
             if (coverage.catalog_incomplete) messages.push('Target catalog is incomplete; counts cover only known targets while recovery is pending.');
             if (coverage.discovery_stale) messages.push('Target discovery is unavailable; counts are last known and new tabs may not attach.');
             if (coverage.target_overflow > 0) messages.push(`${coverage.target_overflow} ${targetKind} exceed the capture limit and are not attached.`);
             if (coverage.failed_targets > 0) messages.push(`${coverage.failed_targets} target attachments failed; retry is pending.`);
-            if (coverage.gaps > 0) messages.push(`${coverage.gaps} HTTP capture owner losses or retirements recorded; coverage may be incomplete.`);
+            if (coverage.gaps > 0) messages.push(`${coverage.gaps} HTTP capture gaps recorded; coverage may be incomplete.`);
             const unattached = coverage.unattached_targets ?? [];
             if (unattached.length) {
               const labels = unattached.slice(0, 3).map(target => `${target.title || 'Untitled target'} [${target.id.length > 48 ? target.id.slice(0, 48) + '…' : target.id}]`);
@@ -280,7 +284,7 @@
               if (kind === 'active') kind = 'gap';
               messages.push('The selected debugger page is not attached for HTTP capture; its new requests are not being recorded here.');
             }
-            if (earlyTargets) messages.push('Supported page, worker and out-of-process iframe targets are attached without requesting startup pauses. Initial requests can still precede Network.enable; first-request capture is not guaranteed. Attaching worker targets can affect their lifecycle and timeout behavior.');
+            if (earlyTargets && coverage.startup_mode !== 'capture-first') messages.push('Supported page, worker and out-of-process iframe targets are attached without requesting startup pauses. Initial requests can still precede Network.enable; first-request capture is not guaranteed. Attaching worker targets can affect their lifecycle and timeout behavior.');
             messages.push('Requests before attachment, including short-lived targets, are unavailable. Requests observed only by native probes are not included in this CDP list. WebSockets remain scoped to the selected debugger target.');
           }
           const dropped = state.debuggerSession.network.dropped;

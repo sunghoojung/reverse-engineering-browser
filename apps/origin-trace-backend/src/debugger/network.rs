@@ -1,11 +1,14 @@
-use super::{Debugger, network_timing};
+use super::{Debugger, network_capture::Owner, network_timing};
 use crate::{
     error::{Error, Result},
     provenance, validation,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 fn bounded(v: &Value, max: usize) -> (String, bool) {
     let s = v.as_str().unwrap_or("");
     (validation::truncate(s, max), s.len() > max)
@@ -50,18 +53,18 @@ fn mime(headers: &[Value], fallback: &str) -> String {
         .unwrap_or(fallback)
         .into()
 }
-fn record<'a>(state: &'a mut Value, id: &str) -> Option<&'a mut Value> {
+fn record<'a>(state: &'a mut Value, owner: &Owner, id: &str) -> Option<&'a mut Value> {
     state["network"]["requests"]
         .as_array_mut()?
         .iter_mut()
         .rev()
-        .find(|r| r["protocol_request_id"] == id)
+        .find(|r| r["capture_owner"] == owner.id && r["protocol_request_id"] == id)
 }
-fn response(state: &mut Value, p: &Value, redirected: bool) {
+fn response(state: &mut Value, owner: &Owner, p: &Value, redirected: bool) {
     let Some(id) = p["requestId"].as_str() else {
         return;
     };
-    let Some(record) = record(state, id) else {
+    let Some(record) = record(state, owner, id) else {
         return;
     };
     let r = &p["response"];
@@ -92,9 +95,15 @@ fn response(state: &mut Value, p: &Value, redirected: bool) {
         record["response"]["body"]["reason"] = json!("This HTTP response has no body.");
     }
 }
-fn finish(state: &mut Value, p: &Value, failed: bool, redirected: bool) -> Option<String> {
+fn finish(
+    state: &mut Value,
+    owner: &Owner,
+    p: &Value,
+    failed: bool,
+    redirected: bool,
+) -> Option<String> {
     let id = p["requestId"].as_str()?;
-    let record = record(state, id)?;
+    let record = record(state, owner, id)?;
     network_timing::finish(record, p, failed, redirected);
     record["state"] = json!(if failed { "failed" } else { "complete" });
     if let Some(time) = p["timestamp"].as_f64() {
@@ -130,12 +139,17 @@ fn finish(state: &mut Value, p: &Value, failed: bool, redirected: bool) -> Optio
     record["id"].as_str().map(str::to_owned)
 }
 impl Debugger {
+    #[cfg(test)]
     pub(super) async fn network(self: &Arc<Self>, method: &str, p: &Value) {
-        if !self.options.capture_network_content {
+        if method.starts_with("Network.webSocket") && self.options.capture_network_content {
+            self.update(|s| super::websocket::event(s, method, p));
             return;
         }
-        if method.starts_with("Network.webSocket") {
-            self.update(|state| super::websocket::event(state, method, p));
+        let owner = Owner::fixture("test", self.snapshot()["target"].clone());
+        self.network_for(&owner, method, p).await;
+    }
+    pub(super) async fn network_for(self: &Arc<Self>, owner: &Arc<Owner>, method: &str, p: &Value) {
+        if !self.options.capture_network_content || owner.retired.load(Ordering::Acquire) {
             return;
         }
         let mut retrieve = None;
@@ -164,22 +178,39 @@ impl Debugger {
                 } else {
                     json!({"state":if request["hasPostData"]==true {"missing"} else {"empty"},"mime":mime,"text":"","base64":"","truncated":false,"reason":if request["hasPostData"]==true {"CDP reported request data but did not retain its bytes."} else {"This request has no body."}})
                 };
+                let Some(public) = self.capture.row_id(owner) else {
+                    self.update(|s| {
+                        s["network"]["dropped"] = json!(
+                            s["network"]["dropped"]
+                                .as_u64()
+                                .unwrap_or(0)
+                                .saturating_add(1)
+                        )
+                    });
+                    return;
+                };
                 self.update(|s| {
-                    if p["redirectResponse"].is_object() {response(s,&json!({"requestId":id,"response":p["redirectResponse"]}),true);finish(s,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}
-                    let target=s["target"]["id"].as_str().unwrap_or("unknown").to_owned();let title=s["target"]["title"].clone();let initiator=provenance::project(&json!({"operation":"call_sites","initiator":p["initiator"],"target_id":target,"scripts":provenance::catalog(s)})).unwrap_or_else(|_|json!({"sites":[],"gaps":["initiator_unavailable"]}));let requests=s["network"]["requests"].as_array_mut().unwrap();let redirect=requests.iter().filter(|r|r["protocol_request_id"]==id).count();let suffix=if redirect>0 {format!(":redirect:{redirect}")} else {String::new()};
-                    let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":format!("cdp:{target}:{id}{suffix}"),"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
+                    if owner.retired.load(Ordering::Acquire) {return;}
+                    if p["redirectResponse"].is_object() {response(s,owner,&json!({"requestId":id,"response":p["redirectResponse"]}),true);finish(s,owner,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}
+                    let target=owner.target["id"].as_str().unwrap_or("unknown").to_owned();let title=owner.target["title"].clone();let initiator=provenance::project(&json!({"operation":"call_sites","initiator":p["initiator"],"target_id":target,"scripts":provenance::catalog(s)})).unwrap_or_else(|_|json!({"sites":[],"gaps":["initiator_unavailable"]}));let requests=s["network"]["requests"].as_array_mut().unwrap();
+                    let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":public,"capture_owner":owner.id,"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
                     if requests.len()>=1000 {requests.remove(0);let dropped=s["network"]["dropped"].as_u64().unwrap_or(0)+1;s["network"]["dropped"]=json!(dropped);}s["network"]["requests"].as_array_mut().unwrap().push(r);
                 });
             }
-            "Network.responseReceived" => self.update(|s| response(s, p, false)),
+            "Network.responseReceived" => self.update(|s| {
+                if !owner.retired.load(Ordering::Acquire) {
+                    response(s, owner, p, false);
+                }
+            }),
             "Network.loadingFinished" | "Network.loadingFailed" => self.update(|s| {
-                let epoch = s["network"]["capture_epoch"].clone();
-                retrieve =
-                    finish(s, p, method.ends_with("Failed"), false).map(|public| (public, epoch));
+                if owner.retired.load(Ordering::Acquire) {
+                    return;
+                }
+                retrieve = finish(s, owner, p, method.ends_with("Failed"), false);
             }),
             _ => (),
         }
-        if let Some((public, epoch)) = retrieve {
+        if let Some(public) = retrieve {
             let Some(protocol) = p["requestId"].as_str().map(str::to_owned) else {
                 return;
             };
@@ -187,7 +218,7 @@ impl Debugger {
                 Ok(permit) => permit,
                 Err(_) => {
                     self.update(|s| {
-                        if s["network"]["capture_epoch"] != epoch {
+                        if owner.retired.load(Ordering::Acquire) {
                             return;
                         }
                         if let Some(record) = s["network"]["requests"]
@@ -204,7 +235,8 @@ impl Debugger {
                     return;
                 }
             };
-            let connection = self.connection.lock().await.clone();
+            let connection = owner.connection.clone();
+            let owner = owner.clone();
             let weak = Arc::downgrade(self);
             tokio::spawn(async move {
                 let _permit = permit;
@@ -222,7 +254,7 @@ impl Debugger {
                 };
                 if let Some(debugger) = weak.upgrade() {
                     debugger.update(|s| {
-                        if s["network"]["capture_epoch"] != epoch {
+                        if owner.retired.load(Ordering::Acquire) {
                             return;
                         }
                         if let Some(record) = s["network"]["requests"]

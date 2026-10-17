@@ -1,5 +1,6 @@
 // Fault-injected owned-browser startup tests. Synthetic loopback CDP only.
 // A fixture release on disconnect is distinguished from an acknowledged resume.
+// REB_CAPTURE_FIRST_CASES=worker-controller or malformed-attachments narrows review runs.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {appendFileSync,existsSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
@@ -28,7 +29,7 @@ if(process.argv[2]==='--browser') {
   log({event:'browser-launch',args,profile,descendant:descendant.pid});
   const server=createServer((_req,res)=>{
     res.setHeader('Content-Type','application/json');
-    res.end(JSON.stringify(targets().filter(t=>t.type==='page').map(t=>({...t,id:t.targetId,webSocketDebuggerUrl:`ws://127.0.0.1:${server.address().port}/devtools/page/${t.targetId}`}))));
+    res.end(JSON.stringify(targets().filter(t=>t.type==='page'||options.experiment&&t.type==='worker').map(t=>({...t,id:t.targetId,webSocketDebuggerUrl:`ws://127.0.0.1:${server.address().port}/devtools/page/${t.targetId}`}))));
   });
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   if(!options.noDevToolsFile)writeFileSync(join(profile,'DevToolsActivePort'),`${server.address().port}\n/devtools/browser/capture-first-fixture\n`);
@@ -43,7 +44,7 @@ if(process.argv[2]==='--browser') {
     const header=Buffer.from([82,69,66,1,0,0,0,0]);header.writeUInt32BE(body.length,4);
     process.stdout.write(Buffer.concat([header,body]));
   };
-  const sessions=new Map(),held=new Set();let serial=0,pending=Buffer.alloc(0),rootHold=false,closed=false;
+  const sessions=new Map(),held=new Set();let serial=0,pending=Buffer.alloc(0),rootHold=false,capturing=false,closed=false;
   let cursor=records(join(fixtureDirectory,'events')).length;
   function release(sessionId,reason) {
     if(held.delete(sessionId))log({event:'release',browser,sessionId,reason});
@@ -76,7 +77,7 @@ if(process.argv[2]==='--browser') {
       log({event:'command',browser,...m});
       const reply=result=>{
         const message={id:m.id,result,...(m.sessionId?{sessionId:m.sessionId}:{})};
-        const replyDelay=m.method==='Target.detachFromTarget'&&options.detachDelay?options.detachDelay:
+        const replyDelay=options.delayCaptureOnly&&!capturing?0:m.method==='Target.detachFromTarget'&&options.detachDelay?options.detachDelay:
           options.delays?.[m.method]&&m.sessionId?.endsWith(':'+options.delayTarget)?options.delays[m.method]:0;
         if(replyDelay)setTimeout(()=>emit(message),replyDelay);else emit(message);
       };
@@ -87,13 +88,15 @@ if(process.argv[2]==='--browser') {
         // Timeout deliberately never replies; production must bound it.
         if(options.failure==='error'||options.failure==='timeout')continue;
       }
-      if(m.method==='Target.getTargets')reply({targetInfos:targets()});
+      if(options.experiment&&m.method==='Target.createBrowserContext')reply({browserContextId:'owned-context'});
+      else if(options.experiment&&m.method==='Target.createTarget')reply({targetId:'a'});
+      else if(m.method==='Target.getTargets')reply({targetInfos:targets()});
       else if(m.method==='Target.attachToTarget')reply({sessionId:attach(targets().find(t=>t.targetId===m.params.targetId),undefined,false)});
       else if(m.method==='Runtime.runIfWaitingForDebugger') {
         release(m.sessionId,'acknowledged-resume');reply({});
       } else if(m.method==='Target.setAutoAttach') {
         reply({});
-        if(browser&&!m.sessionId)rootHold=m.params.autoAttach&&m.params.waitForDebuggerOnStart;
+        if(browser&&!m.sessionId){capturing=m.params.autoAttach;rootHold=capturing&&m.params.waitForDebuggerOnStart;}
         if(browser&&m.params.autoAttach)for(const info of targets().filter(t=>m.sessionId?t.parent===target:!t.parent))attach(info,m.sessionId,m.params.waitForDebuggerOnStart);
       } else if(m.method==='Target.detachFromTarget') {
         const entry=[...sessions].find(([,sid])=>sid===m.params.sessionId);
@@ -105,7 +108,8 @@ if(process.argv[2]==='--browser') {
   setInterval(()=>{
     const events=records(join(fixtureDirectory,'events'));
     while(cursor<events.length) {
-      const event=events[cursor++];if(!browser)continue;
+      const event=events[cursor++];if(!browser||!capturing)continue;
+      if(event.raw){emit(event.raw);continue;}
       if(event.disconnect)close('injected-disconnect');
       if(event.add) {
         const info=targets().find(t=>t.targetId===event.add);
@@ -119,11 +123,14 @@ if(process.argv[2]==='--browser') {
     }
   },15);
 } else {
+  const selected=process.env.REB_CAPTURE_FIRST_CASES;
+  assert(!selected||['worker-controller','malformed-attachments'].includes(selected),'Unknown REB_CAPTURE_FIRST_CASES selector');
   const root=resolve(process.argv[2]??'.');
   const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:type==='page'?'about:blank':`http://localhost/${id}.js`,...(parent?{parent}:{})});
   const alive=pid=>{try{process.kill(pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;throw error;}};
   async function fixture(initial,options,run) {
+    if(selected==='worker-controller'&&!options.experiment||selected==='malformed-attachments'&&!options.malformed)return;
     const directory=await mkdtemp(join(tmpdir(),'reb-capture-first-'));
     let owned,external,address,diagnostics='',failure;
     let catalog=initial;
@@ -153,6 +160,11 @@ if(process.argv[2]==='--browser') {
       address??=(await readFile(join(directory,'endpoint'),'utf8')).trim();
       return(await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)})).json();
     };
+    const action=async(value)=>{
+      address??=(await readFile(join(directory,'endpoint'),'utf8')).trim();
+      const response=await fetch(new URL('/api/debugger/actions',address),{method:'POST',headers:{'Content-Type':'application/json',Origin:address},body:JSON.stringify(value),signal:AbortSignal.timeout(10000)});
+      const body=await response.text();assert(response.ok,`Action failed: ${response.status} ${body}`);return JSON.parse(body);
+    };
     const waitState=(predicate,label,timeout)=>until(async()=>{const s=await state();return predicate(s)&&s;},label,timeout);
     try {
       let mode=['--capture-first-browser',join(directory,'browser'),'--capture-first-headless'];
@@ -163,7 +175,7 @@ if(process.argv[2]==='--browser') {
         mode=['--devtools-active-port',join(profile,'DevToolsActivePort')];
       }
       owned=start(binary,['--port',String(options.port??0),'--endpoint-file',join(directory,'endpoint'),'--debugger-transport',join(directory,'transport'),'--capture-network-content',...mode,...(options.limit?['--capture-target-limit',String(options.limit)]:[])]);
-      await run({commands,send,state,until,waitState,signal:name=>owned.child.kill(name),exited:async(timeout=10000)=>{
+      await run({commands,send,state,action,until,waitState,signal:name=>owned.child.kill(name),exited:async(timeout=10000)=>{
         assert(await waitForClose(owned.closed,timeout),`Backend did not exit: ${diagnostics}`);
         return {code:owned.child.exitCode,signal:owned.child.signalCode,diagnostics};
       },stop:async()=>{
@@ -234,6 +246,8 @@ if(process.argv[2]==='--browser') {
     const started=Date.now();assert(signal('SIGTERM'),'Signal delivered to launch-pending backend');
     const result=await exited(10000);
     assert.equal(result.signal,null,'Launch cancellation must be handled rather than leave the owned browser orphaned');
+    assert.notEqual(result.code,0,'Launch cancellation must return its Interrupted error');
+    assert.match(result.diagnostics,/Interrupted.*Capture-first browser launch cancelled/s,'Cleanup must preserve the launch-cancellation diagnostic');
     assert(Date.now()-started<10000,'SIGTERM must cancel startup before its 15-second deadline');
     await assertOwnedCleanup(commands,until,'Launch-pending SIGTERM');
     console.log('PASS capture-first launcher: SIGTERM during startup promptly cleans its owned browser group/profile');
@@ -325,7 +339,46 @@ if(process.argv[2]==='--browser') {
     assert(!capture(commands).some(c=>c.method.startsWith('Runtime.')||c.method.startsWith('Debugger.')||c.method.startsWith('Page.')));
     console.log('PASS passive baseline: external browser remains observational with no startup holds or Runtime commands');
   });
-  for(const args of [
+  for(const passive of [false,true]) {
+    const context=t=>({...t,browserContextId:'owned-context'});
+    await fixture([context(info('a'))],{passive,experiment:true,delayTarget:'experiment-worker',delayCaptureOnly:true,delays:{'Network.enable':2500}},async({commands,action,waitState,until,add})=>{
+      await waitState(s=>s.state==='running'&&s.network.capture_status.attached_targets===1,'Experiment baseline ready');
+      await action({action:'create_request_interception_experiment'});
+      await waitState(s=>s.request_interception.isolated===true&&s.request_interception.target_id==='a','Disposable context established through public action');
+      const capturePid=capture(commands).find(c=>c.method==='Target.setAutoAttach'&&!c.sessionId&&c.params.autoAttach).pid;
+      add(context(info('experiment-worker','worker','a')));
+      const controller=await until(()=>capture(commands).find(c=>c.pid!==capturePid&&c.method==='Debugger.enable'&&c.sessionId?.endsWith(':experiment-worker')),'Independent experiment-worker controller initializes');
+      const controlCommands=()=>capture(commands).filter(c=>c.pid===controller.pid&&c.sessionId===controller.sessionId);
+      assert(controlCommands().some(c=>c.method==='Runtime.enable'),'Worker controller still enables Runtime');
+      if(passive) {
+        assert(controlCommands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Passive experiment-worker behavior must remain unchanged');
+      } else {
+        assert(!controlCommands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Independent worker controller must not bypass the owned capture startup hold');
+        assert(!resumed(commands,'experiment-worker'),'Competing debugger must initialize while capture Network.enable is still pending');
+        const resumedByCapture=await until(()=>resumed(commands,'experiment-worker'),'Capture owner resumes after its delayed Network setup');
+        assert.equal(resumedByCapture.pid,capturePid,'Only the capture owner releases the startup hold');
+        const network=capture(commands).find(c=>c.pid===capturePid&&c.method==='Network.enable'&&c.sessionId?.endsWith(':experiment-worker'));
+        assert(resumedByCapture.time-network.time>=2400,'Startup resume must follow capture Network.enable acknowledgement');
+        assert(!controlCommands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Controller stays free of competing resumes after capture readiness');
+      }
+      console.log(`PASS ${passive?'passive':'capture-first'} experiment: worker-controller initialization ${passive?'retains its original resume':'cannot bypass capture-owned startup hold'}`);
+    });
+  }
+  for(const [label,params] of [
+    ['non-object params',null],
+    ['missing waiting state',{sessionId:'ambiguous',targetInfo:info('ambiguous','worker','a')}],
+    ['non-boolean waiting state',{sessionId:'ambiguous',targetInfo:info('ambiguous','worker','a'),waitingForDebugger:'true'}],
+  ]) {
+    await fixture([info('a')],{malformed:true},async({commands,send,waitState,until})=>{
+      await waitState(s=>s.network.capture_status.attached_targets===1,'Malformed-attachment baseline ready');
+      const connection=capture(commands).find(c=>c.method==='Target.setAutoAttach'&&!c.sessionId&&c.params.autoAttach);
+      send({raw:{method:'Target.attachedToTarget',params}});
+      await until(()=>!alive(connection.pid),`${label}: close exact owned capture transport`,5000);
+      assert(!capture(commands).some(c=>c.pid===connection.pid&&c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId==='ambiguous'),'Malformed waiting state must not authorize an ambiguous resume');
+      console.log(`PASS capture-first: ${label} retires exact capture connection instead of leaving an unknown startup hold`);
+    });
+  }
+  if(!selected)for(const args of [
     ['--capture-first-browser','/synthetic/not-launched'],
     ['--capture-network-content','--capture-first-browser','/synthetic/not-launched','--devtools-active-port','/synthetic/active'],
     ['--capture-first-headless'],
@@ -337,5 +390,5 @@ if(process.argv[2]==='--browser') {
     assert(await waitForClose(closed,5000),'Invalid capture-first CLI must fail promptly');
     assert.notEqual(child.exitCode,0,`Invalid CLI unexpectedly succeeded: ${args.join(' ')} ${output}`);
   }
-  console.log('PASS capture-first CLI: content-capture requirement, external-browser exclusion, and headless ownership requirement');
+  if(!selected)console.log('PASS capture-first CLI: content-capture requirement, external-browser exclusion, and headless ownership requirement');
 }

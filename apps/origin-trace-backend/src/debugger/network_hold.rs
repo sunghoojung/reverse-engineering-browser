@@ -140,10 +140,11 @@ impl Debugger {
         let weak = Arc::downgrade(self);
         let connection = Arc::downgrade(&c);
         c.observe_events(Arc::new(move |event| {
-            if event["method"] != "Target.attachedToTarget" || event["params"]["waitingForDebugger"] != true { return; }
+            if event["method"] != "Target.attachedToTarget" { return; }
+            if event["params"]["waitingForDebugger"] == false { return; }
             let (Some(d), Some(c)) = (weak.upgrade(), connection.upgrade()) else { return; };
             let session = event["params"]["sessionId"].as_str().filter(|s| !s.is_empty() && s.len() <= 4096);
-            if session.is_none_or(|session| !d.register_capture_hold(&c, session)) {
+            if event["params"]["waitingForDebugger"] != true || session.is_none_or(|session| !d.register_capture_hold(&c, session)) {
                 // Unknown/overflowing control state cannot retain a browser hold.
                 // Closing the transport releases every attachment on this client.
                 d.update(|s| {

@@ -1,0 +1,66 @@
+import assert from 'node:assert/strict';
+import {sanitizeCaptureReport} from './sanitize-capture-completeness-report.mjs';
+const input = {
+  schema: 'reb-capture-completeness-v1',
+  rebCommit: 'a'.repeat(40),
+  secret: 'PRIVATE',
+  results: ['startup', 'prearmed'].map((mode) => ({
+    mode,
+    browserVersion: '154.0.8037.57',
+    verdict: 'incomplete',
+    errorCode: 'browser-startup-unavailable',
+    fixtureComplete: false,
+    comparison: {verdict: 'incomplete', issues: ['invalid-reference'], headers: 'PRIVATE'},
+    operations: [
+      {
+        operationId: `${mode}:case:op`,
+        method: 'GET',
+        expected: 1,
+        receipts: 1,
+        reference: 0,
+        reb: 0,
+        body: 'PRIVATE',
+      },
+    ],
+    netlog: {state: 'incomplete', failures: ['netlog-unavailable']},
+    rawUrl: 'https://private.invalid/',
+  })),
+};
+const out = sanitizeCaptureReport(input);
+assert(!JSON.stringify(out).includes('PRIVATE'));
+assert(!JSON.stringify(out).includes('https:'));
+assert.equal(out.results.length, 2);
+assert.equal(out.results[0].operations[0].receipts, 1);
+for (const change of [
+  (r) => {
+    r.rebCommit = 'https://private.invalid/';
+  },
+  (r) => {
+    r.results[0].errorCode = 'https://private.invalid/';
+  },
+  (r) => {
+    r.results[0].browserVersion = 'secret';
+  },
+  (r) => {
+    r.results[0].operations[0].operationId = 'https://private.invalid/';
+  },
+  (r) => {
+    r.results[0].operations[0].receipts = -1;
+  },
+  (r) => {
+    r.results[0].operations[0].method = 'secret';
+  },
+  (r) => {
+    r.results[0].comparison.issues = ['Authorization: private'];
+  },
+  (r) => {
+    r.results[0].netlog.failures = ['private/raw'];
+  },
+]) {
+  const copy = structuredClone(input);
+  change(copy);
+  assert.throws(() => sanitizeCaptureReport(copy));
+}
+console.log(
+  'PASS capture report export: explicit allowlist strips sensitive extras and refuses invalid identities/counts/strings',
+);

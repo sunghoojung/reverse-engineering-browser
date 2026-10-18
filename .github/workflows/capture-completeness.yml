@@ -1,0 +1,56 @@
+name: Isolated capture comparison
+
+on:
+  push:
+    branches:
+      - qa/capture-comparison-20261018
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capture-comparison-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  owned-fixture-comparison:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: '1'
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Select Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Pin installed browser for this run
+        shell: bash
+        run: |
+          browser="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$browser"
+          version="$("$browser" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+          test -n "$version"
+          printf 'ORIGIN_TRACE_TEST_BROWSER=%s\nREB_REFERENCE_BROWSER_VERSION=%s\n' "$browser" "$version" >> "$GITHUB_ENV"
+          printf 'Pinned installed browser version: %s\n' "$version"
+      - name: Build actual backend and transport serially
+        run: make -j1 origin-trace-backend debugger-transport
+      - name: Run independent offline contract regressions
+        run: make capture-completeness-check
+      - name: Compare controlled localhost cohorts
+        run: node tools/check-capture-completeness-browser.mjs . > "$RUNNER_TEMP/capture-comparison-source.json"
+      - name: Validate allowlisted aggregate export
+        id: sanitize
+        if: ${{ !cancelled() }}
+        run: node tools/sanitize-capture-completeness-report.mjs "$RUNNER_TEMP/capture-comparison-source.json" "$RUNNER_TEMP/capture-comparison-sanitized.json"
+      - name: Upload sanitized aggregate only
+        if: ${{ !cancelled() && steps.sanitize.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: capture-comparison-${{ github.sha }}
+          path: ${{ runner.temp }}/capture-comparison-sanitized.json
+          if-no-files-found: error
+          retention-days: 3

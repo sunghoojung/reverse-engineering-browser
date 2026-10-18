@@ -2683,6 +2683,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var selectedCaptureMode = LiveCaptureMode.content
   private var selectedSystemKeychain = false
   private var automaticSessionSuppressed = false
+  private var liveSessionDecisionOpen = false
   private var localApplicationURL: URL?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -2924,7 +2925,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     captureMode: LiveCaptureMode,
     useSystemKeychain: Bool
   ) {
-    guard !liveSessionCoordinator.isRunning else { return }
+    guard !liveSessionCoordinator.isRunning, !liveSessionDecisionOpen else { return }
     guard let braveURL = customBraveApplicationURL(),
       let braveBundle = Bundle(url: braveURL),
       let braveExecutableURL = braveBundle.executableURL
@@ -2936,6 +2937,24 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         useSystemKeychain: useSystemKeychain
       )
       return
+    }
+    if Bundle.main.object(forInfoDictionaryKey: "OriginTraceReleaseType") as? String == "companion" {
+      liveSessionDecisionOpen = true
+      defer { liveSessionDecisionOpen = false }
+      // This companion release has no validated native-browser pair. Bundle identity
+      // alone cannot establish support for the newer native capture capabilities.
+      let compatibility = NSAlert()
+      compatibility.alertStyle = .warning
+      compatibility.messageText = "This browser pairing has not been verified"
+      compatibility.informativeText =
+        "Origin Trace 0.3.2 is a companion-only release. Brave supplied with 0.3.0 or 0.3.1 lacks newer native runtime-buffer and VM capture features. CDP Traffic may work, but native capture completeness is not established. Continue only if you accept these limits."
+      compatibility.addButton(withTitle: "Continue Offline")
+      compatibility.addButton(withTitle: "Start Unverified Session")
+      presentOriginTraceWindow()
+      guard compatibility.runModal() == .alertSecondButtonReturn else {
+        automaticSessionSuppressed = true
+        return
+      }
     }
     liveSessionCoordinator.start(
       braveExecutableURL: braveExecutableURL,

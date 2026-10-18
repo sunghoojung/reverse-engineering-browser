@@ -1,0 +1,125 @@
+name: Validate and release Origin Trace companion
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Full tested main SHA approved for companion publication"
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/release-companion.yml"
+      - "tools/release-companion*.py"
+      - "apps/research-ui/macos/Info.plist"
+      - "apps/research-ui/macos/OriginTraceApp.swift"
+      - "apps/origin-trace-backend/Cargo.toml"
+      - "apps/origin-trace-backend/Cargo.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-companion-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Validate manual source
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REQUESTED_SHA: ${{ inputs.source_sha }}
+        run: '[[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.sha }}
+      - name: Validate source and companion version
+        id: source
+        env:
+          REQUESTED_SHA: ${{ inputs.source_sha }}
+        run: |
+          [[ "$(uname -m)" == arm64 ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' apps/research-ui/macos/Info.plist)" == 0.3.2 ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :OriginTraceReleaseType' apps/research-ui/macos/Info.plist)" == companion ]]
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$source_sha" == "$REQUESTED_SHA" && "$source_sha" == "$(git rev-parse origin/main)" ]]
+            if git show-ref --verify --quiet refs/tags/v0.3.2; then
+              echo 'Refusing to replace existing v0.3.2 tag' >&2
+              exit 1
+            fi
+          fi
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+      - name: Check publication tooling
+        run: python3 tools/release-companion-test.py
+      - name: Check and build application
+        run: |
+          make check
+          make app-build
+          codesign --verify --deep --strict "build/Origin Trace.app"
+      - name: Exercise relocated companion with stock Chrome CDP
+        run: |
+          export ORIGIN_TRACE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          test -x "$ORIGIN_TRACE_TEST_BROWSER"
+          node tools/check-origin-trace-package.mjs
+          node tools/check-origin-trace-native-close.mjs
+      - name: Preserve package and lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: companion-release-qa-${{ github.run_id }}
+          path: |
+            build/package-qa
+            build/native-close-qa
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Archive verified companion and record limitations
+        env:
+          RELEASE_TAG: v0.3.2
+          RELEASE_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          mkdir -p build/release-companion
+          ditto -c -k --sequesterRsrc --keepParent "build/Origin Trace.app" \
+            build/release-companion/Origin-Trace-v0.3.2-macos.zip
+          python3 tools/release-companion.py prepare
+          (cd build/release-companion && shasum -a 256 --check SHA256SUMS-v0.3.2.txt)
+      - name: Preserve immutable tested candidate
+        id: artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: companion-release-candidate-${{ github.run_id }}
+          path: build/release-companion/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: build/release-companion
+          digest-mismatch: error
+      - name: Publish only the tested companion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v0.3.2
+          RELEASE_SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+        run: python3 tools/release-companion.py publish

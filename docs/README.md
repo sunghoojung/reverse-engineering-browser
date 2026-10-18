@@ -32,6 +32,9 @@ skills under `.agents/skills/`.
   and offline client authoring with synthetic tests
 - [Fast local Brave builds](development/fast-browser-builds.md)
 
+- [Opt-in passive public-demo QA](development/public-demo-passive-qa.md):
+  bounded observations with explicit capture and integration limits
+
 ## Architecture and contracts
 
 - [Native proxy container architecture](./architecture/native-proxy-containers.md)

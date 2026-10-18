@@ -2,6 +2,14 @@
 // Metadata stays ephemeral; callers publish only the aggregate comparison.
 const supported = new Set(['page', 'iframe', 'worker', 'shared_worker', 'service_worker']);
 const key = (...parts) => JSON.stringify(parts);
+const commandCode = (method) =>
+  ({
+    'Network.enable': 'network-enable',
+    'Target.setAutoAttach': 'auto-attach',
+    'Target.attachToTarget': 'target-attach',
+    'Target.detachFromTarget': 'target-detach',
+    'Browser.close': 'browser-close',
+  })[method] ?? 'other';
 export class ReferenceLedger {
   constructor({
     maxSessions = 128,
@@ -183,6 +191,8 @@ export class PassiveReference {
     this.initializing = new Set();
     this.sequence = 0;
     this.closed = false;
+    this.rejectedSessions = new Set();
+    this.duplicateSessions = 0;
     socket.addEventListener('message', (event) => {
       const bytes = Buffer.byteLength(String(event.data));
       if (bytes > 1024 * 1024) {
@@ -205,18 +215,24 @@ export class PassiveReference {
         if (waiter) {
           this.pending.delete(m.id);
           clearTimeout(waiter.timer);
-          m.error ? waiter.reject(Error('CDP command rejected')) : waiter.resolve(m.result);
+          if (m.error) {
+            this.ledger.gap(`command-rejected-${commandCode(waiter.method)}`);
+            waiter.reject(Error('CDP command rejected'));
+          } else waiter.resolve(m.result);
         }
         return;
       }
       this.ledger.ingest(m, bytes);
       if (!m.params || typeof m.params !== 'object') return;
       if (m.method === 'Target.attachedToTarget')
-        this.admit(m.params.sessionId, m.params.targetInfo);
+        this.admit(m.params.sessionId, m.params.targetInfo, m.sessionId);
       if (m.method === 'Target.targetCreated' && supported.has(m.params.targetInfo?.type))
         this.attach(m.params.targetInfo).catch(() => this.ledger.gap('attach-failed'));
       if (m.method === 'Target.detachedFromTarget') {
         const sid = m.params.sessionId;
+        for (const [targetId, active] of this.attachments) {
+          if (active === sid) this.attachments.delete(targetId);
+        }
         for (const hop of this.ledger.hops)
           if (hop.sessionId === sid && hop.state === 'pending') this.ledger.gap('detach-pending');
       }
@@ -240,9 +256,10 @@ export class PassiveReference {
         timer = setTimeout(() => {
           this.pending.delete(id);
           this.ledger.gap('command-timeout');
+          this.ledger.gap(`command-timeout-${commandCode(method)}`);
           reject(Error('CDP timeout'));
         }, 5000);
-      this.pending.set(id, {resolve, reject, timer});
+      this.pending.set(id, {resolve, reject, timer, method});
       try {
         this.socket.send(JSON.stringify({id, method, params, ...(sessionId ? {sessionId} : {})}));
       } catch (error) {
@@ -252,8 +269,25 @@ export class PassiveReference {
       }
     });
   }
-  admit(sessionId, info) {
-    if (!supported.has(info?.type)) return;
+  admit(sessionId, info, parentSession) {
+    if (!supported.has(info?.type) || this.rejectedSessions.has(sessionId)) return;
+    const primary = this.attachments.get(info.targetId);
+    if (primary && primary !== sessionId) {
+      if (this.rejectedSessions.size >= this.ledger.limits.maxSessions) {
+        this.ledger.gap('duplicate-session-limit');
+        this.socket.close();
+        return;
+      }
+      this.rejectedSessions.add(sessionId);
+      this.duplicateSessions++;
+      // Discovery and recursive auto-attach can race. Never enable a second
+      // Network observer for the same target; retain the original owner.
+      const cleanup = this.command('Target.detachFromTarget', {sessionId}, parentSession)
+        .catch(() => this.ledger.gap('duplicate-detach-failed'))
+        .finally(() => this.initializing.delete(cleanup));
+      this.initializing.add(cleanup);
+      return;
+    }
     if (!this.ledger.session(sessionId, info.targetId)) return;
     this.attachments.set(info.targetId, sessionId);
     const init = (async () => {
@@ -445,6 +479,7 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
     missing = 0,
     ambiguous = 0,
     mismatched = 0;
+  const mismatchReasons = {};
   const consumed = new Set(),
     seen = new Set();
   for (const hop of refs) {
@@ -468,17 +503,19 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
     consumed.add(row);
     if (hop.state === 'pending' || row.state === 'pending') add('pending-request');
     if (row.url_truncated || row.method_truncated) add('truncated-identity');
-    if (
-      row.url !== hop.url ||
-      row.method !== hop.method ||
-      row.status !== hop.status ||
-      row.state !== hop.state ||
-      row.resource_type !== hop.resourceType ||
-      row.from_disk_cache !== hop.fromDiskCache ||
-      row.from_service_worker !== hop.fromServiceWorker
-    )
+    const differences = [
+      ['url', row.url, hop.url],
+      ['method', row.method, hop.method],
+      ['status', row.status, hop.status],
+      ['state', row.state, hop.state],
+      ['resourceType', row.resource_type, hop.resourceType],
+      ['fromDiskCache', row.from_disk_cache, hop.fromDiskCache],
+      ['fromServiceWorker', row.from_service_worker, hop.fromServiceWorker],
+    ].filter(([, actual, expected]) => actual !== expected);
+    if (differences.length) {
       mismatched++;
-    else matched++;
+      for (const [name] of differences) mismatchReasons[name] = (mismatchReasons[name] ?? 0) + 1;
+    } else matched++;
   }
   const extra = rows.length - consumed.size;
   return {
@@ -494,6 +531,7 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
     extra,
     ambiguous,
     mismatched,
+    mismatchReasons,
     issues,
     scope:
       'Observed HTTP request hops only; independent clients share Chrome CDP blind spots. Bodies, headers and WebSockets are separate coverage.',
@@ -578,4 +616,35 @@ export function captureRunVerdict(httpVerdict, bodyComparison) {
   )
     return 'incomplete';
   return httpVerdict === 'pass' && bodyComparison.verdict === 'pass' ? 'pass' : 'fail';
+}
+
+// The public epoch also advances during initial selected-debugger setup. Arm
+// only after that setup and browser capture are ready; later changes stay fatal.
+export class CaptureIdentityTracker {
+  constructor() {
+    this.last = null;
+    this.baseline = null;
+    this.readinessTransitions = 0;
+  }
+  observe(snapshot) {
+    const network = snapshot?.network;
+    if (
+      typeof network?.instance_id !== 'string' ||
+      !network.instance_id ||
+      !Number.isSafeInteger(network.capture_epoch) ||
+      network.capture_epoch < 0
+    )
+      return false;
+    const identity = key(network.instance_id, network.capture_epoch);
+    if (this.baseline !== null) return identity === this.baseline;
+    if (this.last !== null && identity !== this.last) this.readinessTransitions++;
+    this.last = identity;
+    if (
+      snapshot.state === 'running' &&
+      network.capture_epoch > 0 &&
+      network.capture_status?.state === 'ready'
+    )
+      this.baseline = identity;
+    return true;
+  }
 }

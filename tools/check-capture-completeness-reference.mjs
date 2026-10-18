@@ -212,3 +212,132 @@ invalid.ingest({method: 'Network.loadingFinished', params: null});
 assert.equal(invalid.errors.size, 2);
 
 assert.equal(compareCapture({...reference, epoch: 2}, network).verdict, 'incomplete');
+
+// Reproduce discovery versus recursive-auto-attach overlap in both orderings.
+class OverlapSocket extends SocketFixture {
+  constructor(order, failDetach = false) {
+    super();
+    this.order = order;
+    this.failDetach = failDetach;
+  }
+  send(raw) {
+    const c = JSON.parse(raw);
+    if (
+      c.method !== 'Target.attachToTarget' &&
+      !(this.failDetach && c.method === 'Target.detachFromTarget')
+    )
+      return super.send(raw);
+    this.commands.push(c);
+    const message = (value) =>
+      this.dispatchEvent(new MessageEvent('message', {data: JSON.stringify(value)}));
+    queueMicrotask(() => {
+      if (this.failDetach && c.method === 'Target.detachFromTarget') {
+        message({id: c.id, error: {code: -32000, message: 'synthetic detach rejected'}});
+        return;
+      }
+      const attached = () =>
+        message({
+          method: 'Target.attachedToTarget',
+          sessionId: 'parent',
+          params: {sessionId: 'auto', targetInfo: {targetId: 'page', type: 'page'}},
+        });
+      if (this.order === 'event-first') attached();
+      message({id: c.id, result: {sessionId: 'manual'}});
+      if (this.order === 'reply-first') queueMicrotask(attached);
+    });
+  }
+}
+for (const order of ['event-first', 'reply-first']) {
+  const socket = new OverlapSocket(order),
+    reference = new PassiveReference(socket);
+  await reference.start();
+  await reference.ready();
+  const primary = order === 'event-first' ? 'auto' : 'manual';
+  const secondary = order === 'event-first' ? 'manual' : 'auto';
+  assert.deepEqual(
+    socket.commands.filter((c) => c.method === 'Network.enable').map((c) => c.sessionId),
+    [primary],
+  );
+  const detached = socket.commands.filter((c) => c.method === 'Target.detachFromTarget');
+  assert.equal(detached.length, 1);
+  assert.equal(detached[0].params.sessionId, secondary);
+  assert.equal(detached[0].sessionId, order === 'reply-first' ? 'parent' : undefined);
+  assert.equal(reference.attachments.get('page'), primary);
+  assert.equal(reference.duplicateSessions, 1);
+  assert.deepEqual(reference.ledger.snapshot().errors, []);
+  reference.close();
+}
+const detachFailure = new PassiveReference(new OverlapSocket('reply-first', true));
+await detachFailure.start();
+await detachFailure.ready();
+assert(detachFailure.ledger.errors.has('duplicate-detach-failed'));
+detachFailure.close();
+const {CaptureIdentityTracker} = await import('./capture-completeness-reference.mjs');
+const tracker = new CaptureIdentityTracker();
+const startup = (state, epoch) => ({
+  state,
+  network: {
+    instance_id: 'same',
+    capture_epoch: epoch,
+    capture_status: {state: state === 'running' ? 'ready' : 'waiting'},
+  },
+});
+assert(tracker.observe(startup('connecting', 0)));
+assert.equal(tracker.baseline, null);
+assert(tracker.observe(startup('running', 1)));
+assert.equal(tracker.readinessTransitions, 1);
+assert(tracker.observe(startup('running', 1)));
+assert(!tracker.observe(startup('running', 2)));
+assert.equal(
+  compareCapture(reference, {
+    ...network,
+    requests: rows.map((r, i) => (i ? r : {...r, status: 201})),
+  }).mismatchReasons.status,
+  1,
+);
+
+class InitializationFailureSocket extends OverlapSocket {
+  send(raw) {
+    const command = JSON.parse(raw);
+    if (command.method !== 'Network.enable') return super.send(raw);
+    this.commands.push(command);
+    queueMicrotask(() =>
+      this.dispatchEvent(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            id: command.id,
+            error: {code: -32000, message: 'synthetic primary failure'},
+          }),
+        }),
+      ),
+    );
+  }
+}
+const primaryFailure = new PassiveReference(new InitializationFailureSocket('reply-first'));
+await primaryFailure.start();
+await primaryFailure.ready();
+assert(primaryFailure.ledger.errors.has('session-initialization'));
+assert(primaryFailure.ledger.errors.has('command-rejected-network-enable'));
+assert.equal(
+  primaryFailure.ledger.sessions.size,
+  1,
+  'secondary rejection does not fabricate a ready replacement',
+);
+primaryFailure.close();
+
+const delayed = new PassiveReference(new OverlapSocket('reply-first'));
+await delayed.start();
+await delayed.ready();
+delayed.socket.dispatchEvent(
+  new MessageEvent('message', {
+    data: JSON.stringify({method: 'Target.detachedFromTarget', params: {sessionId: 'manual'}}),
+  }),
+);
+delayed.admit('auto', {targetId: 'page', type: 'page'}, 'parent');
+assert.equal(
+  delayed.attachments.has('page'),
+  false,
+  'late rejected reply cannot become a replacement owner',
+);
+assert.equal(delayed.ledger.sessions.has('auto'), false);
+delayed.close();

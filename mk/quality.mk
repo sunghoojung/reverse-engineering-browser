@@ -144,6 +144,7 @@ javascript-check: capture-completeness-check
 .PHONY: capture-completeness-check capture-completeness-browser-check
 capture-completeness-check:
 	node tools/check-capture-completeness-reference.mjs
+	node tools/check-capture-completeness-lifecycle.mjs
 	node tools/check-capture-completeness-fixture.mjs
 	node tools/check-capture-completeness-netlog.mjs
 	node tools/check-capture-completeness-integration.mjs

@@ -62,6 +62,83 @@ assert.equal(result.state, 'corroborated');
 assert.equal(result.completenessClaim, false);
 assert(!JSON.stringify(result).includes(origin));
 assert(!JSON.stringify(result).includes('PRIVATE_DO_NOT_OUTPUT'));
+// Upstream serializes IDs as signed int32, including cross-process partition IDs.
+for (const id of [-2147483648, -2147483647, -1, 1, 2147483647]) {
+  const supported = crosscheckNetlog(log([event('one', id)]), options());
+  assert.equal(supported.state, 'corroborated');
+  assert.equal(supported.operations[0].urlRequestSources, 1);
+}
+const partitions = crosscheckNetlog(log([event('one', -1), event('one', 1)]), options());
+assert.equal(partitions.operations[0].urlRequestSources, 2);
+for (const id of [-2147483649, 2147483648, 4294967295, 1.5, '1', null]) {
+  const refused = crosscheckNetlog(log([event('one', id)]), options());
+  assert.equal(refused.state, 'incomplete');
+  assert.deepEqual(refused.failures, ['event-source-id-not-signed-int32']);
+}
+assert.equal(crosscheckNetlog(log([event('one', 0)]), options()).state, 'incomplete');
+for (const [change, failure] of [
+  [
+    (n) => {
+      n.events[0] = null;
+    },
+    'event-not-object',
+  ],
+  [
+    (n) => {
+      delete n.events[0].type;
+    },
+    'event-type-not-nonnegative-integer',
+  ],
+  [
+    (n) => {
+      n.events[0].type = 999;
+    },
+    'event-type-absent-from-constants',
+  ],
+  [
+    (n) => {
+      n.events[0].phase = 'PRIVATE_DO_NOT_OUTPUT';
+    },
+    'event-phase-not-nonnegative-integer',
+  ],
+  [
+    (n) => {
+      n.events[0].phase = 999;
+    },
+    'event-phase-absent-from-constants',
+  ],
+  [
+    (n) => {
+      delete n.events[0].source;
+    },
+    'event-source-not-object',
+  ],
+  [
+    (n) => {
+      n.events[0].source.type = 'PRIVATE_DO_NOT_OUTPUT';
+    },
+    'event-source-type-not-nonnegative-integer',
+  ],
+  [
+    (n) => {
+      n.events[0].source.type = 999;
+    },
+    'event-source-type-absent-from-constants',
+  ],
+  [
+    (n) => {
+      delete n.events[0].source.id;
+    },
+    'event-source-id-not-signed-int32',
+  ],
+]) {
+  const malformed = log([event('one')]);
+  change(malformed);
+  const refused = crosscheckNetlog(malformed, options());
+  assert.equal(refused.state, 'incomplete');
+  assert.deepEqual(refused.failures, [failure]);
+  assert(!JSON.stringify(refused).includes('PRIVATE_DO_NOT_OUTPUT'));
+}
 // Repeated requests: distinct sources; retries/interception: repeated starts.
 result = crosscheckNetlog(
   log([event('one'), event('one'), event('one', 2)]),
@@ -104,7 +181,7 @@ for (const change of [
     n.events[0].type = 999;
   },
   (n) => {
-    n.events[0].source.id = -1;
+    n.events[0].source.id = -2147483649;
   },
   (n) => {
     delete n.events[0].params;

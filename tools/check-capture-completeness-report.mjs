@@ -64,3 +64,38 @@ for (const change of [
 console.log(
   'PASS capture report export: explicit allowlist strips sensitive extras and refuses invalid identities/counts/strings',
 );
+
+const lifecycleInput = structuredClone(input);
+lifecycleInput.results[0].lifecycle = {
+  samples: 2,
+  invalidSamples: 0,
+  firstEpoch: 0,
+  lastEpoch: 1,
+  setupEpochTransitions: 1,
+  epochChanges: 0,
+  omittedEpochTransitions: 0,
+  maxima: {gaps: 9, dropped: 0, attached_targets: 5},
+  epochTransitions: [{from: 0, to: 1, setup: true, secret: 'PRIVATE'}],
+  errorObservations: [{code: 'target-or-ancestor-detached', samples: 1, raw: 'PRIVATE'}],
+  secret: 'PRIVATE',
+};
+lifecycleInput.results[0].operations[0].differences = {state: 1, raw: 'PRIVATE'};
+const safeLifecycle = sanitizeCaptureReport(lifecycleInput);
+assert(!JSON.stringify(safeLifecycle).includes('PRIVATE'));
+assert.equal(safeLifecycle.results[0].lifecycle.maxima.gaps, 9);
+assert.equal(safeLifecycle.results[0].operations[0].differences.state, 1);
+for (const mutate of [
+  (r) => {
+    r.results[0].lifecycle.errorObservations[0].code = 'private-error';
+  },
+  (r) => {
+    r.results[0].lifecycle.epochTransitions[0].setup = 'PRIVATE';
+  },
+  (r) => {
+    r.results[0].operations[0].differences.state = 'PRIVATE';
+  },
+]) {
+  const invalid = structuredClone(lifecycleInput);
+  mutate(invalid);
+  assert.throws(() => sanitizeCaptureReport(invalid));
+}

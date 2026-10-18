@@ -11,7 +11,9 @@ import {
   fixtureOperation,
   compareFixtureBodies,
   captureRunVerdict,
+  CaptureIdentityTracker,
 } from './capture-completeness-reference.mjs';
+import {createLifecycleObserver} from './capture-completeness-lifecycle.mjs';
 import {readBoundedNetlog, crosscheckNetlog} from './capture-completeness-netlog.mjs';
 import {stopBrowserTestProcess, waitForClose} from './browser-test-process.mjs';
 const root = resolve(process.argv[2] ?? '.'),
@@ -40,6 +42,8 @@ async function cohort(mode) {
   const directory = await mkdtemp(join(tmpdir(), 'reb-independent-')),
     fixture = await createCaptureFixture({runId: mode});
   const children = [];
+  const identityTracker = new CaptureIdentityTracker();
+  const lifecycle = createLifecycleObserver();
   let ref,
     browserProcess,
     snapshot,
@@ -124,7 +128,7 @@ async function cohort(mode) {
     if (version.product?.split('/').at(-1) !== process.env.REB_REFERENCE_BROWSER_VERSION)
       errorCode = 'browser-version-pin-missing-or-mismatch';
     await ref.start();
-    let address, initialIdentity;
+    let address;
     const state = async () => {
       const response = await fetch(new URL('/api/debugger', address), {
         signal: AbortSignal.timeout(2000),
@@ -138,9 +142,8 @@ async function cohort(mode) {
         chunks.push(chunk);
       }
       const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      const identity = JSON.stringify([value.network?.instance_id, value.network?.capture_epoch]);
-      if (initialIdentity && identity !== initialIdentity) ref.ledger.gap('reb-epoch-changed');
-      else initialIdentity = identity;
+      lifecycle.observe(value);
+      if (!identityTracker.observe(value)) ref.ledger.gap('reb-public-epoch-changed');
       return value;
     };
     if (!referenceOnly) {
@@ -161,7 +164,7 @@ async function cohort(mode) {
       );
       await until(async () => {
         snapshot = await state();
-        return snapshot.network?.capture_status?.state === 'ready';
+        return identityTracker.baseline !== null;
       }, 'backend-readiness-timeout');
     }
     if (mode === 'prearmed') {
@@ -242,6 +245,17 @@ async function cohort(mode) {
         ).length,
         reference: matching(reference.hops),
         reb: referenceOnly ? null : matching(snapshot?.network?.requests ?? []),
+        referencePending: reference.hops.filter(
+          (h) => fixtureOperation(h, fixture.manifest) === op && h.state === 'pending',
+        ).length,
+        rebPending: (snapshot?.network?.requests ?? []).filter(
+          (h) => fixtureOperation(h, fixture.manifest) === op && h.state === 'pending',
+        ).length,
+        differences: referenceOnly
+          ? {}
+          : (compareCapture(reference, snapshot?.network, {
+              include: (h) => fixtureOperation(h, fixture.manifest) === op,
+            }).mismatchReasons ?? {}),
       };
     });
   const uncovered = operations.some(
@@ -287,6 +301,9 @@ async function cohort(mode) {
     fixtureComplete,
     comparison,
     operations,
+    lifecycle: lifecycle.snapshot(),
+    readinessTransitions: identityTracker.readinessTransitions,
+    duplicateSessionsRejected: ref?.duplicateSessions ?? 0,
     referenceErrors: reference.errors.filter((code) => /^[a-z-]{1,64}$/.test(code)).slice(0, 32),
     rebCoverage: Object.fromEntries(
       [

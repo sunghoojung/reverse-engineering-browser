@@ -1,5 +1,6 @@
 // CI export is an explicit allowlisted copy. Never upload the source report/log.
 import {readFile, stat, writeFile} from 'node:fs/promises';
+import {lifecycleErrorCodes} from './capture-completeness-lifecycle.mjs';
 import {pathToFileURL} from 'node:url';
 const count = (v) => {
   if (!Number.isSafeInteger(v) || v < 0 || v > 10000000) throw Error('invalid-count');
@@ -21,6 +22,41 @@ const numbers = (v, keys) =>
   Object.fromEntries(
     keys.filter((k) => v?.[k] !== undefined).map((k) => [k, v[k] === null ? null : count(v[k])]),
   );
+function sanitizeLifecycle(value) {
+  const result = numbers(value, [
+    'samples',
+    'invalidSamples',
+    'firstEpoch',
+    'lastEpoch',
+    'setupEpochTransitions',
+    'epochChanges',
+    'omittedEpochTransitions',
+  ]);
+  result.maxima = numbers(value.maxima, [
+    'gaps',
+    'dropped',
+    'attached_targets',
+    'eligible_targets',
+    'failed_targets',
+    'target_overflow',
+  ]);
+  if (
+    !Array.isArray(value.epochTransitions) ||
+    value.epochTransitions.length > 16 ||
+    !Array.isArray(value.errorObservations) ||
+    value.errorObservations.length > lifecycleErrorCodes.length
+  )
+    throw Error('invalid-lifecycle');
+  result.epochTransitions = value.epochTransitions.map((item) => {
+    if (typeof item.setup !== 'boolean') throw Error('invalid-lifecycle');
+    return {from: count(item.from), to: count(item.to), setup: item.setup};
+  });
+  result.errorObservations = value.errorObservations.map((item) => ({
+    code: choice(item.code, lifecycleErrorCodes),
+    samples: count(item.samples),
+  }));
+  return result;
+}
 export function sanitizeCaptureReport(input) {
   if (
     input?.schema !== 'reb-capture-completeness-v1' ||
@@ -75,7 +111,23 @@ export function sanitizeCaptureReport(input) {
         return {
           operationId: o.operationId,
           method: choice(o.method, ['GET', 'POST', 'OPTIONS']),
-          ...numbers(o, ['expected', 'receipts', 'reference', 'reb']),
+          ...numbers(o, [
+            'expected',
+            'receipts',
+            'reference',
+            'reb',
+            'referencePending',
+            'rebPending',
+          ]),
+          differences: numbers(o.differences, [
+            'url',
+            'method',
+            'status',
+            'state',
+            'resourceType',
+            'fromDiskCache',
+            'fromServiceWorker',
+          ]),
         };
       });
     }
@@ -91,6 +143,8 @@ export function sanitizeCaptureReport(input) {
         ]),
       };
     if (r.headers) result.headers = {verdict: choice(r.headers.verdict, ['unassessed'])};
+    Object.assign(result, numbers(r, ['readinessTransitions', 'duplicateSessionsRejected']));
+    if (r.lifecycle) result.lifecycle = sanitizeLifecycle(r.lifecycle);
     if (r.referenceErrors) result.referenceErrors = codes(r.referenceErrors);
     if (r.rebCoverage)
       result.rebCoverage = numbers(r.rebCoverage, [

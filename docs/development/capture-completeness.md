@@ -114,3 +114,24 @@ the harness.
 Raw NetLog stays in the disposable local profile and is removed after parsing;
 only bounded summaries of owned fixture identities/counts are reported. Never
 substitute public sites or private user profiles for these authored fixtures.
+
+### Diagnosing controlled-run gaps
+
+The independent recorder admits one Network observer per target. Overlapping
+manual discovery and recursive auto-attachment sessions are detached before
+Network enablement; request rows are never deduplicated by URL or silently
+merged. A failed primary initialization or duplicate cleanup remains incomplete.
+
+The public REB capture epoch advances during selected-debugger initialization.
+The harness records pre-ready transitions and locks identity only once that
+initialization and browser capture are ready. Later identity changes remain
+incomplete. Startup server receipts are retained regardless of readiness.
+
+The sanitized report includes fixed per-operation mismatch reasons, pending
+counts, and bounded pre-shutdown lifecycle aggregates. Error observation counts
+are counts of snapshots carrying a reason, not counts of distinct incidents.
+No shutdown snapshot is included after Browser.close. NetLog source identities
+support Chromium's signed 32-bit serialization, including negative partitioned
+IDs; unknown shapes still fail with fixed diagnostic codes. These diagnostics
+help distinguish test instrumentation problems from capture gaps; they do not
+excuse any missing expected operation or prove lossless capture.

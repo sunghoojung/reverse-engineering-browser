@@ -6,6 +6,11 @@ const MAX_EVENTS = 500000,
   MAX_ROWS = 100000;
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const integer = (value) => Number.isSafeInteger(value) && value >= 0;
+// NetLogEntry::ToDict serializes uint32 source IDs through signed int32.
+// InitializeSourceIdPartition uses the negative half for another process.
+// https://raw.githubusercontent.com/chromium/chromium/main/net/log/net_log_entry.cc
+// https://raw.githubusercontent.com/chromium/chromium/main/net/log/net_log.cc
+const sourceId = (value) => Number.isInteger(value) && value >= -2147483648 && value <= 2147483647;
 const token = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,96}$/.test(value);
 const version = (value) =>
   typeof value === 'string' && /^\d{1,4}\.\d{1,4}\.\d{1,6}\.\d{1,6}$/.test(value);
@@ -213,15 +218,17 @@ export function crosscheckNetlog(netlog, options = {}) {
     sources = new Set(Object.values(c.logSourceType)),
     phases = new Set(Object.values(c.logEventPhase));
   for (const event of netlog.events) {
-    if (
-      !object(event) ||
-      !eventTypes.has(event.type) ||
-      !phases.has(event.phase) ||
-      !object(event.source) ||
-      !sources.has(event.source.type) ||
-      !integer(event.source.id)
-    )
-      return fail('unsupported-event-shape');
+    // Fixed diagnostics identify the violated schema without exporting event
+    // values, URLs, parameters, source IDs, or arbitrary strings from the log.
+    if (!object(event)) return fail('event-not-object');
+    if (!integer(event.type)) return fail('event-type-not-nonnegative-integer');
+    if (!eventTypes.has(event.type)) return fail('event-type-absent-from-constants');
+    if (!integer(event.phase)) return fail('event-phase-not-nonnegative-integer');
+    if (!phases.has(event.phase)) return fail('event-phase-absent-from-constants');
+    if (!object(event.source)) return fail('event-source-not-object');
+    if (!integer(event.source.type)) return fail('event-source-type-not-nonnegative-integer');
+    if (!sources.has(event.source.type)) return fail('event-source-type-absent-from-constants');
+    if (!sourceId(event.source.id)) return fail('event-source-id-not-signed-int32');
     if (
       event.type !== c.logEventTypes.URL_REQUEST_START_JOB ||
       event.phase !== c.logEventPhase.PHASE_BEGIN
@@ -231,6 +238,7 @@ export function crosscheckNetlog(netlog, options = {}) {
     }
     if (
       event.source.type !== c.logSourceType.URL_REQUEST ||
+      event.source.id === 0 ||
       !object(event.params) ||
       typeof event.params.url !== 'string' ||
       typeof event.params.method !== 'string'

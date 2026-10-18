@@ -149,6 +149,15 @@ impl Debugger {
         self.network_for(&owner, method, p).await;
     }
     pub(super) async fn network_for(self: &Arc<Self>, owner: &Arc<Owner>, method: &str, p: &Value) {
+        self.network_for_body_owner(owner, owner, method, p).await;
+    }
+    pub(super) async fn network_for_body_owner(
+        self: &Arc<Self>,
+        owner: &Arc<Owner>,
+        body_owner: &Arc<Owner>,
+        method: &str,
+        p: &Value,
+    ) {
         if !self.options.capture_network_content || owner.retired.load(Ordering::Acquire) {
             return;
         }
@@ -209,7 +218,27 @@ impl Debugger {
                     })).unwrap_or_else(|_| json!({"sites":[],"gaps":["initiator_unavailable"]}));
                     let requests = s["network"]["requests"].as_array_mut().unwrap();
                     let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":public,"capture_owner":owner.id,"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
-                    if requests.len()>=1000 {requests.remove(0);let dropped=s["network"]["dropped"].as_u64().unwrap_or(0)+1;s["network"]["dropped"]=json!(dropped);}s["network"]["requests"].as_array_mut().unwrap().push(r);
+                    // Private provenance follows the bounded ledger; it never
+                    // changes the public request's original target or owner.
+                    let mut provenance = self
+                        .capture
+                        .main_resources
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let evicted = (requests.len() >= 1000).then(|| requests.remove(0));
+                    if let Some(row) = &evicted
+                        && let Some(id) = row["id"].as_str()
+                    {
+                        provenance.remove(id);
+                    }
+                    requests.push(r);
+                    if evicted.is_some() {
+                        let dropped = s["network"]["dropped"].as_u64().unwrap_or(0) + 1;
+                        s["network"]["dropped"] = json!(dropped);
+                    }
+                    if let Some(resource) = super::network_handoff::MainResource::from_event(p) {
+                        provenance.insert(public.clone(), resource);
+                    }
                 });
             }
             "Network.responseReceived" => self.update(|s| {
@@ -243,14 +272,20 @@ impl Debugger {
                             .find(|r| r["id"] == public)
                         {
                             record["response"]["body"]["state"] = json!("error");
-                            record["response"]["body"]["reason"] =
-                                json!("The bounded response-body retrieval queue was full.");
+                            record["response"]["body"]["reason"] = json!(
+                                if body_owner.retired.load(Ordering::Acquire) {
+                                    "Completion target detached before response body retrieval finished"
+                                } else {
+                                    "The bounded response-body retrieval queue was full."
+                                }
+                            );
                         }
                     });
                     return;
                 }
             };
-            let connection = owner.connection.clone();
+            let connection = body_owner.connection.clone();
+            let body_owner = body_owner.clone();
             let owner = owner.clone();
             let weak = Arc::downgrade(self);
             tokio::spawn(async move {
@@ -261,7 +296,7 @@ impl Debugger {
                             "Network.getResponseBody",
                             json!({"requestId":protocol}),
                             Duration::from_secs(5),
-                            owner.session.as_deref(),
+                            body_owner.session.as_deref(),
                         )
                         .await
                         .and_then(|v| body(&v))
@@ -273,6 +308,13 @@ impl Debugger {
                         if owner.retired.load(Ordering::Acquire) {
                             return;
                         }
+                        let result = if body_owner.retired.load(Ordering::Acquire) {
+                            Err(Error::conflict(
+                                "Completion target detached before response body retrieval finished",
+                            ))
+                        } else {
+                            result
+                        };
                         if let Some(record) = s["network"]["requests"]
                             .as_array_mut()
                             .unwrap()

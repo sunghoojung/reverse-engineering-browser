@@ -112,6 +112,8 @@ if(process.argv[2]==='--transport') {
   const root=resolve(process.argv[2]??'.'),binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:`http://localhost/${id}`,...(parent?{parent}:{})});
   async function fixture(initial,options,run) {
+    if(process.env.REB_TERMINAL_HANDOFF_ONLY==='1'&&!options.terminalHandoff)return;
+    if(process.env.REB_CLEANUP_REGRESSION_ONLY==='1'&&options.terminalHandoff)return;
     const directory=await mkdtemp(join(tmpdir(),'reb-browser-sessions-'));let backend,exited,address,diagnostics='';let targets=initial;
     await writeFile(join(directory,'options'),JSON.stringify(options));
     const save=()=>writeFileSync(join(directory,'targets'),JSON.stringify(targets));save();await writeFile(join(directory,'events'),'');await writeFile(join(directory,'commands'),'');
@@ -144,6 +146,67 @@ if(process.argv[2]==='--transport') {
   }
   const request=(send,target,id,path=id)=>send({target,method:'Network.requestWillBeSent',params:{requestId:id,timestamp:1,wallTime:1,type:'Fetch',request:{url:`http://localhost/${path}`,method:'GET',headers:{}}}});
   const finish=(send,target,id)=>{send({target,method:'Network.responseReceived',params:{requestId:id,response:{status:200,headers:{}}}});send({target,method:'Network.loadingFinished',params:{requestId:id,timestamp:2,encodedDataLength:10}});};
+  const handoffCases=[
+    ['iframe','Document','iframe',true],['worker','Script','worker',true],['shared-worker','Script','shared_worker',true],
+    ['normal-collision','Document','iframe',false],['completed-collision','Document','iframe',false],['redirect-collision','Document','iframe',false],
+    ['evicted-collision','Document','iframe',false],['malformed-parent','Document','iframe',false],['malformed-worker-parent','Script','worker',false],['empty-parent','Document','iframe',false],['oversized-parent','Document','iframe',false],
+    ['wrong-frame','Document','iframe',false],['wrong-loader','Document','iframe',false],['wrong-parent','Document','iframe',false],
+    ['wrong-url','Script','worker',false],['wrong-type','Fetch','iframe',false],['terminal-failed','Document','iframe',false],
+    ['old-terminal-time','Document','iframe',false],['retired-source','Script','worker',false],['old-connection','Document','iframe',false],
+  ];
+  for(const [label,type,destinationType,positive] of handoffCases)await fixture([info('a'),info('other'),{...info('child',destinationType,label==='retired-source'?undefined:label==='wrong-parent'?'other':'a'),...(['malformed-parent','malformed-worker-parent'].includes(label)?{parentId:7}:label==='empty-parent'?{parentId:''}:label==='oversized-parent'?{parentId:'p'.repeat(4097)}:{})}],{terminalHandoff:true,snapshotRootsOnly:true},async({send,until,commands,destroy})=>{
+    await until(s=>s.network.capture_status.attached_targets===3,`${label}: handoff owners ready`);
+    const id=type==='Script'?'child':`main-${label}`;
+    const destinationSession=()=>commands().filter(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':child')).at(-1)?.sessionId;
+    const start={requestId:id,timestamp:10,wallTime:10,type,loaderId:type==='Script'?'':id,frameId:'child',request:{url:type==='Script'?'http://localhost/child':`http://localhost/main-${label}`,method:'GET',headers:{}}};
+    if(label==='wrong-frame')start.frameId='other-frame';
+    if(label==='wrong-loader')start.loaderId='other-loader';
+    if(label==='wrong-url')start.request.url='http://localhost/unrelated-script';
+    if(label==='normal-collision'||label==='completed-collision'){
+      request(send,'other',id,'unrelated-collision');
+      if(label==='completed-collision')finish(send,'other',id);
+    }
+    if(label==='evicted-collision'){
+      request(send,'other',id,'evicted-original-collision');
+      for(let i=0;i<1000;i++)request(send,'other',`eviction-${i}`);
+      await until(s=>s.network.dropped>0&&!s.network.requests.some(r=>r.protocol_request_id===id),'Earlier colliding row is evicted before candidate starts');
+    }
+    send({target:'a',method:'Network.requestWillBeSent',params:start});
+    if(label==='redirect-collision')send({target:'a',method:'Network.requestWillBeSent',params:{...start,timestamp:10.5,redirectResponse:{status:302,headers:{},url:start.request.url,encodedDataLength:0}}});
+    send({target:'a',method:'Network.responseReceived',params:{requestId:id,response:{status:200,headers:{},mimeType:'text/plain',url:start.request.url}}});
+    let s=await until(s=>s.network.requests.some(r=>r.target_id==='a'&&r.protocol_request_id===id&&r.state==='pending'&&r.status===200),`${label}: source response retained`);
+    const original=s.network.requests.filter(r=>r.target_id==='a'&&r.protocol_request_id===id).at(-1);
+    if(label==='retired-source'){
+      destroy('a');
+      await until(s=>s.network.requests.find(r=>r.id===original.id)?.state!=='pending','Source retires before child completion');
+      await until(s=>s.network.capture_status.attached_target_ids.includes('child'),'Child reattached after source retirement');
+    }
+    if(label==='old-connection'){
+      const opens=commands().filter(c=>c.event==='open'&&c.browser).length;
+      send({disconnect:true});
+      await until(s=>commands().filter(c=>c.event==='open'&&c.browser).length>opens&&s.network.capture_status.attached_targets===3,'New connection cannot complete old resource',45000);
+    }
+    const terminalSession=destinationSession();
+    send({target:'child',method:label==='terminal-failed'?'Network.loadingFailed':'Network.loadingFinished',params:{requestId:id,timestamp:label==='old-terminal-time'?9:11,encodedDataLength:10,errorText:'synthetic failure'}});
+    if(positive){
+      s=await until(s=>s.network.requests.find(r=>r.id===original.id)?.response.body.state==='available',`${label}: terminal handoff body available`);
+      const row=s.network.requests.find(r=>r.id===original.id);
+      assert.equal(row.capture_owner,original.capture_owner,'Handoff preserves original evidence owner');
+      assert.equal(row.target_id,'a','Handoff preserves original initiating target');
+      assert.equal(row.state,'complete','Observed child loadingFinished completes original row');
+      const body=commands().filter(c=>c.method==='Network.getResponseBody'&&c.params.requestId===id);
+      assert.equal(body.length,1,'A proven handoff retrieves exactly one body');
+      assert.equal(body[0].sessionId,terminalSession,'Body retrieval uses exact destination session');
+      assert.equal(row.response.body.text,`body:${terminalSession}:${id}`);
+    }else{
+      request(send,'other',`sentinel-${label}`);finish(send,'other',`sentinel-${label}`);
+      s=await until(s=>s.network.requests.some(r=>r.protocol_request_id===`sentinel-${label}`&&r.response.body.state==='available'),`${label}: event barrier and healthy owner continue`);
+      const row=s.network.requests.find(r=>r.id===original.id);
+      assert.equal(row.state,['retired-source','old-connection'].includes(label)?'failed':'pending',`${label}: unsupported completion cannot adopt source row`);
+      assert(!commands().some(c=>c.method==='Network.getResponseBody'&&c.params.requestId===id&&c.sessionId===terminalSession),`${label}: destination body is never borrowed without proof`);
+    }
+    console.log(`PASS terminal handoff: ${label} ${positive?'preserves source evidence and retrieves child body':'rejects unsafe adoption'}`);
+  });
   // A negative detach reply is safe only when this exact session's lifetime
   // has already ended. Target identity alone must not retire a live owner.
   await fixture([info('service','service_worker'),info('page')],{detachRace:'confirmed'},async({send,until,commands})=>{

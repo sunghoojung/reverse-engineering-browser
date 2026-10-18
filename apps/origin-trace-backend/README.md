@@ -330,3 +330,19 @@ PNG and DOM text/attributes are never retained in debugger state or written to
 files. The feature refuses observed form/private/editable content and frames,
 while explicitly retaining unknown pixel sensitivity, timing and occlusion.
 See [Element screenshot v1](../../protocol/element-screenshot-v1.md).
+
+### Main-resource terminal handoffs
+
+A document or worker main-script request can begin in a parent CDP session and
+finish in its child session. Capture keeps the original public request ID,
+target and owner. It accepts a child `loadingFinished` only with a single
+pending candidate, exact bounded loader/frame or worker-target identity,
+compatible observed ancestry, a nondecreasing timestamp and live owners on the
+same connection. Completed collisions and dropped request history block this
+adoption; ambiguous events never become guessed completions. Private provenance
+is capped by the 1,000-row ledger and 512-entry target-lineage limit.
+
+After proven completion, body retrieval uses the terminal event's exact session;
+it does not transfer unrelated requests or invent response headers/status.
+Missing responses and detached body owners remain incomplete/unavailable. This
+repairs a lifecycle handoff, not passive capture of a target's first requests.

@@ -81,7 +81,7 @@ impl BrowserCapture {
             cleanup_closing: AtomicBool::new(false),
         }
     }
-    fn current(&self, c: &Arc<Connection>) -> bool {
+    pub(super) fn current(&self, c: &Arc<Connection>) -> bool {
         self.connection
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -507,6 +507,14 @@ impl Debugger {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.capture
+            .handoff_lineage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.capture
+            .handoff_lineage_complete
+            .store(true, Ordering::Release);
         for info in initial["targetInfos"].as_array().unwrap().iter().take(4096) {
             self.remember_capture_target(info);
         }
@@ -812,6 +820,7 @@ impl Debugger {
                         return;
                     }
                 };
+                self.remember_handoff_lineage(c, &p["targetInfo"], parent);
                 let duplicate = self
                     .capture
                     .owners
@@ -1091,7 +1100,13 @@ impl Debugger {
                     .find(|o| o.session.as_deref() == m["sessionId"].as_str())
                     .cloned();
                 if let Some(owner) = owner {
-                    self.network_for(&owner, method, p).await;
+                    if method == "Network.loadingFinished"
+                        && let Some(source) = self.main_resource_completion_owner(c, &owner, p)
+                    {
+                        self.network_for_body_owner(&source, &owner, method, p).await;
+                    } else {
+                        self.network_for(&owner, method, p).await;
+                    }
                 }
             }
             _ => {}

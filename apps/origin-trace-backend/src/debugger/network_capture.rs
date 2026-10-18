@@ -27,6 +27,9 @@ pub(super) struct Owner {
 pub(super) struct Capture {
     pub(super) owners: Mutex<BTreeMap<String, Arc<Owner>>>,
     retry: Mutex<BTreeMap<String, (u32, Instant)>>,
+    pub(super) handoff_lineage_complete: AtomicBool,
+    pub(super) handoff_lineage: Mutex<BTreeMap<(usize, String), Option<String>>>,
+    pub(super) main_resources: Mutex<BTreeMap<String, super::network_handoff::MainResource>>,
     pub(super) next_owner: AtomicU64,
     next_row: AtomicU64,
     pub(super) browser: super::network_browser::BrowserCapture,
@@ -46,6 +49,9 @@ impl Capture {
         Self {
             owners: Mutex::new(BTreeMap::new()),
             retry: Mutex::new(BTreeMap::new()),
+            handoff_lineage_complete: AtomicBool::new(true),
+            handoff_lineage: Mutex::new(BTreeMap::new()),
+            main_resources: Mutex::new(BTreeMap::new()),
             next_owner: AtomicU64::new(1),
             next_row: AtomicU64::new(1),
             browser: super::network_browser::BrowserCapture::new(),

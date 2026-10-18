@@ -479,6 +479,40 @@ export class PassiveReference {
   }
 }
 
+// Counts only, with normalized field names shared by both observer shapes.
+// These predicates preserve the comparator's existing validation contract.
+export const malformedHopFieldNames = [
+  'state',
+  'status',
+  'resourceType',
+  'fromDiskCache',
+  'fromServiceWorker',
+];
+function malformedHopFields(row, reference) {
+  return {
+    state: !['complete', 'failed', 'pending'].includes(row?.state),
+    status: !(Number.isFinite(row?.status) || (row?.status === null && row?.state !== 'complete')),
+    resourceType: typeof row?.[reference ? 'resourceType' : 'resource_type'] !== 'string',
+    fromDiskCache: typeof row?.[reference ? 'fromDiskCache' : 'from_disk_cache'] !== 'boolean',
+    fromServiceWorker:
+      typeof row?.[reference ? 'fromServiceWorker' : 'from_service_worker'] !== 'boolean',
+  };
+}
+function countMalformedHopFields(reference, reb) {
+  return Object.fromEntries(
+    [
+      ['reference', reference],
+      ['reb', reb],
+    ].map(([side, rows]) => {
+      const counts = Object.fromEntries(malformedHopFieldNames.map((name) => [name, 0]));
+      for (const row of rows) {
+        const invalid = malformedHopFields(row, side === 'reference');
+        for (const name of malformedHopFieldNames) if (invalid[name]) counts[name]++;
+      }
+      return [side, counts];
+    }),
+  );
+}
 // Match independently-owned sessions via browser target/raw request/time, not
 // REB public IDs or local session IDs. Timestamp disambiguates looping redirects.
 export function compareCapture(reference, network, {include = () => true} = {}) {
@@ -550,28 +584,12 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
     rows = network.requests.filter((r) => r && include(r));
   if (!refs.length) add('empty-reference');
   const validId = (value) => typeof value === 'string' && value.length > 0;
-  const validState = (state, status) =>
-    ['complete', 'failed', 'pending'].includes(state) &&
-    (Number.isFinite(status) || (status === null && state !== 'complete'));
-  if (
-    reference.hops.some(
-      (h) =>
-        !h ||
-        !validState(h.state, h.status) ||
-        typeof h.resourceType !== 'string' ||
-        typeof h.fromDiskCache !== 'boolean' ||
-        typeof h.fromServiceWorker !== 'boolean',
-    ) ||
-    network.requests.some(
-      (r) =>
-        !r ||
-        !validState(r.state, r.status) ||
-        typeof r.resource_type !== 'string' ||
-        typeof r.from_disk_cache !== 'boolean' ||
-        typeof r.from_service_worker !== 'boolean',
-    )
-  )
+  const malformedFields = countMalformedHopFields(reference.hops, network.requests);
+  if (Object.values(malformedFields).some((side) => Object.values(side).some((count) => count > 0)))
     add('malformed-hop-state');
+  // Validation still covers every row. Scoped counts let authored operations
+  // explain their own defects without attributing unrelated rows to each one.
+  const scopedMalformedFields = countMalformedHopFields(refs, rows);
   if (
     reference.hops.some(
       (h) =>
@@ -658,6 +676,8 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
     ambiguous,
     mismatched,
     mismatchReasons,
+    malformedFields,
+    scopedMalformedFields,
     issues,
     scope:
       'Observed HTTP request hops only; independent clients share Chrome CDP blind spots. Bodies, headers and WebSockets are separate coverage.',

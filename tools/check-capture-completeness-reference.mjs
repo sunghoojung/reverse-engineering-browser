@@ -565,3 +565,81 @@ for (const order of ['event-first', 'reply-first']) {
 console.log(
   'Main-resource handoff: iframe/worker lineage, terminal provenance, manual attachment, repeated URLs, raw-ID collisions, ambiguous/unrelated owners, epochs and pending negative controls passed.',
 );
+
+// Diagnostic counters expose only fixed field names, side, and multiplicity.
+// Every required field is still enforced, including completed-without-status.
+const fieldPairs = [
+  ['state', 'state'],
+  ['status', 'status'],
+  ['resourceType', 'resource_type'],
+  ['fromDiskCache', 'from_disk_cache'],
+  ['fromServiceWorker', 'from_service_worker'],
+];
+for (const side of ['reference', 'reb']) {
+  for (const [field, rebField] of fieldPairs) {
+    for (const value of [undefined, 'PRIVATE_BAD_VALUE']) {
+      const r = structuredClone(reference),
+        n = structuredClone(network);
+      const row = side === 'reference' ? r.hops[0] : n.requests[0];
+      const key = side === 'reference' ? field : rebField;
+      // Resource type permits arbitrary strings under the existing contract.
+      if (field === 'resourceType' && typeof value === 'string') row[key] = null;
+      else row[key] = value;
+      const result = compareCapture(r, n);
+      assert.equal(result.verdict, 'incomplete');
+      assert(result.issues.includes('malformed-hop-state'));
+      assert.equal(result.malformedFields[side][field], 1);
+      assert.equal(result.malformedFields[side === 'reference' ? 'reb' : 'reference'][field], 0);
+      assert(!JSON.stringify(result.malformedFields).includes('PRIVATE'));
+    }
+  }
+}
+const scopedReference = structuredClone(reference),
+  scopedNetwork = structuredClone(network);
+scopedReference.hops[0].status = null;
+scopedNetwork.requests[1].from_disk_cache = null;
+const scoped = compareCapture(scopedReference, scopedNetwork, {
+  include: (row) => row === scopedReference.hops[0] || row === scopedNetwork.requests[0],
+});
+assert.equal(scoped.verdict, 'incomplete');
+assert.equal(scoped.malformedFields.reference.status, 1);
+assert.equal(scoped.malformedFields.reb.fromDiskCache, 1);
+assert.equal(scoped.scopedMalformedFields.reference.status, 1);
+assert.equal(scoped.scopedMalformedFields.reb.fromDiskCache, 0);
+const validNoResponse = new ReferenceLedger();
+validNoResponse.session('private-session', 'private-target');
+validNoResponse.ingest({
+  sessionId: 'private-session',
+  method: 'Network.requestWillBeSent',
+  params: {
+    requestId: 'private-request',
+    timestamp: 5,
+    type: 'Fetch',
+    request: {url: 'http://localhost/private-path', method: 'GET'},
+  },
+});
+validNoResponse.ingest({
+  sessionId: 'private-session',
+  method: 'Network.loadingFinished',
+  params: {
+    requestId: 'private-request',
+    timestamp: 6,
+  },
+});
+validNoResponse.finalize();
+assert.deepEqual(validNoResponse.snapshot().errors, []);
+assert.equal(validNoResponse.hops[0].state, 'complete');
+assert.equal(validNoResponse.hops[0].status, null);
+const noResponseResult = compareCapture(validNoResponse.snapshot(), network);
+assert.equal(noResponseResult.verdict, 'incomplete');
+assert.equal(noResponseResult.malformedFields.reference.state, 0);
+assert.equal(noResponseResult.malformedFields.reference.status, 1);
+assert(!JSON.stringify(noResponseResult.malformedFields).includes('private'));
+const maxRows = structuredClone(network);
+maxRows.requests = Array.from({length: 10000}, () => ({...network.requests[0], status: null}));
+assert.equal(compareCapture(reference, maxRows).malformedFields.reb.status, 10000);
+maxRows.requests.push(maxRows.requests[0]);
+assert.deepEqual(compareCapture(reference, maxRows).issues, ['invalid-reb-snapshot']);
+console.log(
+  'PASS bounded side-specific malformed-field counts, operation scope, required fields, and terminal-without-response incompleteness',
+);

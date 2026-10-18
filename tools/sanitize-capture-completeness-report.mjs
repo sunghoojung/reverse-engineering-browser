@@ -2,6 +2,7 @@
 import {readFile, stat, writeFile} from 'node:fs/promises';
 import {lifecycleErrorCodes} from './capture-completeness-lifecycle.mjs';
 import {startupTimelineKeys, startupTimelineLimitMs} from './capture-completeness-startup.mjs';
+import {malformedHopFieldNames} from './capture-completeness-reference.mjs';
 import {pathToFileURL} from 'node:url';
 const count = (v) => {
   if (!Number.isSafeInteger(v) || v < 0 || v > 10000000) throw Error('invalid-count');
@@ -23,6 +24,26 @@ const numbers = (v, keys) =>
   Object.fromEntries(
     keys.filter((k) => v?.[k] !== undefined).map((k) => [k, v[k] === null ? null : count(v[k])]),
   );
+function sanitizeMalformedFields(value) {
+  return Object.fromEntries(
+    ['reference', 'reb'].map((side) => {
+      const fields = value?.[side];
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields))
+        throw Error('invalid-malformed-fields');
+      return [
+        side,
+        Object.fromEntries(
+          malformedHopFieldNames.map((name) => {
+            const value = fields[name];
+            if (!Number.isSafeInteger(value) || value < 0 || value > 10000)
+              throw Error('invalid-malformed-fields');
+            return [name, value];
+          }),
+        ),
+      ];
+    }),
+  );
+}
 function sanitizeLifecycle(value) {
   const result = numbers(value, [
     'samples',
@@ -102,6 +123,8 @@ export function sanitizeCaptureReport(input) {
         ]),
       };
     }
+    if (r.comparison?.malformedFields !== undefined)
+      result.comparison.malformedFields = sanitizeMalformedFields(r.comparison.malformedFields);
     if (r.operations) {
       if (!Array.isArray(r.operations) || r.operations.length > 256)
         throw Error('invalid-operations');
@@ -122,6 +145,9 @@ export function sanitizeCaptureReport(input) {
             'referencePending',
             'rebPending',
           ]),
+          ...(o.malformedFields !== undefined
+            ? {malformedFields: sanitizeMalformedFields(o.malformedFields)}
+            : {}),
           differences: numbers(o.differences, [
             'url',
             'method',

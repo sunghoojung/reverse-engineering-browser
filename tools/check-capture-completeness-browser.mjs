@@ -252,6 +252,11 @@ async function cohort(mode) {
       const matching = (rows) =>
         rows.filter((h) => fixtureOperation(h, fixture.manifest) === op).length;
       const expected = op.expectedClientCompletions ?? op.expectedReceipts;
+      const operationComparison = referenceOnly
+        ? null
+        : compareCapture(reference, snapshot?.network, {
+            include: (h) => fixtureOperation(h, fixture.manifest) === op,
+          });
       return {
         operationId: op.operationId,
         method: op.method,
@@ -268,11 +273,10 @@ async function cohort(mode) {
         rebPending: (snapshot?.network?.requests ?? []).filter(
           (h) => fixtureOperation(h, fixture.manifest) === op && h.state === 'pending',
         ).length,
-        differences: referenceOnly
-          ? {}
-          : (compareCapture(reference, snapshot?.network, {
-              include: (h) => fixtureOperation(h, fixture.manifest) === op,
-            }).mismatchReasons ?? {}),
+        differences: operationComparison?.mismatchReasons ?? {},
+        ...(operationComparison?.scopedMalformedFields
+          ? {malformedFields: operationComparison.scopedMalformedFields}
+          : {}),
       };
     });
   const uncovered = operations.some(

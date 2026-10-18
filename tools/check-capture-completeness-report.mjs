@@ -122,3 +122,47 @@ for (const invalid of [-1, 120001, 1.5, 'PRIVATE', NaN, undefined]) {
   copy.results[0].startupTimeline.rebStartMs = invalid;
   assert.throws(() => sanitizeCaptureReport(copy), /invalid-startup-timeline/);
 }
+
+const fieldNames = ['state', 'status', 'resourceType', 'fromDiskCache', 'fromServiceWorker'];
+const malformedInput = structuredClone(input);
+const diagnostics = {
+  reference: Object.fromEntries(fieldNames.map((field) => [field, field === 'status' ? 1 : 0])),
+  reb: Object.fromEntries(fieldNames.map((field) => [field, 0])),
+  rawRequestId: 'PRIVATE',
+  url: 'https://private.invalid/',
+};
+diagnostics.reference.sessionId = 'PRIVATE';
+diagnostics.reb.targetId = 'PRIVATE';
+malformedInput.results[0].comparison.malformedFields = structuredClone(diagnostics);
+malformedInput.results[0].operations[0].malformedFields = structuredClone(diagnostics);
+const safeMalformed = sanitizeCaptureReport(malformedInput);
+assert.equal(safeMalformed.results[0].comparison.malformedFields.reference.status, 1);
+assert.equal(safeMalformed.results[0].operations[0].malformedFields.reference.status, 1);
+assert(!JSON.stringify(safeMalformed).includes('PRIVATE'));
+assert(!JSON.stringify(safeMalformed).includes('https:'));
+assert.deepEqual(Object.keys(safeMalformed.results[0].operations[0].malformedFields), [
+  'reference',
+  'reb',
+]);
+for (const side of ['reference', 'reb']) {
+  assert.deepEqual(
+    Object.keys(safeMalformed.results[0].operations[0].malformedFields[side]),
+    fieldNames,
+  );
+  for (const field of fieldNames) {
+    for (const invalid of [undefined, null, -1, 10001, 1.5, 'PRIVATE', NaN, Infinity]) {
+      for (const scope of ['comparison', 'operation']) {
+        const copy = structuredClone(malformedInput);
+        const target =
+          scope === 'comparison' ? copy.results[0].comparison : copy.results[0].operations[0];
+        target.malformedFields[side][field] = invalid;
+        assert.throws(() => sanitizeCaptureReport(copy), /invalid-malformed-fields/);
+      }
+    }
+  }
+  for (const invalid of [undefined, null, [], 'PRIVATE']) {
+    const copy = structuredClone(malformedInput);
+    copy.results[0].operations[0].malformedFields[side] = invalid;
+    assert.throws(() => sanitizeCaptureReport(copy), /invalid-malformed-fields/);
+  }
+}

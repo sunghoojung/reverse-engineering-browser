@@ -341,3 +341,227 @@ assert.equal(
 );
 assert.equal(delayed.ledger.sessions.has('auto'), false);
 delayed.close();
+
+// Browser-owned main resources can start on a parent Network manager and
+// finish on the new frame/worker manager. Keep the start identity and require
+// independent protocol evidence before applying the actual terminal event.
+function handoff(kind = 'iframe', {parent = 'source', targetInfo = {}, requestInfo = {}} = {}) {
+  const ledger = new ReferenceLedger();
+  ledger.session('source', 'page-target', {type: 'page'});
+  ledger.session('unrelated', 'unrelated-target', {type: 'page'});
+  const url = `http://localhost/${kind}`,
+    requestId = kind === 'iframe' ? 'document-loader' : 'child-target';
+  ledger.session('destination', 'child-target', {type: kind, url, ...targetInfo}, parent);
+  const emit = (method, params, sessionId = 'source') =>
+    ledger.ingest({method: `Network.${method}`, params, sessionId});
+  const start = {
+    requestId,
+    loaderId: kind === 'iframe' ? requestId : '',
+    frameId: kind === 'iframe' ? 'child-target' : 'page-target',
+    type: kind === 'iframe' ? 'Document' : 'Script',
+    request: {url, method: 'GET'},
+    timestamp: 10,
+    ...requestInfo,
+  };
+  emit('requestWillBeSent', start);
+  emit('responseReceived', {requestId: start.requestId, response: {status: 200}});
+  return {
+    ledger,
+    emit,
+    start,
+    finish: (params = {}) =>
+      emit('loadingFinished', {requestId, timestamp: 11, ...params}, 'destination'),
+  };
+}
+function compareLedger(ledger) {
+  ledger.finalize();
+  return compareCapture(ledger.snapshot(), {
+    ...network,
+    requests: ledger.hops.map((h, i) => ({
+      id: `handoff-${i}`,
+      target_id: h.targetId,
+      protocol_request_id: h.requestId,
+      timing_evidence: {request_monotonic_seconds: {state: 'available', value: h.timestamp}},
+      url: h.url,
+      method: h.method,
+      status: h.status,
+      state: h.state,
+      resource_type: h.resourceType,
+      from_disk_cache: h.fromDiskCache,
+      from_service_worker: h.fromServiceWorker,
+    })),
+  });
+}
+for (const kind of ['iframe', 'worker', 'shared_worker']) {
+  const {ledger, start, finish} = handoff(kind);
+  finish();
+  assert.equal(ledger.hops.length, 1, `${kind}: transfer does not invent another hop`);
+  assert.equal(ledger.hops[0].state, 'complete');
+  assert.equal(ledger.hops[0].sessionId, 'source');
+  assert.equal(ledger.hops[0].targetId, 'page-target');
+  assert.equal(ledger.hops[0].loaderId, start.loaderId);
+  assert.equal(ledger.hops[0].frameId, start.frameId);
+  assert.equal(ledger.hops[0].terminalSessionId, 'destination');
+  assert.equal(ledger.hops[0].terminalTargetId, 'child-target');
+  assert.equal(ledger.hops[0].terminalTimestamp, 11);
+  assert.equal(ledger.snapshot().sessions[2].parentSessionId, 'source');
+  assert.equal(compareLedger(ledger).verdict, 'pass');
+}
+for (const kind of ['worker', 'shared_worker']) {
+  const {ledger, finish} = handoff(kind, {parent: null});
+  // A discovery/manual attachment has no parent session. The documented
+  // future worker target ID remains stronger than a raw-ID/URL coincidence.
+  finish();
+  assert.equal(ledger.hops[0].state, 'complete');
+  assert.deepEqual([...ledger.errors], []);
+}
+const nested = handoff('iframe', {parent: 'middle'});
+nested.ledger.session('middle', 'middle-target', {type: 'iframe'}, 'source');
+nested.finish();
+assert.equal(nested.ledger.hops[0].state, 'complete');
+const targetParent = handoff('iframe', {parent: null, targetInfo: {parentId: 'page-target'}});
+targetParent.finish();
+assert.equal(targetParent.ledger.hops[0].state, 'complete');
+const redirected = handoff('iframe');
+redirected.emit('requestWillBeSent', {
+  ...redirected.start,
+  timestamp: 10.5,
+  redirectResponse: {status: 302},
+  request: {url: 'http://localhost/redirected-frame', method: 'GET'},
+});
+redirected.emit('responseReceived', {
+  requestId: redirected.start.requestId,
+  response: {status: 200},
+});
+redirected.finish();
+assert.deepEqual(
+  redirected.ledger.hops.map((h) => h.state),
+  ['complete', 'complete'],
+);
+assert.equal(redirected.ledger.hops[0].terminalSessionId, undefined);
+assert.equal(redirected.ledger.hops[1].terminalSessionId, 'destination');
+assert.equal(compareLedger(redirected.ledger).verdict, 'pass');
+
+const rejectedHandoffs = [
+  ['document without lineage', 'iframe', {parent: null}],
+  ['unrelated document owner', 'iframe', {parent: 'unrelated'}],
+  ['wrong document loader', 'iframe', {requestInfo: {loaderId: 'ordinary-loader'}}],
+  ['missing document loader', 'iframe', {requestInfo: {loaderId: undefined}}],
+  ['wrong document frame', 'iframe', {requestInfo: {frameId: 'another-frame'}}],
+  ['missing document frame', 'iframe', {requestInfo: {frameId: undefined}}],
+  ['ordinary request in iframe', 'iframe', {requestInfo: {type: 'Fetch'}}],
+  ['page is not destination iframe', 'iframe', {targetInfo: {type: 'page'}}],
+  ['worker missing loader is not empty', 'worker', {requestInfo: {loaderId: undefined}}],
+  ['worker nonempty loader', 'worker', {requestInfo: {loaderId: 'loader'}}],
+  ['ordinary worker fetch', 'worker', {requestInfo: {type: 'Fetch'}}],
+  ['wrong worker target type', 'worker', {targetInfo: {type: 'page'}}],
+  ['different worker script URL', 'worker', {targetInfo: {url: 'http://localhost/other'}}],
+  ['unrelated worker parent', 'worker', {parent: 'unrelated'}],
+  ['contradictory worker target parent', 'worker', {targetInfo: {parentId: 'unrelated-target'}}],
+  ['service worker identity unproven', 'service_worker', {}],
+];
+for (const [label, kind, options] of rejectedHandoffs) {
+  const {ledger, finish} = handoff(kind, options);
+  finish();
+  assert.equal(ledger.hops[0].state, 'pending', label);
+  assert(ledger.errors.has('orphan-network-event'), label);
+  assert.equal(compareLedger(ledger).verdict, 'incomplete', label);
+}
+for (const timestamp of [undefined, null, NaN, Infinity, 9]) {
+  const {ledger, finish} = handoff();
+  finish({timestamp});
+  assert.equal(ledger.hops[0].state, 'pending', 'invalid or stale terminal time');
+  assert(ledger.errors.has('orphan-network-event'));
+}
+for (const event of ['responseReceived', 'requestServedFromCache', 'loadingFailed']) {
+  const {ledger, emit, start} = handoff('worker');
+  emit(event, {requestId: start.requestId, timestamp: 11, response: {status: 200}}, 'destination');
+  assert.equal(ledger.hops[0].state, 'pending', `${event} cannot prove completion`);
+  assert(ledger.errors.has('orphan-network-event'));
+}
+const noTerminal = handoff('worker');
+assert.equal(compareLedger(noTerminal.ledger).verdict, 'incomplete');
+const contradictoryLineage = handoff('worker');
+contradictoryLineage.ledger.describeSession('destination', {}, 'unrelated');
+contradictoryLineage.finish();
+assert.equal(contradictoryLineage.ledger.hops[0].state, 'pending');
+assert(contradictoryLineage.ledger.errors.has('target-lineage-conflict'));
+const missingSourceType = handoff('worker');
+missingSourceType.ledger.sessionInfo.get('source').type = null;
+missingSourceType.finish();
+assert.equal(missingSourceType.ledger.hops[0].state, 'pending');
+const wrongWorkerId = handoff('worker', {requestInfo: {requestId: 'ordinary-request'}});
+wrongWorkerId.finish({requestId: 'ordinary-request'});
+assert.equal(wrongWorkerId.ledger.hops[0].state, 'pending');
+
+for (const completeCollision of [false, true]) {
+  const {ledger, emit, start, finish} = handoff('worker', {parent: null});
+  emit('requestWillBeSent', {...start, timestamp: 10.5}, 'unrelated');
+  if (completeCollision)
+    emit('loadingFinished', {requestId: start.requestId, timestamp: 10.6}, 'unrelated');
+  finish();
+  assert.equal(ledger.hops.length, 2, 'raw-ID collisions keep both starts');
+  assert.equal(ledger.hops[0].state, 'pending', 'ambiguous candidate is not adopted');
+  assert(ledger.errors.has('orphan-network-event'));
+}
+const localCollision = handoff('worker');
+localCollision.emit('requestWillBeSent', {...localCollision.start, timestamp: 10.5}, 'destination');
+localCollision.finish();
+assert.deepEqual(
+  localCollision.ledger.hops.map((h) => h.state),
+  ['pending', 'complete'],
+);
+assert.equal(compareLedger(localCollision.ledger).verdict, 'incomplete');
+const repeatedStart = handoff('worker');
+repeatedStart.emit('requestWillBeSent', {...repeatedStart.start, timestamp: 10.5});
+repeatedStart.finish();
+assert.equal(repeatedStart.ledger.hops.length, 1);
+assert.equal(compareLedger(repeatedStart.ledger).verdict, 'incomplete');
+const repeatedTerminal = handoff('worker');
+repeatedTerminal.finish();
+repeatedTerminal.finish();
+assert(repeatedTerminal.ledger.errors.has('orphan-network-event'));
+const reconnected = handoff('worker');
+reconnected.ledger.epoch++;
+reconnected.finish();
+assert.equal(reconnected.ledger.hops[0].state, 'pending');
+assert.equal(compareLedger(reconnected.ledger).verdict, 'incomplete');
+
+// Repeated URLs with distinct documented identities stay independent.
+const repeatedUrl = handoff('worker');
+repeatedUrl.ledger.session('second-worker', 'second-target', {
+  type: 'worker',
+  url: repeatedUrl.start.request.url,
+});
+repeatedUrl.emit('requestWillBeSent', {
+  ...repeatedUrl.start,
+  requestId: 'second-target',
+  timestamp: 10.1,
+});
+repeatedUrl.emit('responseReceived', {requestId: 'second-target', response: {status: 200}});
+repeatedUrl.finish();
+assert.deepEqual(
+  repeatedUrl.ledger.hops.map((h) => h.state),
+  ['complete', 'pending'],
+);
+repeatedUrl.emit('loadingFinished', {requestId: 'second-target', timestamp: 11}, 'second-worker');
+assert.equal(compareLedger(repeatedUrl.ledger).verdict, 'pass');
+
+// The observer preserves manual-session ownership while learning target
+// lineage from the rejected recursive-auto-attachment, in either order.
+for (const order of ['event-first', 'reply-first']) {
+  const socket = new OverlapSocket(order),
+    reference = new PassiveReference(socket);
+  reference.ledger.session('parent', 'ancestor', {type: 'page'});
+  await reference.start();
+  const primary = reference.attachments.get('page'),
+    info = reference.ledger.sessionInfo.get(primary);
+  assert.equal(info.targetParentSessionId, 'parent');
+  assert.equal(info.parentSessionId, order === 'event-first' ? 'parent' : null);
+  assert.equal(info.type, 'page');
+  assert.deepEqual([...reference.ledger.errors], []);
+  reference.close();
+}
+console.log(
+  'Main-resource handoff: iframe/worker lineage, terminal provenance, manual attachment, repeated URLs, raw-ID collisions, ambiguous/unrelated owners, epochs and pending negative controls passed.',
+);

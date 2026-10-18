@@ -39,6 +39,8 @@ function sanitizeLifecycle(value) {
     'eligible_targets',
     'failed_targets',
     'target_overflow',
+    'cleanup_already_gone',
+    'cleanup_failures',
   ]);
   if (
     !Array.isArray(value.epochTransitions) ||
@@ -150,6 +152,8 @@ export function sanitizeCaptureReport(input) {
       result.rebCoverage = numbers(r.rebCoverage, [
         'gaps',
         'target_overflow',
+        'cleanup_already_gone',
+        'cleanup_failures',
         'failed_targets',
         'unattached_targets_omitted',
         'attached_targets',

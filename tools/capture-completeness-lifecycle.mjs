@@ -33,16 +33,31 @@ const exactErrors = new Map([
   ],
   ['Capture transport changed; unfinished evidence has a gap.', 'transport-changed'],
   ['HTTP capture initialization failed; retry pending.', 'fallback-initialization'],
+  ['Debugger WebSocket is closed', 'transport-closed'],
+  ['Debugger WebSocket closed', 'transport-closed'],
+  ['Debugger connection closed', 'transport-closed'],
+  ['Debugger WebSocket sent malformed JSON', 'transport-malformed'],
+  ['Debugger WebSocket sent a non-object message', 'transport-malformed'],
+  [
+    'Debugger event byte capacity exceeded; reconnecting preserves a visible gap',
+    'transport-byte-capacity',
+  ],
+  [
+    'Debugger event queue capacity exceeded; reconnecting preserves a visible gap',
+    'transport-queue-capacity',
+  ],
 ]);
 const prefixErrors = [
+  ['Debugger WebSocket closed: ', 'transport-closed'],
+  ['Debugger WebSocket is closed: ', 'transport-closed'],
+  ['Debugger connection closed: ', 'transport-closed'],
   ['Capture detach failed: ', 'detach-failed'],
   ['Browser target capture initialization failed: ', 'owner-initialization-failed'],
   ['Browser capture setup failed: ', 'browser-setup-failed'],
   ['Browser capture unavailable; page polling fallback: ', 'browser-fallback'],
 ];
 export const lifecycleErrorCodes = Object.freeze([
-  ...exactErrors.values(),
-  ...prefixErrors.map(([, code]) => code),
+  ...new Set([...exactErrors.values(), ...prefixErrors.map(([, code]) => code)]),
   'unknown',
 ]);
 export function classifyCaptureError(error) {
@@ -62,6 +77,8 @@ const fields = [
   'eligible_targets',
   'failed_targets',
   'target_overflow',
+  'cleanup_already_gone',
+  'cleanup_failures',
 ];
 export function createLifecycleObserver() {
   let samples = 0,

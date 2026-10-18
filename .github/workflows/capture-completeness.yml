@@ -23,6 +23,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Select Node runtime
         uses: actions/setup-node@v6
         with:
@@ -36,8 +37,27 @@ jobs:
           test -n "$version"
           printf 'ORIGIN_TRACE_TEST_BROWSER=%s\nREB_REFERENCE_BROWSER_VERSION=%s\n' "$browser" "$version" >> "$GITHUB_ENV"
           printf 'Pinned installed browser version: %s\n' "$version"
+      - name: Prove disappearing-session regression on exact prior backend
+        shell: bash
+        run: |
+          baseline=5559e91eb0231846a65174c7ecc7b54d9a126ed6
+          mkdir "$RUNNER_TEMP/capture-baseline"
+          git archive "$baseline" | tar -x -C "$RUNNER_TEMP/capture-baseline"
+          cargo build --locked --manifest-path "$RUNNER_TEMP/capture-baseline/apps/origin-trace-backend/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/apps/origin-trace-backend/target"
+          set +e
+          REB_CLEANUP_REGRESSION_ONLY=1 node tools/check-traffic-browser-sessions.mjs . > "$RUNNER_TEMP/cleanup-baseline.log" 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo 'Expected prior backend regression did not reproduce'
+            exit 1
+          fi
+          grep -F 'Confirmed redundant detach must not close whole transport' "$RUNNER_TEMP/cleanup-baseline.log"
+          echo "Verified disappearing-session negative control on $baseline"
       - name: Build actual backend and transport serially
         run: make -j1 origin-trace-backend debugger-transport
+      - name: Verify candidate cleanup races and fail-closed controls
+        run: node tools/check-traffic-browser-sessions.mjs .
       - name: Run independent offline contract regressions
         run: make capture-completeness-check
       - name: Compare controlled localhost cohorts

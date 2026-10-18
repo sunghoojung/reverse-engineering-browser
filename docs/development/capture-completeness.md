@@ -135,3 +135,28 @@ support Chromium's signed 32-bit serialization, including negative partitioned
 IDs; unknown shapes still fail with fixed diagnostic codes. These diagnostics
 help distinguish test instrumentation problems from capture gaps; they do not
 excuse any missing expected operation or prove lossless capture.
+
+Producer cleanup diagnostics expose cumulative `cleanup_already_gone` and
+`cleanup_failures` counters. A redundant session's detach rejection converges
+only after an exact same-connection session/parent detach or target-destroyed
+notification confirms its lifetime ended. An event barrier drains that proof;
+unknown outcomes and transport failures still fail closed. These counters help
+test the cleanup-race hypothesis; a nonzero gap count is not a count of missing
+requests and remains a conservative incomplete signal in this harness.
+
+The isolated CI gate builds the pinned prior backend and requires the new
+confirmed-disappearing-session regression to fail with its specific assertion,
+then builds the candidate and runs the entire session lifecycle suite. Build or
+launch failures do not satisfy the negative control. Both builds are serial and
+share Cargo dependency artifacts. Only the allowlisted controlled-comparison
+summary is uploaded, never the synthetic logs or raw browser evidence.
+
+Reference main-resource handoffs retain the original request owner and record
+actual terminal-session provenance locally. A unique current-connection iframe
+main resource requires exact loader/request/frame identity and observed ancestry;
+a worker main script requires its documented request-ID/future-target identity
+and explicitly empty loader ID. Only an actual `loadingFinished` event with a
+valid timestamp can complete the hop. Collisions, unknown iframe ancestry and
+conflicting shared-worker parent lineages remain incomplete. Raw lineage and
+terminal IDs are ephemeral, excluded from sanitized reports. This correction
+never changes the expected operation denominator or invents completion events.

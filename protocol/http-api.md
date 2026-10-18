@@ -249,6 +249,12 @@ retries after five seconds. `attached_target_ids` identifies ready owners;
 `unattached_targets` includes up to 16 missing target IDs/current titles and
 `unattached_targets_omitted` counts the remainder. Worker IDs are not page IDs
 and must not be assigned the selected page's identity.
+Optional cumulative `cleanup_already_gone` and `cleanup_failures` counters report
+confirmed-ended cleanup jobs and unsuccessful cleanup jobs, respectively. They
+are cleanup diagnostics, not counts of missing requests. Only jobs belonging to
+the then-current browser connection may increment them; late replies from a
+replaced connection cannot alter the new connection's status. Counters retain
+history across ordinary connection replacement and are absent until observed.
 
 When browser Target setup fails, compatibility fallback reports
 `scope: http-page-targets`, `transport_mode: page-fallback`: the previous eight

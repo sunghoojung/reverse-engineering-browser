@@ -4,7 +4,7 @@ use super::{
     connection::{Connection, Event},
     network_capture::{Owner, next_id},
 };
-use crate::error::{Error, Result};
+use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -20,6 +20,8 @@ struct CleanupJob {
     connection: Arc<Connection>,
     session: String,
     parent: Option<String>,
+    target: Option<String>,
+    gone: Arc<AtomicBool>,
 }
 impl CleanupJob {
     fn key(&self) -> CleanupKey {
@@ -30,10 +32,18 @@ impl CleanupJob {
         )
     }
 }
+enum CleanupOutcome {
+    AlreadyGone,
+    Failed,
+}
+struct CleanupProof {
+    target: Option<String>,
+    gone: Arc<AtomicBool>,
+}
 #[derive(Default)]
 struct CleanupQueue {
     waiting: VecDeque<CleanupJob>,
-    keys: BTreeSet<CleanupKey>,
+    keys: BTreeMap<CleanupKey, CleanupProof>,
 }
 
 pub(super) struct BrowserCapture {
@@ -445,10 +455,6 @@ impl Debugger {
             .browser
             .catalog_incomplete
             .store(false, Ordering::Release);
-        self.capture
-            .browser
-            .cleanup_closing
-            .store(false, Ordering::Release);
         {
             let mut queue = self
                 .capture
@@ -507,12 +513,19 @@ impl Debugger {
         if initial["targetInfos"].as_array().unwrap().len() > 4096 {
             self.mark_capture_catalog_incomplete();
         }
-        *self
-            .capture
-            .browser
-            .connection
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(c.clone());
+        {
+            let mut current = self
+                .capture
+                .browser
+                .connection
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.capture
+                .browser
+                .cleanup_closing
+                .store(false, Ordering::Release);
+            *current = Some(c.clone());
+        }
         let weak = Arc::downgrade(self);
         let event_connection = c.clone();
         tokio::spawn(async move {
@@ -571,24 +584,91 @@ impl Debugger {
             s["network"]["capture_status"]["attached_target_ids"] = json!([]);
         });
     }
-    async fn detach_capture_session(
+    fn record_capture_cleanup(&self, c: &Arc<Connection>, outcome: CleanupOutcome) -> bool {
+        // Hold identity through the state update so a late cleanup reply cannot
+        // charge a replacement connection. No await or nested browser lock.
+        let current = self
+            .capture
+            .browser
+            .connection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !current.as_ref().is_some_and(|active| Arc::ptr_eq(active, c)) {
+            return false;
+        }
+        let (field, first_failure) = match outcome {
+            CleanupOutcome::AlreadyGone => ("cleanup_already_gone", false),
+            CleanupOutcome::Failed => (
+                "cleanup_failures",
+                !self
+                    .capture
+                    .browser
+                    .cleanup_closing
+                    .swap(true, Ordering::AcqRel),
+            ),
+        };
+        self.update(|state| {
+            let status = &mut state["network"]["capture_status"];
+            status[field] = json!(status[field].as_u64().unwrap_or(0).saturating_add(1));
+        });
+        first_failure
+    }
+    fn confirm_capture_cleanup_gone(
         &self,
         c: &Arc<Connection>,
-        session: &str,
+        session: Option<&str>,
         parent: Option<&str>,
+        destroyed_target: Option<&str>,
     ) {
+        let queue = self
+            .capture
+            .browser
+            .cleanup_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for ((connection, sid, owner_parent), proof) in &queue.keys {
+            if *connection != Arc::as_ptr(c) as usize {
+                continue;
+            }
+            let exact_session = session == Some(sid.as_str()) && owner_parent.as_deref() == parent;
+            let exact_target =
+                destroyed_target.is_some() && destroyed_target == proof.target.as_deref();
+            if exact_session || exact_target {
+                proof.gone.store(true, Ordering::Release);
+            }
+        }
+    }
+    async fn detach_capture_session(&self, job: &CleanupJob) {
+        let c = &job.connection;
+        if job.gone.load(Ordering::Acquire) {
+            self.record_capture_cleanup(c, CleanupOutcome::AlreadyGone);
+            return;
+        }
         if let Err(error) = c
             .command_session(
                 "Target.detachFromTarget",
-                json!({"sessionId":session}),
+                json!({"sessionId":job.session}),
                 Duration::from_secs(1),
-                parent,
+                job.parent.as_deref(),
             )
             .await
         {
-            // An uncertain detach must not leave Network buffers accumulating on
-            // repeated retries. Closing this one client releases all its sessions.
-            if !self.capture.browser.cleanup_closing.load(Ordering::Acquire) {
+            // A protocol rejection may race an earlier lifecycle event queued
+            // for the same client. Drain it before consulting exact bounded proof.
+            // A timeout, malformed reply or transport failure is never excused.
+            if error.reason.code == Code::ApplicationFailed
+                && !c.is_closed()
+                && c.barrier().await.is_ok()
+                && !c.is_closed()
+                && self.capture.browser.current(c)
+                && job.gone.load(Ordering::Acquire)
+            {
+                self.record_capture_cleanup(c, CleanupOutcome::AlreadyGone);
+                return;
+            }
+            // Claim the current connection's first causal failure before closing.
+            // Its ensuing EOF must not retire owners twice or erase this reason.
+            if self.record_capture_cleanup(c, CleanupOutcome::Failed) {
                 self.retire_browser_owners(c, &format!("Capture detach failed: {}", error.message));
             }
             c.close().await;
@@ -599,6 +679,7 @@ impl Debugger {
         c: &Arc<Connection>,
         session: &str,
         parent: Option<&str>,
+        target: Option<&str>,
     ) {
         if !self.capture.browser.current(c) || c.is_closed() {
             return;
@@ -607,6 +688,8 @@ impl Debugger {
             connection: c.clone(),
             session: session.to_owned(),
             parent: parent.map(str::to_owned),
+            target: target.filter(|id| id.len() <= 4096).map(str::to_owned),
+            gone: Arc::new(AtomicBool::new(false)),
         };
         let mut queue = self
             .capture
@@ -618,16 +701,25 @@ impl Debugger {
             return;
         }
         let key = job.key();
-        if queue.keys.contains(&key) {
+        if queue.keys.contains_key(&key) {
             return;
         }
         if queue.keys.len() >= 512 {
-            if !self
-                .capture
-                .browser
-                .cleanup_closing
-                .swap(true, Ordering::AcqRel)
-            {
+            let first_failure = {
+                let current = self
+                    .capture
+                    .browser
+                    .connection
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                current.as_ref().is_some_and(|active| Arc::ptr_eq(active, c))
+                    && !self
+                        .capture
+                        .browser
+                        .cleanup_closing
+                        .swap(true, Ordering::AcqRel)
+            };
+            if first_failure {
                 self.retire_browser_owners(c, "Capture cleanup capacity exceeded; closing this client leaves an explicit gap.");
                 c.request_close();
                 let c = c.clone();
@@ -637,7 +729,13 @@ impl Debugger {
             }
             return;
         }
-        queue.keys.insert(key);
+        queue.keys.insert(
+            key,
+            CleanupProof {
+                target: job.target.clone(),
+                gone: job.gone.clone(),
+            },
+        );
         queue.waiting.push_back(job);
         // Ordinary shared-worker fan-out may produce many alternate sessions.
         // Bound queued metadata independently from the four wire commands.
@@ -666,12 +764,7 @@ impl Debugger {
                         }
                     };
                     if d.capture.browser.current(&job.connection) && !job.connection.is_closed() {
-                        d.detach_capture_session(
-                            &job.connection,
-                            &job.session,
-                            job.parent.as_deref(),
-                        )
-                        .await;
+                        d.detach_capture_session(&job).await;
                     }
                     d.capture
                         .browser
@@ -799,7 +892,12 @@ impl Debugger {
                         });
                     }
                     // Unknown startup ownership is not permission to resume a paused target.
-                    self.schedule_capture_detach(c, session, parent);
+                    self.schedule_capture_detach(
+                        c,
+                        session,
+                        parent,
+                        p["targetInfo"]["targetId"].as_str(),
+                    );
                 }
                 self.browser_status();
             }
@@ -868,6 +966,7 @@ impl Debugger {
                     c,
                     root.session.as_deref().unwrap(),
                     root.parent_session.as_deref(),
+                    root.target["id"].as_str(),
                 );
                 self.browser_status();
             }
@@ -875,6 +974,12 @@ impl Debugger {
                 let destroyed = m["method"] == "Target.targetDestroyed";
                 let id = p["targetId"].as_str();
                 let sid = p["sessionId"].as_str();
+                self.confirm_capture_cleanup_gone(
+                    c,
+                    sid,
+                    m["sessionId"].as_str(),
+                    if destroyed { id } else { None },
+                );
                 let removed = {
                     let mut owners = self
                         .capture
@@ -1043,8 +1148,12 @@ impl Debugger {
                     }
                 }
                 self.queue_capture_target(owner.target["id"].as_str().unwrap().to_owned());
-                self.detach_capture_session(&c, session.unwrap(), owner.parent_session.as_deref())
-                    .await;
+                self.schedule_capture_detach(
+                    &c,
+                    session.unwrap(),
+                    owner.parent_session.as_deref(),
+                    owner.target["id"].as_str(),
+                );
             }
         }
         self.browser_status();

@@ -24792,6 +24792,16 @@
               "browser-sessions"
             ]
           },
+          "cleanup_already_gone": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional cumulative confirmed-ended cleanup jobs; not a missing-request count."
+          },
+          "cleanup_failures": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional cumulative failed cleanup jobs on the current browser connection at observation; not a missing-request count."
+          },
           "startup_mode": {
             "const": "passive"
           }

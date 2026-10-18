@@ -67,3 +67,16 @@ absent.observe({network: {capture_epoch: 0, dropped: 0, capture_status: {gaps: 0
 assert.equal(absent.snapshot().maxima.gaps, 0);
 assert.equal(absent.snapshot().maxima.dropped, 0);
 assert.equal(absent.snapshot().maxima.attached_targets, null);
+
+const cleanup = createLifecycleObserver();
+cleanup.observe(
+  state(1, 'Debugger WebSocket closed: SECRET stderr', {
+    cleanup_already_gone: 3,
+    cleanup_failures: 1,
+  }),
+);
+assert.equal(cleanup.snapshot().maxima.cleanup_already_gone, 3);
+assert.equal(cleanup.snapshot().maxima.cleanup_failures, 1);
+assert.deepEqual(cleanup.snapshot().errorObservations, [{code: 'transport-closed', samples: 1}]);
+assert(!JSON.stringify(cleanup.snapshot()).includes('SECRET'));
+assert.equal(classifyCaptureError('Debugger WebSocket closedSECRET'), 'unknown');

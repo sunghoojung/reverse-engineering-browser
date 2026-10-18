@@ -74,7 +74,7 @@ lifecycleInput.results[0].lifecycle = {
   setupEpochTransitions: 1,
   epochChanges: 0,
   omittedEpochTransitions: 0,
-  maxima: {gaps: 9, dropped: 0, attached_targets: 5},
+  maxima: {gaps: 9, dropped: 0, attached_targets: 5, cleanup_already_gone: 2, cleanup_failures: 1},
   epochTransitions: [{from: 0, to: 1, setup: true, secret: 'PRIVATE'}],
   errorObservations: [{code: 'target-or-ancestor-detached', samples: 1, raw: 'PRIVATE'}],
   secret: 'PRIVATE',
@@ -83,6 +83,8 @@ lifecycleInput.results[0].operations[0].differences = {state: 1, raw: 'PRIVATE'}
 const safeLifecycle = sanitizeCaptureReport(lifecycleInput);
 assert(!JSON.stringify(safeLifecycle).includes('PRIVATE'));
 assert.equal(safeLifecycle.results[0].lifecycle.maxima.gaps, 9);
+assert.equal(safeLifecycle.results[0].lifecycle.maxima.cleanup_already_gone, 2);
+assert.equal(safeLifecycle.results[0].lifecycle.maxima.cleanup_failures, 1);
 assert.equal(safeLifecycle.results[0].operations[0].differences.state, 1);
 for (const mutate of [
   (r) => {

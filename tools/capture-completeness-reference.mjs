@@ -19,6 +19,7 @@ export class ReferenceLedger {
   } = {}) {
     this.limits = {maxSessions, maxEvents, maxBytes, maxHops};
     this.sessions = new Map();
+    this.sessionInfo = new Map();
     this.active = new Map();
     this.hops = [];
     this.websockets = [];
@@ -31,7 +32,7 @@ export class ReferenceLedger {
   gap(reason) {
     if (this.errors.size < 32) this.errors.add(reason);
   }
-  session(sessionId, targetId) {
+  session(sessionId, targetId, info = {}, parentSessionId) {
     if (
       ![sessionId, targetId].every(
         (id) => typeof id === 'string' && id.length > 0 && id.length <= 1024,
@@ -42,6 +43,7 @@ export class ReferenceLedger {
     }
     if (this.sessions.has(sessionId)) {
       if (this.sessions.get(sessionId) !== targetId) this.gap('session-reused');
+      else this.describeSession(sessionId, info, parentSessionId);
       return false;
     }
     if (this.sessions.size >= this.limits.maxSessions) {
@@ -49,7 +51,116 @@ export class ReferenceLedger {
       return false;
     }
     this.sessions.set(sessionId, targetId);
+    this.sessionInfo.set(sessionId, {
+      epoch: this.epoch,
+      sessionId,
+      targetId,
+      parentSessionId: parentSessionId ?? null,
+      targetParentSessionId: null,
+      type: null,
+      url: null,
+      parentId: null,
+      parentFrameId: null,
+      openerId: null,
+      openerFrameId: null,
+      lineageConflict: false,
+    });
+    this.describeSession(sessionId, info, parentSessionId);
     return true;
+  }
+  describeSession(sessionId, info, parentSessionId) {
+    const owner = this.sessionInfo.get(sessionId);
+    if (!owner) return;
+    const retain = (name, value) => {
+      if (value === undefined || value === null || value === '') return;
+      if (typeof value !== 'string' || value.length > 1024) {
+        owner.lineageConflict = true;
+        this.gap('invalid-target-lineage');
+      } else if (owner[name] && owner[name] !== value) {
+        owner.lineageConflict = true;
+        this.gap('target-lineage-conflict');
+      } else owner[name] = value;
+    };
+    for (const name of ['type', 'parentId', 'parentFrameId', 'openerId', 'openerFrameId'])
+      retain(name, info[name]);
+    // A secondary auto-attachment can prove target lineage without becoming
+    // the admitted Network observer or rewriting that session's actual parent.
+    retain('targetParentSessionId', parentSessionId);
+    if (typeof info.url === 'string' && info.url) owner.url = info.url;
+  }
+  parentRelation(source, destination) {
+    const visited = new Set();
+    let current = destination,
+      hasParent = false;
+    while (current && !visited.has(current.targetId)) {
+      visited.add(current.targetId);
+      if (current.epoch !== this.epoch || current.lineageConflict) return false;
+      const sessionParent = this.sessionInfo.get(current.targetParentSessionId);
+      if (sessionParent && sessionParent.epoch !== this.epoch) return false;
+      const parentId = current.parentId ?? sessionParent?.targetId;
+      if (current.parentId && sessionParent && current.parentId !== sessionParent.targetId)
+        return false;
+      if (!parentId) return hasParent ? false : null;
+      hasParent = true;
+      if (parentId === source.targetId) return true;
+      const parents = [...this.sessionInfo.values()].filter(
+        (s) => s.epoch === this.epoch && s.targetId === parentId,
+      );
+      if (parents.length !== 1) return false;
+      [current] = parents;
+    }
+    return false;
+  }
+  mainResourceCompletion(sessionId, params) {
+    const destination = this.sessionInfo.get(sessionId);
+    if (
+      !destination ||
+      destination.epoch !== this.epoch ||
+      destination.lineageConflict ||
+      !Number.isFinite(params.timestamp)
+    )
+      return null;
+    // Chrome DevTools' NetworkManager.ts, maybeAdoptMainResourceRequest and
+    // startNetworkRequest, document this main-resource lifecycle handoff:
+    // https://github.com/ChromeDevTools/devtools-frontend/blob/main/front_end/core/sdk/NetworkManager.ts
+    // Keep ordinary request IDs session-scoped. Even a completed colliding
+    // start in another session makes this narrowly supported adoption unsafe.
+    const candidates = [...this.active.values()].filter(
+      (hop) => hop.epoch === this.epoch && hop.requestId === params.requestId,
+    );
+    if (candidates.length !== 1) return null;
+    const [hop] = candidates,
+      source = this.sessionInfo.get(hop.sessionId);
+    if (
+      hop.state !== 'pending' ||
+      !source ||
+      source.epoch !== this.epoch ||
+      source.lineageConflict ||
+      source.targetId === destination.targetId ||
+      params.timestamp < hop.timestamp
+    )
+      return null;
+    const relation = this.parentRelation(source, destination);
+    // Chromium's RenderFrameDevToolsAgentHost uses the DevTools frame token
+    // as its target ID; require that exact frame plus its observed ancestry.
+    // https://github.com/chromium/chromium/blob/main/content/browser/devtools/render_frame_devtools_agent_host.cc
+    const document =
+      hop.resourceType === 'Document' &&
+      hop.loaderId === hop.requestId &&
+      hop.frameId === destination.targetId &&
+      destination.type === 'iframe' &&
+      ['page', 'iframe'].includes(source.type) &&
+      relation === true;
+    const worker =
+      hop.resourceType === 'Script' &&
+      hop.loaderId === '' &&
+      hop.requestId === destination.targetId &&
+      ['worker', 'shared_worker'].includes(destination.type) &&
+      ['page', 'iframe', 'worker', 'shared_worker'].includes(source.type) &&
+      relation !== false &&
+      (!destination.url || destination.url === hop.url);
+    if (!document && !worker) return null;
+    return hop;
   }
   ingest(message, byteLength = Buffer.byteLength(JSON.stringify(message) ?? '')) {
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
@@ -119,6 +230,8 @@ export class ReferenceLedger {
         targetId,
         requestId: p.requestId,
         hop: previous ? previous.hop + 1 : 0,
+        loaderId: typeof p.loaderId === 'string' ? p.loaderId : null,
+        frameId: typeof p.frameId === 'string' ? p.frameId : null,
         url: p.request.url,
         method: p.request.method,
         resourceType: p.type ?? '',
@@ -142,14 +255,21 @@ export class ReferenceLedger {
       ].includes(method)
     )
       return;
-    const hop = this.active.get(id);
+    const hop =
+      this.active.get(id) ??
+      (method === 'Network.loadingFinished' ? this.mainResourceCompletion(sessionId, p) : null);
     if (!hop) {
       this.gap('orphan-network-event');
       return;
     }
     if (method === 'Network.responseReceived') this.response(hop, p.response);
     if (method === 'Network.requestServedFromCache') hop.servedFromCache = true;
-    if (method === 'Network.loadingFinished') hop.state = 'complete';
+    if (method === 'Network.loadingFinished') {
+      hop.state = 'complete';
+      hop.terminalSessionId = sessionId;
+      hop.terminalTargetId = targetId;
+      hop.terminalTimestamp = p.timestamp ?? null;
+    }
     if (method === 'Network.loadingFailed') {
       hop.state = 'failed';
       hop.canceled = p.canceled === true;
@@ -173,6 +293,7 @@ export class ReferenceLedger {
     return {
       finalized: this.finalized,
       epoch: this.epoch,
+      sessions: [...this.sessionInfo.values()],
       hops: this.hops,
       websockets: this.websockets,
       errors: [...this.errors],
@@ -228,6 +349,10 @@ export class PassiveReference {
         this.admit(m.params.sessionId, m.params.targetInfo, m.sessionId);
       if (m.method === 'Target.targetCreated' && supported.has(m.params.targetInfo?.type))
         this.attach(m.params.targetInfo).catch(() => this.ledger.gap('attach-failed'));
+      if (m.method === 'Target.targetInfoChanged') {
+        const info = m.params.targetInfo;
+        this.ledger.describeSession(this.attachments.get(info?.targetId), info ?? {});
+      }
       if (m.method === 'Target.detachedFromTarget') {
         const sid = m.params.sessionId;
         for (const [targetId, active] of this.attachments) {
@@ -273,6 +398,7 @@ export class PassiveReference {
     if (!supported.has(info?.type) || this.rejectedSessions.has(sessionId)) return;
     const primary = this.attachments.get(info.targetId);
     if (primary && primary !== sessionId) {
+      this.ledger.describeSession(primary, info, parentSession);
       if (this.rejectedSessions.size >= this.ledger.limits.maxSessions) {
         this.ledger.gap('duplicate-session-limit');
         this.socket.close();
@@ -288,7 +414,7 @@ export class PassiveReference {
       this.initializing.add(cleanup);
       return;
     }
-    if (!this.ledger.session(sessionId, info.targetId)) return;
+    if (!this.ledger.session(sessionId, info.targetId, info, parentSession)) return;
     this.attachments.set(info.targetId, sessionId);
     const init = (async () => {
       await this.command('Network.enable', {}, sessionId);

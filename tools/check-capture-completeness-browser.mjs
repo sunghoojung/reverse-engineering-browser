@@ -309,6 +309,8 @@ async function cohort(mode) {
       [
         'gaps',
         'target_overflow',
+        'cleanup_already_gone',
+        'cleanup_failures',
         'failed_targets',
         'unattached_targets_omitted',
         'attached_targets',

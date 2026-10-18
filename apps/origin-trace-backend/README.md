@@ -108,7 +108,14 @@ than deleting a potentially live profile.
 Only this owned process uses browser-root and recursive
 `Target.setAutoAttach(waitForDebuggerOnStart=true)`. A waiting attachment is
 registered at transport ingress, before the normal bounded event queue; capture
-then enables Network and recursive attachment before resuming execution. An
+then sends Network.enable and acknowledges recursive attachment before releasing
+its exact owned hold. Pre-renderer workers can defer the Network.enable reply
+until release, so the send barrier is deliberately separate from readiness:
+the owner becomes ready only after both initialization replies succeed on a live
+connection. This ordering follows Chromium
+[NetworkHandler::Enable](https://github.com/chromium/chromium/blob/155.0.8059.39/content/browser/devtools/protocol/network_handler.cc)
+and [DevToolsSession](https://github.com/chromium/chromium/blob/155.0.8059.39/content/browser/devtools/devtools_session.cc):
+browser-side Network setup precedes a possibly deferred renderer reply. An
 independent watchdog starts release after a four-second setup deadline, with up
 to one further second for resume acknowledgement. Initialization failure,
 rejection, capacity overflow, shutdown and cancellation release the hold or close

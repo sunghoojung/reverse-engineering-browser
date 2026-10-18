@@ -46,6 +46,14 @@ impl Debugger {
         self.update(|s| s["network"]["capture_status"]["held_targets"] = json!(held.len()));
         true
     }
+    pub(super) fn has_capture_hold(&self, c: &Arc<Connection>, session: &str) -> bool {
+        self.capture
+            .holds
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&(Arc::as_ptr(c) as usize, session.to_owned()))
+    }
     // At most one bounded duplicate-owner waiter per registered hold.
     pub(super) fn defer_capture_hold(&self, c: &Arc<Connection>, session: &str) -> Option<bool> {
         let mut held = self

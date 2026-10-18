@@ -1320,11 +1320,71 @@ impl Debugger {
     async fn initialize_browser_owner(self: &Arc<Self>, c: Arc<Connection>, owner: Arc<Owner>) {
         let session = owner.session.as_deref();
         let budget = 134217728u64 / u64::from(self.options.capture_target_limit);
-        let result=async {
-            c.command_session("Network.enable",json!({"maxTotalBufferSize":budget,"maxResourceBufferSize":budget.min(2097152),"maxPostDataSize":131072}),Duration::from_secs(3),session).await?;
-            c.command_session("Target.setAutoAttach",auto_attach(self.options.capture_first_owned),Duration::from_secs(3),session).await?;
-            Ok::<_,Error>(())
-        }.await;
+        let network_params = json!({
+            "maxTotalBufferSize": budget,
+            "maxResourceBufferSize": budget.min(2097152),
+            "maxPostDataSize": 131072,
+        });
+        let result = if let Some(held_session) =
+            session.filter(|session| self.has_capture_hold(&c, session))
+        {
+            // A pre-renderer worker cannot acknowledge Network.enable until its
+            // owned startup hold is released. Chromium enables browser-side
+            // Network handling before forwarding the acknowledgement to the
+            // renderer. Send Network first, configure descendants, then release
+            // only our registered hold. Readiness still requires both replies.
+            let (sent, received) = tokio::sync::oneshot::channel();
+            let enable = c.command_session_notified(
+                "Network.enable",
+                network_params,
+                Duration::from_secs(3),
+                session,
+                sent,
+            );
+            let configure_and_release = async {
+                received
+                    .await
+                    .map_err(|_| Error::conflict("Capture Network.enable was not sent"))?;
+                let configured = c
+                    .command_session(
+                        "Target.setAutoAttach",
+                        auto_attach(true),
+                        Duration::from_secs(3),
+                        session,
+                    )
+                    .await;
+                self.resume_capture_hold(
+                    &c,
+                    held_session,
+                    configured.as_ref().err().map(|_| {
+                        "Capture-first initialization failed; target resumed with a capture gap."
+                    }),
+                )
+                .await;
+                configured.map(|_| ())
+            };
+            let (enabled, configured) = tokio::join!(enable, configure_and_release);
+            enabled.map(|_| ()).and(configured)
+        } else {
+            async {
+                c.command_session(
+                    "Network.enable",
+                    network_params,
+                    Duration::from_secs(3),
+                    session,
+                )
+                .await?;
+                c.command_session(
+                    "Target.setAutoAttach",
+                    auto_attach(self.options.capture_first_owned),
+                    Duration::from_secs(3),
+                    session,
+                )
+                .await?;
+                Ok::<_, Error>(())
+            }
+            .await
+        };
         if let Some(session) = session {
             self.resume_capture_hold(
                 &c,
@@ -1336,6 +1396,7 @@ impl Debugger {
             .await;
         }
         if self.stopping.load(Ordering::Acquire)
+            || c.is_closed()
             || !self.capture.browser.current(&c)
             || owner.retired.load(Ordering::Acquire)
         {

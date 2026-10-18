@@ -33,6 +33,10 @@ pub struct Connection {
     events: mpsc::Sender<Event>,
     observer: StdMutex<Option<EventObserver>>,
 }
+struct CommandAdmission<F> {
+    before_send: F,
+    sent_notification: Option<oneshot::Sender<()>>,
+}
 struct Pending<'a> {
     connection: &'a Connection,
     id: u64,
@@ -268,9 +272,41 @@ impl Connection {
         deadline: Duration,
         session: Option<&str>,
     ) -> Result<Value> {
-        self.command_session_guarded(method, params, deadline, session, || true)
-            .await
-            .map(|result| result.expect("Unconditional debugger command is admitted"))
+        self.command_session_guarded(
+            method,
+            params,
+            deadline,
+            session,
+            CommandAdmission {
+                before_send: || true,
+                sent_notification: None,
+            },
+        )
+        .await
+        .map(|result| result.expect("Unconditional debugger command is admitted"))
+    }
+    // Signal only after the complete command frame has reached the transport.
+    // This is a send-order barrier, never a successful protocol acknowledgement.
+    pub(super) async fn command_session_notified(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+        session: Option<&str>,
+        sent: oneshot::Sender<()>,
+    ) -> Result<Value> {
+        self.command_session_guarded(
+            method,
+            params,
+            deadline,
+            session,
+            CommandAdmission {
+                before_send: || true,
+                sent_notification: Some(sent),
+            },
+        )
+        .await
+        .map(|result| result.expect("Unconditional debugger command is admitted"))
     }
     // Recheck expiring mutation authority after the command writer queue, before
     // sending any bytes. A rejected guard leaves a known, unsent outcome.
@@ -281,8 +317,17 @@ impl Connection {
         deadline: Duration,
         before_send: impl FnOnce() -> bool,
     ) -> Result<Option<Value>> {
-        self.command_session_guarded(method, params, deadline, None, before_send)
-            .await
+        self.command_session_guarded(
+            method,
+            params,
+            deadline,
+            None,
+            CommandAdmission {
+                before_send,
+                sent_notification: None,
+            },
+        )
+        .await
     }
     async fn command_session_guarded(
         &self,
@@ -290,8 +335,12 @@ impl Connection {
         params: Value,
         deadline: Duration,
         session: Option<&str>,
-        before_send: impl FnOnce() -> bool,
+        admission: CommandAdmission<impl FnOnce() -> bool>,
     ) -> Result<Option<Value>> {
+        let CommandAdmission {
+            before_send,
+            sent_notification,
+        } = admission;
         if self.is_closed() {
             return Err(Error::conflict("Debugger WebSocket is closed"));
         }
@@ -348,6 +397,9 @@ impl Connection {
                 "Native debugger transport command pipe failed or timed out",
             )
             .with_reason(Reason::uncertain(Cause::TransportFailure)));
+        }
+        if let Some(notification) = sent_notification {
+            let _ = notification.send(());
         }
         let result = tokio::time::timeout(deadline, receiver).await;
         self.pending

@@ -44,7 +44,7 @@ if(process.argv[2]==='--browser') {
     const header=Buffer.from([82,69,66,1,0,0,0,0]);header.writeUInt32BE(body.length,4);
     process.stdout.write(Buffer.concat([header,body]));
   };
-  const sessions=new Map(),held=new Set(),autoParents=new Set();let serial=0,pending=Buffer.alloc(0),rootHold=false,rootAuto=false,capturing=false,closed=false;
+  const sessions=new Map(),held=new Set(),autoParents=new Set(),enableAfterResume=new Map();let serial=0,pending=Buffer.alloc(0),rootHold=false,rootAuto=false,capturing=false,closed=false;
   let cursor=records(join(fixtureDirectory,'events')).length;
   function release(sessionId,reason) {
     if(held.delete(sessionId))log({event:'release',browser,sessionId,reason});
@@ -83,7 +83,17 @@ if(process.argv[2]==='--browser') {
       };
       const reject=message=>emit({id:m.id,error:{code:-32000,message},...(m.sessionId?{sessionId:m.sessionId}:{})});
       const target=[...sessions].find(([,sid])=>sid===m.sessionId)?.[0];
+      if(browser&&options.orderedInit&&target==='ordered-worker'&&m.method==='Network.enable') {
+        enableAfterResume.set(m.sessionId,()=>{
+          if(options.enableOutcome==='timeout')return;
+          const finish=()=>{log({event:'ordered-enable-reply',browser,sessionId:m.sessionId,outcome:options.enableOutcome??'success'});if(options.enableOutcome==='error')reject('synthetic ordered Network.enable failure');else reply({});};
+          if(options.enableReplyDelay===0)finish();else setTimeout(finish,options.enableReplyDelay??600);
+        });
+        log({event:'ordered-enable-withheld',browser,sessionId:m.sessionId});
+        continue;
+      }
       if(browser&&target===options.failTarget&&m.method===options.failMethod) {
+        if(options.orderedInit&&m.method==='Runtime.runIfWaitingForDebugger'){const finishEnable=enableAfterResume.get(m.sessionId);enableAfterResume.delete(m.sessionId);finishEnable?.();}
         if(options.failure==='error')reject('synthetic initialization failure');
         // Timeout deliberately never replies; production must bound it.
         if(options.failure==='error'||options.failure==='timeout')continue;
@@ -95,6 +105,7 @@ if(process.argv[2]==='--browser') {
       else if(m.method==='Target.attachToTarget')reply({sessionId:attach(targets().find(t=>t.targetId===m.params.targetId),undefined,false)});
       else if(m.method==='Runtime.runIfWaitingForDebugger') {
         release(m.sessionId,'acknowledged-resume');reply({});
+        const finishEnable=enableAfterResume.get(m.sessionId);enableAfterResume.delete(m.sessionId);finishEnable?.();
       } else if(m.method==='Target.setAutoAttach') {
         reply({});
         if(browser&&!m.sessionId){rootAuto=m.params.autoAttach;capturing||=rootAuto;rootHold=rootAuto&&m.params.waitForDebuggerOnStart;}
@@ -131,13 +142,13 @@ if(process.argv[2]==='--browser') {
   },15);
 } else {
   const selected=process.env.REB_CAPTURE_FIRST_CASES;
-  assert(!selected||['worker-controller','malformed-attachments','duplicate-owners'].includes(selected),'Unknown REB_CAPTURE_FIRST_CASES selector');
+  assert(!selected||['worker-controller','malformed-attachments','duplicate-owners','ordered-init'].includes(selected),'Unknown REB_CAPTURE_FIRST_CASES selector');
   const root=resolve(process.argv[2]??'.');
   const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:type==='page'?'about:blank':`http://localhost/${id}.js`,...(parent?{parent}:{})});
   const alive=pid=>{try{process.kill(pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;throw error;}};
   async function fixture(initial,options,run) {
-    if(selected==='worker-controller'&&!options.experiment||selected==='malformed-attachments'&&!options.malformed||selected==='duplicate-owners'&&!options.duplicates)return;
+    if(selected==='ordered-init'&&!options.orderedInit||selected==='worker-controller'&&!options.experiment||selected==='malformed-attachments'&&!options.malformed||selected==='duplicate-owners'&&!options.duplicates)return;
     const directory=await mkdtemp(join(tmpdir(),'reb-capture-first-'));
     let owned,external,address,diagnostics='',failure;
     let catalog=initial;
@@ -212,6 +223,56 @@ if(process.argv[2]==='--browser') {
     const detach=all.findIndex(c=>c.method==='Target.detachFromTarget'&&c.params.sessionId?.endsWith(':'+id));
     assert(resume>=0&&detach>resume,`${id}: held target must receive resume before detach`);
   }
+  await fixture([info('a')],{orderedInit:true,enableReplyDelay:1000},async({commands,waitState,until,add,state})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Owned page ready before ordered worker');
+    add(info('ordered-worker','worker','a'));
+    const enable=await until(()=>commands().find(c=>c.event==='ordered-enable-withheld'),'Worker enable waits for authorized release');
+    await until(()=>resumed(commands,'ordered-worker'),'Ordered worker startup released without waiting for Network ACK',2500);
+    const all=capture(commands).filter(c=>c.sessionId===enable.sessionId);
+    const network=all.findIndex(c=>c.method==='Network.enable'),recurse=all.findIndex(c=>c.method==='Target.setAutoAttach'&&c.params.waitForDebuggerOnStart===true),resume=all.findIndex(c=>c.method==='Runtime.runIfWaitingForDebugger');
+    assert(network>=0&&recurse>network&&resume>recurse,'Network command bytes precede recursive autoattach and exact owned startup release');
+    assert(!commands().some(c=>c.event==='ordered-enable-reply'),'Release must occur before withheld Network.enable reply');
+    assert(!(await state()).network.capture_status.attached_target_ids.includes('ordered-worker'),'Released worker remains unready until Network.enable acknowledgment');
+    await until(()=>commands().some(c=>c.event==='ordered-enable-reply'),'Network ACK follows authorized release');
+    await waitState(s=>s.network.capture_status.attached_target_ids.includes('ordered-worker'),'Delayed Network ACK completes owner readiness');
+    assert.equal(capture(commands).filter(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId===enable.sessionId).length,1,'Initial exact hold is released once');
+    console.log('PASS capture-first ordered initialization: enable bytes, recursive attach, owned release, delayed ACK, readiness');
+  });
+  for(const enableOutcome of ['error','timeout'])await fixture([info('a')],{orderedInit:true,enableOutcome,enableReplyDelay:100},async({commands,waitState,until,add})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Owned page before failing ordered worker');
+    add(info('ordered-worker','worker','a'));
+    const enable=await until(()=>commands().find(c=>c.event==='ordered-enable-withheld'),'Failing ordered enable sent');
+    const resume=await until(()=>resumed(commands,'ordered-worker'),'Failing ordered worker hold released boundedly',5500);
+    assert(resume.time-enable.time<5000,'Network ACK failure cannot strand authorized startup hold');
+    const failed=await waitState(s=>s.network.capture_status.gaps>0&&s.network.capture_status.failed_targets>0,'Ordered ACK failure remains visible',6000);
+    assert(!failed.network.capture_status.attached_target_ids.includes('ordered-worker'),'Failed ACK cannot mark released owner ready');
+    await assertResumeBeforeDetach(commands,'ordered-worker');
+    console.log(`PASS capture-first ordered initialization: ${enableOutcome} ACK leaves explicit failure after bounded owned release`);
+  });
+  for(const failure of ['error','timeout'])await fixture([info('a')],{orderedInit:true,enableReplyDelay:0,failTarget:'ordered-worker',failMethod:'Runtime.runIfWaitingForDebugger',failure},async({commands,waitState,until,add,state})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Page ready before ordered resume failure');
+    add(info('ordered-worker','worker','a'));
+    const enable=await until(()=>commands().find(c=>c.event==='ordered-enable-withheld'),'Ordered worker starts before resume failure');
+    await until(()=>commands().some(c=>c.event==='ordered-enable-reply'),'Network ACK succeeds as resume is attempted');
+    // Observe during the resume deadline, not only after asynchronous EOF retirement.
+    await until(async()=>{
+      const snapshot=await state();
+      assert(!snapshot.network.capture_status.attached_target_ids.includes('ordered-worker'),'Failed authorized resume must never advertise its owner ready');
+      return !alive(enable.pid);
+    },'Failed ordered resume closes exact transport',6500);
+    assert(!resumed(commands,'ordered-worker'),'Rejected or timed-out resume is never acknowledged');
+    assert(released(commands,enable.sessionId),'Transport closure releases failed ordered hold');
+    console.log(`PASS capture-first ordered initialization: Network ACK cannot make ${failure} resume owner ready`);
+  });
+  for(const passive of [false,true])await fixture([info('a')],{orderedInit:true,passive},async({commands,waitState,until,add})=>{
+    await waitState(s=>s.network.capture_status.attached_targets===1,'Baseline owner before unowned startup');
+    add(info('ordered-worker','worker','a'),false);
+    const enable=await until(()=>commands().find(c=>c.event==='ordered-enable-withheld'),'Unheld worker enable sent');
+    await waitState(s=>s.network.capture_status.failed_targets>0,'Unowned enable times out without a release',6000);
+    assert(!capture(commands).some(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId===enable.sessionId),'Unheld or passive owner must never gain startup-release authority');
+    if(passive)assert(!capture(commands).some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Passive capture never releases any target');
+    console.log(`PASS ${passive?'passive':'owned unheld'} ordered initialization: no release without exact registered hold`);
+  });
   await fixture([info('a'),info('worker','worker','a'),info('nested','worker','worker')],{},async({commands,waitState,until,stop})=>{
     const s=await waitState(s=>s.network.capture_status.attached_targets===3,'Owned nested owners');
     assert.equal(s.network.capture_status.startup_mode,'capture-first');
@@ -243,10 +304,11 @@ if(process.argv[2]==='--browser') {
     add(info('other'));
     await until(()=>resumed(commands,'other'),'Dispatcher progresses while duplicate owner initializes');
     const held=firstHeld?enable.sessionId:duplicate;
-    assert(!capture(commands).some(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId===held),'Held target cannot resume before the exact existing owner is ready');
+    if(!firstHeld)assert(!capture(commands).some(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId===held),'Held duplicate cannot resume before the exact existing owner is ready');
     if(firstHeld)await until(()=>capture(commands).some(c=>c.method==='Target.detachFromTarget'&&c.params.sessionId===duplicate),'Nonwaiting duplicate detached');
     const resume=await until(()=>capture(commands).find(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId===held),'Held owner resumed after setup');
-    assert(resume.time-enable.time>=1400,'Delayed Network.enable must settle before held duplicate release');
+    if(!firstHeld)assert(resume.time-enable.time>=1400,'Delayed Network.enable must settle before held duplicate release');
+    else assert(!commands().some(c=>c.event==='delayed-reply'&&c.method==='Network.enable'&&c.sessionId===held&&c.time<resume.time),'Initial exact held owner releases before delayed ACK, without granting duplicate authority');
     await waitState(s=>s.network.capture_status.attached_targets===3,'Exactly three independent owners remain');
     assert(!capture(commands).some(c=>c.method==='Target.attachToTarget'&&c.params.targetId==='discovered-only'),'Owned first-seen catalog must not enter explicit admission');
     assert.equal(capture(commands).filter(c=>c.method==='Network.enable'&&c.sessionId===duplicate).length,0,'Duplicate never becomes a second capture owner');
@@ -365,10 +427,11 @@ if(process.argv[2]==='--browser') {
   }
   await fixture([info('a'),info('deadline','worker','a')],{delayTarget:'deadline',delays:{'Network.enable':2500,'Target.setAutoAttach':2500}},async({commands,waitState,until})=>{
     const held=await until(()=>commands().find(c=>c.event==='attached'&&c.target==='deadline'),'Watchdog attachment');
-    const release=await until(()=>resumed(commands,'deadline'),'Independent startup watchdog releases slow initialization',10000);
-    assert(release.time-held.time>=3500&&release.time-held.time<6500,'Startup hold must be independently bounded across consecutive initialization commands');
-    await waitState(s=>s.network.capture_status.hold_timeouts>=1,'Hold timeout visible');
-    console.log('PASS capture-first: cumulative initialization exceeds independent hold deadline; watchdog resumes and reports timeout');
+    const release=await until(()=>resumed(commands,'deadline'),'Ordered startup releases overlapping slow initialization',10000);
+    assert(release.time-held.time>=2400&&release.time-held.time<4500,'Ordered initialization overlaps ACK waits instead of accumulating startup delays');
+    const ready=await waitState(s=>s.network.capture_status.attached_target_ids.includes('deadline'),'Overlapping initialization becomes ready');
+    assert.equal(ready.network.capture_status.hold_timeouts??0,0,'Overlapping waits do not manufacture a watchdog timeout');
+    console.log('PASS capture-first: ordered initialization overlaps Network and recursive attach ACK waits within startup bound');
   });
   await fixture([info('a'),...Array.from({length:24},(_,i)=>info(`queued-${i}`,'other'))],{detachDelay:900},async({commands,until,waitState})=>{
     const last=await until(()=>commands().find(c=>c.event==='attached'&&c.target==='queued-23'),'Held cleanup burst reaches transport');
@@ -457,11 +520,16 @@ if(process.argv[2]==='--browser') {
         assert(controlCommands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Passive experiment-worker behavior must remain unchanged');
       } else {
         assert(!controlCommands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Independent worker controller must not bypass the owned capture startup hold');
-        assert(!resumed(commands,'experiment-worker'),'Competing debugger must initialize while capture Network.enable is still pending');
-        const resumedByCapture=await until(()=>resumed(commands,'experiment-worker'),'Capture owner resumes after its delayed Network setup');
+        // The registered capture owner may release after its ordered send; the independent controller still has no release authority.
+        const resumedByCapture=await until(()=>resumed(commands,'experiment-worker'),'Capture owner performs its authorized ordered startup release');
         assert.equal(resumedByCapture.pid,capturePid,'Only the capture owner releases the startup hold');
         const network=capture(commands).find(c=>c.pid===capturePid&&c.method==='Network.enable'&&c.sessionId?.endsWith(':experiment-worker'));
-        assert(resumedByCapture.time-network.time>=2400,'Startup resume must follow capture Network.enable acknowledgement');
+        const ordered=capture(commands).filter(c=>c.pid===capturePid&&c.sessionId===network.sessionId);
+        assert(ordered.findIndex(c=>c.method==='Target.setAutoAttach')>ordered.findIndex(c=>c.method==='Network.enable'),'Capture enable bytes precede recursive autoattach');
+        assert(ordered.findIndex(c=>c.method==='Runtime.runIfWaitingForDebugger')>ordered.findIndex(c=>c.method==='Target.setAutoAttach'),'Only capture releases after recursive attach');
+        await waitState(s=>s.network.capture_status.attached_target_ids.includes('experiment-worker'),'Capture readiness still awaits delayed Network ACK');
+        const ack=commands().find(c=>c.event==='delayed-reply'&&c.pid===capturePid&&c.method==='Network.enable'&&c.sessionId===network.sessionId);
+        assert(ack&&ack.time>=resumedByCapture.time,'Initial ordered release precedes Network ACK');
         assert(!controlCommands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Controller stays free of competing resumes after capture readiness');
       }
       console.log(`PASS ${passive?'passive':'capture-first'} experiment: worker-controller initialization ${passive?'retains its original resume':'cannot bypass capture-owned startup hold'}`);

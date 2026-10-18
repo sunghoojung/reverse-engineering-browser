@@ -1,6 +1,7 @@
 // CI export is an explicit allowlisted copy. Never upload the source report/log.
 import {readFile, stat, writeFile} from 'node:fs/promises';
 import {lifecycleErrorCodes} from './capture-completeness-lifecycle.mjs';
+import {startupTimelineKeys, startupTimelineLimitMs} from './capture-completeness-startup.mjs';
 import {pathToFileURL} from 'node:url';
 const count = (v) => {
   if (!Number.isSafeInteger(v) || v < 0 || v > 10000000) throw Error('invalid-count');
@@ -146,6 +147,19 @@ export function sanitizeCaptureReport(input) {
       };
     if (r.headers) result.headers = {verdict: choice(r.headers.verdict, ['unassessed'])};
     Object.assign(result, numbers(r, ['readinessTransitions', 'duplicateSessionsRejected']));
+    if (r.startupTimeline) {
+      result.startupTimeline = Object.fromEntries(
+        startupTimelineKeys.map((key) => {
+          const value = r.startupTimeline[key];
+          if (
+            value !== null &&
+            (!Number.isSafeInteger(value) || value < 0 || value > startupTimelineLimitMs)
+          )
+            throw Error('invalid-startup-timeline');
+          return [key, value];
+        }),
+      );
+    }
     if (r.lifecycle) result.lifecycle = sanitizeLifecycle(r.lifecycle);
     if (r.referenceErrors) result.referenceErrors = codes(r.referenceErrors);
     if (r.rebCoverage)

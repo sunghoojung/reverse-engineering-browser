@@ -13,6 +13,7 @@ import {
   captureRunVerdict,
   CaptureIdentityTracker,
 } from './capture-completeness-reference.mjs';
+import {createStartupTimeline, startCaptureObservers} from './capture-completeness-startup.mjs';
 import {createLifecycleObserver} from './capture-completeness-lifecycle.mjs';
 import {readBoundedNetlog, crosscheckNetlog} from './capture-completeness-netlog.mjs';
 import {stopBrowserTestProcess, waitForClose} from './browser-test-process.mjs';
@@ -44,6 +45,7 @@ async function cohort(mode) {
   const children = [];
   const identityTracker = new CaptureIdentityTracker();
   const lifecycle = createLifecycleObserver();
+  const startupTimeline = createStartupTimeline();
   let ref,
     browserProcess,
     snapshot,
@@ -71,6 +73,7 @@ async function cohort(mode) {
     for (const p of children) p.child.kill('SIGTERM');
   }, 60000);
   try {
+    startupTimeline.mark('browserLaunchMs');
     browserProcess = start(browser, [
       '--headless=new',
       '--disable-dev-shm-usage',
@@ -94,40 +97,6 @@ async function cohort(mode) {
         })
         .catch(() => {});
     }, 100);
-    const lines = await until(async () => {
-      if (browserProcess.child.exitCode !== null) throw Error('browser-exited');
-      return (await readFile(join(directory, 'profile/DevToolsActivePort'), 'utf8'))
-        .trim()
-        .split('\n');
-    }, 'browser-startup-unavailable');
-    const socket = new WebSocket(`ws://127.0.0.1:${lines[0]}${lines[1]}`);
-    await new Promise((resolveOpen, reject) => {
-      const timer = setTimeout(() => {
-        socket.close();
-        reject(Error('socket-open-timeout'));
-      }, 5000);
-      socket.addEventListener(
-        'open',
-        () => {
-          clearTimeout(timer);
-          resolveOpen();
-        },
-        {once: true},
-      );
-      socket.addEventListener(
-        'error',
-        () => {
-          clearTimeout(timer);
-          reject(Error('socket-open-failed'));
-        },
-        {once: true},
-      );
-    });
-    ref = new PassiveReference(socket);
-    version = await ref.command('Browser.getVersion');
-    if (version.product?.split('/').at(-1) !== process.env.REB_REFERENCE_BROWSER_VERSION)
-      errorCode = 'browser-version-pin-missing-or-mismatch';
-    await ref.start();
     let address;
     const state = async () => {
       const response = await fetch(new URL('/api/debugger', address), {
@@ -143,35 +112,83 @@ async function cohort(mode) {
       }
       const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       lifecycle.observe(value);
-      if (!identityTracker.observe(value)) ref.ledger.gap('reb-public-epoch-changed');
+      if (!identityTracker.observe(value)) {
+        // REB can report before the independent socket exists. Keep the failure
+        // sticky even when there is not yet a reference ledger to mark.
+        errorCode = errorCode ?? 'reb-public-epoch-changed';
+        ref?.ledger.gap('reb-public-epoch-changed');
+      }
       return value;
     };
-    if (!referenceOnly) {
-      start(binary, [
-        '--port',
-        '0',
-        '--endpoint-file',
-        join(directory, 'endpoint'),
-        '--devtools-active-port',
-        join(directory, 'profile/DevToolsActivePort'),
-        '--debugger-transport',
-        transport,
-        '--capture-network-content',
-      ]);
-      address = await until(
-        async () => (await readFile(join(directory, 'endpoint'), 'utf8')).trim(),
-        'backend-startup-unavailable',
-      );
-      await until(async () => {
-        snapshot = await state();
-        return identityTracker.baseline !== null;
-      }, 'backend-readiness-timeout');
-    }
+    await startCaptureObservers({
+      timeline: startupTimeline,
+      reference: async () => {
+        const lines = await until(async () => {
+          if (browserProcess.child.exitCode !== null) throw Error('browser-exited');
+          return (await readFile(join(directory, 'profile/DevToolsActivePort'), 'utf8'))
+            .trim()
+            .split('\n');
+        }, 'browser-startup-unavailable');
+        startupTimeline.mark('devtoolsDiscoveredMs');
+        const socket = new WebSocket(`ws://127.0.0.1:${lines[0]}${lines[1]}`);
+        await new Promise((resolveOpen, reject) => {
+          const timer = setTimeout(() => {
+            socket.close();
+            reject(Error('socket-open-timeout'));
+          }, 5000);
+          socket.addEventListener(
+            'open',
+            () => {
+              clearTimeout(timer);
+              resolveOpen();
+            },
+            {once: true},
+          );
+          socket.addEventListener(
+            'error',
+            () => {
+              clearTimeout(timer);
+              reject(Error('socket-open-failed'));
+            },
+            {once: true},
+          );
+        });
+        ref = new PassiveReference(socket);
+        version = await ref.command('Browser.getVersion');
+        if (version.product?.split('/').at(-1) !== process.env.REB_REFERENCE_BROWSER_VERSION)
+          errorCode = 'browser-version-pin-missing-or-mismatch';
+        await ref.start();
+      },
+      reb: referenceOnly
+        ? null
+        : async () => {
+            start(binary, [
+              '--port',
+              '0',
+              '--endpoint-file',
+              join(directory, 'endpoint'),
+              '--devtools-active-port',
+              join(directory, 'profile/DevToolsActivePort'),
+              '--debugger-transport',
+              transport,
+              '--capture-network-content',
+            ]);
+            address = await until(
+              async () => (await readFile(join(directory, 'endpoint'), 'utf8')).trim(),
+              'backend-startup-unavailable',
+            );
+            await until(async () => {
+              snapshot = await state();
+              return identityTracker.baseline !== null;
+            }, 'backend-readiness-timeout');
+          },
+    });
     if (mode === 'prearmed') {
       const {targetInfos} = await ref.command('Target.getTargets');
       const page = targetInfos.find((t) => t.type === 'page' && t.url === 'about:blank');
       const sid = ref.attachments.get(page?.targetId);
       if (!sid) throw Error('page-session-missing');
+      startupTimeline.mark('fixtureNavigationMs');
       await ref.command('Page.navigate', {url: fixture.entryUrl}, sid);
     }
     try {
@@ -303,6 +320,7 @@ async function cohort(mode) {
     operations,
     lifecycle: lifecycle.snapshot(),
     readinessTransitions: identityTracker.readinessTransitions,
+    startupTimeline: startupTimeline.snapshot(),
     duplicateSessionsRejected: ref?.duplicateSessions ?? 0,
     referenceErrors: reference.errors.filter((code) => /^[a-z-]{1,64}$/.test(code)).slice(0, 32),
     rebCoverage: Object.fromEntries(

@@ -29,7 +29,17 @@ repository handoff gates remain `make lint`, `make check`, `make e2e`,
 `make sanitize`, and `git diff --check`.
 
 The startup cohort navigates immediately at browser launch; its early events
-remain in the denominator. The prearmed cohort navigates only after both
+remain in the denominator. Immediately after browser launch, the independent
+reference startup and REB process launch are initiated together: neither waits
+for the other's discovery, socket, version check, initialization, or readiness.
+The report's `startupTimeline` contains monotonic millisecond offsets from cohort
+setup (0–120000), with null for milestones not reached. `referenceReadyMs` means
+its initialization promise settled successfully; ledger gaps still invalidate
+coverage. `rebReadyMs` means the existing capture identity/readiness check passed.
+`fixtureNavigationMs` is the explicit prearmed navigation only; startup navigation
+is requested by the browser launch arguments. These timings diagnose launch skew,
+not event completeness. No cache or service-worker bypass is introduced.
+The prearmed cohort navigates only after both
 collectors are ready. Worker, frame, and popup startup inside either page is
 never paused for attachment. The passive collector must not use
 `waitForDebuggerOnStart: true` to improve its score.

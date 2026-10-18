@@ -101,3 +101,24 @@ for (const mutate of [
   mutate(invalid);
   assert.throws(() => sanitizeCaptureReport(invalid));
 }
+
+const startupInput = structuredClone(input);
+startupInput.results[0].startupTimeline = {
+  browserLaunchMs: 0,
+  referenceStartMs: 1,
+  devtoolsDiscoveredMs: 20,
+  referenceReadyMs: 1500,
+  rebStartMs: 1,
+  rebReadyMs: 100,
+  fixtureNavigationMs: null,
+  secret: 'PRIVATE',
+};
+const safeStartup = sanitizeCaptureReport(startupInput);
+assert(!JSON.stringify(safeStartup).includes('PRIVATE'));
+assert.equal(safeStartup.results[0].startupTimeline.referenceReadyMs, 1500);
+assert.equal(safeStartup.results[0].startupTimeline.fixtureNavigationMs, null);
+for (const invalid of [-1, 120001, 1.5, 'PRIVATE', NaN, undefined]) {
+  const copy = structuredClone(startupInput);
+  copy.results[0].startupTimeline.rebStartMs = invalid;
+  assert.throws(() => sanitizeCaptureReport(copy), /invalid-startup-timeline/);
+}

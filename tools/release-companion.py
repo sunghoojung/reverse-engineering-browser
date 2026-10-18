@@ -33,6 +33,9 @@ CHECKS = [
     "Packaged application build and strict code-signature verification",
     "Packaged launcher, backend/CDP readiness, relocated UI and cleanup with stock Chrome",
     "Native close/Quit lifecycle suite",
+    "Production AppKit warning via XCUITest: default and clicked Offline, explicit fake-browser "
+    "launch, failure Retry, later-session warning and modal-reopen acceptance",
+    "Warning screenshots and independent fake-browser launch receipts",
 ]
 LIMITS = [
     "Companion-only release: no Brave browser is included or rebuilt.",
@@ -41,7 +44,8 @@ LIMITS = [
     "Stock Chrome CDP testing is not proof of native Brave probe or VM/runtime-buffer capture.",
     "The companion is ad-hoc signed, not Apple-notarized.",
     "Release validation uses macOS 15 arm64; macOS 13/14 compatibility is not established.",
-    "The default compatibility warning and offline escape are not claimed as native interaction QA.",
+    "Warning interaction QA uses an owned fake-browser executable only; "
+    "it does not establish native browser/companion compatibility or capture coverage.",
 ]
 
 

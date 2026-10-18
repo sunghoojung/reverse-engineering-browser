@@ -11,6 +11,8 @@ on:
     paths:
       - ".github/workflows/release-companion.yml"
       - "tools/release-companion*.py"
+      - "tools/check-companion-warning.mjs"
+      - "tools/companion-warning-ui/**"
       - "apps/research-ui/macos/Info.plist"
       - "apps/research-ui/macos/OriginTraceApp.swift"
       - "apps/origin-trace-backend/Cargo.toml"
@@ -71,6 +73,8 @@ jobs:
           test -x "$ORIGIN_TRACE_TEST_BROWSER"
           node tools/check-origin-trace-package.mjs
           node tools/check-origin-trace-native-close.mjs
+      - name: Exercise real compatibility warning decisions with an owned fixture
+        run: node tools/check-companion-warning.mjs
       - name: Preserve package and lifecycle diagnostics
         if: always()
         uses: actions/upload-artifact@v7
@@ -79,6 +83,7 @@ jobs:
           path: |
             build/package-qa
             build/native-close-qa
+            build/companion-warning-qa
           if-no-files-found: ignore
           retention-days: 14
       - name: Archive verified companion and record limitations

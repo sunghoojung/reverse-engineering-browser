@@ -13,10 +13,14 @@ archive for native compatibility evidence.
 3. The companion pull-request workflow on cloud macOS builds the app, verifies
    its signature, runs `check-origin-trace-package.mjs` with stock Chrome and
    `check-origin-trace-native-close.mjs`, and archives the tested candidate.
-   Inspect package/native-close diagnostics. Also verify the compatibility alert:
-   default Continue Offline launches no browser; explicit Start Unverified
-   Session permits launch; a later session warns again. Source-contract assertions
-   alone do not establish native dialog interaction acceptance.
+   It also runs `node tools/check-companion-warning.mjs`: actual XCUITest input
+   exercises the production compatibility alert, default/click Continue Offline,
+   explicit Start Unverified Session, failure Retry, later sessions and modal
+   reopen. An owned fake Development executable only records a launch and exits;
+   exact launch counts and named screenshots are checked outside the UI-test
+   sandbox. Inspect package/native-close/warning diagnostics. These tests require
+   cloud macOS execution; authoring or source-contract checks alone do not pass
+   native interaction acceptance. They establish no real-browser compatibility.
 4. Confirm the release scope and disclose that the historical Development browser
    is not a validated native pair. New native VM/runtime-buffer functionality
    requires a compatible separately built browser and independent acceptance.

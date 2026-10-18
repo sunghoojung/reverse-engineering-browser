@@ -110,6 +110,24 @@ class CompanionRelease(unittest.TestCase):
         self.assertIn("macOS 13/14 compatibility is not established", notes)
         self.assertEqual(manifest["checks"], HELPER.CHECKS)
 
+    def test_warning_acceptance_claims_cover_choices_and_keep_fake_browser_boundary(self):
+        HELPER.prepare(self.root)
+        manifest = json.loads((self.output / HELPER.PROVENANCE).read_text())
+        checks = "\n".join(manifest["checks"])
+        notes = (self.output / HELPER.NOTES).read_text()
+        for claim in ("Production AppKit warning via XCUITest", "default and clicked Offline",
+                      "explicit fake-browser launch", "failure Retry", "later-session warning",
+                      "modal-reopen acceptance", "independent fake-browser launch receipts"):
+            self.assertIn(claim, checks)
+            self.assertIn(claim, notes)
+        boundary = (
+            "Warning interaction QA uses an owned fake-browser executable only; "
+            "it does not establish native browser/companion compatibility or capture coverage."
+        )
+        self.assertIn(boundary, manifest["limits"])
+        self.assertIn(boundary, notes)
+        self.assertNotIn("not claimed as native interaction QA", notes)
+
     def test_pull_request_can_prepare_only_and_workflow_sha_is_not_source_sha(self):
         with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_SHA": "b" * 40}):
             HELPER.prepare(self.root)

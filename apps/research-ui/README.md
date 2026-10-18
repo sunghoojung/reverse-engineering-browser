@@ -50,6 +50,14 @@ public IDs is rejected and the last valid evidence stays visible. Raw protocol
 request IDs may repeat across targets or redirect hops when the public row IDs
 remain distinct.
 
+Changing the selected debugger target preserves a selected HTTP row and comparison
+baseline only when its immutable capture owner, exact row identity, and backend
+instance remain uniquely retained. Closing another target does not discard that
+history. Missing ownership, reused or ambiguous rows, a cleared window, backend
+restart, generation regression, or same-target reconnection expires the selection.
+This is a local viewer continuity check: old catalog links and pending details
+keep their original epoch guards; WebSocket and action ownership are unchanged.
+
 ## Connected investigations
 
 **Advanced** is a manually opened workspace chooser. Completed workspace

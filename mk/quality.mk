@@ -103,6 +103,7 @@ javascript-check:
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-traffic-capture.mjs
+	node tools/check-traffic-retained-focus.mjs
 	node tools/check-traffic-capture-qa.mjs
 	node tools/check-public-demo-passive-smoke.mjs
 	node tools/check-websocket-inspection.mjs

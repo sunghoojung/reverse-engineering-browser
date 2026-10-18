@@ -1,27 +1,35 @@
 name: Optional public demo passive smoke
 on:
+  push:
+    branches: [qa/public-matrix-20261018]
   workflow_dispatch:
     inputs:
       authorization:
-        description: 'Type passive-one-visit-per-demo to authorize bounded requests/fingerprinting observation of the two documented demos'
+        description: 'Type passive-one-visit-per-demo to authorize bounded requests/fingerprinting observation of the five documented demos'
         required: true
         type: string
 permissions:
   contents: read
 jobs:
   passive-smoke:
-    if: inputs.authorization == 'passive-one-visit-per-demo'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.authorization == 'passive-one-visit-per-demo') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/qa/public-matrix-20261018' && github.event.created == true && github.run_attempt == 1)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Verify offline privacy and opt-in contract
         run: node tools/check-public-demo-passive-smoke.mjs
       - name: Build real backend and debugger transport
-        run: make origin-trace-backend debugger-transport
+        run: make -j1 origin-trace-backend debugger-transport
       - name: Observe concurrent demo tabs with one navigation each
         env:
           REB_PUBLIC_DEMO_OPT_IN: passive-one-visit-per-demo

@@ -19,7 +19,7 @@ storage contracts.
    | --- | --- |
    | Any implementation handoff or validation failure | `reb-validation` |
    | Origin Trace UI, native app, packaging, assets, keyboard use, or visual behavior | `reb-ui-e2e` |
-   | Brave bootstrap, pins, overlays, patches, or browser compilation | `reb-brave-verify` |
+   | Brave maintenance, upstream refresh, bootstrap, pins, overlays, patches, or browser compilation | `reb-brave-verify` |
 
 4. For bug fixes, reproduce the problem through the closest user-facing path
    before editing. Record the state, action, and visible or observable failure.
@@ -213,6 +213,12 @@ synchronization:
 5. Run `make brave-probe-check` when the initialized toolchain is available.
 6. Run `gn format --dry-run` for changed GN files and compile the affected
    target when full Xcode and Chromium tooling are installed.
+
+For upstream refreshes and patch regeneration, use `reb-brave-verify` and its
+maintenance reference. Keep the three pins coherent and prove ordered replay
+on a disposable Brave-initialized baseline before reusing a working checkout.
+For a complete build candidate, use the guarded
+[`integrated build path`](docs/development/integrated-brave-build.md).
 
 For faster repeated local Brave builds, follow
 [`docs/development/fast-browser-builds.md`](docs/development/fast-browser-builds.md).

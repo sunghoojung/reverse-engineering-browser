@@ -148,8 +148,11 @@ The isolated CI gate builds the pinned prior backend and requires the new
 confirmed-disappearing-session regression to fail with its specific assertion,
 then builds the candidate and runs the entire session lifecycle suite. Build or
 launch failures do not satisfy the negative control. Both builds are serial and
-share Cargo dependency artifacts. Only the allowlisted controlled-comparison
-summary is uploaded, never the synthetic logs or raw browser evidence.
+use separate Cargo target directories, with explicit backend paths and logged
+source commits/binary hashes. Shared target directories can retain a prior
+package fingerprint and invalidate the old/new comparison. Only the allowlisted
+controlled-comparison summary is uploaded, never the synthetic logs or raw
+browser evidence.
 
 Reference main-resource handoffs retain the original request owner and record
 actual terminal-session provenance locally. A unique current-connection iframe

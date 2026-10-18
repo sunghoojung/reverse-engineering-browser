@@ -43,9 +43,14 @@ jobs:
           baseline=5559e91eb0231846a65174c7ecc7b54d9a126ed6
           mkdir "$RUNNER_TEMP/capture-baseline"
           git archive "$baseline" | tar -x -C "$RUNNER_TEMP/capture-baseline"
-          cargo build --locked --manifest-path "$RUNNER_TEMP/capture-baseline/apps/origin-trace-backend/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/apps/origin-trace-backend/target"
+          cargo build --locked --manifest-path "$RUNNER_TEMP/capture-baseline/apps/origin-trace-backend/Cargo.toml" --target-dir "$RUNNER_TEMP/capture-baseline-target"
+          baseline_binary="$RUNNER_TEMP/capture-baseline-target/debug/origin-trace-backend"
+          test -x "$baseline_binary"
+          baseline_sha="$(sha256sum "$baseline_binary" | cut -d ' ' -f1)"
+          printf 'BASELINE_BACKEND_SHA256=%s\n' "$baseline_sha" >> "$GITHUB_ENV"
+          printf 'Baseline source: %s; binary SHA256: %s\n' "$baseline" "$baseline_sha"
           set +e
-          REB_CLEANUP_REGRESSION_ONLY=1 node tools/check-traffic-browser-sessions.mjs . > "$RUNNER_TEMP/cleanup-baseline.log" 2>&1
+          ORIGIN_TRACE_BACKEND="$baseline_binary" REB_CLEANUP_REGRESSION_ONLY=1 node tools/check-traffic-browser-sessions.mjs . > "$RUNNER_TEMP/cleanup-baseline.log" 2>&1
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
@@ -55,7 +60,18 @@ jobs:
           grep -F 'Confirmed redundant detach must not close whole transport' "$RUNNER_TEMP/cleanup-baseline.log"
           echo "Verified disappearing-session negative control on $baseline"
       - name: Build actual backend and transport serially
-        run: make -j1 origin-trace-backend debugger-transport
+        shell: bash
+        run: |
+          # Baseline never writes this target directory. Sharing it can reuse the
+          # baseline package fingerprint when checkout files have older mtimes.
+          make -j1 origin-trace-backend debugger-transport
+          candidate_binary="$GITHUB_WORKSPACE/apps/origin-trace-backend/target/debug/origin-trace-backend"
+          test -x "$candidate_binary"
+          candidate_sha="$(sha256sum "$candidate_binary" | cut -d ' ' -f1)"
+          test "$candidate_sha" != "$BASELINE_BACKEND_SHA256"
+          git diff --exit-code HEAD -- apps/origin-trace-backend
+          printf 'ORIGIN_TRACE_BACKEND=%s\n' "$candidate_binary" >> "$GITHUB_ENV"
+          printf 'Candidate source: %s; binary SHA256: %s\n' "$(git rev-parse HEAD)" "$candidate_sha"
       - name: Verify candidate cleanup races and fail-closed controls
         run: node tools/check-traffic-browser-sessions.mjs .
       - name: Run independent offline contract regressions

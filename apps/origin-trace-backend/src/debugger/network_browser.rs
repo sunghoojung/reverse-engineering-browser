@@ -593,7 +593,10 @@ impl Debugger {
             .connection
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if !current.as_ref().is_some_and(|active| Arc::ptr_eq(active, c)) {
+        if !current
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, c))
+        {
             return false;
         }
         let (field, first_failure) = match outcome {
@@ -712,7 +715,9 @@ impl Debugger {
                     .connection
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                current.as_ref().is_some_and(|active| Arc::ptr_eq(active, c))
+                current
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, c))
                     && !self
                         .capture
                         .browser

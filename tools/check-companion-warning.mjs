@@ -17,6 +17,13 @@ const browser=join(temporary,'Brave Browser Development.app');
 const executable=join(browser,'Contents/MacOS/WarningFixture');
 const result=join(report,'warning-ui.xcresult');
 let log='',timer,exportError;
+function failureSummary(output) {
+  // Synthetic UI fixtures only. Keep CI exceptions small enough that Node does
+  // not truncate the actual assertion behind compiler invocations.
+  const failures=output.split('\n').filter(line=>/error:|failed|Failing tests:|Test Case|Executed |TEST FAILED|timed out/i.test(line));
+  return (failures.length?failures.slice(-30).map(line=>line.slice(0,1000)).join('\n'):output.slice(-6000)).slice(-12000);
+}
+
 try {
   await cp(join(root,'build/Origin Trace.app'),app,{recursive:true});
   execFileSync('codesign',['--verify','--deep','--strict',app],{stdio:'pipe'});
@@ -44,9 +51,9 @@ try {
   for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{log=(log+chunk).slice(-512*1024);});
   try {
     await new Promise((done,reject)=>{
-      timer=setTimeout(()=>{try{process.kill(-child.pid,'SIGKILL');}catch(error){if(error.code!=='ESRCH')log+='\n'+error;}reject(new Error('Cloud warning UI test timed out\n'+log));},600000);
+      timer=setTimeout(()=>{try{process.kill(-child.pid,'SIGKILL');}catch(error){if(error.code!=='ESRCH')log+='\n'+error;}reject(new Error('Cloud warning UI test timed out\n'+failureSummary(log)));},600000);
       child.once('error',reject);
-      child.once('close',(code,signal)=>code===0?done():reject(new Error(`Cloud warning UI test exited ${code}/${signal}\n${log}`)));
+      child.once('close',(code,signal)=>code===0?done():reject(new Error(`Cloud warning UI test exited ${code}/${signal}\n${failureSummary(log)}`)));
     });
   } finally {
     clearTimeout(timer);

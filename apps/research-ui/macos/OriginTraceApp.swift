@@ -2948,8 +2948,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       compatibility.messageText = "This browser pairing has not been verified"
       compatibility.informativeText =
         "Origin Trace 0.3.2 is a companion-only release. Brave supplied with 0.3.0 or 0.3.1 lacks newer native runtime-buffer and VM capture features. CDP Traffic may work, but native capture completeness is not established. Continue only if you accept these limits."
-      compatibility.addButton(withTitle: "Continue Offline")
+      let offlineButton = compatibility.addButton(withTitle: "Continue Offline")
       compatibility.addButton(withTitle: "Start Unverified Session")
+      // Keep Return explicitly bound to the safe choice on every macOS alert style.
+      offlineButton.keyEquivalent = "\r"
+      compatibility.window.defaultButtonCell = offlineButton.cell as? NSButtonCell
       presentOriginTraceWindow()
       guard compatibility.runModal() == .alertSecondButtonReturn else {
         automaticSessionSuppressed = true

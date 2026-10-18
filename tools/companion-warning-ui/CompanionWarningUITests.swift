@@ -24,7 +24,7 @@ final class CompanionWarningUITests: XCTestCase {
     openNewLiveSession(app)
     assertCompatibilityWarning(app)
     attachScreenshot(app, name: "keyboard-offline-later-session-warning")
-    app.buttons["Continue Offline"].click()
+    app.dialogs.containing(.staticText, identifier: warningTitle).element.buttons["Continue Offline"].click()
     assertOffline(app)
     attachScreenshot(app, name: "keyboard-offline-later-session-offline")
   }
@@ -36,7 +36,7 @@ final class CompanionWarningUITests: XCTestCase {
 
     assertCompatibilityWarning(app)
     attachScreenshot(app, name: "button-offline-initial-warning")
-    app.buttons["Continue Offline"].click()
+    app.dialogs.containing(.staticText, identifier: warningTitle).element.buttons["Continue Offline"].click()
     assertOffline(app, observationTimeout: 65)
     attachScreenshot(app, name: "button-offline-after-click")
   }
@@ -48,7 +48,7 @@ final class CompanionWarningUITests: XCTestCase {
 
     assertCompatibilityWarning(app)
     attachScreenshot(app, name: "retry-initial-warning")
-    app.buttons["Start Unverified Session"].click()
+    app.dialogs.containing(.staticText, identifier: warningTitle).element.buttons["Start Unverified Session"].click()
     let failure = app.staticTexts[failureTitle]
     XCTAssertTrue(failure.waitForExistence(timeout: 90),
                   "The inert browser must reach the real startup failure alert: " + app.debugDescription)
@@ -58,15 +58,19 @@ final class CompanionWarningUITests: XCTestCase {
       "Brave stopped before its debugger endpoint became ready")).firstMatch
     XCTAssertTrue(stoppedBrowser.exists,
                   "Failure must come from the owned browser exiting, not a missing helper: " + app.debugDescription)
-    XCTAssertTrue(app.buttons["Retry"].isEnabled)
-    XCTAssertTrue(app.buttons["Continue Offline"].isEnabled)
+    // NSAlert also exposes a Touch Bar Retry button; target only the real dialog.
+    let failureDialog = app.dialogs.containing(.staticText, identifier: failureTitle).element
+    XCTAssertTrue(failureDialog.exists)
+    XCTAssertEqual(failureDialog.buttons.matching(identifier: "Retry").count, 1)
+    XCTAssertTrue(failureDialog.buttons["Retry"].isEnabled)
+    XCTAssertTrue(failureDialog.buttons["Continue Offline"].isEnabled)
     attachScreenshot(app, name: "retry-real-startup-failure")
 
-    app.buttons["Retry"].click()
+    failureDialog.buttons["Retry"].click()
     assertCompatibilityWarning(app)
     XCTAssertFalse(failure.exists, "The failure alert must end before its fresh compatibility decision")
     attachScreenshot(app, name: "retry-fresh-warning")
-    app.buttons["Continue Offline"].click()
+    app.dialogs.containing(.staticText, identifier: warningTitle).element.buttons["Continue Offline"].click()
     assertOffline(app)
     attachScreenshot(app, name: "retry-after-offline")
     // Only the first explicit opt-in may reach the fake executable. The outer
@@ -89,7 +93,7 @@ final class CompanionWarningUITests: XCTestCase {
                    "Reopen must not nest a second compatibility alert")
     attachScreenshot(app, name: "modal-reopen-single-warning")
 
-    app.buttons["Continue Offline"].click()
+    app.dialogs.containing(.staticText, identifier: warningTitle).element.buttons["Continue Offline"].click()
     assertOffline(app)
     // An explicit offline decision also suppresses automatic live startup on
     // a later OS reopen. Activating the app alone would not test that callback.
@@ -152,12 +156,14 @@ final class CompanionWarningUITests: XCTestCase {
                    "native capture completeness is not established"] {
       XCTAssertTrue(detail.contains(phrase), "Missing warning detail: " + phrase)
     }
-    XCTAssertEqual(app.buttons.matching(identifier: "Continue Offline").count, 1)
-    XCTAssertEqual(app.buttons.matching(identifier: "Start Unverified Session").count, 1)
-    XCTAssertTrue(app.buttons["Continue Offline"].isEnabled)
-    XCTAssertTrue(app.buttons["Start Unverified Session"].isEnabled)
-    XCTAssertTrue(app.buttons["Continue Offline"].isHittable)
-    XCTAssertTrue(app.buttons["Start Unverified Session"].isHittable)
+    let dialog = app.dialogs.containing(.staticText, identifier: warningTitle).element
+    XCTAssertTrue(dialog.exists)
+    XCTAssertEqual(dialog.buttons.matching(identifier: "Continue Offline").count, 1)
+    XCTAssertEqual(dialog.buttons.matching(identifier: "Start Unverified Session").count, 1)
+    XCTAssertTrue(dialog.buttons["Continue Offline"].isEnabled)
+    XCTAssertTrue(dialog.buttons["Start Unverified Session"].isEnabled)
+    XCTAssertTrue(dialog.buttons["Continue Offline"].isHittable)
+    XCTAssertTrue(dialog.buttons["Start Unverified Session"].isHittable)
   }
 
   @MainActor
@@ -193,7 +199,7 @@ final class CompanionWarningUITests: XCTestCase {
     XCTAssertTrue(newSession.waitForExistence(timeout: 5))
     newSession.click()
     XCTAssertTrue(app.staticTexts[setupTitle].waitForExistence(timeout: 10))
-    let start = app.buttons["Start Session"]
+    let start = app.dialogs.containing(.staticText, identifier: setupTitle).element.buttons["Start Session"]
     XCTAssertTrue(start.isEnabled && start.isHittable)
     attachScreenshot(app, name: "keyboard-offline-new-session-setup")
     start.click()

@@ -215,3 +215,12 @@ history. Unknown values are ignored by the observer and rejected by the report
 sanitizer; raw diagnostics, URLs, and identifiers are never exported. This separates
 transport startup failures from discovery-command failures without changing the
 30-second failure backoff or attributing an aggregate fallback to a specific cause.
+
+Focused producer ExtraInfo controls run with `REB_EXTRA_STATUS_ONLY=1` in
+`tools/check-traffic-browser-sessions.mjs`. Synthetic events cover before/after
+request order, responseReceived precedence, cached effective 200 versus wire 304,
+304-only evidence, duplicate and malformed observations, redirect/raw-ID reuse,
+separate owners and replacement sessions, and dropped-history refusal. Assertions
+check both effective status provenance and separate wire status. The fixture
+processing barrier uses a separate completed request; it does not infer processing
+from an arbitrary sleep. These controls do not establish real-browser completeness.

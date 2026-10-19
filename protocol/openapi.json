@@ -22398,6 +22398,25 @@
             "minLength": 1,
             "maxLength": 20,
             "description": "Opaque immutable HTTP connection-owner token; never substitute it for capture_epoch."
+          },
+          "status_source": {
+            "description": "Provenance of effective status. Optional for older producers; current producers initialize every row to unavailable.",
+            "type": "string",
+            "enum": [
+              "unavailable",
+              "response-received",
+              "redirect-response",
+              "response-received-extra-info"
+            ]
+          },
+          "wire_status": {
+            "description": "Uniquely attributable ExtraInfo wire status, distinct from effective cached response status; null on missing or ambiguous evidence.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 100,
+            "maximum": 599
           }
         },
         "x-schema-completeness": "partial",
@@ -24852,6 +24871,10 @@
                 }
               }
             ]
+          },
+          "status_extra_info_overflow": {
+            "type": "boolean",
+            "description": "Sticky saturation of the bounded 2048-entry ExtraInfo identity history; disables ExtraInfo attribution without discarding HTTP rows or authoritative response status."
           }
         },
         "description": "Bounded HTTP capture coverage. Passive browser sessions cover supported page, worker and out-of-process iframe targets; page polling is a compatibility fallback. Ready never promises first-navigation or pre-attachment completeness. WebSocket v1 remains selected-target scoped."

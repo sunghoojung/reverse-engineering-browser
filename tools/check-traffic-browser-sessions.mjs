@@ -118,9 +118,10 @@ if(process.argv[2]==='--transport') {
   const root=resolve(process.argv[2]??'.'),binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:`http://localhost/${id}`,...(parent?{parent}:{})});
   async function fixture(initial,options,run) {
+    if(process.env.REB_EXTRA_STATUS_ONLY==='1'&&!options.extraStatus)return;
     if(process.env.REB_ENDPOINT_ONLY==='1'&&!options.endpointCase)return;
     if(process.env.REB_TERMINAL_HANDOFF_ONLY==='1'&&!options.terminalHandoff)return;
-    if(process.env.REB_CLEANUP_REGRESSION_ONLY==='1'&&(options.terminalHandoff||options.endpointCase))return;
+    if(process.env.REB_CLEANUP_REGRESSION_ONLY==='1'&&(options.terminalHandoff||options.endpointCase||options.extraStatus))return;
     const directory=await mkdtemp(join(tmpdir(),'reb-browser-sessions-'));let backend,exited,address,diagnostics='';let targets=initial;
     await writeFile(join(directory,'options'),JSON.stringify(options));
     const save=()=>writeFileSync(join(directory,'targets'),JSON.stringify(targets));save();await writeFile(join(directory,'events'),'');await writeFile(join(directory,'commands'),'');
@@ -184,6 +185,88 @@ if(process.argv[2]==='--transport') {
     await delay(1200);
     assert.deepEqual((await state()).network.capture_status.browser_setup_failure,expected,'Structured setup diagnostic survives fallback refresh');
     console.log(`PASS browser setup diagnostic: ${setupFailure}`);
+  });
+  await fixture([info('a'),info('b')],{extraStatus:true},async({send,until,commands})=>{
+    await until(s=>s.network.capture_status.attached_targets===2,'ExtraInfo owners ready');
+    const extra=(target,id,statusCode)=>send({target,method:'Network.responseReceivedExtraInfo',params:{requestId:id,statusCode,headers:{}}});
+    const response=(target,id,status,fromDiskCache=false)=>send({target,method:'Network.responseReceived',params:{requestId:id,response:{status,fromDiskCache,headers:{}}}});
+    let serial=0;
+    const barrier=async()=>{const id=`extra-barrier-${++serial}`;request(send,'b',id);finish(send,'b',id);return until(s=>s.network.requests.some(r=>r.protocol_request_id===id&&r.response.body.state==='available'),'ExtraInfo processing barrier');};
+    const rows=(s,id,target='a')=>s.network.requests.filter(r=>r.target_id===target&&r.protocol_request_id===id);
+    const check=(s,id,status,status_source,wire_status,target='a')=>{const r=rows(s,id,target).at(-1);assert.ok(r,`${id}: retained row`);assert.deepEqual({status:r.status,status_source:r.status_source,wire_status:r.wire_status},{status,status_source,wire_status},id);};
+    request(send,'a','fresh');check(await barrier(),'fresh',null,'unavailable',null);
+    extra('a','before',201);request(send,'a','before');check(await barrier(),'before',201,'response-received-extra-info',201);
+    request(send,'a','after');extra('a','after',202);check(await barrier(),'after',202,'response-received-extra-info',202);
+    response('a','after',200);check(await barrier(),'after',200,'response-received',202);
+    request(send,'a','cached');response('a','cached',200,true);extra('a','cached',304);check(await barrier(),'cached',200,'response-received',304);
+    request(send,'a','only304');extra('a','only304',304);check(await barrier(),'only304',null,'unavailable',304);
+    request(send,'a','duplicate');extra('a','duplicate',203);check(await barrier(),'duplicate',203,'response-received-extra-info',203);
+    extra('a','duplicate',203);check(await barrier(),'duplicate',null,'unavailable',null);
+    for(const [label,value] of [['zero',0],['low',99],['high',600],['fraction',200.5],['string','200'],['missing',undefined],['null',null]]){
+      const id=`invalid-${label}`;request(send,'a',id);extra('a',id,200);extra('a',id,value);check(await barrier(),id,null,'unavailable',null);
+    }
+    for(const [label,value] of [['null',null],['string','200'],['missing',undefined]])for(const order of ['before','after']){
+      const id=`malformed-response-${label}-${order}`;request(send,'a',id);
+      if(order==='before')extra('a',id,200);
+      response('a',id,value);
+      if(order==='after')extra('a',id,200);
+      check(await barrier(),id,null,'response-received',200);
+    }
+    for(const order of ['before','after']){
+      const id=`nonobject-response-${order}`;request(send,'a',id);
+      if(order==='before')extra('a',id,200);
+      send({target:'a',method:'Network.responseReceived',params:{requestId:id,response:null}});
+      if(order==='after')extra('a',id,200);
+      check(await barrier(),id,null,'unavailable',200);
+    }
+    response('a','response-before-start',200);request(send,'a','response-before-start');extra('a','response-before-start',200);check(await barrier(),'response-before-start',null,'unavailable',200);
+    extra('a','bad-before','200');extra('a','bad-before',200);request(send,'a','bad-before');check(await barrier(),'bad-before',null,'unavailable',null);
+    extra('b','cross-owner',204);request(send,'a','cross-owner');check(await barrier(),'cross-owner',null,'unavailable',null);
+    request(send,'b','cross-owner');check(await barrier(),'cross-owner',204,'response-received-extra-info',204,'b');
+    request(send,'a','reuse');extra('a','reuse',205);await barrier();request(send,'a','reuse','reused');
+    let s=await barrier();for(const r of rows(s,'reuse'))assert.deepEqual([r.status,r.status_source,r.wire_status],[null,'unavailable',null],'Raw ID reuse invalidates fallback on every retained hop');
+    request(send,'a','redirect');extra('a','redirect',200);await barrier();
+    send({target:'a',method:'Network.requestWillBeSent',params:{requestId:'redirect',timestamp:2,wallTime:2,type:'Fetch',request:{url:'http://localhost/redirected',method:'GET',headers:{}},redirectResponse:{status:302,headers:{}}}});
+    s=await barrier();const redirected=rows(s,'redirect');assert.equal(redirected.length,2);assert.deepEqual([redirected[0].status,redirected[0].status_source,redirected[0].wire_status],[302,'redirect-response',null]);check(s,'redirect',null,'unavailable',null);
+    request(send,'a','duplicate-response');response('a','duplicate-response',200);extra('a','duplicate-response',200);response('a','duplicate-response',200);check(await barrier(),'duplicate-response',200,'response-received',null);
+    send({target:'a',method:'Network.requestWillBeSent',params:{requestId:'explicit-null-redirect',timestamp:1,wallTime:1,type:'Fetch',request:{url:'http://localhost/null-redirect',method:'GET',headers:{}},redirectResponse:null}});
+    extra('a','explicit-null-redirect',200);check(await barrier(),'explicit-null-redirect',null,'unavailable',null);
+    request(send,'a','authoritative');response('a','authoritative',206);extra('a','authoritative',206);extra('a','authoritative',206);check(await barrier(),'authoritative',206,'response-received',null);
+    // A newly attached same-target session cannot consume the old owner's buffer.
+    extra('a','replacement',207);await barrier();const old=commands().filter(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':a')).length;send({detach:'a'});
+    await until(s=>s.network.capture_status.attached_targets===2&&commands().filter(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':a')).length>old,'Replacement owner ready');
+    request(send,'a','replacement');check(await barrier(),'replacement',null,'unavailable',null);
+    extra('a','connection-replacement',208);await barrier();const opens=commands().filter(c=>c.event==='open'&&c.browser).length;send({disconnect:true});
+    await until(s=>s.network.capture_status.attached_targets===2&&commands().filter(c=>c.event==='open'&&c.browser).length>opens,'New connection owns distinct ExtraInfo namespace',45000);
+    request(send,'a','connection-replacement');check(await barrier(),'connection-replacement',null,'unavailable',null);
+    console.log('PASS ExtraInfo status provenance, order, cache, ambiguity, owner isolation and replacement');
+  });
+  await fixture([info('a')],{extraStatus:true},async({send,until})=>{
+    await until(s=>s.network.capture_status.attached_targets===1,'ExtraInfo eviction owner ready');
+    for(let i=0;i<999;i++)request(send,'a',`extra-eviction-${i}`);
+    request(send,'a','retained-before-eviction');send({target:'a',method:'Network.responseReceivedExtraInfo',params:{requestId:'retained-before-eviction',statusCode:201,headers:{}}});
+    await until(s=>s.network.requests.some(r=>r.protocol_request_id==='retained-before-eviction'&&r.status===201),'Valid fallback exists before history loss');
+    request(send,'a','overflow-trigger');
+    const overflow=await until(s=>s.network.dropped>0,'Evicted history is explicit');
+    const prior=overflow.network.requests.find(r=>r.protocol_request_id==='retained-before-eviction');assert.ok(prior);assert.deepEqual([prior.status,prior.status_source,prior.wire_status],[null,'unavailable',null],'Unrelated history loss retracts retained fallback immediately');
+    request(send,'a','post-eviction');send({target:'a',method:'Network.responseReceivedExtraInfo',params:{requestId:'post-eviction',statusCode:200,headers:{}}});
+    request(send,'a','eviction-barrier');finish(send,'a','eviction-barrier');
+    const s=await until(s=>s.network.requests.some(r=>r.protocol_request_id==='eviction-barrier'&&r.response.body.state==='available'),'Eviction event processing barrier');
+    const r=s.network.requests.find(r=>r.protocol_request_id==='post-eviction');assert.deepEqual([r.status,r.status_source,r.wire_status],[null,'unavailable',null],'Lost history refuses ExtraInfo attribution');
+    console.log('PASS ExtraInfo refuses dropped history');
+  });
+  await fixture([info('a')],{extraStatus:true},async({send,until})=>{
+    await until(s=>s.network.capture_status.attached_targets===1,'ExtraInfo capacity owner ready');
+    request(send,'a','before-capacity');send({target:'a',method:'Network.responseReceivedExtraInfo',params:{requestId:'before-capacity',statusCode:201,headers:{}}});
+    await until(s=>s.network.requests.some(r=>r.protocol_request_id==='before-capacity'&&r.status===201),'Fallback established before tombstone saturation');
+    for(let i=0;i<2048;i++)send({target:'a',method:'Network.responseReceivedExtraInfo',params:{requestId:`extra-capacity-${i}`,statusCode:200,headers:{}}});
+    const saturated=await until(s=>s.network.capture_status.status_extra_info_overflow===true,'ExtraInfo identity capacity is visible');
+    assert.equal(saturated.network.dropped,0,'Identity cap is separate from HTTP row eviction');
+    const prior=saturated.network.requests.find(r=>r.protocol_request_id==='before-capacity');assert.deepEqual([prior.status,prior.status_source,prior.wire_status],[null,'unavailable',null]);
+    request(send,'a','after-capacity');finish(send,'a','after-capacity');
+    const s=await until(s=>s.network.requests.some(r=>r.protocol_request_id==='after-capacity'&&r.response.body.state==='available'),'Authoritative capture continues after identity cap');
+    const r=s.network.requests.find(r=>r.protocol_request_id==='after-capacity');assert.deepEqual([r.status,r.status_source,r.wire_status],[200,'response-received',null]);assert.equal(s.network.capture_status.status_extra_info_overflow,true);
+    console.log('PASS ExtraInfo identity capacity visible and authoritative capture unaffected');
   });
   const handoffCases=[
     ['iframe','Document','iframe',true],['worker','Script','worker',true],['shared-worker','Script','shared_worker',true],

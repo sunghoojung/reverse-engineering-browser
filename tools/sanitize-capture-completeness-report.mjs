@@ -201,6 +201,8 @@ export function sanitizeCaptureReport(input) {
             'url',
             'method',
             'status',
+            'statusSource',
+            'wireStatus',
             'state',
             'resourceType',
             'fromDiskCache',

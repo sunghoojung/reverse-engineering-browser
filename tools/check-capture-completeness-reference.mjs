@@ -723,3 +723,301 @@ assert.equal(compareCapture(reference, maxRows).statusValueBuckets, undefined);
 console.log(
   'PASS exclusive bounded status buckets, zero-valid predicate, null/state distinction and operation scope',
 );
+
+function extraInfoFixture(limits) {
+  const ledger = new ReferenceLedger(limits);
+  ledger.session('owner', 'target', {type: 'page'});
+  const emit = (method, params = {}, sessionId = 'owner') =>
+    ledger.ingest({
+      sessionId,
+      method: `Network.${method}`,
+      params: {requestId: 'worker-id', ...params},
+    });
+  const start = (params = {}, sessionId) =>
+    emit(
+      'requestWillBeSent',
+      {
+        loaderId: '',
+        type: 'Script',
+        timestamp: 1,
+        request: {url: 'http://localhost/worker.js', method: 'GET'},
+        ...params,
+      },
+      sessionId,
+    );
+  const extra = (statusCode = 200, sessionId) =>
+    emit('responseReceivedExtraInfo', {statusCode}, sessionId);
+  const finish = (sessionId) => emit('loadingFinished', {timestamp: 2}, sessionId);
+  return {ledger, emit, start, extra, finish};
+}
+function extraInfoComparison(ledger) {
+  ledger.finalize();
+  const reference = ledger.snapshot(),
+    n = {
+      ...network,
+      requests: reference.hops.map((h, i) => ({
+        ...rows[0],
+        id: String(i),
+        target_id: h.targetId,
+        protocol_request_id: h.requestId,
+        timing_evidence: {request_monotonic_seconds: {state: 'available', value: h.timestamp}},
+        url: h.url,
+        method: h.method,
+        state: h.state,
+        status: h.status,
+        status_source: h.status_source,
+        wire_status: h.wire_status,
+        resource_type: h.resourceType,
+        from_disk_cache: h.fromDiskCache,
+        from_service_worker: h.fromServiceWorker,
+      })),
+    };
+  return {reference, network: n, result: compareCapture(reference, n)};
+}
+for (const order of [
+  ['extra', 'start', 'finish'],
+  ['start', 'extra', 'finish'],
+  ['start', 'finish', 'extra'],
+]) {
+  const fixture = extraInfoFixture();
+  for (const step of order) fixture[step]();
+  assert.equal(
+    fixture.ledger.hops[0].status,
+    null,
+    'no speculative attribution before finalization',
+  );
+  const {result} = extraInfoComparison(fixture.ledger),
+    hop = fixture.ledger.hops[0];
+  assert.equal(result.verdict, 'pass');
+  assert.equal(hop.status, 200);
+  assert.equal(hop.status_source, 'response-received-extra-info');
+  assert.equal(hop.wire_status, 200);
+  assert.equal(fixture.ledger.hops.length, 1);
+  const frozen = structuredClone(fixture.ledger.snapshot()),
+    events = fixture.ledger.events;
+  fixture.extra();
+  fixture.ledger.finalize();
+  assert.equal(fixture.ledger.events, events);
+  assert.deepEqual(
+    fixture.ledger.snapshot(),
+    frozen,
+    'closed observation window remains immutable',
+  );
+}
+for (const extraFirst of [false, true]) {
+  const f = extraInfoFixture();
+  f.start();
+  if (extraFirst) f.extra(304);
+  f.emit('responseReceived', {response: {status: 200, fromDiskCache: true}});
+  f.finish();
+  if (!extraFirst) f.extra(304);
+  assert.equal(extraInfoComparison(f.ledger).result.verdict, 'pass');
+  assert.equal(f.ledger.hops[0].status, 200);
+  assert.equal(f.ledger.hops[0].wire_status, 304);
+  assert.equal(f.ledger.hops[0].status_source, 'response-received');
+  assert.equal(f.ledger.hops[0].fromDiskCache, true);
+}
+const wireOnly = extraInfoFixture();
+wireOnly.start();
+wireOnly.extra(304);
+wireOnly.finish();
+assert.equal(extraInfoComparison(wireOnly.ledger).result.verdict, 'incomplete');
+assert.equal(wireOnly.ledger.hops[0].status, null);
+assert.equal(wireOnly.ledger.hops[0].wire_status, 304);
+assert.equal(wireOnly.ledger.hops[0].status_source, 'unavailable');
+for (const statusCode of [undefined, null, 0, 99, 600, 200.5, NaN, Infinity, '200']) {
+  const f = extraInfoFixture();
+  f.start();
+  f.emit('responseReceivedExtraInfo', {statusCode});
+  f.finish();
+  assert.equal(extraInfoComparison(f.ledger).result.verdict, 'incomplete');
+  assert.equal(f.ledger.hops[0].status, null);
+  assert.equal(f.ledger.hops[0].wire_status, null);
+}
+for (const afterTerminal of [false, true]) {
+  const f = extraInfoFixture();
+  f.extra();
+  f.start();
+  if (!afterTerminal) f.extra();
+  f.finish();
+  if (afterTerminal) f.extra();
+  assert.equal(extraInfoComparison(f.ledger).result.verdict, 'incomplete');
+  assert.equal(
+    f.ledger.hops[0].wire_status,
+    null,
+    'identical duplicate evidence remains ambiguous',
+  );
+}
+for (const status of [undefined, null, '200', NaN]) {
+  const f = extraInfoFixture();
+  f.start();
+  f.extra();
+  f.emit('responseReceived', {response: {status}});
+  f.finish();
+  assert.equal(extraInfoComparison(f.ledger).result.verdict, 'incomplete');
+  assert.equal(f.ledger.hops[0].status, null, 'malformed authoritative response blocks fallback');
+  assert.equal(f.ledger.hops[0].status_source, 'response-received');
+}
+const redirectedExtra = extraInfoFixture();
+redirectedExtra.start();
+redirectedExtra.extra(302);
+redirectedExtra.start({timestamp: 1.5, redirectResponse: {status: 302}});
+redirectedExtra.extra(200);
+redirectedExtra.finish();
+assert.equal(extraInfoComparison(redirectedExtra.ledger).result.verdict, 'incomplete');
+assert.deepEqual(
+  redirectedExtra.ledger.hops.map((h) => h.wire_status),
+  [null, null],
+);
+assert.equal(redirectedExtra.ledger.hops[0].status_source, 'redirect-response');
+assert.equal(redirectedExtra.ledger.hops[1].status, null);
+const nullRedirect = extraInfoFixture();
+nullRedirect.start({redirectResponse: null});
+nullRedirect.extra();
+nullRedirect.finish();
+assert.equal(extraInfoComparison(nullRedirect.ledger).result.verdict, 'incomplete');
+assert.equal(
+  nullRedirect.ledger.hops[0].status,
+  null,
+  'present null redirect marker is not absent',
+);
+const duplicateResponse = extraInfoFixture();
+duplicateResponse.start();
+duplicateResponse.extra();
+duplicateResponse.emit('responseReceived', {response: {status: 200}});
+duplicateResponse.emit('responseReceived', {response: {status: 201}});
+duplicateResponse.finish();
+assert.equal(extraInfoComparison(duplicateResponse.ledger).result.verdict, 'pass');
+assert.equal(duplicateResponse.ledger.hops[0].status, 201, 'retain actual response status');
+assert.equal(
+  duplicateResponse.ledger.hops[0].wire_status,
+  null,
+  'duplicate response forbids ExtraInfo attribution',
+);
+for (const evictActive of [false, true]) {
+  const f = extraInfoFixture();
+  f.start();
+  f.extra();
+  f.finish();
+  if (evictActive) f.ledger.active.clear();
+  f.start({timestamp: 3});
+  f.finish();
+  assert.equal(extraInfoComparison(f.ledger).result.verdict, 'incomplete');
+  assert(f.ledger.hops.every((h) => h.status === null && h.wire_status === null));
+}
+const unrelatedExtra = extraInfoFixture();
+unrelatedExtra.ledger.session('other', 'other-target', {type: 'page'});
+unrelatedExtra.start();
+unrelatedExtra.extra(200, 'other');
+unrelatedExtra.finish();
+assert.equal(extraInfoComparison(unrelatedExtra.ledger).result.verdict, 'incomplete');
+assert.equal(unrelatedExtra.ledger.hops[0].status, null, 'raw ID does not bridge session owners');
+const separateOwners = extraInfoFixture();
+separateOwners.ledger.session('other', 'other-target', {type: 'page'});
+separateOwners.start();
+separateOwners.extra(200);
+separateOwners.finish();
+separateOwners.start({}, 'other');
+separateOwners.extra(201, 'other');
+separateOwners.finish('other');
+assert.equal(extraInfoComparison(separateOwners.ledger).result.verdict, 'pass');
+assert.deepEqual(
+  separateOwners.ledger.hops.map((h) => h.status),
+  [200, 201],
+);
+const otherEpoch = extraInfoFixture();
+otherEpoch.extra();
+otherEpoch.ledger.epoch++;
+otherEpoch.ledger.session('new-owner', 'new-target', {type: 'page'});
+otherEpoch.start({}, 'new-owner');
+otherEpoch.finish('new-owner');
+assert.equal(extraInfoComparison(otherEpoch.ledger).result.verdict, 'incomplete');
+assert.equal(otherEpoch.ledger.hops[0].status, null);
+const cappedStatus = extraInfoFixture({maxStatusEntries: 1});
+cappedStatus.emit('responseReceivedExtraInfo', {requestId: 'other-id', statusCode: 200});
+cappedStatus.start();
+cappedStatus.extra();
+cappedStatus.finish();
+assert.equal(extraInfoComparison(cappedStatus.ledger).result.verdict, 'incomplete');
+assert.equal(cappedStatus.ledger.statusHistory.size, 1);
+assert(cappedStatus.ledger.errors.has('status-history-limit'));
+assert.equal(cappedStatus.ledger.hops[0].status, null);
+const {createResponseEvidence} = await import('./capture-completeness-response-evidence.mjs');
+const truncatedHistory = extraInfoFixture();
+truncatedHistory.ledger.responseEvidence = createResponseEvidence({maxEvents: 0});
+truncatedHistory.start();
+truncatedHistory.extra();
+truncatedHistory.finish();
+assert.equal(extraInfoComparison(truncatedHistory.ledger).result.verdict, 'incomplete');
+assert.equal(truncatedHistory.ledger.hops[0].status, null, 'omitted evidence prevents attribution');
+const eventLimited = extraInfoFixture({maxEvents: 3});
+eventLimited.start();
+eventLimited.extra();
+eventLimited.finish();
+eventLimited.emit('dataReceived', {dataLength: 0});
+assert.equal(extraInfoComparison(eventLimited.ledger).result.verdict, 'incomplete');
+assert.equal(
+  eventLimited.ledger.hops[0].status,
+  null,
+  'event budget loss refuses earlier fallback evidence',
+);
+const privateExtra = extraInfoFixture();
+privateExtra.start();
+privateExtra.emit('responseReceivedExtraInfo', {
+  statusCode: 200,
+  headers: {Authorization: 'PRIVATE'},
+  blockedCookies: [{cookieLine: 'PRIVATE'}],
+});
+privateExtra.finish();
+extraInfoComparison(privateExtra.ledger);
+assert(!JSON.stringify(privateExtra.ledger.snapshot()).includes('PRIVATE'));
+for (const terminal of ['pending', 'failed']) {
+  const f = extraInfoFixture();
+  f.start();
+  f.extra(403);
+  if (terminal === 'failed') f.emit('loadingFailed', {canceled: true});
+  const {result} = extraInfoComparison(f.ledger);
+  assert.equal(f.ledger.hops[0].state, terminal, 'status evidence never invents completion');
+  assert.equal(result.verdict, terminal === 'failed' ? 'pass' : 'incomplete');
+}
+const provenanceFixture = extraInfoFixture();
+provenanceFixture.start();
+provenanceFixture.extra();
+provenanceFixture.finish();
+const provenance = extraInfoComparison(provenanceFixture.ledger);
+for (const field of ['status_source', 'wire_status', 'both']) {
+  const n = structuredClone(provenance.network);
+  for (const name of field === 'both' ? ['status_source', 'wire_status'] : [field])
+    delete n.requests[0][name];
+  assert.equal(
+    compareCapture(provenance.reference, n).verdict,
+    'incomplete',
+    'fallback cannot pass as legacy provenance',
+  );
+}
+for (const [field, value, reason] of [
+  ['status_source', 'response-received', 'statusSource'],
+  ['status_source', 'unavailable', 'statusSource'],
+  ['wire_status', 201, 'wireStatus'],
+]) {
+  const n = structuredClone(provenance.network);
+  n.requests[0][field] = value;
+  const result = compareCapture(provenance.reference, n);
+  assert.notEqual(result.verdict, 'pass');
+  assert.equal(result.mismatchReasons[reason], 1);
+}
+for (const [field, value] of [
+  ['status_source', 'unknown'],
+  ['status_source', 'unavailable'],
+  ['wire_status', undefined],
+  ['wire_status', 0],
+  ['wire_status', 200.5],
+  ['status', 304],
+]) {
+  const n = structuredClone(provenance.network);
+  n.requests[0][field] = value;
+  assert(compareCapture(provenance.reference, n).issues.includes('malformed-status-provenance'));
+}
+console.log(
+  'PASS same-owner single-hop ExtraInfo status, ordering, authoritative response/304, provenance, collision, reuse, history bounds and frozen-window controls',
+);

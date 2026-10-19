@@ -92,6 +92,8 @@ lifecycleInput.results[0].lifecycle = {
 };
 lifecycleInput.results[0].operations[0].differences = {
   state: 1,
+  statusSource: 1,
+  wireStatus: 1,
   raw: 'PRIVATE',
 };
 const safeLifecycle = sanitizeCaptureReport(lifecycleInput);
@@ -100,6 +102,8 @@ assert.equal(safeLifecycle.results[0].lifecycle.maxima.gaps, 9);
 assert.equal(safeLifecycle.results[0].lifecycle.maxima.cleanup_already_gone, 2);
 assert.equal(safeLifecycle.results[0].lifecycle.maxima.cleanup_failures, 1);
 assert.equal(safeLifecycle.results[0].operations[0].differences.state, 1);
+assert.equal(safeLifecycle.results[0].operations[0].differences.statusSource, 1);
+assert.equal(safeLifecycle.results[0].operations[0].differences.wireStatus, 1);
 for (const mutate of [
   (r) => {
     r.results[0].lifecycle.errorObservations[0].code = 'private-error';

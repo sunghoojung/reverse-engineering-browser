@@ -17,14 +17,17 @@ export class ReferenceLedger {
     maxEvents = 20000,
     maxBytes = 16 * 1024 * 1024,
     maxHops = 10000,
+    maxStatusEntries = maxHops,
   } = {}) {
-    this.limits = {maxSessions, maxEvents, maxBytes, maxHops};
+    this.limits = {maxSessions, maxEvents, maxBytes, maxHops, maxStatusEntries};
     this.sessions = new Map();
     this.sessionInfo = new Map();
     this.active = new Map();
     this.hops = [];
     this.websockets = [];
     this.responseEvidence = createResponseEvidence();
+    this.statusHistory = new Map();
+    this.statusHistoryComplete = true;
     this.events = 0;
     this.bytes = 0;
     this.errors = new Set();
@@ -164,7 +167,97 @@ export class ReferenceLedger {
     if (!document && !worker) return null;
     return hop;
   }
+  observeStatusHistory(sessionId, method, params) {
+    if (
+      ![
+        'Network.requestWillBeSent',
+        'Network.responseReceived',
+        'Network.responseReceivedExtraInfo',
+      ].includes(method)
+    )
+      return;
+    if (
+      typeof params.requestId !== 'string' ||
+      !params.requestId ||
+      params.requestId.length > 1024
+    ) {
+      this.statusHistoryComplete = false;
+      this.gap('status-history-incomplete');
+      return;
+    }
+    const id = key(this.epoch, sessionId, params.requestId);
+    if (!this.statusHistory.has(id)) {
+      if (this.statusHistory.size >= this.limits.maxStatusEntries) {
+        this.statusHistoryComplete = false;
+        this.gap('status-history-limit');
+        return;
+      }
+      this.statusHistory.set(id, {
+        starts: 0,
+        responses: 0,
+        extras: 0,
+        redirect: false,
+        status: null,
+      });
+    }
+    const history = this.statusHistory.get(id);
+    if (method === 'Network.requestWillBeSent') {
+      history.starts = Math.min(history.starts + 1, 2);
+      history.redirect ||= params.redirectResponse !== undefined;
+    } else if (method === 'Network.responseReceived') {
+      history.responses = Math.min(history.responses + 1, 2);
+    } else {
+      history.extras = Math.min(history.extras + 1, 2);
+      // Retain only the scalar status. Never retain ExtraInfo headers/cookies.
+      if (
+        history.extras === 1 &&
+        Number.isInteger(params.statusCode) &&
+        params.statusCode >= 100 &&
+        params.statusCode <= 599
+      )
+        history.status = params.statusCode;
+    }
+  }
+  correlateExtraInfoStatus() {
+    // Resolve once at the end of the observation window, so before-request,
+    // after-terminal and duplicate events all participate in the same proof.
+    // Network.pdl documents both missing responseReceived and cached 200/304:
+    // https://github.com/ChromeDevTools/devtools-protocol/blob/master/pdl/domains/Network.pdl
+    if (
+      !this.statusHistoryComplete ||
+      this.errors.size ||
+      !this.responseEvidence.snapshot().complete
+    )
+      return;
+    for (const hop of this.hops) {
+      const history = this.statusHistory.get(key(hop.epoch, hop.sessionId, hop.requestId));
+      if (
+        hop.epoch !== this.epoch ||
+        this.sessionInfo.get(hop.sessionId)?.epoch !== hop.epoch ||
+        hop.hop !== 0 ||
+        hop.redirect ||
+        !history ||
+        history.starts !== 1 ||
+        history.redirect ||
+        history.extras !== 1 ||
+        history.responses > 1 ||
+        history.status === null
+      )
+        continue;
+      hop.wire_status = history.status;
+      if (
+        history.responses === 0 &&
+        hop.status_source === 'unavailable' &&
+        hop.status === null &&
+        history.status !== 304
+      ) {
+        hop.status = history.status;
+        hop.status_source = 'response-received-extra-info';
+      }
+    }
+  }
   ingest(message, byteLength = Buffer.byteLength(JSON.stringify(message) ?? '')) {
+    if (this.finalized) return;
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
       this.gap('malformed-message');
       return;
@@ -187,6 +280,7 @@ export class ReferenceLedger {
       this.gap('unknown-session');
       return;
     }
+    this.observeStatusHistory(sessionId, method, p);
     const id = key(this.epoch, sessionId, p.requestId);
     if (method === 'Network.webSocketCreated') {
       if (this.websockets.length >= this.limits.maxHops) this.gap('websocket-limit');
@@ -218,7 +312,7 @@ export class ReferenceLedger {
       if (p.redirectResponse) {
         if (!previous) this.gap('redirect-start-missing');
         else {
-          this.response(previous, p.redirectResponse);
+          this.response(previous, p.redirectResponse, 'redirect-response');
           previous.state = 'complete';
           previous.redirect = true;
         }
@@ -240,6 +334,8 @@ export class ReferenceLedger {
         resourceType: p.type ?? '',
         timestamp: p.timestamp,
         status: null,
+        status_source: 'unavailable',
+        wire_status: null,
         state: 'pending',
         fromDiskCache: false,
         fromServiceWorker: false,
@@ -278,7 +374,8 @@ export class ReferenceLedger {
       hop.canceled = p.canceled === true;
     }
   }
-  response(hop, response) {
+  response(hop, response, source = 'response-received') {
+    hop.status_source = source;
     if (!response || !Number.isFinite(response.status)) {
       this.gap('malformed-response');
       return;
@@ -288,6 +385,8 @@ export class ReferenceLedger {
     hop.fromServiceWorker = response.fromServiceWorker === true;
   }
   finalize() {
+    if (this.finalized) return;
+    this.correlateExtraInfoStatus();
     this.finalized = true;
     this.finalSnapshot = structuredClone(this.snapshot());
   }
@@ -549,6 +648,26 @@ function countStatusValues(reference, reb) {
     }),
   );
 }
+function statusProvenance(row) {
+  const present =
+    !!row && (Object.hasOwn(row, 'status_source') || Object.hasOwn(row, 'wire_status'));
+  const complete =
+    !!row && Object.hasOwn(row, 'status_source') && Object.hasOwn(row, 'wire_status');
+  const valid =
+    complete &&
+    [
+      'unavailable',
+      'response-received',
+      'redirect-response',
+      'response-received-extra-info',
+    ].includes(row.status_source) &&
+    (row.wire_status === null ||
+      (Number.isInteger(row.wire_status) && row.wire_status >= 100 && row.wire_status <= 599)) &&
+    (row.status_source !== 'unavailable' || row.status === null) &&
+    (row.status_source !== 'response-received-extra-info' ||
+      (row.status !== 304 && row.status === row.wire_status && Number.isInteger(row.status)));
+  return {present, complete, valid};
+}
 // Match independently-owned sessions via browser target/raw request/time, not
 // REB public IDs or local session IDs. Timestamp disambiguates looping redirects.
 export function compareCapture(reference, network, {include = () => true} = {}) {
@@ -627,6 +746,13 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
   // explain their own defects without attributing unrelated rows to each one.
   const scopedMalformedFields = countMalformedHopFields(refs, rows);
   if (
+    [...reference.hops, ...network.requests].some((row) => {
+      const provenance = statusProvenance(row);
+      return provenance.present && !provenance.valid;
+    })
+  )
+    add('malformed-status-provenance');
+  if (
     reference.hops.some(
       (h) =>
         !h ||
@@ -683,6 +809,11 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
     consumed.add(row);
     if (hop.state === 'pending' || row.state === 'pending') add('pending-request');
     if (row.url_truncated || row.method_truncated) add('truncated-identity');
+    const referenceProvenance = statusProvenance(hop),
+      rebProvenance = statusProvenance(row),
+      fallback = [hop.status_source, row.status_source].includes('response-received-extra-info');
+    if (fallback && (!referenceProvenance.complete || !rebProvenance.complete))
+      add('missing-status-provenance');
     const differences = [
       ['url', row.url, hop.url],
       ['method', row.method, hop.method],
@@ -691,6 +822,12 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
       ['resourceType', row.resource_type, hop.resourceType],
       ['fromDiskCache', row.from_disk_cache, hop.fromDiskCache],
       ['fromServiceWorker', row.from_service_worker, hop.fromServiceWorker],
+      ...(fallback || (referenceProvenance.complete && rebProvenance.complete)
+        ? [
+            ['statusSource', row.status_source, hop.status_source],
+            ['wireStatus', row.wire_status, hop.wire_status],
+          ]
+        : []),
     ].filter(([, actual, expected]) => actual !== expected);
     if (differences.length) {
       mismatched++;

@@ -626,3 +626,35 @@ native transport opening, discovery enablement, target enumeration, and malforme
 successful enumeration output. Reasons come only from structured error codes and
 causes, never from browser-supplied error text. Missing endpoint publication is
 still a waiting condition; all existing retry timing remains unchanged.
+
+### HTTP status provenance
+
+Current Traffic rows include top-level `status_source` and `wire_status`; both
+properties remain optional in the contract for older producers. `status_source`
+is `unavailable`, `response-received`, `redirect-response`, or
+`response-received-extra-info`. Fresh rows initialize it to `unavailable` with
+`status: null` and `wire_status: null`.
+
+`Network.responseReceived` and the explicit `redirectResponse` evidence are
+authoritative for the effective `status`. A uniquely attributable
+`Network.responseReceivedExtraInfo.statusCode` can supply a missing effective
+status and records `wire_status` independently. Wire status must be an integer
+100–599. ExtraInfo alone with wire status 304 never supplies an effective status:
+a cached `responseReceived` status 200 with wire status 304 retains effective 200.
+
+Attribution requires exactly one unredirected request and one valid ExtraInfo
+observation for the same capture owner and raw protocol request ID, with complete
+retained history. ExtraInfo may precede the request. Duplicate or malformed
+observations (including duplicate response events), raw-ID reuse, any explicit
+redirectResponse field (including null), or lost history invalidate ExtraInfo
+attribution: `wire_status` becomes null and any ExtraInfo-derived effective status
+returns to null/`unavailable`. Genuine response or redirect status remains intact.
+No attribution crosses a capture owner or connection generation. These fields do
+not imply a response body, complete request capture, or replayable traffic.
+
+Optional `capture_status.status_extra_info_overflow` becomes true when the private
+2048-entry `(capture owner, protocol request ID)` history saturates. This sticky
+flag makes the attribution limit visible: all ExtraInfo-derived status and wire
+status are retracted, and later ExtraInfo attribution remains disabled. HTTP rows,
+`responseReceived`, and redirect response status continue normally. Identity
+history is not evicted and later reused as a false proof of uniqueness.

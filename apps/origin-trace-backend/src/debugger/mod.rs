@@ -14,6 +14,7 @@ mod network_capture;
 mod network_handoff;
 mod network_handoff_bridge;
 mod network_request;
+mod network_status;
 mod network_timing;
 pub(crate) use network_request::NetworkRequestSelection;
 mod objects;

@@ -74,6 +74,11 @@ fn response(state: &mut Value, owner: &Owner, p: &Value, redirected: bool) {
     network_timing::response(record, p, redirected);
     let (h, headers_truncated) = headers(&r["headers"]);
     let (m, _) = bounded(&r["mimeType"], 512);
+    record["status_source"] = json!(if redirected {
+        "redirect-response"
+    } else {
+        "response-received"
+    });
     record["status"] = r["status"]
         .as_f64()
         .map(|n| json!(n as i64))
@@ -161,6 +166,19 @@ impl Debugger {
         if !self.options.capture_network_content || owner.retired.load(Ordering::Acquire) {
             return;
         }
+        if matches!(
+            method,
+            "Network.requestWillBeSent" | "Network.responseReceived"
+        ) {
+            // Count even malformed/rejected repeated starts before validation.
+            self.update(|state| {
+                self.capture
+                    .status_evidence
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .observe(state, &owner.id, method, p);
+            });
+        }
         let mut retrieve = None;
         match method {
             "Network.requestWillBeSent" => {
@@ -217,7 +235,7 @@ impl Debugger {
                         "target_id":target, "scripts":scripts
                     })).unwrap_or_else(|_| json!({"sites":[],"gaps":["initiator_unavailable"]}));
                     let requests = s["network"]["requests"].as_array_mut().unwrap();
-                    let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":public,"capture_owner":owner.id,"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
+                    let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":public,"capture_owner":owner.id,"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_source":"unavailable","wire_status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
                     // Private provenance follows the bounded ledger; it never
                     // changes the public request's original target or owner.
                     let mut provenance = self
@@ -253,6 +271,29 @@ impl Debugger {
                 retrieve = finish(s, owner, p, method.ends_with("Failed"), false);
             }),
             _ => (),
+        }
+        if matches!(
+            method,
+            "Network.requestWillBeSent" | "Network.responseReceivedExtraInfo"
+        ) {
+            self.update(|state| {
+                if !owner.retired.load(Ordering::Acquire) {
+                    self.capture
+                        .status_evidence
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .observe(
+                            state,
+                            &owner.id,
+                            if method == "Network.requestWillBeSent" {
+                                "reconcile"
+                            } else {
+                                method
+                            },
+                            p,
+                        );
+                }
+            });
         }
         if let Some(public) = retrieve {
             let Some(protocol) = p["requestId"].as_str().map(str::to_owned) else {

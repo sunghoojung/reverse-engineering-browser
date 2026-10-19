@@ -432,7 +432,8 @@ impl Debugger {
                 let reason = failure.reason();
                 let error = failure.error;
                 self.update(|s| {
-                    s["network"]["capture_status"]["browser_setup_failure"] = json!({"stage":stage,"reason":reason});
+                    s["network"]["capture_status"]["browser_setup_failure"] =
+                        json!({"stage":stage,"reason":reason});
                 });
                 let current = self
                     .capture
@@ -474,7 +475,9 @@ impl Debugger {
             }
         }
     }
-    async fn open_browser_capture(self: &Arc<Self>) -> std::result::Result<bool, BrowserSetupFailure> {
+    async fn open_browser_capture(
+        self: &Arc<Self>,
+    ) -> std::result::Result<bool, BrowserSetupFailure> {
         let Some((_, url)) = self
             .endpoint_if_published()
             .map_err(|e| BrowserSetupFailure::at(BrowserSetupStage::Endpoint, e))?
@@ -514,7 +517,10 @@ impl Debugger {
             }
             Err(error) => {
                 c.close().await;
-                return Err(BrowserSetupFailure::at(BrowserSetupStage::GetTargets, error));
+                return Err(BrowserSetupFailure::at(
+                    BrowserSetupStage::GetTargets,
+                    error,
+                ));
             }
         };
         self.capture

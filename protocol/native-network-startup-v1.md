@@ -26,6 +26,21 @@ host admission and response-artifact admission use the same owned-profile gate,
 so earlier startup does not authorize unrelated profile capture. Artifact-only
 sessions remain supported independently of the Network category.
 
+The owned [live launcher](../scripts/run-live-session.sh) starts the broker first
+and polls for its socket pathname and token file up to 100 times at 50 ms
+intervals (nominally five seconds); the final timeout guard checks the socket
+pathname only. If artifact capture is enabled, it then starts the artifact
+receiver and polls for its socket pathname with the same count and interval.
+It starts the UI and waits for its endpoint before spawning Brave. The broker
+creates its token before binding and listening.
+However, a socket pathname can exist after `bind` and before `listen`: these
+checks are not a formal listener-ready or authenticated receiver acknowledgment
+barrier. Startup connect failure is explicitly logged as `Unable to connect to
+native probe broker` in the launcher's `brave.log`; artifact connection failure
+is logged as `Unable to connect to native artifact receiver`. Capture stays inactive, with no renderer retry. A failed
+connection cannot deliver a gap record, so missing native events must remain
+unknown rather than being interpreted as an empty or complete capture.
+
 A fixed, content-free startup log describes activation and known coverage limits.
 A failed connection or later disconnect leaves capture unavailable; ordinary
 browser operation continues. Absence of events is never evidence of no traffic.
@@ -104,20 +119,23 @@ three-stack replay on a Brave-initialized checkout.
 
 Before declaring this browser-ready:
 
-1. Replay all stacks and overlays on a disposable initialized pinned checkout;
+1. Establish and validate a formal broker-ready acknowledgment before browser
+   startup; pathname existence alone is insufficient. This is a remaining
+   acceptance item, not a new handshake implemented by this source candidate.
+2. Replay all stacks and overlays on a disposable initialized pinned checkout;
    verify repeated sync is unchanged. Run `make brave-doctor`, `gn format
    --dry-run` on the changed component GN file, and `make brave-probe-check`.
-2. Compile the modified browser main-parts object as well as both proxy template
+3. Compile the modified browser main-parts object as well as both proxy template
    instantiations, sink, socket client, IPC client and session. The focused object list now includes the main-parts object, derived from
    the pinned `brave/browser:core` source set; validate it in generated Ninja. Complete the
    guarded [integrated build](../docs/development/integrated-brave-build.md).
-3. With an authorized local fixture and CDP capture disabled, launch a fresh
+4. With an authorized local fixture and CDP capture disabled, launch a fresh
    owned profile directly to a URL. Compare server receipts with native startup
    document/subresource, redirect, cancellation and terminal events. Exercise
    popup, cross-origin frame, workers, cache reload, Shields rejection/stub,
    close-during-request and redirect handoff. Assert exact native ownership and
    no fabricated successful completion; exclude unrelated/OTR/system contexts.
-4. Exercise disabled/expired sessions, invalid authentication, disconnected broker
+5. Exercise disabled/expired sessions, invalid authentication, disconnected broker
    and bounded queue pressure. Preserve named unsupported SW/memory-cache cases
    in the acceptance report instead of silently removing them from a denominator.
 

@@ -1,0 +1,249 @@
+diff --git a/browser/brave_browser_main_parts.cc b/browser/brave_browser_main_parts.cc
+index 5fbaad3..b697fa1 100644
+--- a/browser/brave_browser_main_parts.cc
++++ b/browser/brave_browser_main_parts.cc
+@@ -19,6 +19,7 @@
+ #include "brave/components/constants/brave_constants.h"
+ #include "brave/components/constants/pref_names.h"
+ #include "brave/components/ipfs/buildflags/buildflags.h"
++#include "brave/components/reverse_engineering_browser/browser/native_probe_socket_client.h"
+ #include "brave/components/speedreader/common/buildflags/buildflags.h"
+ #include "brave/components/tor/buildflags/buildflags.h"
+ #include "build/build_config.h"
+@@ -177,6 +178,9 @@ void ChromeBrowserMainParts::PreShutdown() {
+ }
+ 
+ void ChromeBrowserMainParts::PreProfileInit() {
++  // Establish the explicitly authorized native session before profile startup
++  // can navigate. Renderer launch is too late for browser-led requests.
++  static_cast<void>(reb::NativeProbeSocketClient::Get().StartFromCommandLine());
+   ChromeBrowserMainParts_ChromiumImpl::PreProfileInit();
+ #if !BUILDFLAG(IS_ANDROID)
+   auto* command_line = base::CommandLine::ForCurrentProcess();
+diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
+index 5104ff1..a9dc1b6 100644
+--- a/browser/brave_content_browser_client.cc
++++ b/browser/brave_content_browser_client.cc
+@@ -91,7 +91,6 @@
+ #include "brave/components/psst/buildflags/buildflags.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_console_session.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+-#include "brave/components/reverse_engineering_browser/browser/native_probe_socket_client.h"
+ #include "brave/components/request_otr/common/buildflags/buildflags.h"
+ #include "brave/components/skus/common/features.h"
+ #include "brave/components/skus/common/skus_internals.mojom.h"
+@@ -573,8 +572,6 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
+   if (reb::IsNativeConsoleEnabled()) {
+     reb::StartNativeConsoleSession(base::BindOnce(&chrome::ExitIgnoreUnloadHandlers));
+   }
+-  static_cast<void>(
+-      reb::NativeProbeSocketClient::Get().StartFromCommandLine());
+   Profile* profile = Profile::FromBrowserContext(host->GetBrowserContext());
+   // The BraveRendererUpdater might be null for some irregular profiles, e.g.
+   // the System Profile.
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+index b36bb6c..2c79187 100644
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -161,6 +161,12 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+       request_id_(request_id),
+       network_service_request_id_(network_service_request_id),
+       render_frame_token_(render_frame_token),
++      native_capture_lifecycle_(
++          (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
++           reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
++                  reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)
++              ? reb::NativeNetworkCaptureSink::Get().generation()
++              : 0),
+       options_(options),
+       browser_context_(browser_context),
+       traffic_annotation_(traffic_annotation),
+@@ -171,6 +177,14 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+       proxied_client_receiver_(this),
+       navigation_response_task_runner_(navigation_response_task_runner),
+       weak_factory_(this) {
++  if (native_capture_lifecycle_.IsCurrent(
++          reb::NativeNetworkCaptureSink::Get().generation())) {
++    EnsureNativeCaptureIdentity();
++    reb::NativeNetworkCaptureSink::Get().RecordRequestStarted(
++        request_id_, network_service_request_id_, initiator_process_id_,
++        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
++        request_);
++  }
+   // If there is a client error, clean up the request.
+   target_client_.set_disconnect_handler(base::BindOnce(
+       &BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError,
+@@ -184,6 +198,10 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+ 
+ template <template <typename> class T>
+ BraveProxyingURLLoaderFactory<T>::InProgressRequest::~InProgressRequest() {
++  // Teardown is an observation boundary, not proof of a network completion.
++  // All attribution was snapshotted at admission; no live frame/context lookup.
++  FinishNativeCapture(network::URLLoaderCompletionStatus(net::ERR_ABORTED),
++                      "proxy_destroyed");
+   if (ctx_) {
+     factory_->request_handler_->OnURLRequestDestroyed(ctx_);
+   }
+@@ -207,6 +225,25 @@ void BraveProxyingURLLoaderFactory<
+   native_capture_identity_initialized_ = true;
+ }
+ 
++template <template <typename> class T>
++bool BraveProxyingURLLoaderFactory<T>::InProgressRequest::NativeCaptureIsCurrent() const {
++  const auto& sink = reb::NativeNetworkCaptureSink::Get();
++  return native_capture_lifecycle_.IsCurrent(sink.generation()) && sink.IsEnabled();
++}
++
++template <template <typename> class T>
++void BraveProxyingURLLoaderFactory<T>::InProgressRequest::FinishNativeCapture(
++    const network::URLLoaderCompletionStatus& status,
++    std::string_view disposition) {
++  auto& sink = reb::NativeNetworkCaptureSink::Get();
++  if (native_capture_lifecycle_.Finish(sink.generation()) && sink.IsEnabled()) {
++    sink.RecordRequestCompleted(
++        request_id_, network_service_request_id_, initiator_process_id_,
++        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
++        status, disposition);
++  }
++}
++
+ template <template <typename> class T>
+ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::Restart() {
+   UpdateRequestInfo();
+@@ -225,6 +262,8 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnLoaderDisconnected(
+     if (target_loader_.is_bound()) {
+       target_loader_.ResetWithReason(custom_reason, description);
+     }
++    FinishNativeCapture(network::URLLoaderCompletionStatus(net::ERR_ABORTED),
++                        "redirect_handoff");
+     factory_->RemoveRequest(this);
+   } else {
+     OnRequestError(network::URLLoaderCompletionStatus(net::ERR_ABORTED));
+@@ -397,13 +436,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnComplete(
+     OnRequestError(status);
+     return;
+   }
+-  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
+-  if (network_capture.IsEnabled()) {
+-    EnsureNativeCaptureIdentity();
+-    network_capture.RecordRequestCompleted(
+-        request_id_, network_service_request_id_, initiator_process_id_,
+-        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_, status);
+-  }
++  FinishNativeCapture(status);
+ 
+   target_client_->OnComplete(status);
+ 
+@@ -508,6 +541,13 @@ void BraveProxyingURLLoaderFactory<
+       return;
+     }
+ 
++    // A Shields stub is synthetic, not an observed network response.
++    if (NativeCaptureIsCurrent()) {
++      static_cast<void>(reb::NativeNetworkCaptureSink::Get().RecordResponseStarted(
++          request_id_, network_service_request_id_, initiator_process_id_,
++          tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
++          *response, true));
++    }
+     // Craft the response.
+     target_client_->OnReceiveResponse(std::move(response), std::move(consumer),
+                                       std::move(cached_metadata_));
+@@ -575,15 +615,6 @@ void BraveProxyingURLLoaderFactory<
+   if (!target_loader_.is_bound() && factory_->target_factory_.is_bound()) {
+     // Nothing has cancelled us up to this point, so it's now OK to
+     // initiate the real network request.
+-    auto& network_capture = reb::NativeNetworkCaptureSink::Get();
+-    if (network_capture.IsEnabled()) {
+-      EnsureNativeCaptureIdentity();
+-      network_capture.RecordRequestStarted(
+-          request_id_, network_service_request_id_, initiator_process_id_,
+-          tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+-          request_);
+-    }
+-
+     uint32_t options = options_;
+     factory_->target_factory_->CreateLoaderAndStart(
+         target_loader_.BindNewPipeAndPassReceiver(
+@@ -690,16 +721,15 @@ void BraveProxyingURLLoaderFactory<
+ 
+   std::uint64_t creator_event_id = 0;
+   auto& network_capture = reb::NativeNetworkCaptureSink::Get();
+-  if (network_capture.IsEnabled()) {
+-    EnsureNativeCaptureIdentity();
++  if (NativeCaptureIsCurrent()) {
+     creator_event_id = network_capture.RecordResponseStarted(
+         request_id_, network_service_request_id_, initiator_process_id_,
+         tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+         *current_response_head_);
+   }
+   auto& artifact_capture = reb::NativeArtifactCaptureSink::Get();
+-  if (artifact_capture.IsEnabled()) {
+-    EnsureNativeCaptureIdentity();
++  if (native_capture_lifecycle_.IsCurrent(network_capture.generation()) &&
++      artifact_capture.IsEnabled()) {
+     current_response_body_ = artifact_capture.MaybeCaptureResponse(
+         request_id_, frame_id_, creator_event_id, request_,
+         *current_response_head_, std::move(current_response_body_));
+@@ -730,8 +760,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::
+     ctx_->set_redirect_source(request_.url);
+   }
+   auto& network_capture = reb::NativeNetworkCaptureSink::Get();
+-  if (network_capture.IsEnabled()) {
+-    EnsureNativeCaptureIdentity();
++  if (NativeCaptureIsCurrent()) {
+     network_capture.RecordRequestRedirected(
+         request_id_, network_service_request_id_, initiator_process_id_,
+         tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+@@ -791,13 +820,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError(
+   // Make a non-const copy of status so that |should_collapse_initiator| can be
+   // modified.
+   network::URLLoaderCompletionStatus collapse_status(status);
+-  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
+-  if (network_capture.IsEnabled()) {
+-    EnsureNativeCaptureIdentity();
+-    network_capture.RecordRequestCompleted(
+-        request_id_, network_service_request_id_, initiator_process_id_,
+-        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_, status);
+-  }
++  FinishNativeCapture(status);
+ 
+   if (base::FeatureList::IsEnabled(
+           ::brave_shields::features::kBraveAdblockCollapseBlockedElements) &&
+diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
+index e4ab039..5ac81b7 100644
+--- a/browser/net/brave_proxying_url_loader_factory.h
++++ b/browser/net/brave_proxying_url_loader_factory.h
+@@ -12,6 +12,7 @@
+ #include <optional>
+ #include <set>
+ #include <string>
++#include <string_view>
+ #include <utility>
+ #include <vector>
+ 
+@@ -26,6 +27,7 @@
+ #include "base/timer/elapsed_timer.h"
+ #include "brave/browser/net/resource_context_data.h"
+ #include "brave/browser/net/url_context.h"
++#include "brave/components/reverse_engineering_browser/common/native_network_lifecycle.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/receiver_set.h"
+@@ -128,6 +130,9 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+     void OnRequestError(const network::URLLoaderCompletionStatus& status);
+     void HandleBeforeRequestRedirect();
+     void EnsureNativeCaptureIdentity();
++    bool NativeCaptureIsCurrent() const;
++    void FinishNativeCapture(const network::URLLoaderCompletionStatus& status,
++                             std::string_view disposition = {});
+ 
+     base::ElapsedTimer elapsed_timer_;
+ 
+@@ -146,6 +151,7 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+     uint64_t browser_context_id_high_ = 0;
+     uint64_t browser_context_id_low_ = 0;
+     bool native_capture_identity_initialized_ = false;
++    reb::NativeNetworkLifecycle native_capture_lifecycle_;
+     const uint32_t options_;
+ 
+     raw_ptr<content::BrowserContext> browser_context_ = nullptr;

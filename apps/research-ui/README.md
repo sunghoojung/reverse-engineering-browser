@@ -38,6 +38,11 @@ backend and serves them only to matching disposable-target requests; it performs
 no third-party/provider upload. Native macOS file-picker behavior requires native
 validation. See [Scoped local overrides v1](../../protocol/local-overrides-v1.md).
 
+Native proxy destruction and redirect handoff are displayed as **incomplete**
+observations, with the final network outcome explicitly unavailable. They are
+not evidence that the underlying request failed or successfully completed. See
+the [native startup contract](../../protocol/native-network-startup-v1.md).
+
 ## Traffic identity and resource filters
 
 Traffic classifies a CDP response as **Wasm** when its recorded MIME type is

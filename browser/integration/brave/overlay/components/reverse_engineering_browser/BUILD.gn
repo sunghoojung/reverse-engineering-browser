@@ -166,6 +166,7 @@ source_set("browser") {
     "common/native_runtime_snapshot_queue.h",
     "common/native_console_io.cc",
     "common/native_console_io.h",
+    "common/native_network_lifecycle.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
     "common/native_vm_finding.h",

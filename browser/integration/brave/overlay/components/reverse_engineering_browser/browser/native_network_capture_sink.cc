@@ -8,11 +8,13 @@
 #include <algorithm>
 #include <array>
 #include <string_view>
+#include <utility>
 
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+#include "content/public/browser/browser_context.h"
 #include "net/http/http_response_headers.h"
 #include "net/url_request/redirect_info.h"
 #include "services/network/public/cpp/resource_request.h"
@@ -93,11 +95,25 @@ bool NativeNetworkCaptureSink::IsEnabled() const noexcept {
   return now < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
 }
 
+void NativeNetworkCaptureSink::SetOwnedProfilePath(base::FilePath path) {
+  owned_profile_path_ = std::move(path);
+}
+
+bool NativeNetworkCaptureSink::IsOwnedContext(content::BrowserContext* context) const {
+  return context && !context->IsOffTheRecord() && !owned_profile_path_.empty() &&
+         context->GetPath() == owned_profile_path_;
+}
+
+std::uint64_t NativeNetworkCaptureSink::generation() const noexcept {
+  return generation_.load(std::memory_order_acquire);
+}
+
 void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
                                           const std::uint64_t session_id,
                                           const std::uint64_t category_mask,
                                           const std::uint64_t expires_at_monotonic_ns) noexcept {
   emitter_.store(nullptr, std::memory_order_release);
+  generation_.fetch_add(1, std::memory_order_acq_rel);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
   category_mask_.store(emitter ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(emitter ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
@@ -180,7 +196,8 @@ std::uint64_t NativeNetworkCaptureSink::RecordResponseStarted(
     const std::uint64_t frame_id,
     const std::uint64_t browser_context_id_high,
     const std::uint64_t browser_context_id_low,
-    const network::mojom::URLResponseHead& response_head) noexcept {
+    const network::mojom::URLResponseHead& response_head,
+    const bool synthetic) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) [[likely]] {
     return 0;
@@ -206,7 +223,12 @@ std::uint64_t NativeNetworkCaptureSink::RecordResponseStarted(
   if (response_head.was_fetched_via_service_worker) {
     event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kFromServiceWorker);
   }
-  SetPayload(event, response_head.mime_type, "; protocol=", response_head.alpn_negotiated_protocol);
+  if (synthetic) {
+    SetPayload(event, "synthetic_shields; ", response_head.mime_type);
+  } else {
+    SetPayload(event, response_head.mime_type,
+               "; protocol=", response_head.alpn_negotiated_protocol);
+  }
   emitter(event);
   return sequence_number;
 }
@@ -219,7 +241,8 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
     const std::uint64_t frame_id,
     const std::uint64_t browser_context_id_high,
     const std::uint64_t browser_context_id_low,
-    const network::URLLoaderCompletionStatus& status) noexcept {
+    const network::URLLoaderCompletionStatus& status,
+    const std::string_view disposition) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) [[likely]] {
     return;
@@ -240,7 +263,8 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
   event.header.error_code = status.error_code;
   event.header.encoded_data_length = status.encoded_data_length;
   event.header.decoded_body_length = status.decoded_body_length;
-  SetPayload(event, status.error_code == 0 ? "completed" : "failed");
+  SetPayload(event,
+             disposition.empty() ? (status.error_code == 0 ? "completed" : "failed") : disposition);
   emitter(event);
 }
 

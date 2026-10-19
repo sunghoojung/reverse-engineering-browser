@@ -135,6 +135,14 @@ int ConnectNativeLocalIpc(const std::string& socket_path,
     return -1;
   }
 #endif
+  // Startup must not wait for a saturated local listener or an unread hello.
+  // A pending connection/partial hello fails closed; callers never retry from
+  // request hooks. The artifact writer may switch back after this admission.
+  const int flags = fcntl(descriptor, F_GETFL, 0);
+  if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0) {
+    close(descriptor);
+    return -1;
+  }
   address.sun_family = AF_UNIX;
   std::copy(socket_path.begin(), socket_path.end(), address.sun_path);
   if (connect(descriptor, reinterpret_cast<const sockaddr*>(&address),
@@ -143,12 +151,9 @@ int ConnectNativeLocalIpc(const std::string& socket_path,
     close(descriptor);
     return -1;
   }
-  if (non_blocking) {
-    const int flags = fcntl(descriptor, F_GETFL, 0);
-    if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0) {
-      close(descriptor);
-      return -1;
-    }
+  if (!non_blocking && fcntl(descriptor, F_SETFL, flags) != 0) {
+    close(descriptor);
+    return -1;
   }
   return descriptor;
 }

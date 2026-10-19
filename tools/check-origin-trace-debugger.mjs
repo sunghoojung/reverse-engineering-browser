@@ -4344,6 +4344,19 @@ function observationFixtureContext() {
 }
 const observationCode = (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
 const observationUI = runInNewContext(observationCode + ';({evidenceObservationModel,evidenceRequestKey,evidenceArtifactReference,isBrokerResponse,isArtifactResponse})', {TextDecoder, Uint8Array});
+const nativeNetworkProjection = runInNewContext(observationCode + ';({requestsFromEvents,evidenceObservationOutcome,evidenceObservationLabel,evidencePayload})', {TextDecoder, Uint8Array});
+for (const disposition of ['proxy_destroyed', 'redirect_handoff']) {
+  const interrupted = observationEvent(109, 'network', 'request_failed', disposition, {request_id:'19', error_code:-3});
+  const row = nativeNetworkProjection.requestsFromEvents([interrupted])[0];
+  assert.equal(row.status, 'incomplete');
+  assert.equal(Boolean(row.failed), false);
+  assert.match(nativeNetworkProjection.evidenceObservationOutcome(interrupted), /final network outcome unavailable/);
+  assert.equal(nativeNetworkProjection.evidenceObservationLabel(interrupted, nativeNetworkProjection.evidencePayload(interrupted)), 'Network observation ended');
+  const actualError = {...interrupted, error_code:-7};
+  assert.equal(nativeNetworkProjection.requestsFromEvents([actualError])[0].status, 'failed');
+  assert.match(nativeNetworkProjection.evidenceObservationOutcome(actualError), /Failure recorded/);
+}
+console.log('PASS native proxy teardown/handoff is incomplete observation, real network failures preserved');
 const observationContext = observationFixtureContext();
 assert(observationUI.isBrokerResponse({count:observationContext.events.length,events:observationContext.events,capture_mode:'demo'}));
 assert(observationUI.isArtifactResponse({count:observationContext.artifacts.length,artifacts:observationContext.artifacts}));

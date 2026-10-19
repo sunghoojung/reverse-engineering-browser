@@ -290,7 +290,16 @@ if(process.argv[2]==='--transport') {
     }
     if(label==='evicted-collision'){
       request(send,'other',id,'evicted-original-collision');
-      for(let i=0;i<1000;i++)request(send,'other',`eviction-${i}`);
+      await until(s=>s.network.requests.some(r=>r.target_id==='other'&&r.protocol_request_id===id),'Earlier collision is admitted before eviction setup');
+      // Exercise row-history eviction, not transport queue saturation. Wait for
+      // each bounded batch to be consumed before sending the next batch.
+      for(let i=0;i<1000;i++){
+        request(send,'other',`eviction-${i}`);
+        if((i+1)%50===0){
+          const admitted=await until(s=>s.network.requests.some(r=>r.target_id==='other'&&r.protocol_request_id===`eviction-${i}`),'Eviction setup batch is admitted');
+          assert.equal(admitted.network.capture_status.gaps,0,'Eviction setup must not lose transport events');
+        }
+      }
       await until(s=>s.network.dropped>0&&!s.network.requests.some(r=>r.protocol_request_id===id),'Earlier colliding row is evicted before candidate starts');
     }
     send({target:'a',method:'Network.requestWillBeSent',params:start});
@@ -323,6 +332,7 @@ if(process.argv[2]==='--transport') {
     }else{
       request(send,'other',`sentinel-${label}`);finish(send,'other',`sentinel-${label}`);
       s=await until(s=>s.network.requests.some(r=>r.protocol_request_id===`sentinel-${label}`&&r.response.body.state==='available'),`${label}: event barrier and healthy owner continue`);
+      if(label==='evicted-collision')assert.equal(s.network.capture_status.gaps,0,'Eviction rejection must not rely on a transport reconnect');
       const row=s.network.requests.find(r=>r.id===original.id);
       assert.equal(row.state,['retired-source','old-connection'].includes(label)?'failed':'pending',`${label}: unsupported completion cannot adopt source row`);
       assert(!commands().some(c=>c.method==='Network.getResponseBody'&&c.params.requestId===id&&c.sessionId===terminalSession),`${label}: destination body is never borrowed without proof`);

@@ -84,6 +84,13 @@ export function candidateWarningScrollPlan({top, max, ownsPoint}, distance=400) 
 }
 export function candidateGeometryStability(previous,current,count) {return previous===current?count+1:0;}
 
+// An action acknowledgement can briefly enable controls before an older GET
+// arrives. Wait for its receipt to reconcile, not only for options or geometry.
+export function candidateTargetChoiceReady(snapshot) {
+  return snapshot.present && snapshot.disabled === false && !snapshot.receipt &&
+    !snapshot.needsRefresh && !snapshot.experimentPending && !snapshot.debuggerActionPending;
+}
+
 export function candidateTargetSelectionMatches(expected, snapshot) {
   const rows=snapshot.options.filter(option=>option.value===expected.value);
   return snapshot.lifetime===expected.lifetime&&snapshot.selected===expected.value&&
@@ -144,6 +151,10 @@ export async function checkCandidateFixture() {
   assert.equal(candidateWarningScrollPlan({top:0,max:0,ownsPoint:true}),null,'No overflow cannot prove wheel scrolling');
   assert.equal(candidateWarningScrollPlan({top:0,max:100,ownsPoint:false}),null,'A stale or occluded point cannot prove owner scrolling');
   let stable=0,previous='';for(const current of ['moving1','moving2','still','still','still','still']){stable=candidateGeometryStability(previous,current,stable);previous=current;}assert.equal(stable,3,'Click waits for three unchanged native-frame geometry samples');
+  const targetReady={present:true,disabled:false,receipt:false,needsRefresh:false,experimentPending:false,debuggerActionPending:false};
+  assert(candidateTargetChoiceReady(targetReady));
+  for(const patch of [{present:false},{disabled:true},{receipt:true},{needsRefresh:true},{experimentPending:true},{debuggerActionPending:true}])assert.equal(candidateTargetChoiceReady({...targetReady,...patch}),false,'Target selection requires current acknowledgement reconciliation and enabled controls');
+  assert.equal(candidateTargetChoiceReady({...targetReady,receipt:true}),false,'Enabled control immediately after navigation acknowledgement cannot admit selection before an older in-flight GET');
   const selected={value:'worker-A',type:'worker',lifetime:'session1/nav2'},targetSnapshot={selected:'worker-A',ownerTarget:'worker-A',lifetime:selected.lifetime,options:[{value:'worker-A',type:'worker',label:'Worker · updated title'}]};
   assert(candidateTargetSelectionMatches(selected,targetSnapshot),'Same exact worker may refresh its display title');
   for(const patch of [{selected:'worker-B'},{ownerTarget:'worker-B'},{lifetime:'session1/nav3'},{options:[]},{options:[{value:'worker-A',type:'page'}]},{options:[...targetSnapshot.options,...targetSnapshot.options]}])assert.equal(candidateTargetSelectionMatches(selected,{...targetSnapshot,...patch}),false,'Title independence must never weaken exact identity/type/owner/lifetime checks');
@@ -301,10 +312,10 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
   };
   const formSnapshotExpression=`(()=>{const control=id=>{const n=document.querySelector('#'+id);return {value:n?.value,checked:n?.type==='checkbox'?n.checked:undefined,disabled:n?.disabled,valid:n?.validity?.valid,validationMessage:n?.validationMessage};};return {url:control('hooks-field-url'),method:control('hooks-field-method'),kind:control('hooks-field-kind'),pointer:control('hooks-field-pointer'),captureConsent:control('hooks-field-confirm'),captureButton:control('hooks-field-configure'),armConsent:control('hooks-confirm'),armButton:control('hooks-arm'),captureStatus:document.querySelector('#hooks-field-status')?.textContent,armStatus:document.querySelector('#source-hooks-notice')?.textContent,experimentPending:state.experimentPending,debuggerActionPending:state.debuggerActionPending,experimentError:state.experimentError,backendField:state.debuggerSession?.runtime_hooks?.field_test?{enabled:state.debuggerSession.runtime_hooks.field_test.enabled,url:state.debuggerSession.runtime_hooks.field_test.url,method:state.debuggerSession.runtime_hooks.field_test.method,kind:state.debuggerSession.runtime_hooks.field_test.kind,pointer:state.debuggerSession.runtime_hooks.field_test.pointer}:null};})()`;
   const recordForm=async(label)=>{const form=await evaluate(formSnapshotExpression);receipts.push({phase,kind:'form-state',label,form});return form;};
-  const targetSnapshotExpression=`(()=>{const s=document.querySelector('#candidate-experiment-target'),session=state.debuggerSession,hooks=session?.runtime_hooks;return {selected:s?.value,ownerTarget:candidateExperiment?.target,lifetime:JSON.stringify([hooks?.session_id,session?.request_interception?.created_at_ms,session?.object_experiment?.navigation_id,hooks?.target_id,session?.target?.id]),documentURL:session?.object_experiment?.url,catalogCount:session?.scripts?.length,catalog:(session?.scripts??[]).slice(0,64).map(script=>({id:script.script_id,target:script.target_id??session?.target?.id,type:script.target_type??'page',hash:script.hash,length:script.length,url:script.url})),options:[...(s?.options??[])].slice(0,10).map((option,index)=>({index,value:option.value,label:option.textContent,type:option.value===hooks?.target_id?'page':hooks?.workers?.find(worker=>worker.id===option.value)?.type??null}))};})()`;
+  const targetSnapshotExpression=`(()=>{const s=document.querySelector('#candidate-experiment-target'),session=state.debuggerSession,hooks=session?.runtime_hooks;return {present:!!s,disabled:s?.disabled,receipt:Boolean(state.experimentReceipt),needsRefresh:Boolean(state.experimentNeedsRefresh),experimentPending:Boolean(state.experimentPending),debuggerActionPending:Boolean(state.debuggerActionPending),selected:s?.value,ownerTarget:candidateExperiment?.target,lifetime:JSON.stringify([hooks?.session_id,session?.request_interception?.created_at_ms,session?.object_experiment?.navigation_id,hooks?.target_id,session?.target?.id]),documentURL:session?.object_experiment?.url,catalogCount:session?.scripts?.length,catalog:(session?.scripts??[]).slice(0,64).map(script=>({id:script.script_id,target:script.target_id??session?.target?.id,type:script.target_type??'page',hash:script.hash,length:script.length,url:script.url})),options:[...(s?.options??[])].slice(0,10).map((option,index)=>({index,value:option.value,label:option.textContent,type:option.value===hooks?.target_id?'page':hooks?.workers?.find(worker=>worker.id===option.value)?.type??null}))};})()`;
   const chooseTarget=async(kind)=>{
     phase='select disposable '+kind;
-    const before=await evaluate(targetSnapshotExpression),type=kind.toLowerCase();
+    const before=await until(`(()=>{const snapshot=${targetSnapshotExpression};return (${candidateTargetChoiceReady.toString()})(snapshot)?snapshot:false;})()`,'Target selection did not reconcile with a current debugger snapshot'),type=kind.toLowerCase();
     const option=before.options.find(option=>option.value&&option.type===type&&option.label.trim().startsWith(kind));
     assert(option,`Missing explicit ${kind} target option`);
     const expected={...option,lifetime:before.lifetime};

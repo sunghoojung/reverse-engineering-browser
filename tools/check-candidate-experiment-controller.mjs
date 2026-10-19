@@ -5,6 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
 import {webcrypto} from 'node:crypto';
+import {candidateTargetChoiceReady} from './check-candidate-experiment-journey.mjs';
 
 function deferred(){let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};}
 export async function checkCandidateExperimentController(root) {
@@ -107,10 +108,16 @@ export async function checkCandidateExperimentController(root) {
   c.state.debuggerSession.generation=10;
   const previous=c.state.debuggerSession;
   c.state.experimentReceipt={generation:11,groups:['runtime_hooks']};
+  const targetReadiness=()=>candidateTargetChoiceReady({present:true,disabled:c.node('target').disabled,
+    receipt:Boolean(c.state.experimentReceipt),needsRefresh:Boolean(c.state.experimentNeedsRefresh),
+    experimentPending:Boolean(c.state.experimentPending),debuggerActionPending:Boolean(c.state.debuggerActionPending)});
+  assert.equal(c.node('target').disabled,false,'Action acknowledgement may leave target enabled before an older GET arrives');
+  assert.equal(targetReadiness(),false,'Journey must wait on the receipt even before stale GET reconciliation disables the control');
   c.state.debuggerSession=c.api.sync(previous,{...previous,generation:10},null);
   assert.equal(c.state.experimentNeedsRefresh,true);
   c.api.render();assert.equal(c.node('bind').disabled,true);assert.equal(c.node('target').disabled,true);
   assert.match(c.node('status').textContent,/Waiting for a current debugger snapshot/);
+  assert.equal(targetReadiness(),false,'Retained target option is not an actionable selection while reconciliation is pending');
   c.api.owner.bound={id:999,context:'expired'};c.api.render();
   assert.equal(c.api.owner.bound,null);assert.match(c.node('status').textContent,/Waiting for a current debugger snapshot/,'Expired binding still explains the active reconciliation gate');
   await c.api.bind();assert.equal(c.calls.length,0,'Stale poll cannot dispatch Bind');
@@ -120,6 +127,7 @@ export async function checkCandidateExperimentController(root) {
   c.state.debuggerSession=c.api.sync(c.state.debuggerSession,{...previous,generation:11},c.state.experimentReceipt);
   c.api.render();assert.equal(c.state.experimentNeedsRefresh,false);assert.equal(c.node('bind').disabled,false);
   assert.equal(c.calls.length,0,'Reconciliation does not automatically retry');
+  assert.equal(c.node('target').disabled,false);assert.equal(targetReadiness(),true,'Only current production snapshot recovery admits native target selection');
   c.state.debuggerActionPending=true;c.api.render();assert.equal(c.node('bind').disabled,true);
   assert.match(c.node('status').textContent,/Waiting for the current debugger action/);
   c.node('bind').disabled=false;await c.api.bind();assert.equal(c.calls.length,0);

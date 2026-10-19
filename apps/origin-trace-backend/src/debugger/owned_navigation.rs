@@ -58,14 +58,13 @@ impl Debugger {
             .unwrap_or_else(|e| e.into_inner())
             .get(target)
             .cloned();
-        if let Some(previous) = pinned.as_ref() {
-            if previous.retired.load(Ordering::Acquire)
+        if let Some(previous) = pinned.as_ref()
+            && (previous.retired.load(Ordering::Acquire)
                 || owner
                     .as_ref()
-                    .is_none_or(|current| !Arc::ptr_eq(previous, current))
-            {
-                return Err(Error::conflict("Owned page capture owner changed"));
-            }
+                    .is_none_or(|current| !Arc::ptr_eq(previous, current)))
+        {
+            return Err(Error::conflict("Owned page capture owner changed"));
         }
         let Some(owner) = owner else {
             return Ok(None);

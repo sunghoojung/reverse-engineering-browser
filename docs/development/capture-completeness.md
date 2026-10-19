@@ -173,3 +173,11 @@ valid timestamp can complete the hop. Collisions, unknown iframe ancestry and
 conflicting shared-worker parent lineages remain incomplete. Raw lineage and
 terminal IDs are ephemeral, excluded from sanitized reports. This correction
 never changes the expected operation denominator or invents completion events.
+
+A not-yet-published DevToolsActivePort file remains startup waiting and is retried
+by the existing refresh loop. It does not trigger the 30-second browser-capability
+failure backoff. Existing malformed endpoints and unsupported browser discovery
+retain that backoff. Reports expose fixed-enum capture transport, scope and
+readiness state so a ready page-only fallback cannot be mistaken for browser-wide
+child-target readiness. Error diagnostics classify discovery failure prefixes
+without publishing their path or raw error suffix.

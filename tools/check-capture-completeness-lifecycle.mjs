@@ -3,6 +3,7 @@ import {
   classifyCaptureError,
   createLifecycleObserver,
   lifecycleErrorCodes,
+  captureReadiness,
 } from './capture-completeness-lifecycle.mjs';
 const state = (epoch, error = '', extra = {}) => ({
   network: {
@@ -80,3 +81,22 @@ assert.equal(cleanup.snapshot().maxima.cleanup_failures, 1);
 assert.deepEqual(cleanup.snapshot().errorObservations, [{code: 'transport-closed', samples: 1}]);
 assert(!JSON.stringify(cleanup.snapshot()).includes('SECRET'));
 assert.equal(classifyCaptureError('Debugger WebSocket closedSECRET'), 'unknown');
+
+assert.equal(
+  classifyCaptureError('Target discovery unavailable: PRIVATE_PATH'),
+  'target-discovery-unavailable',
+);
+assert.equal(
+  classifyCaptureError('HTTP capture setup task failed: PRIVATE'),
+  'fallback-setup-task-failed',
+);
+assert.deepEqual(
+  captureReadiness(
+    state(1, '', {transport_mode: 'page-fallback', scope: 'http-page-targets', state: 'ready'}),
+  ),
+  {transport: 'page-fallback', scope: 'http-page-targets', state: 'ready'},
+);
+assert.deepEqual(
+  captureReadiness(state(1, '', {transport_mode: 'PRIVATE', scope: 'PRIVATE', state: 'PRIVATE'})),
+  {transport: null, scope: null, state: null},
+);

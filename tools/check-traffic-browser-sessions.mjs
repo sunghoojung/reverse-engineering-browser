@@ -39,7 +39,8 @@ if(process.argv[2]==='--transport') {
       if(m.method==='Network.enable'&&(target==='reset-failure'||(target==='retry'&&!existsSync(join(directory,'failed-once'))))) {
         writeFileSync(join(directory,'failed-once'),'1');emit({id:m.id,sessionId:m.sessionId,error:{code:-32000,message:'synthetic initialization failure'}});continue;
       }
-      if(m.method==='Target.setDiscoverTargets') {discovering=m.params.discover;reply({});}
+      if(browser&&m.method==='Target.setDiscoverTargets'&&options.unsupportedDiscovery&&!existsSync(join(directory,'discovery-supported'))) {log({event:'unsupported-discovery'});emit({id:m.id,error:{code:-32601,message:'synthetic unsupported browser discovery'}});}
+      else if(m.method==='Target.setDiscoverTargets') {discovering=m.params.discover;reply({});}
       else if(m.method==='Target.getTargets') {
         const snapshot=targets().filter(t=>!options.snapshotRootsOnly||!t.parent);snapshots++;
         if(options.reconcileDestroy&&snapshots===2) {
@@ -112,8 +113,9 @@ if(process.argv[2]==='--transport') {
   const root=resolve(process.argv[2]??'.'),binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:`http://localhost/${id}`,...(parent?{parent}:{})});
   async function fixture(initial,options,run) {
+    if(process.env.REB_ENDPOINT_ONLY==='1'&&!options.endpointCase)return;
     if(process.env.REB_TERMINAL_HANDOFF_ONLY==='1'&&!options.terminalHandoff)return;
-    if(process.env.REB_CLEANUP_REGRESSION_ONLY==='1'&&options.terminalHandoff)return;
+    if(process.env.REB_CLEANUP_REGRESSION_ONLY==='1'&&(options.terminalHandoff||options.endpointCase))return;
     const directory=await mkdtemp(join(tmpdir(),'reb-browser-sessions-'));let backend,exited,address,diagnostics='';let targets=initial;
     await writeFile(join(directory,'options'),JSON.stringify(options));
     const save=()=>writeFileSync(join(directory,'targets'),JSON.stringify(targets));save();await writeFile(join(directory,'events'),'');await writeFile(join(directory,'commands'),'');
@@ -133,12 +135,12 @@ if(process.argv[2]==='--transport') {
     }
     try {
       const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
-      await writeFile(join(directory,'active'),`${server.address().port}\n/devtools/browser/fixture\n`);
+      if(options.endpointCase!=='missing')await writeFile(join(directory,'active'),options.endpointCase==='malformed'?'invalid\n':`${server.address().port}\n/devtools/browser/fixture\n`);
       await writeFile(join(directory,'transport'),`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} --transport "$@"\n`,{mode:0o700});
       backend=spawn(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',join(directory,'active'),'--debugger-transport',join(directory,'transport'),...(options.capture===false?[]:['--capture-network-content']),...(options.limit?['--capture-target-limit',String(options.limit)]:[])],{cwd:directory,env:{...process.env,REB_CAPTURE_FIXTURE:directory}});
       exited=new Promise(r=>{backend.once('exit',r);backend.once('error',e=>{diagnostics+=e.message;r();});});
       for(const stream of [backend.stdout,backend.stderr])stream.on('data',chunk=>diagnostics=(diagnostics+chunk).slice(-8192));
-      await run({send,state,until,commands,forget:id=>{targets=targets.filter(t=>t.targetId!==id);save();},add:t=>{targets.push(t);save();send({add:t.targetId});},destroy:id=>{targets=targets.filter(t=>t.targetId!==id);save();send({destroy:id});}});
+      await run({send,state,until,commands,publishEndpoint:()=>writeFile(join(directory,'active'),`${server.address().port}\n/devtools/browser/fixture\n`),supportDiscovery:()=>writeFile(join(directory,'discovery-supported'),'1'),forget:id=>{targets=targets.filter(t=>t.targetId!==id);save();},add:t=>{targets.push(t);save();send({add:t.targetId});},destroy:id=>{targets=targets.filter(t=>t.targetId!==id);save();send({destroy:id});}});
     } finally {
       if(backend?.exitCode===null&&backend.signalCode===null){backend.kill('SIGTERM');await Promise.race([exited,delay(3000)]);if(backend.exitCode===null&&backend.signalCode===null){backend.kill('SIGKILL');await exited;}}
       await new Promise(r=>server.close(r));await rm(directory,{recursive:true,force:true});
@@ -146,6 +148,29 @@ if(process.argv[2]==='--transport') {
   }
   const request=(send,target,id,path=id)=>send({target,method:'Network.requestWillBeSent',params:{requestId:id,timestamp:1,wallTime:1,type:'Fetch',request:{url:`http://localhost/${path}`,method:'GET',headers:{}}}});
   const finish=(send,target,id)=>{send({target,method:'Network.responseReceived',params:{requestId:id,response:{status:200,headers:{}}}});send({target,method:'Network.loadingFinished',params:{requestId:id,timestamp:2,encodedDataLength:10}});};
+  for(const endpointCase of ['missing','malformed','unsupported'])await fixture([info('page'),info('worker','worker','page')],{endpointCase,snapshotRootsOnly:true,unsupportedDiscovery:endpointCase==='unsupported'},async({until,state,commands,publishEndpoint,supportDiscovery})=>{
+    if(endpointCase==='missing') {
+      await until(s=>s.state==='waiting'&&s.error==='Waiting for the authorized browser debugger','Missing endpoint observed by refresh');
+      assert.equal(commands().filter(c=>c.event==='open'&&c.browser).length,0,'Absent endpoint cannot attempt browser transport');
+      const published=Date.now();await publishEndpoint();
+      const ready=await until(s=>s.network.capture_status.transport_mode==='browser-sessions'&&s.network.capture_status.attached_targets===2,'Published endpoint captures page and recursive worker without capability backoff',10000);
+      assert.ok(Date.now()-published<10000,'Published endpoint must recover on normal refresh, before 30-second capability backoff');
+      assert.ok(commands().some(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':worker')),'Recursive worker capture enabled');
+      assert.equal(ready.network.capture_status.transport_mode,'browser-sessions');
+    } else {
+      await until(s=>s.network.capture_status.transport_mode==='page-fallback'&&String(s.network.capture_status.last_error).includes(endpointCase==='malformed'?'endpoint is incomplete':'synthetic unsupported browser discovery'),`${endpointCase}: known capability failure observed`);
+      const attempts=commands().filter(c=>c.event==='open'&&c.browser).length;
+      assert.equal(attempts,endpointCase==='unsupported'?1:0,'Only published valid endpoint opens browser transport');
+      if(endpointCase==='unsupported')await supportDiscovery();
+      await publishEndpoint();
+      // Cross two regular one-second refresh intervals without waiting 30 seconds.
+      await delay(2200);
+      const current=await state();
+      assert.equal(commands().filter(c=>c.event==='open'&&c.browser).length,attempts,'Known endpoint/capability failure must retain browser retry backoff');
+      assert.equal(current.network.capture_status.transport_mode,'page-fallback');
+    }
+    console.log(`PASS endpoint startup: ${endpointCase}`);
+  });
   const handoffCases=[
     ['iframe','Document','iframe',true],['worker','Script','worker',true],['shared-worker','Script','shared_worker',true],
     ['normal-collision','Document','iframe',false],['completed-collision','Document','iframe',false],['redirect-collision','Document','iframe',false],

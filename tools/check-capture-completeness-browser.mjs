@@ -14,7 +14,7 @@ import {
   CaptureIdentityTracker,
 } from './capture-completeness-reference.mjs';
 import {createStartupTimeline, startCaptureObservers} from './capture-completeness-startup.mjs';
-import {createLifecycleObserver} from './capture-completeness-lifecycle.mjs';
+import {createLifecycleObserver, captureReadiness} from './capture-completeness-lifecycle.mjs';
 import {readBoundedNetlog, crosscheckNetlog} from './capture-completeness-netlog.mjs';
 import {stopBrowserTestProcess, waitForClose} from './browser-test-process.mjs';
 const root = resolve(process.argv[2] ?? '.'),
@@ -323,6 +323,7 @@ async function cohort(mode) {
     comparison,
     operations,
     lifecycle: lifecycle.snapshot(),
+    captureReadiness: captureReadiness(snapshot),
     readinessTransitions: identityTracker.readinessTransitions,
     startupTimeline: startupTimeline.snapshot(),
     duplicateSessionsRejected: ref?.duplicateSessions ?? 0,

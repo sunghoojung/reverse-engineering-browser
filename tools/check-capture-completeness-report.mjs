@@ -166,3 +166,18 @@ for (const side of ['reference', 'reb']) {
     assert.throws(() => sanitizeCaptureReport(copy), /invalid-malformed-fields/);
   }
 }
+
+const readinessInput = structuredClone(input);
+readinessInput.results[0].captureReadiness = {
+  transport: 'page-fallback',
+  scope: 'http-page-targets',
+  state: 'ready',
+  raw: 'PRIVATE',
+};
+assert.deepEqual(sanitizeCaptureReport(readinessInput).results[0].captureReadiness, {
+  transport: 'page-fallback',
+  scope: 'http-page-targets',
+  state: 'ready',
+});
+readinessInput.results[0].captureReadiness.transport = 'PRIVATE';
+assert.throws(() => sanitizeCaptureReport(readinessInput));

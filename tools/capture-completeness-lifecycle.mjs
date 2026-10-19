@@ -48,6 +48,8 @@ const exactErrors = new Map([
   ],
 ]);
 const prefixErrors = [
+  ['Target discovery unavailable: ', 'target-discovery-unavailable'],
+  ['HTTP capture setup task failed: ', 'fallback-setup-task-failed'],
   ['Debugger WebSocket closed: ', 'transport-closed'],
   ['Debugger WebSocket is closed: ', 'transport-closed'],
   ['Debugger connection closed: ', 'transport-closed'],
@@ -138,4 +140,19 @@ export function createLifecycleObserver() {
       };
     },
   };
+}
+
+export const captureReadinessEnums = Object.freeze({
+  transport: ['browser-sessions', 'page-fallback'],
+  scope: ['http-browser-targets', 'http-page-targets'],
+  state: ['waiting', 'ready', 'partial', 'disabled'],
+});
+export function captureReadiness(snapshot) {
+  const status = snapshot?.network?.capture_status;
+  return Object.fromEntries(
+    Object.entries(captureReadinessEnums).map(([key, values]) => {
+      const value = status?.[key === 'transport' ? 'transport_mode' : key];
+      return [key, values.includes(value) ? value : null];
+    }),
+  );
 }

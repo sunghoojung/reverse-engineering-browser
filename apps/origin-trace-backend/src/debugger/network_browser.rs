@@ -383,7 +383,7 @@ impl Debugger {
             return false;
         }
         match self.open_browser_capture().await {
-            Ok(()) => true,
+            Ok(ready) => ready,
             Err(error) => {
                 let current = self
                     .capture
@@ -425,8 +425,12 @@ impl Debugger {
             }
         }
     }
-    async fn open_browser_capture(self: &Arc<Self>) -> Result<()> {
-        let (_, url) = self.endpoint()?;
+    async fn open_browser_capture(self: &Arc<Self>) -> Result<bool> {
+        let Some((_, url)) = self.endpoint_if_published()? else {
+            // The regular refresh loop will retry after publication. Do not
+            // impose the capability-failure backoff or report page fallback.
+            return Ok(false);
+        };
         let (c, mut events) = Connection::open(&self.transport, &url).await?;
         if let Err(error) = c
             .command(
@@ -566,7 +570,7 @@ impl Debugger {
         // requiring a Runtime resume on targets whose startup we do not own.
         self.schedule_capture_admission(&c);
         self.browser_status();
-        Ok(())
+        Ok(true)
     }
     fn retire_browser_owners(&self, c: &Arc<Connection>, reason: &str) {
         if !self.capture.browser.current(c) {

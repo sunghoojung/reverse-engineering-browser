@@ -179,13 +179,20 @@ impl Debugger {
         }
     }
     fn endpoint(&self) -> Result<(u16, String)> {
+        self.endpoint_if_published()?
+            .ok_or_else(|| Error::conflict("Waiting for the authorized browser debugger"))
+    }
+    // Absence during browser startup is not evidence of unsupported browser
+    // capture. Keep malformed/unreadable endpoint failures distinct.
+    fn endpoint_if_published(&self) -> Result<Option<(u16, String)>> {
         let path = self
             .options
             .devtools_active_port
             .as_ref()
             .ok_or_else(|| Error::conflict("Live debugging is not enabled"))?;
-        let bytes = durable::read_private(path, 4096)?
-            .ok_or_else(|| Error::conflict("Waiting for the authorized browser debugger"))?;
+        let Some(bytes) = durable::read_private(path, 4096)? else {
+            return Ok(None);
+        };
         let body = std::str::from_utf8(&bytes)
             .map_err(|_| Error::conflict("The browser debugger endpoint is malformed"))?;
         let lines = body.lines().collect::<Vec<_>>();
@@ -205,7 +212,7 @@ impl Debugger {
             lines[1].into()
         };
         connection::local_websocket(&url)?;
-        Ok((port, url))
+        Ok(Some((port, url)))
     }
     async fn discover(&self) -> Result<Vec<Value>> {
         let (port, _) = self.endpoint()?;

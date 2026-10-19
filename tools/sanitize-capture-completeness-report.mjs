@@ -1,6 +1,6 @@
 // CI export is an explicit allowlisted copy. Never upload the source report/log.
 import {readFile, stat, writeFile} from 'node:fs/promises';
-import {lifecycleErrorCodes} from './capture-completeness-lifecycle.mjs';
+import {lifecycleErrorCodes, captureReadinessEnums} from './capture-completeness-lifecycle.mjs';
 import {startupTimelineKeys, startupTimelineLimitMs} from './capture-completeness-startup.mjs';
 import {malformedHopFieldNames} from './capture-completeness-reference.mjs';
 import {pathToFileURL} from 'node:url';
@@ -183,6 +183,14 @@ export function sanitizeCaptureReport(input) {
           )
             throw Error('invalid-startup-timeline');
           return [key, value];
+        }),
+      );
+    }
+    if (r.captureReadiness) {
+      result.captureReadiness = Object.fromEntries(
+        Object.entries(captureReadinessEnums).map(([key, values]) => {
+          const value = r.captureReadiness[key];
+          return [key, value === null ? null : choice(value, values)];
         }),
       );
     }

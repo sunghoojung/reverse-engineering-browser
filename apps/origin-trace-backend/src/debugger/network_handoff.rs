@@ -246,7 +246,13 @@ mod tests {
         let (destination, resource) = document();
         assert!(proof(&source, &destination, Some(true), &resource, 10.0));
         for timestamp in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 9.0] {
-            assert!(!proof(&source, &destination, Some(true), &resource, timestamp));
+            assert!(!proof(
+                &source,
+                &destination,
+                Some(true),
+                &resource,
+                timestamp
+            ));
         }
         for timestamp in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
             let mut changed = resource.clone();
@@ -288,7 +294,14 @@ mod tests {
     fn event_parser_requires_exact_potential_main_resource_fields() {
         let parsed = MainResource::from_event(&event()).unwrap();
         assert_eq!(parsed.request_id, "navigation");
-        for field in ["requestId", "loaderId", "frameId", "type", "timestamp", "request"] {
+        for field in [
+            "requestId",
+            "loaderId",
+            "frameId",
+            "type",
+            "timestamp",
+            "request",
+        ] {
             let mut changed = event();
             changed.as_object_mut().unwrap().remove(field);
             assert!(MainResource::from_event(&changed).is_none(), "{field}");
@@ -339,13 +352,21 @@ mod tests {
     #[test]
     fn event_parser_rejects_malformed_values_and_timestamps() {
         for field in ["requestId", "loaderId", "frameId", "type"] {
-            for value in [serde_json::Value::Null, serde_json::json!(7), serde_json::json!([])] {
+            for value in [
+                serde_json::Value::Null,
+                serde_json::json!(7),
+                serde_json::json!([]),
+            ] {
                 let mut changed = event();
                 changed[field] = value;
                 assert!(MainResource::from_event(&changed).is_none());
             }
         }
-        for value in [serde_json::Value::Null, serde_json::json!("10"), serde_json::json!(-1)] {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("10"),
+            serde_json::json!(-1),
+        ] {
             let mut changed = event();
             changed["timestamp"] = value;
             assert!(MainResource::from_event(&changed).is_none());
@@ -354,5 +375,4 @@ mod tests {
         changed["request"]["url"] = serde_json::json!("");
         assert!(MainResource::from_event(&changed).is_none());
     }
-
 }

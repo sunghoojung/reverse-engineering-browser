@@ -1107,7 +1107,8 @@ impl Debugger {
                     if method == "Network.loadingFinished"
                         && let Some(source) = self.main_resource_completion_owner(c, &owner, p)
                     {
-                        self.network_for_body_owner(&source, &owner, method, p).await;
+                        self.network_for_body_owner(&source, &owner, method, p)
+                            .await;
                     } else {
                         self.network_for(&owner, method, p).await;
                     }

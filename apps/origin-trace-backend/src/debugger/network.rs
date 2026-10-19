@@ -272,13 +272,14 @@ impl Debugger {
                             .find(|r| r["id"] == public)
                         {
                             record["response"]["body"]["state"] = json!("error");
-                            record["response"]["body"]["reason"] = json!(
-                                if body_owner.retired.load(Ordering::Acquire) {
-                                    "Completion target detached before response body retrieval finished"
-                                } else {
-                                    "The bounded response-body retrieval queue was full."
-                                }
-                            );
+                            record["response"]["body"]["reason"] = json!(if body_owner
+                                .retired
+                                .load(Ordering::Acquire)
+                            {
+                                "Completion target detached before response body retrieval finished"
+                            } else {
+                                "The bounded response-body retrieval queue was full."
+                            });
                         }
                     });
                     return;

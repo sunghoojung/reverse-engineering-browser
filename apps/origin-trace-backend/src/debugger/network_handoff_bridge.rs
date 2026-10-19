@@ -48,7 +48,11 @@ impl Debugger {
         let explicit = target.get("parentId").and_then(Value::as_str);
         let malformed = target.get("parentId").is_some()
             && explicit.is_none_or(|id| id.is_empty() || id.len() > 4096);
-        let owners = self.capture.owners.lock().unwrap_or_else(|e| e.into_inner());
+        let owners = self
+            .capture
+            .owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let parent = parent_session
             .and_then(|session| {
                 owners.values().find(|owner| {
@@ -93,7 +97,10 @@ impl Debugger {
         destination: &Arc<Owner>,
         params: &Value,
     ) -> Option<Arc<Owner>> {
-        if !self.capture.handoff_lineage_complete.load(Ordering::Acquire)
+        if !self
+            .capture
+            .handoff_lineage_complete
+            .load(Ordering::Acquire)
             || connection.is_closed()
             || !self.capture.browser.current(connection)
             || destination.retired.load(Ordering::Acquire)
@@ -127,7 +134,11 @@ impl Debugger {
                 row["capture_owner"].as_str()?.to_owned(),
             )
         };
-        let owners = self.capture.owners.lock().unwrap_or_else(|e| e.into_inner());
+        let owners = self
+            .capture
+            .owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let source = owners.values().find(|owner| owner.id == source_id)?.clone();
         if source.retired.load(Ordering::Acquire)
             || source.session.is_none()
@@ -199,9 +210,21 @@ mod tests {
     fn lineage_is_bounded_and_conflicts_are_sticky() {
         let mut lineage = BTreeMap::new();
         let key = (1, "child".to_owned());
-        assert!(retain_lineage(&mut lineage, key.clone(), Some("parent".into())));
-        assert!(retain_lineage(&mut lineage, key.clone(), Some("other".into())));
-        assert!(retain_lineage(&mut lineage, key.clone(), Some("parent".into())));
+        assert!(retain_lineage(
+            &mut lineage,
+            key.clone(),
+            Some("parent".into())
+        ));
+        assert!(retain_lineage(
+            &mut lineage,
+            key.clone(),
+            Some("other".into())
+        ));
+        assert!(retain_lineage(
+            &mut lineage,
+            key.clone(),
+            Some("parent".into())
+        ));
         assert_eq!(lineage[&key], None);
         for index in 1..512 {
             assert!(retain_lineage(&mut lineage, (1, index.to_string()), None));

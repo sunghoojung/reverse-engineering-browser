@@ -9,8 +9,8 @@
 #define BUILDFLAG(flag) (flag)
 #define IS_POSIX 1
 namespace base {
-template <class T>
-using span = std::span<T>;
+// Preserve std::span deduction guides instead of alias-template CTAD.
+using std::span;
 template <class T>
 std::span<const std::uint8_t> byte_span_from_ref(const T& value) {
   return {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)};

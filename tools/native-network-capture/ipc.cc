@@ -34,7 +34,10 @@ int main(int argc, char** argv) {
   assert(socket_path.size() < sizeof(address.sun_path));
   std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
   assert(bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
-  assert(listen(listener, 0) == 0);
+  // Darwin maps a zero backlog to somaxconn, rather than a minimal queue.
+  // Request one pending connection explicitly so the bounded saturation test
+  // exercises refusal on both Darwin and Linux.
+  assert(listen(listener, 1) == 0);
   for (bool non_blocking : {true, false}) {
     const int client = reb::ConnectNativeLocalIpc(socket_path, token_path, 33, non_blocking);
     assert(client >= 0);

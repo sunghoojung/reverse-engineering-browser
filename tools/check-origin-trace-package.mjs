@@ -53,8 +53,10 @@ export async function checkPackageContract() {
   assert(coordinator.includes('resourcesURL.appendingPathComponent("run-live-session.sh")'));
   assert(native.includes('(NSApp.modalWindow ?? window).makeKeyAndOrderFront(nil)'),
     'Activation/reopen must preserve the active modal alert keyboard target');
-  assert(coordinator.includes('lines.last(where: { !$0.hasPrefix("Live session cleanup") })'),
-    'Startup failure summaries must ignore our trailing teardown diagnostics');
+  assert(coordinator.includes('let prefix = "REB_LIVE_SESSION_FAILURE: "'));
+  assert(coordinator.includes('Self.failureCause(in: try? Data(contentsOf: logURL))'));
+  assert(build.includes('tools/check-live-session-failure.swift'),
+    'The native build must execute the production failure-cause regression cases');
   const warningUI = await readFile(join(root, 'tools/companion-warning-ui/CompanionWarningUITests.swift'), 'utf8');
   assert.equal([...warningUI.matchAll(/app\.typeKey\(\.return, modifierFlags: \[\]\)/g)].length, 2,
     'Real Return must cover both initial activation and modal reopen');

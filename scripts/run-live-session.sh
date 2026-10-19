@@ -3,6 +3,15 @@
 set -euo pipefail
 umask 077
 
+# The native coordinator selects this explicit cause even when Bash or cleanup
+# writes later diagnostics. Helpers keep their detailed output in separate logs.
+fail_live_session() {
+  local status="$1"
+  shift
+  printf 'REB_LIVE_SESSION_FAILURE: %s\n' "$*" >&2
+  exit "${status}"
+}
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 repository_root="$(cd "${script_dir}/.." && pwd)"
@@ -44,44 +53,35 @@ readonly api_collection_store="${REB_API_COLLECTION_STORE:-${live_session_root}/
 readonly local_analyst_store="${REB_LOCAL_ANALYST_STORE:-${live_session_root}/../local-analyst-workspace-v1.json}"
 
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
-  echo "REB_NATIVE_QUIET_MODE must be 0 or 1." >&2
-  exit 2
+  fail_live_session 2 "REB_NATIVE_QUIET_MODE must be 0 or 1."
 fi
 if [[ "${cdp_network_capture}" != 0 && "${cdp_network_capture}" != 1 ]]; then
-  echo "REB_CDP_NETWORK_CAPTURE must be 0 or 1." >&2
-  exit 2
+  fail_live_session 2 "REB_CDP_NETWORK_CAPTURE must be 0 or 1."
 fi
 if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; then
-  echo "REB_CAPTURE_CANVAS_IMAGES must be 0 or 1." >&2
-  exit 2
+  fail_live_session 2 "REB_CAPTURE_CANVAS_IMAGES must be 0 or 1."
 fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
-  echo "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1." >&2
-  exit 2
+  fail_live_session 2 "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1."
 fi
 if [[ "${localhost_only}" != 0 && "${localhost_only}" != 1 ]]; then
-  echo "REB_LOCALHOST_ONLY must be 0 or 1." >&2
-  exit 2
+  fail_live_session 2 "REB_LOCALHOST_ONLY must be 0 or 1."
 fi
 if [[ "${embedded_session}" != 0 && "${embedded_session}" != 1 ]]; then
-  echo "REB_EMBEDDED_SESSION must be 0 or 1." >&2
-  exit 2
+  fail_live_session 2 "REB_EMBEDDED_SESSION must be 0 or 1."
 fi
 if [[ "${embedded_session}" == 1 ]]; then
   if [[ -z "${session_handshake}" || -z "${session_owner_pid}" ]] ||
      ! [[ "${session_owner_pid}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Embedded sessions require REB_SESSION_HANDSHAKE and a valid REB_SESSION_OWNER_PID." >&2
-    exit 2
+    fail_live_session 2 "Embedded sessions require REB_SESSION_HANDSHAKE and a valid REB_SESSION_OWNER_PID."
   fi
 fi
 if [[ "${capture_canvas_images}" == 1 ]] &&
    (( (category_mask & 1) == 0 || (category_mask & 1024) == 0 )); then
-  echo "REB_CAPTURE_CANVAS_IMAGES requires Canvas and Artifact category bits (mask 1025)." >&2
-  exit 2
+  fail_live_session 2 "REB_CAPTURE_CANVAS_IMAGES requires Canvas and Artifact category bits (mask 1025)."
 fi
 if [[ "${native_quiet_mode}" == 1 && "${cdp_network_capture}" == 1 ]]; then
-  echo "REB_CDP_NETWORK_CAPTURE requires the live debugger." >&2
-  exit 2
+  fail_live_session 2 "REB_CDP_NETWORK_CAPTURE requires the live debugger."
 fi
 
 mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}"
@@ -121,37 +121,28 @@ if [[ -z "${brave_binary}" ]]; then
 fi
 
 if [[ ! -x "${broker_binary}" ]]; then
-  echo "Event broker is missing. Run: make broker" >&2
-  exit 1
+  fail_live_session 1 "Event broker is missing. Run: make broker"
 fi
 if [[ ! -x "${artifact_receiver_binary}" ]]; then
-  echo "Artifact receiver is missing. Run: make artifact-receiver" >&2
-  exit 1
+  fail_live_session 1 "Artifact receiver is missing. Run: make artifact-receiver"
 fi
 if [[ "${native_quiet_mode}" == 0 && ! -x "${debugger_transport_binary}" ]]; then
-  echo "Debugger transport is missing. Run: make debugger-transport" >&2
-  exit 1
+  fail_live_session 1 "Debugger transport is missing. Run: make debugger-transport"
 fi
 if [[ ! -x "${heap_snapshot_binary}" ]]; then
-  echo "Heap snapshot helper is missing. Run: make heap-snapshot" >&2
-  exit 1
+  fail_live_session 1 "Heap snapshot helper is missing. Run: make heap-snapshot"
 fi
 if [[ ! -x "${decoder_binary}" ]]; then
-  echo "Decoder is missing. Run: make decoder" >&2
-  exit 1
+  fail_live_session 1 "Decoder is missing. Run: make decoder"
 fi
 if [[ ! -x "${research_ui_server}" || ! -x "${vm_analyzer}" ]]; then
-  echo "Research UI server is missing: ${research_ui_server}" >&2
-  exit 1
+  fail_live_session 1 "Research UI server is missing: ${research_ui_server}"
 fi
 if [[ "${embedded_session}" == 0 && ! -d "${origin_trace_app}" ]]; then
-  echo "Origin Trace is missing. Run: make app-build" >&2
-  exit 1
+  fail_live_session 1 "Origin Trace is missing. Run: make app-build"
 fi
 if [[ -z "${brave_binary}" || ! -x "${brave_binary}" ]]; then
-  echo "A complete Brave app build is required." >&2
-  echo "Build Brave, or set REB_BRAVE_BINARY to the custom Brave executable." >&2
-  exit 1
+  fail_live_session 1 "A complete Brave app build is required. Build Brave, or set REB_BRAVE_BINARY to the custom Brave executable."
 fi
 
 broker_pid=""
@@ -239,14 +230,12 @@ for _ in {1..100}; do
     break
   fi
   if ! kill -0 "${broker_pid}" 2>/dev/null; then
-    echo "Event broker stopped during startup. See: ${broker_log}" >&2
-    exit 1
+    fail_live_session 1 "Event broker stopped during startup. See: ${broker_log}"
   fi
   sleep 0.05
 done
 if [[ ! -S "${socket_path}" ]]; then
-  echo "Event broker socket did not become ready. See: ${broker_log}" >&2
-  exit 1
+  fail_live_session 1 "Event broker socket did not become ready. See: ${broker_log}"
 fi
 
 if ((category_mask & (512 | 1024))); then
@@ -267,14 +256,12 @@ if ((category_mask & (512 | 1024))); then
       break
     fi
     if ! kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
-      echo "Artifact receiver stopped during startup. See: ${artifact_receiver_log}" >&2
-      exit 1
+      fail_live_session 1 "Artifact receiver stopped during startup. See: ${artifact_receiver_log}"
     fi
     sleep 0.05
   done
   if [[ ! -S "${artifact_socket_path}" ]]; then
-    echo "Artifact receiver socket did not become ready. See: ${artifact_receiver_log}" >&2
-    exit 1
+    fail_live_session 1 "Artifact receiver socket did not become ready. See: ${artifact_receiver_log}"
   fi
 fi
 
@@ -350,14 +337,12 @@ for _ in {1..300}; do
     break
   fi
   if ! kill -0 "${ui_pid}" 2>/dev/null; then
-    echo "Research UI stopped during startup. See: ${ui_log}" >&2
-    exit 1
+    fail_live_session 1 "Research UI stopped during startup. See: ${ui_log}"
   fi
   sleep 0.05
 done
 if [[ ! -s "${ui_endpoint_path}" ]]; then
-  echo "Research UI endpoint did not become ready. See: ${ui_log}" >&2
-  exit 1
+  fail_live_session 1 "Research UI endpoint did not become ready. See: ${ui_log}"
 fi
 ui_endpoint="$(tr -d '\r\n' < "${ui_endpoint_path}")"
 readonly ui_endpoint
@@ -408,20 +393,17 @@ if [[ "${native_quiet_mode}" == 0 ]]; then
       break
     fi
     if ! kill -0 "${brave_pid}" 2>/dev/null; then
-      echo "Brave stopped before its debugger endpoint became ready. See: ${brave_log}" >&2
-      exit 1
+      fail_live_session 1 "Brave stopped before its debugger endpoint became ready. See: ${brave_log}"
     fi
     sleep 0.05
   done
   if [[ ! -s "${devtools_active_port}" ]]; then
-    echo "Brave did not become ready within 30 seconds. Complete any macOS Brave Safe Storage prompt, then retry. See: ${brave_log}" >&2
-    exit 1
+    fail_live_session 1 "Brave did not become ready within 30 seconds. Complete any macOS Brave Safe Storage prompt, then retry. See: ${brave_log}"
   fi
 else
   sleep 0.25
   if ! kill -0 "${brave_pid}" 2>/dev/null; then
-    echo "Brave stopped during quiet-mode startup. See: ${brave_log}" >&2
-    exit 1
+    fail_live_session 1 "Brave stopped during quiet-mode startup. See: ${brave_log}"
   fi
 fi
 
@@ -477,13 +459,11 @@ echo "Close Brave to stop this capture session."
 if [[ "${embedded_session}" == 1 ]]; then
   while kill -0 "${session_owner_pid}" 2>/dev/null; do
     if ! kill -0 "${brave_pid}" 2>/dev/null; then
-      echo "Brave stopped; the live capture connection has closed. See: ${brave_log}" >&2
-      exit 1
+      fail_live_session 1 "Brave stopped; the live capture connection has closed. See: ${brave_log}"
     fi
     for dependency in "${broker_pid}" "${artifact_receiver_pid}" "${ui_pid}"; do
       if [[ -n "${dependency}" ]] && ! kill -0 "${dependency}" 2>/dev/null; then
-        echo "A live capture helper stopped; the session has closed. See: ${session_directory}" >&2
-        exit 1
+        fail_live_session 1 "A live capture helper stopped; the session has closed. See: ${session_directory}"
       fi
     done
     sleep 1

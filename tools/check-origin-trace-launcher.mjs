@@ -238,6 +238,7 @@ async function checkLiveSessionCleanup() {
     assert(from >= 0 && to > from, `Missing live launcher fixture boundary: ${start}`);
     return source.slice(from, to);
   };
+  const failure = section('fail_live_session() {', '\nscript_dir=');
   const cleanup = section('broker_pid=""', '"${broker_binary}" --store');
   const analyzer = section('analyzer_log=', 'ui_arguments=(');
   const monitor = section('if [[ "${embedded_session}" == 1 ]]; then\n  while kill', null);
@@ -285,6 +286,7 @@ embedded_session=1
 session_owner_pid=${process.pid}
 brave_log=${quote(join(directory, "brave.log"))}
 vm_analyzer=${quote(worker)}
+${failure}
 ${cleanup}
 ${launch("broker")} & broker_pid=$!
 ${launch("receiver")} & artifact_receiver_pid=$!
@@ -333,7 +335,14 @@ ${monitor}`);
       assert.equal(result.signal, null, output);
       assert.match(output, /Live session cleanup started:/);
       assert.match(output, /Live session cleanup complete\./);
-      if (scenario.signal === "browser") assert.match(output, /Brave stopped; the live capture connection has closed/);
+      const markedFailures = output.split("\n").filter(line => line.startsWith("REB_LIVE_SESSION_FAILURE: "));
+      if (scenario.signal === "browser") {
+        assert.deepEqual(markedFailures, [`REB_LIVE_SESSION_FAILURE: Brave stopped; the live capture connection has closed. See: ${join(directory, "brave.log")}`]);
+        assert(output.indexOf(markedFailures[0]) < output.indexOf("Live session cleanup started:"),
+          "The actionable cause must be recorded before teardown diagnostics");
+      } else {
+        assert.deepEqual(markedFailures, [], "Cancellation must not invent a diagnosed failure");
+      }
       await assert.rejects(access(handshake));
       for (const [role, pid] of Object.entries(pids)) assert.equal(alive(pid), false, `${scenario.name} orphaned ${role} ${pid}\n${output}`);
       if (scenario.stubborn.length) {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {sanitizeCaptureReport} from './sanitize-capture-completeness-report.mjs';
+import {statusValueBucketNames} from './capture-completeness-reference.mjs';
 const input = {
   schema: 'reb-capture-completeness-v1',
   rebCommit: 'a'.repeat(40),
@@ -181,3 +182,71 @@ assert.deepEqual(sanitizeCaptureReport(readinessInput).results[0].captureReadine
 });
 readinessInput.results[0].captureReadiness.transport = 'PRIVATE';
 assert.throws(() => sanitizeCaptureReport(readinessInput));
+
+const statusInput = structuredClone(input),
+  statusBuckets = {
+    reference: Object.fromEntries(
+      statusValueBucketNames.map((name) => [name, name === 'null' ? 1 : 0]),
+    ),
+    reb: Object.fromEntries(statusValueBucketNames.map((name) => [name, name === 'zero' ? 1 : 0])),
+    rawStatus: 'PRIVATE',
+    requestId: 'PRIVATE',
+  };
+statusBuckets.reference.rawStatus = 'PRIVATE';
+statusBuckets.reb.url = 'https://private.invalid/';
+statusInput.results[0].comparison.statusValueBuckets = structuredClone(statusBuckets);
+statusInput.results[0].operations[0].statusValueBuckets = structuredClone(statusBuckets);
+const safeStatus = sanitizeCaptureReport(statusInput);
+assert(!JSON.stringify(safeStatus).includes('PRIVATE'));
+assert(!JSON.stringify(safeStatus).includes('https:'));
+for (const scope of ['comparison', 'operation']) {
+  const target =
+    scope === 'comparison' ? safeStatus.results[0].comparison : safeStatus.results[0].operations[0];
+  assert.deepEqual(Object.keys(target.statusValueBuckets), ['reference', 'reb']);
+  assert.equal(target.statusValueBuckets.reference.null, 1);
+  assert.equal(target.statusValueBuckets.reb.zero, 1);
+  for (const side of ['reference', 'reb']) {
+    assert.deepEqual(Object.keys(target.statusValueBuckets[side]), statusValueBucketNames);
+    const mutate = (fn) => {
+      const copy = structuredClone(statusInput),
+        value = scope === 'comparison' ? copy.results[0].comparison : copy.results[0].operations[0];
+      fn(value);
+      return copy;
+    };
+    for (const name of statusValueBucketNames)
+      for (const invalid of [undefined, null, -1, 10001, 1.5, 'PRIVATE', NaN, Infinity])
+        assert.throws(
+          () =>
+            sanitizeCaptureReport(
+              mutate((v) => {
+                v.statusValueBuckets[side][name] = invalid;
+              }),
+            ),
+          /invalid-status-value-buckets/,
+        );
+    for (const invalid of [undefined, null, [], 'PRIVATE'])
+      assert.throws(
+        () =>
+          sanitizeCaptureReport(
+            mutate((v) => {
+              v.statusValueBuckets[side] = invalid;
+            }),
+          ),
+        /invalid-status-value-buckets/,
+      );
+    const atLimit = mutate((v) => {
+      v.statusValueBuckets[side] = Object.fromEntries(
+        statusValueBucketNames.map((name) => [name, name === 'zero' ? 10000 : 0]),
+      );
+    });
+    assert.doesNotThrow(() => sanitizeCaptureReport(atLimit));
+    const overTotal = mutate((v) => {
+      v.statusValueBuckets[side].missing = 10000;
+      v.statusValueBuckets[side].nonnumber = 1;
+    });
+    assert.throws(() => sanitizeCaptureReport(overTotal), /invalid-status-value-buckets/);
+  }
+}
+console.log(
+  'PASS status bucket export: fixed keys, observer/operation scope, privacy, count and total bounds',
+);

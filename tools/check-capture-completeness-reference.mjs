@@ -3,6 +3,7 @@ import {
   ReferenceLedger,
   compareCapture,
   completenessVerdict,
+  statusValueBucketNames,
 } from './capture-completeness-reference.mjs';
 const ledger = new ReferenceLedger();
 ledger.session('s1', 't1');
@@ -642,4 +643,83 @@ maxRows.requests.push(maxRows.requests[0]);
 assert.deepEqual(compareCapture(reference, maxRows).issues, ['invalid-reb-snapshot']);
 console.log(
   'PASS bounded side-specific malformed-field counts, operation scope, required fields, and terminal-without-response incompleteness',
+);
+
+// Buckets describe values without tightening or relaxing status validation.
+const statusCases = [
+  [undefined, 'missing', true],
+  [null, 'null', true],
+  [0, 'zero', false],
+  [-0, 'zero', false],
+  [100, 'httpRange', false],
+  [200, 'httpRange', false],
+  [599, 'httpRange', false],
+  [99, 'otherNumber', false],
+  [600, 'otherNumber', false],
+  [-1, 'otherNumber', false],
+  [200.5, 'otherNumber', false],
+  [1e300, 'otherNumber', false],
+  [NaN, 'nonfiniteNumber', true],
+  [Infinity, 'nonfiniteNumber', true],
+  [-Infinity, 'nonfiniteNumber', true],
+  ['PRIVATE_STATUS', 'nonnumber', true],
+  [false, 'nonnumber', true],
+  [{raw: 'PRIVATE_STATUS'}, 'nonnumber', true],
+  [[], 'nonnumber', true],
+];
+for (const [status, bucket, invalid] of statusCases) {
+  const r = structuredClone(reference),
+    n = structuredClone(network);
+  r.hops[0].status = status;
+  n.requests[0].status = status;
+  const result = compareCapture(r, n, {include: (h) => h === r.hops[0] || h === n.requests[0]});
+  assert.equal(result.verdict, invalid ? 'incomplete' : 'pass', `${bucket}: existing verdict`);
+  for (const side of ['reference', 'reb']) {
+    assert.equal(result.malformedFields[side].status, invalid ? 1 : 0);
+    assert.deepEqual(
+      result.scopedStatusValueBuckets[side],
+      Object.fromEntries(statusValueBucketNames.map((name) => [name, name === bucket ? 1 : 0])),
+    );
+    assert.equal(
+      Object.values(result.statusValueBuckets[side]).reduce((a, b) => a + b, 0),
+      4,
+    );
+    assert.equal(
+      Object.values(result.scopedStatusValueBuckets[side]).reduce((a, b) => a + b, 0),
+      1,
+    );
+  }
+  assert(!JSON.stringify(result.statusValueBuckets).includes('PRIVATE'));
+  assert.equal(result.referenceHops, 1);
+  assert.equal(result.rebHops, 1);
+}
+for (const state of ['pending', 'failed', 'complete']) {
+  const r = structuredClone(reference),
+    n = structuredClone(network);
+  for (const row of [r.hops[0], n.requests[0]]) Object.assign(row, {status: null, state});
+  const result = compareCapture(r, n);
+  assert.equal(result.verdict, state === 'failed' ? 'pass' : 'incomplete');
+  for (const side of ['reference', 'reb']) {
+    assert.equal(result.malformedFields[side].status, state === 'complete' ? 1 : 0);
+    assert.equal(result.statusValueBuckets[side].null, 2);
+  }
+}
+const missingStatus = structuredClone(network);
+delete missingStatus.requests[0].status;
+assert.equal(compareCapture(reference, missingStatus).statusValueBuckets.reb.missing, 1);
+const badRow = structuredClone(network);
+badRow.requests[0] = null;
+const badRowResult = compareCapture(reference, badRow);
+assert.equal(badRowResult.statusValueBuckets.reb.missing, 1);
+assert.equal(badRowResult.scopedStatusValueBuckets.reb.missing, 0);
+assert.equal(badRowResult.verdict, 'incomplete');
+assert.equal(scoped.statusValueBuckets.reference.null, 2);
+assert.equal(scoped.scopedStatusValueBuckets.reference.null, 1);
+assert.equal(scoped.scopedStatusValueBuckets.reb.httpRange, 1);
+maxRows.requests.pop();
+assert.equal(compareCapture(reference, maxRows).statusValueBuckets.reb.null, 10000);
+maxRows.requests.push(maxRows.requests[0]);
+assert.equal(compareCapture(reference, maxRows).statusValueBuckets, undefined);
+console.log(
+  'PASS exclusive bounded status buckets, zero-valid predicate, null/state distinction and operation scope',
 );

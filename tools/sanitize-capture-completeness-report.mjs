@@ -3,7 +3,7 @@ import {sanitizeResponseEvidence} from './capture-completeness-response-evidence
 import {readFile, stat, writeFile} from 'node:fs/promises';
 import {lifecycleErrorCodes, captureReadinessEnums} from './capture-completeness-lifecycle.mjs';
 import {startupTimelineKeys, startupTimelineLimitMs} from './capture-completeness-startup.mjs';
-import {malformedHopFieldNames} from './capture-completeness-reference.mjs';
+import {malformedHopFieldNames, statusValueBucketNames} from './capture-completeness-reference.mjs';
 import {pathToFileURL} from 'node:url';
 const count = (v) => {
   if (!Number.isSafeInteger(v) || v < 0 || v > 10000000) throw Error('invalid-count');
@@ -42,6 +42,27 @@ function sanitizeMalformedFields(value) {
           }),
         ),
       ];
+    }),
+  );
+}
+function sanitizeStatusValueBuckets(value) {
+  return Object.fromEntries(
+    ['reference', 'reb'].map((side) => {
+      const buckets = value?.[side];
+      if (!buckets || typeof buckets !== 'object' || Array.isArray(buckets))
+        throw Error('invalid-status-value-buckets');
+      let total = 0;
+      const result = Object.fromEntries(
+        statusValueBucketNames.map((name) => {
+          const value = buckets[name];
+          if (!Number.isSafeInteger(value) || value < 0 || value > 10000)
+            throw Error('invalid-status-value-buckets');
+          total += value;
+          return [name, value];
+        }),
+      );
+      if (total > 10000) throw Error('invalid-status-value-buckets');
+      return [side, result];
     }),
   );
 }
@@ -126,6 +147,10 @@ export function sanitizeCaptureReport(input) {
     }
     if (r.comparison?.malformedFields !== undefined)
       result.comparison.malformedFields = sanitizeMalformedFields(r.comparison.malformedFields);
+    if (r.comparison?.statusValueBuckets !== undefined)
+      result.comparison.statusValueBuckets = sanitizeStatusValueBuckets(
+        r.comparison.statusValueBuckets,
+      );
     if (r.operations) {
       if (!Array.isArray(r.operations) || r.operations.length > 256)
         throw Error('invalid-operations');
@@ -151,6 +176,9 @@ export function sanitizeCaptureReport(input) {
           ]),
           ...(o.malformedFields !== undefined
             ? {malformedFields: sanitizeMalformedFields(o.malformedFields)}
+            : {}),
+          ...(o.statusValueBuckets !== undefined
+            ? {statusValueBuckets: sanitizeStatusValueBuckets(o.statusValueBuckets)}
             : {}),
           differences: numbers(o.differences, [
             'url',

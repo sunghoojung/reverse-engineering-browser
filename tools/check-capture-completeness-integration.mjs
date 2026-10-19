@@ -170,6 +170,28 @@ try {
     'pass',
     'fully authored offline golden exercises actual module result shapes',
   );
+  const statusComparison = compareCapture(reference, network);
+  assert.equal(
+    statusComparison.referenceHops,
+    24,
+    'status diagnostics preserve the authored denominator',
+  );
+  assert.equal(statusComparison.rebHops, 24);
+  for (const side of ['reference', 'reb']) {
+    assert.equal(statusComparison.statusValueBuckets[side].httpRange, 24);
+    assert.equal(
+      Object.values(statusComparison.statusValueBuckets[side]).reduce((a, b) => a + b, 0),
+      24,
+    );
+  }
+  for (const op of fixture.manifest.operations.filter((op) => op.kind === 'http')) {
+    const scoped = compareCapture(reference, network, {
+      include: (h) => fixtureOperation(h, fixture.manifest) === op,
+    });
+    const expected = op.expectedClientCompletions ?? op.expectedReceipts;
+    for (const side of ['reference', 'reb'])
+      assert.equal(scoped.scopedStatusValueBuckets[side].httpRange, expected);
+  }
   const copy = (value) => structuredClone(value);
   assert.notEqual(result({r: {...reference, hops: []}}), 'pass');
   assert.notEqual(result({r: {...reference, errors: ['drop']}}), 'pass');

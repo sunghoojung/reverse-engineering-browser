@@ -282,6 +282,9 @@ async function cohort(mode) {
         ...(operationComparison?.scopedMalformedFields
           ? {malformedFields: operationComparison.scopedMalformedFields}
           : {}),
+        ...(operationComparison?.scopedStatusValueBuckets
+          ? {statusValueBuckets: operationComparison.scopedStatusValueBuckets}
+          : {}),
       };
     });
   const uncovered = operations.some(

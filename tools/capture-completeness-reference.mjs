@@ -517,6 +517,38 @@ function countMalformedHopFields(reference, reb) {
     }),
   );
 }
+// Descriptive buckets only: finite zero and other finite numeric statuses
+// retain the existing validation behavior above. Never export a raw value.
+export const statusValueBucketNames = [
+  'missing',
+  'null',
+  'zero',
+  'httpRange',
+  'otherNumber',
+  'nonfiniteNumber',
+  'nonnumber',
+];
+export function statusValueBucket(status) {
+  if (status === undefined) return 'missing';
+  if (status === null) return 'null';
+  if (typeof status !== 'number') return 'nonnumber';
+  if (!Number.isFinite(status)) return 'nonfiniteNumber';
+  if (status === 0) return 'zero';
+  if (Number.isInteger(status) && status >= 100 && status <= 599) return 'httpRange';
+  return 'otherNumber';
+}
+function countStatusValues(reference, reb) {
+  return Object.fromEntries(
+    [
+      ['reference', reference],
+      ['reb', reb],
+    ].map(([side, rows]) => {
+      const counts = Object.fromEntries(statusValueBucketNames.map((name) => [name, 0]));
+      for (const row of rows) counts[statusValueBucket(row?.status)]++;
+      return [side, counts];
+    }),
+  );
+}
 // Match independently-owned sessions via browser target/raw request/time, not
 // REB public IDs or local session IDs. Timestamp disambiguates looping redirects.
 export function compareCapture(reference, network, {include = () => true} = {}) {
@@ -682,6 +714,8 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
     mismatchReasons,
     malformedFields,
     scopedMalformedFields,
+    statusValueBuckets: countStatusValues(reference.hops, network.requests),
+    scopedStatusValueBuckets: countStatusValues(refs, rows),
     issues,
     scope:
       'Observed HTTP request hops only; independent clients share Chrome CDP blind spots. Bodies, headers and WebSockets are separate coverage.',

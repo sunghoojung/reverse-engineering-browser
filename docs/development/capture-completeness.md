@@ -146,6 +146,18 @@ IDs; unknown shapes still fail with fixed diagnostic codes. These diagnostics
 help distinguish test instrumentation problems from capture gaps; they do not
 excuse any missing expected operation or prove lossless capture.
 
+Status diagnostics count fixed, mutually exclusive value buckets for each
+observer, globally and per authored operation: `missing` (absent or undefined),
+`null`, `zero` (including negative zero), `httpRange` (integer 100 through 599),
+`otherNumber` (other finite numbers), `nonfiniteNumber`, and `nonnumber`.
+Only bounded counts are exported, never status values, URLs, or request IDs.
+These buckets do not change validation: finite zero already passes the numeric
+status predicate, while null on a completed hop, a missing status, a nonfinite
+number, or a nonnumeric value remains malformed. Null on pending or failed
+hops retains its existing meaning. Global buckets include all observed rows;
+per-operation buckets include only that operation's rows. Neither changes the
+24-hop fixture denominator or supplies a missing response.
+
 Producer cleanup diagnostics expose cumulative `cleanup_already_gone` and
 `cleanup_failures` counters. A redundant session's detach rejection converges
 only after an exact same-connection session/parent detach or target-destroyed

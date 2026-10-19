@@ -1,3 +1,4 @@
+import {scopedResponseEvidence} from './capture-completeness-response-evidence.mjs';
 // Owned localhost fixtures only. No public-site URLs are accepted.
 import {spawn} from 'node:child_process';
 import {mkdtemp, readFile, rm, stat} from 'node:fs/promises';
@@ -259,6 +260,10 @@ async function cohort(mode) {
           });
       return {
         operationId: op.operationId,
+        responseEvidence: scopedResponseEvidence(
+          reference,
+          (h) => fixtureOperation(h, fixture.manifest) === op,
+        ),
         method: op.method,
         caseId: op.caseId,
         expected,

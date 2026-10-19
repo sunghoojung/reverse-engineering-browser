@@ -1,3 +1,4 @@
+import {createResponseEvidence} from './capture-completeness-response-evidence.mjs';
 // Independent test oracle. Never import REB's capture/parser/ownership helpers.
 // Metadata stays ephemeral; callers publish only the aggregate comparison.
 const supported = new Set(['page', 'iframe', 'worker', 'shared_worker', 'service_worker']);
@@ -23,6 +24,7 @@ export class ReferenceLedger {
     this.active = new Map();
     this.hops = [];
     this.websockets = [];
+    this.responseEvidence = createResponseEvidence();
     this.events = 0;
     this.bytes = 0;
     this.errors = new Set();
@@ -179,6 +181,7 @@ export class ReferenceLedger {
       return;
     }
     if (!method?.startsWith('Network.')) return;
+    this.responseEvidence.observe(this.epoch, sessionId, method, p);
     const targetId = this.sessions.get(sessionId);
     if (!targetId) {
       this.gap('unknown-session');
@@ -294,6 +297,7 @@ export class ReferenceLedger {
       finalized: this.finalized,
       epoch: this.epoch,
       sessions: [...this.sessionInfo.values()],
+      responseEvidence: this.responseEvidence.snapshot(),
       hops: this.hops,
       websockets: this.websockets,
       errors: [...this.errors],

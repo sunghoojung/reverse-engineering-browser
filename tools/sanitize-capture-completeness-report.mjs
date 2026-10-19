@@ -1,3 +1,4 @@
+import {sanitizeResponseEvidence} from './capture-completeness-response-evidence.mjs';
 // CI export is an explicit allowlisted copy. Never upload the source report/log.
 import {readFile, stat, writeFile} from 'node:fs/promises';
 import {lifecycleErrorCodes, captureReadinessEnums} from './capture-completeness-lifecycle.mjs';
@@ -136,6 +137,9 @@ export function sanitizeCaptureReport(input) {
           throw Error('invalid-operation');
         return {
           operationId: o.operationId,
+          ...(o.responseEvidence !== undefined
+            ? {responseEvidence: sanitizeResponseEvidence(o.responseEvidence)}
+            : {}),
           method: choice(o.method, ['GET', 'POST', 'OPTIONS']),
           ...numbers(o, [
             'expected',

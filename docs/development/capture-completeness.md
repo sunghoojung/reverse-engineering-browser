@@ -181,3 +181,16 @@ retain that backoff. Reports expose fixed-enum capture transport, scope and
 readiness state so a ready page-only fallback cannot be mistaken for browser-wide
 child-target readiness. Error diagnostics classify discovery failure prefixes
 without publishing their path or raw error suffix.
+
+Response-event diagnostics retain bounded metadata for `responseReceived` and
+`responseReceivedExtraInfo`, including events that arrive before a request.
+Reports contain fixed status buckets, local event ordinals and session-relation
+labels only. Events sharing a protocol request ID are namespace observations,
+not attributed responses: redirect hops expose the same sequence and explicit
+namespace hop counts. Other-session matches are never accepted as owners.
+These diagnostics do not fill missing status or change the comparison verdict.
+Limits are 4096 events/1 MiB internally and 8 hops/16 events per operation in
+the report; omission makes diagnostic completeness false with explicit counts.
+Here `complete` means only that diagnostic metadata was retained within its
+bounds, even if zero response events were observed. It never means that HTTP
+requests or response events were captured completely.

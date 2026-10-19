@@ -4,7 +4,7 @@ use super::{
     connection::{Connection, Event},
     network_capture::{Owner, next_id},
 };
-use crate::error::{Code, Error, Result};
+use crate::error::{Cause, Code, Error};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -14,6 +14,49 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+// Fixed diagnostic vocabulary. This is the last failed browser setup attempt,
+// retained through page fallback and cleared only after successful browser setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum BrowserSetupStage {
+    Endpoint,
+    TransportOpen,
+    DiscoverTargets,
+    GetTargets,
+    GetTargetsShape,
+}
+struct BrowserSetupFailure {
+    stage: BrowserSetupStage,
+    error: Error,
+}
+impl BrowserSetupFailure {
+    fn at(stage: BrowserSetupStage, error: Error) -> Self {
+        Self { stage, error }
+    }
+    fn reason(&self) -> &'static str {
+        match self.error.reason.cause() {
+            Some(Cause::Timeout) => "timeout",
+            Some(Cause::Disconnected) => "disconnected",
+            Some(Cause::TransportFailure) => "transport-failure",
+            Some(Cause::InvalidReply) => "invalid-reply",
+            None => match self.error.reason.code {
+                Code::ProtocolError => "protocol-error",
+                Code::ApplicationFailed => "command-rejected",
+                Code::DependencyUnavailable => "dependency-unavailable",
+                Code::ResourceLimit => "resource-limit",
+                Code::Timeout => "timeout",
+                Code::InvalidRequest => "invalid-request",
+                Code::StateConflict => "state-conflict",
+                Code::StaleGeneration => "stale-generation",
+                Code::TargetUnavailable => "target-unavailable",
+                Code::Cancelled => "cancelled",
+                Code::CommandOutcomeUnknown => "outcome-unknown",
+                Code::Unspecified => "unspecified",
+            },
+        }
+    }
+}
 
 type CleanupKey = (usize, String, Option<String>);
 struct CleanupJob {
@@ -384,7 +427,13 @@ impl Debugger {
         }
         match self.open_browser_capture().await {
             Ok(ready) => ready,
-            Err(error) => {
+            Err(failure) => {
+                let stage = failure.stage;
+                let reason = failure.reason();
+                let error = failure.error;
+                self.update(|s| {
+                    s["network"]["capture_status"]["browser_setup_failure"] = json!({"stage":stage,"reason":reason});
+                });
                 let current = self
                     .capture
                     .browser
@@ -425,13 +474,18 @@ impl Debugger {
             }
         }
     }
-    async fn open_browser_capture(self: &Arc<Self>) -> Result<bool> {
-        let Some((_, url)) = self.endpoint_if_published()? else {
+    async fn open_browser_capture(self: &Arc<Self>) -> std::result::Result<bool, BrowserSetupFailure> {
+        let Some((_, url)) = self
+            .endpoint_if_published()
+            .map_err(|e| BrowserSetupFailure::at(BrowserSetupStage::Endpoint, e))?
+        else {
             // The regular refresh loop will retry after publication. Do not
             // impose the capability-failure backoff or report page fallback.
             return Ok(false);
         };
-        let (c, mut events) = Connection::open(&self.transport, &url).await?;
+        let (c, mut events) = Connection::open(&self.transport, &url)
+            .await
+            .map_err(|e| BrowserSetupFailure::at(BrowserSetupStage::TransportOpen, e))?;
         if let Err(error) = c
             .command(
                 "Target.setDiscoverTargets",
@@ -441,18 +495,26 @@ impl Debugger {
             .await
         {
             c.close().await;
-            return Err(error);
+            return Err(BrowserSetupFailure::at(
+                BrowserSetupStage::DiscoverTargets,
+                error,
+            ));
         }
         let initial = match c
             .command("Target.getTargets", json!({}), Duration::from_secs(3))
             .await
         {
             Ok(v) if v["targetInfos"].is_array() => v,
-            _ => {
+            Ok(_) => {
                 c.close().await;
-                return Err(Error::conflict(
-                    "Browser Target discovery is unsupported or malformed",
+                return Err(BrowserSetupFailure::at(
+                    BrowserSetupStage::GetTargetsShape,
+                    Error::protocol("Browser Target discovery returned malformed targets"),
                 ));
+            }
+            Err(error) => {
+                c.close().await;
+                return Err(BrowserSetupFailure::at(BrowserSetupStage::GetTargets, error));
             }
         };
         self.capture
@@ -570,6 +632,9 @@ impl Debugger {
         // requiring a Runtime resume on targets whose startup we do not own.
         self.schedule_capture_admission(&c);
         self.browser_status();
+        self.update(|s| {
+            s["network"]["capture_status"]["browser_setup_failure"] = Value::Null;
+        });
         Ok(true)
     }
     fn retire_browser_owners(&self, c: &Arc<Connection>, reason: &str) {
@@ -1361,6 +1426,44 @@ impl Debugger {
 mod tests {
     use super::*;
     use clap::Parser;
+    #[test]
+    fn setup_diagnostics_use_structured_reasons_not_error_text() {
+        use crate::error::Reason;
+        let unknown = BrowserSetupFailure::at(
+            BrowserSetupStage::TransportOpen,
+            Error::conflict("timed out SECRET"),
+        );
+        assert_eq!(unknown.reason(), "state-conflict");
+        for (cause, expected) in [
+            (Cause::Timeout, "timeout"),
+            (Cause::Disconnected, "disconnected"),
+            (Cause::TransportFailure, "transport-failure"),
+            (Cause::InvalidReply, "invalid-reply"),
+        ] {
+            let failure = BrowserSetupFailure::at(
+                BrowserSetupStage::GetTargets,
+                Error::conflict("SECRET").with_reason(Reason::uncertain(cause)),
+            );
+            assert_eq!(failure.stage, BrowserSetupStage::GetTargets);
+            assert_eq!(failure.reason(), expected);
+        }
+        assert_eq!(
+            BrowserSetupFailure::at(
+                BrowserSetupStage::DiscoverTargets,
+                Error::conflict("SECRET").with_code(Code::ApplicationFailed),
+            )
+            .reason(),
+            "command-rejected"
+        );
+        assert_eq!(
+            BrowserSetupFailure::at(
+                BrowserSetupStage::GetTargetsShape,
+                Error::protocol("SECRET"),
+            )
+            .reason(),
+            "protocol-error"
+        );
+    }
     #[test]
     fn supported_targets_and_metadata_are_bounded() {
         for kind in [

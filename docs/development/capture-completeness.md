@@ -206,3 +206,12 @@ the report; omission makes diagnostic completeness false with explicit counts.
 Here `complete` means only that diagnostic metadata was retained within its
 bounds, even if zero response events were observed. It never means that HTTP
 requests or response events were captured completely.
+
+Browser setup diagnosis exports bounded `lifecycle.browserSetupObservations`
+entries `{stage, reason, samples}` from the optional fixed producer diagnostic.
+Samples count observed snapshots, not distinct failures. The producer clears its
+last setup failure after successful browser setup; observed aggregates retain the
+history. Unknown values are ignored by the observer and rejected by the report
+sanitizer; raw diagnostics, URLs, and identifiers are never exported. This separates
+transport startup failures from discovery-command failures without changing the
+30-second failure backoff or attributing an aggregate fallback to a specific cause.

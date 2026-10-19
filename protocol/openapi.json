@@ -24804,6 +24804,54 @@
           },
           "startup_mode": {
             "const": "passive"
+          },
+          "browser_setup_failure": {
+            "description": "Last failed browser setup attempt; survives page fallback and clears after successful browser setup. Not a claim of unsupported capability.",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "stage",
+                  "reason"
+                ],
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "endpoint",
+                      "transport-open",
+                      "discover-targets",
+                      "get-targets",
+                      "get-targets-shape"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "timeout",
+                      "disconnected",
+                      "transport-failure",
+                      "invalid-reply",
+                      "protocol-error",
+                      "command-rejected",
+                      "dependency-unavailable",
+                      "resource-limit",
+                      "invalid-request",
+                      "state-conflict",
+                      "stale-generation",
+                      "target-unavailable",
+                      "cancelled",
+                      "outcome-unknown",
+                      "unspecified"
+                    ]
+                  }
+                }
+              }
+            ]
           }
         },
         "description": "Bounded HTTP capture coverage. Passive browser sessions cover supported page, worker and out-of-process iframe targets; page polling is a compatibility fallback. Ready never promises first-navigation or pre-attachment completeness. WebSocket v1 remains selected-target scoped."

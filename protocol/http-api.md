@@ -617,3 +617,12 @@ without another creation event. Rejected-session cleanup runs independently with
 a deduplicated FIFO of at most512 queued/in-flight session identities and four
 concurrent commands; queue overload closes that capture connection with an explicit
 gap rather than blocking healthy Network event dispatch indefinitely.
+
+Optional `capture_status.browser_setup_failure` is null or a fixed `{stage, reason}`
+object describing the last failed browser capture setup attempt. It survives page
+fallback status updates and clears on successful browser setup. It does not prove
+that browser-wide capture is unsupported. Stages separate endpoint validation,
+native transport opening, discovery enablement, target enumeration, and malformed
+successful enumeration output. Reasons come only from structured error codes and
+causes, never from browser-supplied error text. Missing endpoint publication is
+still a waiting condition; all existing retry timing remains unchanged.

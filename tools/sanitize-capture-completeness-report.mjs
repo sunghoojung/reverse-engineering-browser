@@ -1,7 +1,12 @@
 import {sanitizeResponseEvidence} from './capture-completeness-response-evidence.mjs';
 // CI export is an explicit allowlisted copy. Never upload the source report/log.
 import {readFile, stat, writeFile} from 'node:fs/promises';
-import {lifecycleErrorCodes, captureReadinessEnums} from './capture-completeness-lifecycle.mjs';
+import {
+  lifecycleErrorCodes,
+  captureReadinessEnums,
+  browserSetupStages,
+  browserSetupReasons,
+} from './capture-completeness-lifecycle.mjs';
 import {startupTimelineKeys, startupTimelineLimitMs} from './capture-completeness-startup.mjs';
 import {malformedHopFieldNames, statusValueBucketNames} from './capture-completeness-reference.mjs';
 import {pathToFileURL} from 'node:url';
@@ -101,6 +106,18 @@ function sanitizeLifecycle(value) {
     code: choice(item.code, lifecycleErrorCodes),
     samples: count(item.samples),
   }));
+  if (value.browserSetupObservations !== undefined) {
+    if (
+      !Array.isArray(value.browserSetupObservations) ||
+      value.browserSetupObservations.length > browserSetupStages.length * browserSetupReasons.length
+    )
+      throw Error('invalid-lifecycle');
+    result.browserSetupObservations = value.browserSetupObservations.map((item) => ({
+      stage: choice(item.stage, browserSetupStages),
+      reason: choice(item.reason, browserSetupReasons),
+      samples: count(item.samples),
+    }));
+  }
   return result;
 }
 export function sanitizeCaptureReport(input) {
@@ -286,7 +303,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const [source, destination] = process.argv.slice(2);
     if (!source || !destination || (await stat(source)).size > 1024 * 1024) throw Error();
     const report = sanitizeCaptureReport(JSON.parse(await readFile(source, 'utf8')));
-    await writeFile(destination, JSON.stringify(report, null, 2) + '\n', {flag: 'wx', mode: 0o600});
+    await writeFile(destination, JSON.stringify(report, null, 2) + '\n', {
+      flag: 'wx',
+      mode: 0o600,
+    });
   } catch {
     console.error('Capture report export refused: invalid or unavailable aggregate report.');
     process.exitCode = 1;

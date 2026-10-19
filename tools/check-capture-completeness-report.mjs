@@ -11,7 +11,11 @@ const input = {
     verdict: 'incomplete',
     errorCode: 'browser-startup-unavailable',
     fixtureComplete: false,
-    comparison: {verdict: 'incomplete', issues: ['invalid-reference'], headers: 'PRIVATE'},
+    comparison: {
+      verdict: 'incomplete',
+      issues: ['invalid-reference'],
+      headers: 'PRIVATE',
+    },
     operations: [
       {
         operationId: `${mode}:case:op`,
@@ -75,12 +79,21 @@ lifecycleInput.results[0].lifecycle = {
   setupEpochTransitions: 1,
   epochChanges: 0,
   omittedEpochTransitions: 0,
-  maxima: {gaps: 9, dropped: 0, attached_targets: 5, cleanup_already_gone: 2, cleanup_failures: 1},
+  maxima: {
+    gaps: 9,
+    dropped: 0,
+    attached_targets: 5,
+    cleanup_already_gone: 2,
+    cleanup_failures: 1,
+  },
   epochTransitions: [{from: 0, to: 1, setup: true, secret: 'PRIVATE'}],
   errorObservations: [{code: 'target-or-ancestor-detached', samples: 1, raw: 'PRIVATE'}],
   secret: 'PRIVATE',
 };
-lifecycleInput.results[0].operations[0].differences = {state: 1, raw: 'PRIVATE'};
+lifecycleInput.results[0].operations[0].differences = {
+  state: 1,
+  raw: 'PRIVATE',
+};
 const safeLifecycle = sanitizeCaptureReport(lifecycleInput);
 assert(!JSON.stringify(safeLifecycle).includes('PRIVATE'));
 assert.equal(safeLifecycle.results[0].lifecycle.maxima.gaps, 9);
@@ -250,3 +263,15 @@ for (const scope of ['comparison', 'operation']) {
 console.log(
   'PASS status bucket export: fixed keys, observer/operation scope, privacy, count and total bounds',
 );
+
+lifecycleInput.results[0].lifecycle.browserSetupObservations = [
+  {stage: 'transport-open', reason: 'timeout', samples: 1, raw: 'PRIVATE'},
+];
+const safeSetup =
+  sanitizeCaptureReport(lifecycleInput).results[0].lifecycle.browserSetupObservations;
+assert.deepEqual(safeSetup, [{stage: 'transport-open', reason: 'timeout', samples: 1}]);
+for (const key of ['stage', 'reason', 'samples']) {
+  const bad = structuredClone(lifecycleInput);
+  bad.results[0].lifecycle.browserSetupObservations[0][key] = 'PRIVATE';
+  assert.throws(() => sanitizeCaptureReport(bad));
+}

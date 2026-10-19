@@ -77,7 +77,10 @@ impl Connection {
             .ok_or_else(|| Error::conflict("Debugger transport diagnostics are unavailable"))?;
         let ready = tokio::time::timeout(Duration::from_secs(3), frame(&mut stdout))
             .await
-            .map_err(|_| Error::conflict("Native debugger transport startup timed out"))??;
+            .map_err(|_| {
+                Error::conflict("Native debugger transport startup timed out")
+                    .with_reason(Reason::new(Code::StateConflict).with_cause(Cause::Timeout))
+            })??;
         if !ready.is_empty() {
             return Err(Error::protocol(
                 "Native debugger transport returned a malformed startup frame",
@@ -365,7 +368,10 @@ async fn frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>> {
     reader
         .read_exact(&mut header)
         .await
-        .map_err(|_| Error::conflict("Debugger WebSocket closed"))?;
+        .map_err(|_| {
+            Error::conflict("Debugger WebSocket closed")
+                .with_reason(Reason::new(Code::StateConflict).with_cause(Cause::Disconnected))
+        })?;
     if &header[..4] != b"REB\x01" {
         return Err(Error::protocol(
             "Native debugger transport returned an invalid protocol header",
@@ -379,7 +385,10 @@ async fn frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>> {
     reader
         .read_exact(&mut body)
         .await
-        .map_err(|_| Error::conflict("Debugger WebSocket closed"))?;
+        .map_err(|_| {
+            Error::conflict("Debugger WebSocket closed")
+                .with_reason(Reason::new(Code::StateConflict).with_cause(Cause::Disconnected))
+        })?;
     Ok(body)
 }
 pub fn local_websocket(value: &str) -> Result<()> {

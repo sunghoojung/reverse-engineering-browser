@@ -64,7 +64,9 @@ console.log(
 const absent = createLifecycleObserver();
 absent.observe({network: {capture_epoch: 0, capture_status: {}}});
 assert(Object.values(absent.snapshot().maxima).every((value) => value === null));
-absent.observe({network: {capture_epoch: 0, dropped: 0, capture_status: {gaps: 0}}});
+absent.observe({
+  network: {capture_epoch: 0, dropped: 0, capture_status: {gaps: 0}},
+});
 assert.equal(absent.snapshot().maxima.gaps, 0);
 assert.equal(absent.snapshot().maxima.dropped, 0);
 assert.equal(absent.snapshot().maxima.attached_targets, null);
@@ -92,11 +94,47 @@ assert.equal(
 );
 assert.deepEqual(
   captureReadiness(
-    state(1, '', {transport_mode: 'page-fallback', scope: 'http-page-targets', state: 'ready'}),
+    state(1, '', {
+      transport_mode: 'page-fallback',
+      scope: 'http-page-targets',
+      state: 'ready',
+    }),
   ),
   {transport: 'page-fallback', scope: 'http-page-targets', state: 'ready'},
 );
 assert.deepEqual(
-  captureReadiness(state(1, '', {transport_mode: 'PRIVATE', scope: 'PRIVATE', state: 'PRIVATE'})),
+  captureReadiness(
+    state(1, '', {
+      transport_mode: 'PRIVATE',
+      scope: 'PRIVATE',
+      state: 'PRIVATE',
+    }),
+  ),
   {transport: null, scope: null, state: null},
 );
+
+const setupObserver = createLifecycleObserver();
+setupObserver.observe(
+  state(1, 'later error', {
+    browser_setup_failure: {
+      stage: 'get-targets',
+      reason: 'timeout',
+      raw: 'SECRET',
+    },
+  }),
+);
+setupObserver.observe(state(1, '', {browser_setup_failure: null}));
+setupObserver.observe(
+  state(1, '', {
+    browser_setup_failure: {stage: 'SECRET', reason: 'timeout'},
+  }),
+);
+setupObserver.observe(
+  state(1, '', {
+    browser_setup_failure: {stage: 'endpoint', reason: 'SECRET'},
+  }),
+);
+assert.deepEqual(setupObserver.snapshot().browserSetupObservations, [
+  {stage: 'get-targets', reason: 'timeout', samples: 1},
+]);
+assert(!JSON.stringify(setupObserver.snapshot()).includes('SECRET'));

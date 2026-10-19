@@ -70,6 +70,30 @@ export function classifyCaptureError(error) {
     'unknown'
   );
 }
+export const browserSetupStages = Object.freeze([
+  'endpoint',
+  'transport-open',
+  'discover-targets',
+  'get-targets',
+  'get-targets-shape',
+]);
+export const browserSetupReasons = Object.freeze([
+  'timeout',
+  'disconnected',
+  'transport-failure',
+  'invalid-reply',
+  'protocol-error',
+  'command-rejected',
+  'dependency-unavailable',
+  'resource-limit',
+  'invalid-request',
+  'state-conflict',
+  'stale-generation',
+  'target-unavailable',
+  'cancelled',
+  'outcome-unknown',
+  'unspecified',
+]);
 const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
 const increment = (value) => Math.min(Number.MAX_SAFE_INTEGER, value + 1);
 const fields = [
@@ -92,6 +116,7 @@ export function createLifecycleObserver() {
     omittedEpochTransitions = 0;
   const epochTransitions = [],
     errorCounts = new Map(),
+    setupCounts = new Map(),
     maxima = Object.fromEntries(fields.map((f) => [f, null]));
   return {
     observe(snapshot) {
@@ -119,6 +144,15 @@ export function createLifecycleObserver() {
         const value = field === 'dropped' ? network.dropped : status[field];
         if (validCount(value)) maxima[field] = Math.max(maxima[field] ?? 0, value);
       }
+      const setup = status.browser_setup_failure;
+      if (
+        setup &&
+        browserSetupStages.includes(setup.stage) &&
+        browserSetupReasons.includes(setup.reason)
+      ) {
+        const key = `${setup.stage}:${setup.reason}`;
+        setupCounts.set(key, increment(setupCounts.get(key) ?? 0));
+      }
       const code = classifyCaptureError(status.last_error);
       if (code) errorCounts.set(code, increment(errorCounts.get(code) ?? 0));
     },
@@ -133,6 +167,10 @@ export function createLifecycleObserver() {
         epochTransitions: epochTransitions.map((value) => ({...value})),
         omittedEpochTransitions,
         maxima: {...maxima},
+        browserSetupObservations: [...setupCounts].map(([key, samples]) => {
+          const [stage, reason] = key.split(':');
+          return {stage, reason, samples};
+        }),
         errorObservations: [...errorCounts].map(([code, samples]) => ({
           code,
           samples,

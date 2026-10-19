@@ -66,6 +66,13 @@ pub struct Reason {
     details: Details,
 }
 impl Reason {
+    pub fn with_cause(mut self, cause: Cause) -> Self {
+        self.details.cause = Some(cause);
+        self
+    }
+    pub fn cause(&self) -> Option<Cause> {
+        self.details.cause
+    }
     pub fn new(code: Code) -> Self {
         Self {
             code,
@@ -220,6 +227,19 @@ mod tests {
                 "error":"secret: cancelled stale target timed out", "code":"unspecified", "details":{}
             })
         );
+    }
+    #[test]
+    fn cause_annotation_preserves_existing_public_error_code() {
+        for cause in [Cause::Timeout, Cause::Disconnected] {
+            let error = Error::conflict("private diagnostic")
+                .with_reason(Reason::new(Code::StateConflict).with_cause(cause));
+            assert_eq!(error.status, 409);
+            assert_eq!(error.reason.code, Code::StateConflict);
+            let value = serde_json::to_value(error).unwrap();
+            assert_eq!(value["code"], "state_conflict");
+            assert!(value["details"]["cause"].is_string());
+            assert!(value["details"].get("phase").is_none());
+        }
     }
     #[test]
     fn details_are_bounded_and_separate_from_human_text() {

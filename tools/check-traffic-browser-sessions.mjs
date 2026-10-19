@@ -41,6 +41,11 @@ if(process.argv[2]==='--transport') {
       }
       if(browser&&m.method==='Target.setDiscoverTargets'&&options.unsupportedDiscovery&&!existsSync(join(directory,'discovery-supported'))) {log({event:'unsupported-discovery'});emit({id:m.id,error:{code:-32601,message:'synthetic unsupported browser discovery'}});}
       else if(m.method==='Target.setDiscoverTargets') {discovering=m.params.discover;reply({});}
+      else if(browser&&m.method==='Target.getTargets'&&options.setupFailure) {
+        if(options.setupFailure==='timeout')continue;
+        if(options.setupFailure==='rejected')emit({id:m.id,error:{code:-32601,message:'synthetic setup rejection'}});
+        else reply({targetInfos:null});
+      }
       else if(m.method==='Target.getTargets') {
         const snapshot=targets().filter(t=>!options.snapshotRootsOnly||!t.parent);snapshots++;
         if(options.reconcileDestroy&&snapshots===2) {
@@ -157,6 +162,7 @@ if(process.argv[2]==='--transport') {
       assert.ok(Date.now()-published<10000,'Published endpoint must recover on normal refresh, before 30-second capability backoff');
       assert.ok(commands().some(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':worker')),'Recursive worker capture enabled');
       assert.equal(ready.network.capture_status.transport_mode,'browser-sessions');
+      assert.equal(ready.network.capture_status.browser_setup_failure,null);
     } else {
       await until(s=>s.network.capture_status.transport_mode==='page-fallback'&&String(s.network.capture_status.last_error).includes(endpointCase==='malformed'?'endpoint is incomplete':'synthetic unsupported browser discovery'),`${endpointCase}: known capability failure observed`);
       const attempts=commands().filter(c=>c.event==='open'&&c.browser).length;
@@ -168,8 +174,16 @@ if(process.argv[2]==='--transport') {
       const current=await state();
       assert.equal(commands().filter(c=>c.event==='open'&&c.browser).length,attempts,'Known endpoint/capability failure must retain browser retry backoff');
       assert.equal(current.network.capture_status.transport_mode,'page-fallback');
+      assert.deepEqual(current.network.capture_status.browser_setup_failure,endpointCase==='malformed'?{stage:'endpoint',reason:'state-conflict'}:{stage:'discover-targets',reason:'command-rejected'});
     }
     console.log(`PASS endpoint startup: ${endpointCase}`);
+  });
+  for(const setupFailure of ['timeout','rejected','shape'])await fixture([info('page')],{endpointCase:'diagnostic',setupFailure},async({until,state})=>{
+    const expected={stage:setupFailure==='shape'?'get-targets-shape':'get-targets',reason:setupFailure==='timeout'?'timeout':setupFailure==='rejected'?'command-rejected':'protocol-error'};
+    await until(s=>s.network.capture_status.transport_mode==='page-fallback'&&s.network.capture_status.browser_setup_failure?.reason===expected.reason,`Structured setup diagnostic: ${setupFailure}`);
+    await delay(1200);
+    assert.deepEqual((await state()).network.capture_status.browser_setup_failure,expected,'Structured setup diagnostic survives fallback refresh');
+    console.log(`PASS browser setup diagnostic: ${setupFailure}`);
   });
   const handoffCases=[
     ['iframe','Document','iframe',true],['worker','Script','worker',true],['shared-worker','Script','shared_worker',true],

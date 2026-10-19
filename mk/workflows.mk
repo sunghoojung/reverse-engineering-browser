@@ -82,7 +82,7 @@ ui: e2e heap-snapshot decoder deob-worker-build
 origin-trace-backend:
 	cargo build --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 
-traffic-capture-check: origin-trace-backend debugger-transport
+traffic-capture-check: origin-trace-backend debugger-transport broker
 	node tools/check-browser-test-process.mjs
 	node tools/check-traffic-multitarget.mjs
 	node tools/check-traffic-browser-sessions.mjs

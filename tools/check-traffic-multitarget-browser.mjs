@@ -3,7 +3,7 @@
 // startup. Never wait for a capture owner before issuing those early requests.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, rm, stat, writeFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
@@ -21,7 +21,8 @@ const directory=await mkdtemp(join(tmpdir(),'reb-traffic-browser-'));
 const children=[];let socket,uiSocket,sequence=1,diagnostics='',failure;const pending=new Map();
 const served=new Set(),servedCounts=new Map(),heldResponses=new Map();
 let lastCaptureSnapshot=null,lastCaptureReadError='',refreshFailureSnapshot;
-let lastControlCommand=null;
+let lastControlCommand=null,readLiveUI,saveLiveUIShot;
+const uiErrors=[];
 const delay=ms=>new Promise(resolveDelay=>setTimeout(resolveDelay,ms));
 const fixture=createServer((request,response)=>{
   const url=new URL(request.url,`http://${request.headers.host}`);
@@ -106,8 +107,35 @@ try {
   const version=await command('Browser.getVersion');
   console.log('Fixture browser version:',JSON.stringify({product:version.product,protocolVersion:version.protocolVersion}).slice(0,512));
   const diagnosticTransport=await prepareCaptureDiagnosticTransport(directory,transport);
-  const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',diagnosticTransport,'--capture-network-content','--ui-directory',join(root,'apps/research-ui')]);
+  const brokerSocket=join(directory,'broker.sock');
+  const broker=start(join(root,'build/reb-event-broker'),[
+    '--store',join(directory,'events.jsonl'),'--trace-store',join(directory,'trace.jsonl'),
+    '--signal-store',join(directory,'signals.jsonl'),'--socket',brokerSocket,
+    '--token-file',join(directory,'broker.token'),'--session-id','71',
+    '--category-mask','256','--duration-seconds','600']);
+  await until(async()=>{
+    const socket=await stat(brokerSocket),token=await stat(join(directory,'broker.token'));
+    assert(token.isFile()&&token.mode%512===384,'Owned broker token remains user-only');
+    assert(socket.isSocket()&&socket.mode%512===384,'Owned broker socket remains user-only');
+    return true;
+  },'Live fixture native broker startup');
+  const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',diagnosticTransport,'--capture-network-content','--socket',brokerSocket,'--broker-pid',String(broker.pid),'--store',join(directory,'events.jsonl'),'--trace-store',join(directory,'trace.jsonl'),'--signal-store',join(directory,'signals.jsonl'),'--ui-directory',join(root,'apps/research-ui')]);
   const address=await until(async()=>(await readFile(join(directory,'endpoint'),'utf8')).trim(),'Backend startup');
+  // Match the real live launcher: an owned native broker plus CDP capture.
+  // Omitting the broker configuration advertises idle mode to the UI.
+  const modeResponse=await fetch(new URL('/api/events?limit=1',address),{signal:AbortSignal.timeout(2000)});
+  assert(modeResponse.ok,'Live fixture event endpoint is available');
+  const modeReader=modeResponse.body.getReader(),modeChunks=[];let modeBytes=0;
+  try {
+    while(true) {
+      const {done,value}=await modeReader.read();if(done)break;
+      modeBytes+=value.length;assert(modeBytes<=16384,'Fixture mode response stays within 16 KiB');modeChunks.push(value);
+    }
+  } finally {await modeReader.cancel();}
+  const mode=JSON.parse(Buffer.concat(modeChunks).toString('utf8'));
+  assert.equal(mode.capture_mode,'live','Live UI fixture must never start in idle/demo mode');
+  assert.equal(mode.broker_connected,true,'Owned native broker is available to the live UI');
+
   const state=async()=>{
     try {
       const response=await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)});
@@ -120,7 +148,10 @@ try {
         paused:value.paused?{reason:String(value.paused.reason??'').slice(0,128)}:null,
         targets:value.targets?.slice(0,32).map(target=>({id:target.id,type:target.type,
           fixture_path:typeof target.url==='string'&&target.url.startsWith(origin+'/')?new URL(target.url).pathname.slice(0,128):null})),
-        capture_status:value.network?.capture_status};
+        capture_status:value.network?.capture_status,
+        request_receipts:value.network?.requests?.filter(row=>{
+          try {const url=new URL(row.url);return ['127.0.0.1','localhost'].includes(url.hostname)&&url.port===String(fixture.address().port);}catch{return false;}
+        }).slice(0,32).map(row=>({id:row.id,target_id:row.target_id,path:new URL(row.url).pathname.slice(0,128),body_state:row.response?.body?.state}))};
       lastCaptureReadError='';
       return value;
     } catch(error) {lastCaptureReadError=String(error).slice(0,512);throw error;}
@@ -139,10 +170,18 @@ try {
   const uiLines=await until(async()=>{const lines=(await readFile(join(directory,'ui-profile/DevToolsActivePort'),'utf8')).trim().split('\n');return lines.length>=2&&lines;},'Viewer browser startup');
   uiSocket=new WebSocket(`ws://127.0.0.1:${uiLines[0]}${uiLines[1]}`);
   await new Promise((resolveOpen,reject)=>{const timer=setTimeout(()=>reject(Error('Viewer socket startup timeout')),5000);uiSocket.onopen=()=>{clearTimeout(timer);resolveOpen();};uiSocket.onerror=error=>{clearTimeout(timer);reject(error);};});
-  uiSocket.onmessage=socket.onmessage;
+  uiSocket.onmessage=event=>{
+    const message=JSON.parse(event.data);
+    if(message.method==='Runtime.exceptionThrown'&&uiErrors.length<8) {
+      const details=message.params?.exceptionDetails;
+      uiErrors.push({text:String(details?.text??'JavaScript exception').slice(0,128),line:details?.lineNumber??null,column:details?.columnNumber??null});
+    }
+    socket.onmessage(event);
+  };
   const uiCommand=(method,params={},sessionId)=>command(method,params,sessionId,uiSocket);
   const uiTarget=(await uiCommand('Target.createTarget',{url:address})).targetId;
   const uiSession=(await uiCommand('Target.attachToTarget',{targetId:uiTarget,flatten:true})).sessionId;
+  await uiCommand('Runtime.enable',{},uiSession);
   const uiRead=async expression=>{
     const result=await uiCommand('Runtime.evaluate',{expression,returnByValue:true},uiSession);
     assert(!result.exceptionDetails,JSON.stringify(result.exceptionDetails));
@@ -157,6 +196,12 @@ try {
     await uiCommand('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1},uiSession);
   };
   const uiRows=()=>uiRead("Array.from(document.querySelectorAll('#request-rows .request-row'),n=>({id:n.dataset.requestId,text:n.textContent}))");
+  readLiveUI=()=>uiRead(`(()=>({ready:document.readyState,
+    mode:document.querySelector('#session-mode')?.dataset.kind??null,
+    traffic_visible:document.querySelector('#screen-traffic')?.hidden===false,
+    row_count:document.querySelectorAll('#request-rows .request-row').length,
+    rows:Array.from(document.querySelectorAll('#request-rows .request-row')).slice(0,32).map(n=>({id:n.dataset.requestId,path:n.querySelector('.request-resource')?.textContent.slice(0,128)}))}))()`);
+
   const uiPaths=async(paths,label)=>until(async()=>{
     const visible=await uiRead("!document.querySelector('#screen-traffic').hidden");
     const rows=await uiRows();return visible&&paths.every(path=>rows.some(row=>row.text.includes(path)))&&rows;
@@ -166,6 +211,8 @@ try {
     const {data}=await uiCommand('Page.captureScreenshot',{format:'png'},uiSession);
     await writeFile(join(output,`${name}.png`),Buffer.from(data,'base64'));
   };
+  saveLiveUIShot=shot;
+  await shot('initial-live-ui');
   // Include about:blank -> navigation, a common new-tab lifecycle.
   const b=(await command('Target.createTarget',{url:'about:blank'})).targetId;
   await until(async()=>{const ids=(await state()).network.capture_status.attached_target_ids;return ids.includes(a)&&ids.includes(b);},'New blank tab owner');
@@ -384,6 +431,24 @@ try {
   // Snapshot again after the failed operation; the previous polling result can
   // predate a popup or renderer state transition by several seconds.
   try {await refreshFailureSnapshot?.();} catch {}
+  // Preserve owned-fixture UI evidence before browser teardown, including a
+  // first-assertion failure. Do not replace the original error if capture fails.
+  try {
+    const ui=await readLiveUI?.();
+    const snapshot=lastCaptureSnapshot;
+    const receipt={ui:ui??null,errors:uiErrors,backend:snapshot&&{
+      http_status:snapshot.http_status,state:snapshot.state,target:snapshot.target,
+      target_count:snapshot.target_count,capture_state:snapshot.capture_status?.state,
+      attached_targets:snapshot.capture_status?.attached_targets,
+      request_receipts:snapshot.request_receipts?.slice(0,16)}};
+    const receiptText=JSON.stringify(receipt,null,2);
+    assert(Buffer.byteLength(receiptText)<=32768,'Owned UI failure receipt stays within 32 KiB');
+    console.error('Live UI failure receipt:',JSON.stringify(receipt).slice(0,16384));
+    const output=join(root,'build/traffic-live-ui');await mkdir(output,{recursive:true});
+    await writeFile(join(output,'failure-receipt.json'),receiptText);
+  } catch(diagnosticError) {console.error('Live UI diagnostic capture failed:',String(diagnosticError).slice(0,512));}
+  try {await saveLiveUIShot?.('failure-live-ui');}
+  catch(diagnosticError) {console.error('Live UI failure screenshot unavailable:',String(diagnosticError).slice(0,512));}
   console.error('Failed control command:',JSON.stringify(lastControlCommand));
   console.error('Popup fixture receipts:',JSON.stringify(['/popup','/popup-immediate'].map(path=>({path,server_requests:servedCounts.get(path)??0}))));
   console.error('Capture failure snapshot:',JSON.stringify(lastCaptureSnapshot)?.slice(0,16384));

@@ -152,6 +152,14 @@ These observations do not establish universal popup or worker coverage; the
 bounded diagnostic relay can itself perturb timing. A backend-mediated opening
 API and native pre-CDP capture remain separate future work.
 
+The owned fixture separately retains and consumes the original worker/frame
+Fetch Responses after recording startup rows. It checks unchanged request and
+owner identities, one server receipt, observed `loadingFinished`, and exact body
+bytes. This distinguishes an unconsumed response stream from a missing terminal
+event without retrying requests or making startup failures pass. The new
+worker/frame consumption check still needs a real-browser result; existing
+initial-page consumption evidence alone does not prove those contexts.
+
 `tools/check-traffic-multitarget-browser.mjs` exercises real Chromium with the
 native transport against synthetic loopback pages, including blank new tabs,
 navigation, background fetches, focus changes and target closure; Linux CI runs

@@ -51,12 +51,12 @@ if(process.argv[2]==='--browser-wrapper') {
       `);
     }
     if(url.pathname==='/outer-frame') {
-      type='text/html';body=html("fetch('/outer-inline');const frame=document.createElement('iframe');frame.src='/inner-frame';document.documentElement.append(frame);");
+      type='text/html';body=html("globalThis.originalStartupResponse=fetch('/outer-inline');const frame=document.createElement('iframe');frame.src='/inner-frame';document.documentElement.append(frame);");
     }
-    if(url.pathname==='/inner-frame') {type='text/html';body=html("fetch('/inner-inline');new Worker('/frame-worker.js');");}
+    if(url.pathname==='/inner-frame') {type='text/html';body=html("globalThis.originalStartupResponse=fetch('/inner-inline');new Worker('/frame-worker.js');");}
     const workers={'/dedicated.js':'/dedicated-inline','/nested-worker.js':'/nested-inline','/frame-worker.js':'/frame-worker-inline'};
     if(workers[url.pathname]) {
-      type='text/javascript';body=`fetch('${workers[url.pathname]}');setInterval(()=>{},1000);`;
+      type='text/javascript';body=`globalThis.originalStartupResponse=fetch('${workers[url.pathname]}');setInterval(()=>{},1000);`;
       if(url.pathname==='/dedicated.js')body+="new Worker('/nested-worker.js');";
     }
     response.setHeader('Content-Type',type);response.end(body);
@@ -219,6 +219,55 @@ if(process.argv[2]==='--browser-wrapper') {
       snapshot=await reportRows(['/outer-frame','/inner-frame'],'OOPIF/nested-frame initial-document measurement',{strict:false});
       const missingFrameDocuments=['/outer-frame','/inner-frame'].filter(path=>!rowFor(snapshot,path));
       console.log(`COVERAGE LIMIT: initial cross-site frame documents missing=${JSON.stringify(missingFrameDocuments)}; startup holds alter timing and do not establish 100% capture. Body availability remains separately bounded.`);
+    });
+    // Drain the same authored startup Responses only after their original row
+    // observations. No retry fetch, startup wait, or producer completion is added.
+    const originalPaths=[...workerPaths,'/outer-inline','/inner-inline'];
+    await runCase('original worker and frame response consumption',originalPaths,async()=>{
+      const before=await reportRows(originalPaths,'original startup rows before consumption');
+      const identities=new Map(originalPaths.map(path=>{
+        const row=rowFor(before,path);
+        assert.equal(servedCounts.get(path),1,'Original startup response requested exactly once');
+        return [path,{id:row.id,owner:row.capture_owner,target:row.target_id,protocol:row.protocol_request_id,state:row.state}];
+      }));
+      const infos=(await command('Target.getTargets')).targetInfos;
+      const consume=async(target,expression)=>{
+        caseStage.mark('target-attachment');
+        const session=(await command('Target.attachToTarget',{targetId:target,flatten:true})).sessionId;
+        try {
+          caseStage.mark('evaluation');
+          const result=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true},session);
+          caseStage.mark('evaluation-exception');
+          assert(!result.exceptionDetails,'Original Response consumption must succeed in its authored context');
+          return result.result?.value;
+        } finally {await command('Target.detachFromTarget',{sessionId:session});}
+      };
+      for(const [i,path] of workerPaths.entries()) {
+        const url=(i===2?origin.replace('127.0.0.1','localhost'):origin)+['/dedicated.js','/nested-worker.js','/frame-worker.js'][i];
+        const matches=infos.filter(t=>t.type==='worker'&&t.url===url);
+        assert.equal(matches.length,1,'Original startup response has one authored worker context');
+        assert.equal(identities.get(path).target,matches[0].targetId,'Startup row belongs to original worker');
+        const text=await consume(matches[0].targetId,'globalThis.originalStartupResponse.then(response=>response.text())');
+        assert.equal(text,`synthetic:${path}`,'Consumed bytes come from the original startup response');
+      }
+      const outer=infos.filter(t=>t.type==='iframe'&&t.url===origin.replace('127.0.0.1','localhost')+'/outer-frame');
+      assert.equal(outer.length,1,'Original responses have one authored outer iframe context');
+      const frameBodies=await consume(outer[0].targetId,`(()=>{
+        if(location.pathname!=='/outer-frame'||frames.length!==1||frames[0].location.pathname!=='/inner-frame')throw Error('Unexpected authored frame tree');
+        return Promise.all([globalThis.originalStartupResponse,frames[0].originalStartupResponse].map(p=>p.then(response=>response.text())));
+      })()`);
+      assert.deepEqual(frameBodies,['synthetic:/outer-inline','synthetic:/inner-inline']);
+      const after=await reportRows(originalPaths,'same startup rows after original Response consumption',{requireBodies:true});
+      for(const path of originalPaths) {
+        const row=rowFor(after,path),prior=identities.get(path);
+        assert.equal(servedCounts.get(path),1,'Consuming the original Response must not replay a request');
+        assert.deepEqual({id:row.id,owner:row.capture_owner,target:row.target_id,protocol:row.protocol_request_id},
+          {id:prior.id,owner:prior.owner,target:prior.target,protocol:prior.protocol},'Completion must update the same original capture row and owner');
+        assert.equal(row.state,'complete');
+        assert.equal(row.timing_evidence?.completion_source,'loadingFinished','Only an observed terminal event establishes completion');
+        assert.equal(row.response.body.text,`synthetic:${path}`);
+      }
+      console.log('Original startup response transitions:',JSON.stringify(originalPaths.map(path=>({path,before:diagnosticEnum(identities.get(path).state,['pending','complete','failed']),after:'complete',server_requests:servedCounts.get(path)}))));
     });
     // Stable post-startup bodies are a separate strict contract. Their readiness
     // must not retroactively stand in for the startup-row assertions above.

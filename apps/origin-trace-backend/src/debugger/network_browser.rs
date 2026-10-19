@@ -25,6 +25,7 @@ enum BrowserSetupStage {
     DiscoverTargets,
     GetTargets,
     GetTargetsShape,
+    RootAutoAttach,
 }
 struct BrowserSetupFailure {
     stage: BrowserSetupStage,
@@ -685,7 +686,8 @@ impl Debugger {
                 auto_attach(true),
                 Duration::from_secs(3),
             )
-            .await?;
+            .await
+            .map_err(|e| BrowserSetupFailure::at(BrowserSetupStage::RootAutoAttach, e))?;
         } else {
             // Passive capture must never enable the browser-root popup throttle.
             self.schedule_capture_admission(&c);
@@ -1669,6 +1671,21 @@ mod tests {
             )
             .reason(),
             "protocol-error"
+        );
+    }
+    #[test]
+    fn owned_root_setup_rejection_retains_stage_and_public_code() {
+        let rejected: std::result::Result<(), Error> =
+            Err(Error::conflict("private diagnostic").with_code(Code::ApplicationFailed));
+        let failure = rejected
+            .map_err(|e| BrowserSetupFailure::at(BrowserSetupStage::RootAutoAttach, e))
+            .unwrap_err();
+        assert_eq!(failure.stage, BrowserSetupStage::RootAutoAttach);
+        assert_eq!(failure.reason(), "command-rejected");
+        assert_eq!(failure.error.reason.code, Code::ApplicationFailed);
+        assert_eq!(
+            serde_json::to_value(failure.stage).unwrap(),
+            json!("root-auto-attach")
         );
     }
     #[test]

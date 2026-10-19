@@ -138,3 +138,15 @@ assert.deepEqual(setupObserver.snapshot().browserSetupObservations, [
   {stage: 'get-targets', reason: 'timeout', samples: 1},
 ]);
 assert(!JSON.stringify(setupObserver.snapshot()).includes('SECRET'));
+
+const ownedSetup = createLifecycleObserver();
+const ownedSnapshot = {
+  network: {
+    capture_epoch: 0,
+    capture_status: {browser_setup_failure: {stage: 'root-auto-attach', reason: 'timeout'}},
+  },
+};
+ownedSetup.observe(ownedSnapshot);
+assert.deepEqual(ownedSetup.snapshot().browserSetupObservations, [
+  {stage: 'root-auto-attach', reason: 'timeout', samples: 1},
+]);

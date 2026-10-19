@@ -76,6 +76,7 @@ export const browserSetupStages = Object.freeze([
   'discover-targets',
   'get-targets',
   'get-targets-shape',
+  'root-auto-attach',
 ]);
 export const browserSetupReasons = Object.freeze([
   'timeout',

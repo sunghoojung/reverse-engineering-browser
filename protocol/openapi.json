@@ -24848,7 +24848,8 @@
                       "transport-open",
                       "discover-targets",
                       "get-targets",
-                      "get-targets-shape"
+                      "get-targets-shape",
+                      "root-auto-attach"
                     ]
                   },
                   "reason": {

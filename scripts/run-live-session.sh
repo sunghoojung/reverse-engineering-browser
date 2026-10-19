@@ -160,41 +160,57 @@ analyzer_pid=""
 ui_pid=""
 brave_pid=""
 # An open native UI can keep HTTP event streams alive during graceful shutdown.
-# Bound teardown of our own children so retry never waits for an abandoned stream.
-stop_process() {
-  local child_pid="$1"
-  if [[ -z "${child_pid}" ]]; then
-    return
-  fi
-  if kill -0 "${child_pid}" 2>/dev/null; then
-    kill -TERM "${child_pid}" 2>/dev/null || true
-    for _ in {1..100}; do
-      if ! kill -0 "${child_pid}" 2>/dev/null; then
-        break
+# Signal every owned child before waiting so one blocked helper cannot postpone
+# shutdown of the others. All children share one bounded grace period.
+stop_processes() {
+  local attempts="$1"
+  shift
+  local child_pid
+  local attempt
+  local pending
+  for child_pid in "$@"; do
+    if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+      kill -TERM "${child_pid}" 2>/dev/null || true
+    fi
+  done
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    pending=0
+    for child_pid in "$@"; do
+      if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+        pending=1
       fi
-      sleep 0.05
     done
-    if kill -0 "${child_pid}" 2>/dev/null; then
+    if [[ "${pending}" == 0 ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+  for child_pid in "$@"; do
+    if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+      echo "Live session cleanup: forcing owned child ${child_pid} to stop." >&2
       kill -KILL "${child_pid}" 2>/dev/null || true
     fi
-  fi
-  wait "${child_pid}" 2>/dev/null || true
+  done
+  for child_pid in "$@"; do
+    if [[ -n "${child_pid}" ]]; then
+      wait "${child_pid}" 2>/dev/null || true
+    fi
+  done
 }
 
 stop_artifact_receiver() {
   if [[ -z "${artifact_receiver_pid}" ]]; then
     return
   fi
-  stop_process "${artifact_receiver_pid}"
+  stop_processes 100 "${artifact_receiver_pid}"
   artifact_receiver_pid=""
 }
 
 cleanup() {
-  stop_process "${brave_pid}"
-  stop_process "${analyzer_pid}"
-  stop_process "${broker_pid}"
-  stop_artifact_receiver
-  stop_process "${ui_pid}"
+  echo "Live session cleanup started: browser=${brave_pid:-none} analyzer=${analyzer_pid:-none} broker=${broker_pid:-none} artifacts=${artifact_receiver_pid:-none} backend=${ui_pid:-none}" >&2
+  stop_processes 100 "${brave_pid}" "${analyzer_pid}" "${broker_pid}" \
+    "${artifact_receiver_pid}" "${ui_pid}"
+  artifact_receiver_pid=""
   if [[ -S "${socket_path}" ]]; then
     rm -f "${socket_path}"
   fi
@@ -204,6 +220,7 @@ cleanup() {
   if [[ "${embedded_session}" == 1 && -n "${session_handshake}" ]]; then
     rm -f "${session_handshake}"
   fi
+  echo "Live session cleanup complete." >&2
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -269,10 +286,9 @@ analyze_captured_artifacts() {
   # shellcheck disable=SC2317,SC2329  # Invoked by the signal trap below.
   stop_analyzer_worker() {
     trap - INT TERM
-    if [[ -n "${worker_pid}" ]] && kill -0 "${worker_pid}" 2>/dev/null; then
-      kill "${worker_pid}" 2>/dev/null || true
-      wait "${worker_pid}" 2>/dev/null || true
-    fi
+    # Finish the worker's two-second grace before the coordinator's shared
+    # five-second deadline can kill this shell and orphan its active worker.
+    stop_processes 40 "${worker_pid}"
     exit 0
   }
   trap stop_analyzer_worker INT TERM

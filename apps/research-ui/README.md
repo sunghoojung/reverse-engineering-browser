@@ -354,6 +354,9 @@ preserving Chromium's sandbox. Do not wrap live Brave in `sandbox-exec`: nested
 macOS sandbox initialization fails. Build commands can still use that wrapper.
 If Brave or a required live helper exits, Origin Trace reports the closed
 connection and offers retry instead of silently leaving a failed session running.
+The coordinator signals all owned helpers together, allows a shared five-second
+shutdown grace, then stops remaining children. An active analyzer worker has a
+shorter two-second grace so its supervising shell can reap it before exiting.
 Runtime experiments and Console commands still require explicit actions in their
 disposable contexts. Worker/proxy foundations do not yet have runtime adapters.
 
@@ -523,7 +526,11 @@ demo, failed-live-start/offline fallback, and live HTTP modes. Each exercises
 bundled CSS/JS, private-route rejection, native capability markers, API contracts,
 Decoder and saved Analyst execution. The existing launcher check runs from an
 unrelated directory with bundled helpers and a disposable headless browser; it
-also checks shutdown and handshake removal. Logs are saved under `build/package-qa/`.
+also checks shutdown and handshake removal. Logs are saved under `build/package-qa/`,
+including bounded coordinator output and process status for browser interruption.
+`node tools/check-origin-trace-launcher.mjs --cleanup-only` exercises the same
+teardown functions with disposable socket-free helpers, including unresponsive
+children and analyzer-worker cleanup; it does not replace native package acceptance.
 The macOS CI job runs this check before uploading the app preview.
 
 The failed-start smoke uses a deliberately missing browser and follows the offline

@@ -425,6 +425,15 @@ jobs:
           test -n "$ORIGIN_TRACE_TEST_BROWSER"
           make traffic-capture-check
 
+      - name: Upload live Traffic continuity screenshots
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: traffic-live-ui-${{ github.run_id }}
+          path: build/traffic-live-ui/
+          if-no-files-found: warn
+          retention-days: 3
+
       - name: Run sanitizers
         if: matrix.os == 'ubuntu-latest'
         run: make sanitize

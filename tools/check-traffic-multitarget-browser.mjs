@@ -3,7 +3,7 @@
 // startup. Never wait for a capture owner before issuing those early requests.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdtemp, readFile, rm} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
@@ -18,7 +18,7 @@ const browser=process.env.ORIGIN_TRACE_TEST_BROWSER||process.env.REB_UI_CHROMIUM
 const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
 const transport=resolve(process.env.ORIGIN_TRACE_DEBUGGER_TRANSPORT||join(root,'build/reb-debugger-transport'));
 const directory=await mkdtemp(join(tmpdir(),'reb-traffic-browser-'));
-const children=[];let socket,sequence=1,diagnostics='',failure;const pending=new Map();
+const children=[];let socket,uiSocket,sequence=1,diagnostics='',failure;const pending=new Map();
 const served=new Set(),servedCounts=new Map(),heldResponses=new Map();
 let lastCaptureSnapshot=null,lastCaptureReadError='',refreshFailureSnapshot;
 let lastControlCommand=null;
@@ -98,15 +98,15 @@ try {
     const message=JSON.parse(event.data),waiter=pending.get(message.id);
     if(waiter){pending.delete(message.id);clearTimeout(waiter.timer);message.error?waiter.reject(Error(message.error.message)):waiter.resolve(message.result);}
   };
-  const command=(method,params={},sessionId)=>new Promise((resolveCommand,reject)=>{
+  const command=(method,params={},sessionId,controlSocket=socket)=>new Promise((resolveCommand,reject)=>{
     lastControlCommand={method,session_id:sessionId??null};
     const id=sequence++,timer=setTimeout(()=>{pending.delete(id);reject(Error(`${method} timeout`));},5000);
-    pending.set(id,{resolve:resolveCommand,reject,timer});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));
+    pending.set(id,{resolve:resolveCommand,reject,timer});controlSocket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));
   });
   const version=await command('Browser.getVersion');
   console.log('Fixture browser version:',JSON.stringify({product:version.product,protocolVersion:version.protocolVersion}).slice(0,512));
   const diagnosticTransport=await prepareCaptureDiagnosticTransport(directory,transport);
-  const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',diagnosticTransport,'--capture-network-content']);
+  const backend=start(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',active,'--debugger-transport',diagnosticTransport,'--capture-network-content','--ui-directory',join(root,'apps/research-ui')]);
   const address=await until(async()=>(await readFile(join(directory,'endpoint'),'utf8')).trim(),'Backend startup');
   const state=async()=>{
     try {
@@ -130,6 +130,42 @@ try {
   // Assert our authored page is ready instead of assuming a global owner count.
   const a=await until(async()=>(await command('Target.getTargets')).targetInfos.find(t=>t.type==='page'&&t.url===origin+'/page-a')?.targetId,'Authored first page');
   let snapshot=await until(async()=>{const s=await state();return s.state==='running'&&s.target.id===a&&s.network.capture_status.attached_target_ids.includes(a)&&s;},'First capture owner');
+  // Actual application assets and live HTTP snapshots, not the synthetic UI
+  // fixture. Assertions only read DOM; no render/refresh/state injection occurs.
+  // Keep the viewer in a separate browser so its polling cannot capture itself
+  // and recursively grow snapshots or displace authored requests from the UI.
+  start(browser,['--headless=new','--disable-dev-shm-usage','--disable-background-networking','--no-first-run',
+    '--remote-debugging-port=0',`--user-data-dir=${directory}/ui-profile`,'about:blank']);
+  const uiLines=await until(async()=>{const lines=(await readFile(join(directory,'ui-profile/DevToolsActivePort'),'utf8')).trim().split('\n');return lines.length>=2&&lines;},'Viewer browser startup');
+  uiSocket=new WebSocket(`ws://127.0.0.1:${uiLines[0]}${uiLines[1]}`);
+  await new Promise((resolveOpen,reject)=>{const timer=setTimeout(()=>reject(Error('Viewer socket startup timeout')),5000);uiSocket.onopen=()=>{clearTimeout(timer);resolveOpen();};uiSocket.onerror=error=>{clearTimeout(timer);reject(error);};});
+  uiSocket.onmessage=socket.onmessage;
+  const uiCommand=(method,params={},sessionId)=>command(method,params,sessionId,uiSocket);
+  const uiTarget=(await uiCommand('Target.createTarget',{url:address})).targetId;
+  const uiSession=(await uiCommand('Target.attachToTarget',{targetId:uiTarget,flatten:true})).sessionId;
+  const uiRead=async expression=>{
+    const result=await uiCommand('Runtime.evaluate',{expression,returnByValue:true},uiSession);
+    assert(!result.exceptionDetails,JSON.stringify(result.exceptionDetails));
+    return result.result?.value;
+  };
+  await uiCommand('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false},uiSession);
+  await until(()=>uiRead("!!document.querySelector('#request-rows') && document.readyState==='complete'"),'Live Origin Trace UI loads');
+  const uiClick=async selector=>{
+    const point=await uiRead(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)return null;n.scrollIntoView({block:'center'});const r=n.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,visible:r.width>0&&r.height>0&&!n.closest('[hidden]')};})()`);
+    assert(point?.visible,`Visible UI control: ${selector}`);
+    await uiCommand('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1},uiSession);
+    await uiCommand('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1},uiSession);
+  };
+  const uiRows=()=>uiRead("Array.from(document.querySelectorAll('#request-rows .request-row'),n=>({id:n.dataset.requestId,text:n.textContent}))");
+  const uiPaths=async(paths,label)=>until(async()=>{
+    const visible=await uiRead("!document.querySelector('#screen-traffic').hidden");
+    const rows=await uiRows();return visible&&paths.every(path=>rows.some(row=>row.text.includes(path)))&&rows;
+  },label);
+  const shot=async name=>{
+    const output=join(root,'build/traffic-live-ui');await mkdir(output,{recursive:true});
+    const {data}=await uiCommand('Page.captureScreenshot',{format:'png'},uiSession);
+    await writeFile(join(output,`${name}.png`),Buffer.from(data,'base64'));
+  };
   // Include about:blank -> navigation, a common new-tab lifecycle.
   const b=(await command('Target.createTarget',{url:'about:blank'})).targetId;
   await until(async()=>{const ids=(await state()).network.capture_status.attached_target_ids;return ids.includes(a)&&ids.includes(b);},'New blank tab owner');
@@ -146,6 +182,10 @@ try {
   const rows=snapshot.network.requests.filter(row=>row.url.endsWith('/request-a')||row.url.endsWith('/request-b'));
   assert.equal(rows.find(row=>row.target_id===a).response.body.text,'synthetic:/request-a');
   assert.equal(rows.find(row=>row.target_id===b).response.body.text,'synthetic:/request-b');
+  const liveRows=await uiPaths(['/page-b','/request-a','/request-b'],'New-tab navigation and both owners appear in Traffic without refresh or workspace click');
+  const retainedUIIds=rows.map(row=>row.id);
+  for(const id of retainedUIIds)assert(liveRows.some(row=>row.id===id),'DOM row has the exact captured request identity');
+  await shot('new-tab-live-arrivals');
   // Server-held responses establish real overlap, not merely ready owners.
   for(const [session,suffix] of [[sessionA,'a'],[sessionB,'b']]) {
     const result=await command('Runtime.evaluate',{expression:`globalThis.overlapBody=fetch('${origin}/overlap/${suffix}').then(r=>r.text());'started'`},session);
@@ -153,6 +193,8 @@ try {
   }
   await until(()=>heldResponses.has('/overlap/a')&&heldResponses.has('/overlap/b'),'Both tab requests simultaneously outstanding at server');
   await until(async()=>(await state()).network.requests.filter(row=>row.url.startsWith(origin+'/overlap/')&&row.response.body.state==='loading').length===2,'Both overlapping owner rows retained before selection');
+  await uiPaths(['/overlap/a','/overlap/b'],'Both concurrent requests appear in live Traffic while responses remain outstanding');
+  await shot('concurrent-requests-pending');
   // HTTP owners attach from browser events before the selected-debugger's
   // independently polled catalog necessarily exposes the page as selectable.
   await until(async()=>(await state()).targets.some(target=>target.id===b),'B appears in selectable debugger catalog');
@@ -163,6 +205,24 @@ try {
   snapshot=await until(async()=>{const s=await state();return s.network.requests.some(row=>row.url===origin+'/after-switch-a'&&row.response.body.state==='available')&&s;},'Background A after focus switch');
   assert(heldResponses.has('/overlap/a')&&heldResponses.has('/overlap/b'),'Both original responses stay outstanding across selection and background activity');
   for(const row of rows)assert(snapshot.network.requests.some(retained=>retained.id===row.id),'Focus switch must retain earlier rows');
+  await uiPaths(['/request-a','/request-b','/after-switch-a'],'Live Traffic keeps rows and background arrivals after debugger target switch');
+  for(const screen of ['sources','signals']) {
+    await uiClick(`.nav-button[data-screen="${screen}"]`);
+    await until(()=>uiRead(`!document.querySelector('#screen-${screen}').hidden`),`${screen} workspace opens`);
+    await uiClick('.nav-button[data-screen="traffic"]');
+    const retained=await uiPaths(['/request-a','/request-b'],`Traffic retained after ${screen}`);
+    for(const id of retainedUIIds)assert(retained.some(row=>row.id===id),'View switch preserves exact rows');
+  }
+  await uiClick('#native-console-toggle');
+  await until(()=>uiRead("!document.querySelector('#native-console-panel').hidden"),'Console opens');
+  await uiClick('#native-console-toggle');
+  for(const owner of [a,b,'all']) {
+    await uiClick(`#request-tab-scopes [data-scope-id="${owner}"]`);
+    await until(()=>uiRead(`document.querySelector('#request-tab-scopes [data-scope-id="${owner}"]').getAttribute('aria-selected')==='true'`),'Traffic owner scope selected');
+    const scoped=await uiRows();
+    for(const row of rows.filter(row=>owner==='all'||row.target_id===owner))assert(scoped.some(item=>item.id===row.id),'Owner scope includes exact retained request');
+    for(const row of rows.filter(row=>owner!=='all'&&row.target_id!==owner))assert(!scoped.some(item=>item.id===row.id),'Owner scope excludes the other owner');
+  }
   await command('Target.closeTarget',{targetId:a});
   snapshot=await until(async()=>{const s=await state(),ids=s.network.capture_status.attached_target_ids;return !ids.includes(a)&&ids.includes(b)&&s;},'Closed A owner');
   const heldB=heldResponses.get('/overlap/b');assert(heldB,'B response remains outstanding when A closes');heldB.response.end(heldB.body);
@@ -178,6 +238,25 @@ try {
   snapshot=await until(async()=>{const s=await state();return s.network.requests.some(row=>row.url===origin+'/after-close-b'&&row.response.body.state==='available')&&s;},'Surviving B captures after A closes');
   assert.equal(snapshot.network.requests.find(row=>row.url===origin+'/after-close-b').target_id,b);
   assert(snapshot.network.requests.some(row=>row.id===overlapA.id&&row.response.body.state==='error'),'Incomplete closed-owner history stays explicit');
+  // Navigate the existing new tab to a second owned origin, then open a lasting
+  // popup. Readiness for the blank popup is deliberate: startup completeness
+  // remains the separate, explicitly partial probe below.
+  const secondOrigin=origin.replace('127.0.0.1','localhost');
+  await command('Page.navigate',{url:secondOrigin+'/page-next-origin'},sessionB);
+  await uiPaths(['/page-b','/page-next-origin','/request-a','/request-b'],'Subsequent cross-origin navigation appears automatically and preserves history');
+  await command('Runtime.evaluate',{expression:"window.open('about:blank','issue233-popup');'opened'"},sessionB);
+  const popupId=await until(async()=>(await command('Target.getTargets')).targetInfos.find(t=>t.openerId===b&&t.url==='about:blank')?.targetId,'Owned lasting popup');
+  await until(async()=>(await state()).network.capture_status.attached_target_ids.includes(popupId),'Blank popup capture ready');
+  const popupSession=(await command('Target.attachToTarget',{targetId:popupId,flatten:true})).sessionId;
+  await command('Page.navigate',{url:secondOrigin+'/page-popup-live'},popupSession);
+  await uiPaths(['/page-next-origin','/page-popup-live'],'Popup navigation appears in actual Traffic without manual refresh');
+  await shot('cross-origin-popup-retained');
+  await command('Target.closeTarget',{targetId:popupId});
+  const finalUI=await uiPaths(['/request-a','/request-b','/after-close-b','/page-next-origin','/page-popup-live'],'Traffic retains closed-tab history and live survivor requests');
+  for(const id of retainedUIIds)assert(finalUI.some(row=>row.id===id),'Closing an owner retains exact UI rows');
+  await shot('closed-tab-history-live-survivor');
+  await uiCommand('Target.closeTarget',{targetId:uiTarget});
+  console.log('PASS issue233 live UI: automatic new-tab and cross-origin navigation arrivals, overlapping owners, Sources/Fingerprinting/Console and Traffic scope continuity, popup and closed-tab history; no manual refresh');
   console.log('PASS real concurrent tabs: server-held requests overlap, selection switches while pending, closing A preserves its incomplete row and B exact body, survivor continues');
   console.log('PASS real Chromium/native transport: blank new tab navigation, both-page bodies, background capture after focus switch, history retention and target closure');
   // Early-traffic acceptance probe: these operations intentionally never wait
@@ -323,6 +402,8 @@ try {
       await waitForClose(children[0].closed,3000);
     } catch(error) {cleanupErrors.push(error);}
   }
+  if(uiSocket?.readyState===WebSocket.OPEN)uiSocket.send(JSON.stringify({id:sequence++,method:'Browser.close'}));
+  try {uiSocket?.close();} catch(error) {cleanupErrors.push(error);}
   try {socket?.close();} catch(error) {cleanupErrors.push(error);}
   let allClosed=true;
   for(const process of [...children].reverse()) {

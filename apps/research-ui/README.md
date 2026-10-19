@@ -440,6 +440,15 @@ fallback and its missing worker/iframe coverage. Overflow and unattached targets
 remain explicit in either mode; native-only requests are not merged into this CDP
 list, and WebSockets retain their selected-debugger-target scope.
 
+`make traffic-capture-check` includes a live Chromium → native transport →
+backend → actual Traffic UI regression using authored loopback origins. A separate
+viewer browser prevents self-capture. It checks automatic new-tab and subsequent
+navigation arrivals, concurrent requests, view and target-scope continuity, popup
+traffic, and retained closed-tab history without manual refresh. Screenshots are
+written under `build/traffic-live-ui/` and retained by CI. Blank-target readiness
+is deliberate; this continuity test does not establish lossless startup capture
+or replace native macOS acceptance.
+
 The backend command-line option `--capture-target-limit` sets the HTTP owner cap
 (default 32, allowed range 1–128). This is a backend launch option, not an in-app
 setting. Raising it permits more capture owners; the existing 1,000-request window

@@ -1,9 +1,12 @@
 //! A bounded blank -> armed owner -> navigation transaction for owned pages.
 use super::{Debugger, connection::Connection, network_capture::Owner};
-use crate::error::{Code, Error, Result};
+use crate::error::{Cause, Code, Error, Reason, Result};
 use serde_json::{Value, json};
 use std::{
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -105,6 +108,7 @@ impl Debugger {
             connection: connection.clone(),
             target: None,
         };
+        let mutation_in_flight = AtomicBool::new(false);
         let result = tokio::time::timeout(TRANSACTION, async {
             self.owned_page_live(&connection, &context)?;
             let created = connection
@@ -113,8 +117,12 @@ impl Debugger {
                     json!({"url":"about:blank","browserContextId":context,"background":true}),
                     TRANSACTION,
                     || {
-                        self.owned_page_live(&connection, &context).is_ok()
-                            && self.require_scope_idle().is_ok()
+                        let admitted = self.owned_page_live(&connection, &context).is_ok()
+                            && self.require_scope_idle().is_ok();
+                        if admitted {
+                            mutation_in_flight.store(true, Ordering::Release);
+                        }
+                        admitted
                     },
                 )
                 .await?
@@ -124,9 +132,13 @@ impl Debugger {
             let target = created["targetId"]
                 .as_str()
                 .filter(|id| !id.is_empty() && id.len() <= 4096)
-                .ok_or_else(|| Error::conflict("Browser returned an invalid owned page identity"))?
+                .ok_or_else(|| {
+                    Error::conflict("Browser returned an invalid owned page identity")
+                        .with_reason(Reason::uncertain(Cause::InvalidReply))
+                })?
                 .to_owned();
             page.target = Some(target.clone());
+            mutation_in_flight.store(false, Ordering::Release);
             let mut pinned = None;
             let owner = loop {
                 self.owned_page_live(&connection, &context)?;
@@ -168,17 +180,22 @@ impl Debugger {
                         TRANSACTION,
                         owner.session.as_deref().unwrap(),
                         || {
-                            self.owned_page_live(&connection, &context).is_ok()
+                            let admitted = self.owned_page_live(&connection, &context).is_ok()
                                 && self
                                     .owned_page_owner(&connection, &target, &mut pinned)
                                     .is_ok_and(|owner| owner.is_some())
-                                && self.require_scope_idle().is_ok()
+                                && self.require_scope_idle().is_ok();
+                            if admitted {
+                                mutation_in_flight.store(true, Ordering::Release);
+                            }
+                            admitted
                         },
                     )
                     .await?
                     .ok_or_else(|| {
                         Error::conflict("Owned page navigation authority expired before send")
                     })?;
+                mutation_in_flight.store(false, Ordering::Release);
                 if reply.get("errorText").is_some() {
                     return Err(Error::conflict("Owned page navigation failed"));
                 }
@@ -190,7 +207,12 @@ impl Debugger {
         })
         .await
         .unwrap_or_else(|_| {
-            Err(Error::conflict("Owned page creation timed out").with_code(Code::Timeout))
+            let error = Error::conflict("Owned page creation timed out");
+            Err(if mutation_in_flight.load(Ordering::Acquire) {
+                error.with_reason(Reason::uncertain(Cause::Timeout))
+            } else {
+                error.with_code(Code::Timeout)
+            })
         });
         if result.is_ok() {
             page.target = None;

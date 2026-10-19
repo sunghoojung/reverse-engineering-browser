@@ -101,9 +101,13 @@ if(process.argv[2]==='--browser') {
       if(options.ownedNavigation&&capturing&&target==='navigation-new'&&m.method==='Network.enable'&&options.navigationFault==='timeout')continue;
       if(options.ownedNavigation&&m.method==='Target.createTarget') {
         if(!existsSync(join(fixtureDirectory,'experiment-created'))){writeFileSync(join(fixtureDirectory,'experiment-created'),'1');reply({targetId:'a'});}
+        else if(options.navigationFault==='create-no-reply')continue;
+        else if(options.navigationFault==='malformed-create-ID')reply({targetId:7});
+        else if(options.navigationFault==='owner-readiness-timeout')reply({targetId:'navigation-new'});
         else {const targetInfo={targetId:'navigation-new',type:'page',title:'new',url:m.params.url,browserContextId:'owned-context'};writeFileSync(join(fixtureDirectory,'targets'),JSON.stringify([...targets(),targetInfo]));appendFileSync(join(fixtureDirectory,'events'),JSON.stringify({add:'navigation-new'})+'\n');reply({targetId:'navigation-new'});}
       }
       else if(options.ownedNavigation&&m.method==='Target.getTargetInfo'){const targetInfo=targets().find(t=>t.targetId===m.params.targetId);reply({targetInfo:options.navigationFault==='context-mismatch'?{...targetInfo,browserContextId:'different-context'}:targetInfo});}
+      else if(options.ownedNavigation&&m.method==='Page.navigate'&&options.navigationFault==='navigate-no-reply')continue;
       else if(options.ownedNavigation&&m.method==='Page.navigate'&&options.navigationFault==='navigate-error')reply({errorText:'synthetic navigation rejected'});
       else if(options.ownedNavigation&&m.method==='Target.closeTarget') {
         writeFileSync(join(fixtureDirectory,'targets'),JSON.stringify(targets().filter(t=>t.targetId!==m.params.targetId)));appendFileSync(join(fixtureDirectory,'events'),JSON.stringify({raw:{method:'Target.targetDestroyed',params:{targetId:m.params.targetId}}})+'\n');reply({success:true});
@@ -272,6 +276,26 @@ if(process.argv[2]==='--browser') {
       if(navigationFault==='disposal')await action({action:'dispose_request_interception_experiment'});
       assert.equal(capture(commands).filter(c=>c.method==='Target.createTarget').length,2,'No implicit page creation retry');
       console.log(`PASS create_experiment_page product path: ${navigationFault}`);
+    });
+  }
+  for(const navigationFault of ['create-no-reply','navigate-no-reply','malformed-create-ID','owner-readiness-timeout']) {
+    await fixture([{...info('a'),browserContextId:'owned-context'}],{ownedNavigation:true,experiment:true,navigationFault},async({commands,action,actionResult,waitState,until})=>{
+      await waitState(s=>s.state==='running'&&s.network.capture_status.attached_targets===1,'Uncertain navigation baseline ready');
+      await action({action:'create_request_interception_experiment'});
+      const wanted='http://localhost/uncertain-navigation-fixture',started=Date.now();
+      const result=await actionResult({action:'create_experiment_page',url:wanted});
+      assert(!result.ok,`${navigationFault}: action must fail`);
+      const readiness=navigationFault==='owner-readiness-timeout';
+      assert.equal(result.body.code,readiness?'timeout':'command_outcome_unknown',`${navigationFault}: outcome classification`);
+      if(!readiness)assert.equal(result.body.details.cause,navigationFault==='malformed-create-ID'?'invalid_reply':'timeout');
+      if(navigationFault!=='malformed-create-ID')assert(Date.now()-started>=14000&&Date.now()-started<23000,'Outer transaction deadline remains bounded');
+      const creates=capture(commands).filter(c=>c.method==='Target.createTarget');assert.equal(creates.length,2,'No create retry after uncertain outcome');assert.equal(creates[1].params.url,'about:blank');
+      const navigation=capture(commands).filter(c=>c.method==='Page.navigate'&&c.params.url===wanted);assert.equal(navigation.length,navigationFault==='navigate-no-reply'?1:0,'No navigation retry after uncertain outcome');
+      if(navigationFault==='navigate-no-reply'||readiness)await until(()=>capture(commands).some(c=>c.method==='Target.closeTarget'),'Asynchronous known-target cleanup admitted',4000);
+      const cleanup=capture(commands).filter(c=>c.method==='Target.closeTarget');
+      if(navigationFault==='navigate-no-reply'||readiness){assert.equal(cleanup.length,1);assert.equal(cleanup[0].params.targetId,'navigation-new');assert.equal(cleanup[0].pid,creates[1].pid,'Known target cleanup uses exact original capture connection');}
+      else assert.equal(cleanup.length,0,'Unknown created target identity cannot close unrelated targets');
+      console.log(`PASS create_experiment_page outcome classification: ${navigationFault}`);
     });
   }
   await fixture([info('a')],{orderedInit:true,enableReplyDelay:1000},async({commands,waitState,until,add,state})=>{

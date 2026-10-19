@@ -436,7 +436,9 @@ page in the current disposable context. It waits for that exact capture owner's
 Network and recursive auto-attach acknowledgments, verifies the page is still
 blank in the same context, and sends navigation through that owner's session.
 Creation and navigation recheck their authority after the transport writer queue.
-The transaction has a 15-second deadline and never retries a navigation. Owner,
+The transaction has a 15-second deadline and never retries a navigation. A timeout
+after mutation admission reports an unknown command outcome; a readiness-only
+timeout remains an ordinary timeout. Owner,
 connection, or context replacement aborts it. Passive page creation is unchanged.
 
 On failure or cancellation, a known new target receives a best-effort close on

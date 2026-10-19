@@ -329,6 +329,26 @@ impl Connection {
         )
         .await
     }
+    pub(super) async fn command_in_session_guarded(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+        session: &str,
+        before_send: impl FnOnce() -> bool,
+    ) -> Result<Option<Value>> {
+        self.command_session_guarded(
+            method,
+            params,
+            deadline,
+            Some(session),
+            CommandAdmission {
+                before_send,
+                sent_notification: None,
+            },
+        )
+        .await
+    }
     async fn command_session_guarded(
         &self,
         method: &str,
@@ -672,6 +692,52 @@ mod tests {
                     "Runtime.evaluate",
                     json!({"expression":"synthetic_secret"}),
                     Duration::from_secs(2),
+                    || {
+                        checked.store(true, Ordering::Release);
+                        check.load(Ordering::Acquire)
+                    },
+                )
+                .await
+        });
+        // Wait until the command has reached the blocked writer, rather than
+        // relying on a timing delay to model a queued, subsequently retired rule.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !connection.pending.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!observed.load(Ordering::Acquire));
+        permitted.store(false, Ordering::Release);
+        drop(writer);
+        assert!(command.await.unwrap().unwrap().is_none());
+        assert!(observed.load(Ordering::Acquire));
+        assert!(connection.pending.lock().unwrap().is_empty());
+        assert!(!directory.path().join("received").exists());
+        connection.close().await;
+    }
+    #[tokio::test]
+    async fn queued_session_guard_rechecks_before_navigation_bytes_are_sent() {
+        use std::sync::atomic::AtomicBool;
+
+        let (directory, connection, _events) = fixture(None, false).await;
+        let writer = connection.stdin.lock().await;
+        let permitted = Arc::new(AtomicBool::new(true));
+        let observed = Arc::new(AtomicBool::new(false));
+        let queued = connection.clone();
+        let check = permitted.clone();
+        let checked = observed.clone();
+        let command = tokio::spawn(async move {
+            queued
+                .command_in_session_guarded(
+                    "Page.navigate",
+                    json!({"url":"https://example.test/owned"}),
+                    Duration::from_secs(2),
+                    "owned-session",
                     || {
                         checked.store(true, Ordering::Release);
                         check.load(Ordering::Acquire)

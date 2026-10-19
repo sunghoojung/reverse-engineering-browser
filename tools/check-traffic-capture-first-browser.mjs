@@ -38,6 +38,7 @@ if(process.argv[2]==='--browser-wrapper') {
     response.setHeader('Access-Control-Allow-Origin','*');response.setHeader('Cache-Control','no-store');
     const html=script=>`<title>Authored capture-first fixture</title><link rel="icon" href="data:,"><script>${script}</script>`;
     let body=`synthetic:${request.url}`,type='text/plain';
+    if(url.pathname==='/owned-open') {type='text/html';body=html("fetch('/owned-open-inline').then(response=>response.text());");}
     if(url.pathname==='/initial') {type='text/html';body=html("window.initialResponse=fetch('/initial-inline');");}
     if(url.pathname.startsWith('/early-tab/')) {
       type='text/html';body=html(`fetch('/early-inline/${url.pathname.split('/').at(-1)}');`);
@@ -246,6 +247,29 @@ if(process.argv[2]==='--browser-wrapper') {
       console.log(`FINAL row/body observations: ${JSON.stringify([...observedPaths].map(path=>{const row=rowFor(snapshot,path);return {path,request_row:!!row,response_body:bodyState(row)};}))}`);
       caseStage.mark('debugger-focus');
       assert.equal(snapshot.target.id,first,'Capture-first background activity must not change debugger focus');
+    });
+    // Exercise the actual Experiment page action separately from adversarial
+    // direct-URL creation above. The backend owns this opening barrier.
+    await runCase('owned experiment page opening',['/owned-open','/owned-open-inline'],async()=>{
+      const action=async(payload)=>{
+        const response=await fetch(new URL('/api/debugger/actions',address),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(20000)});
+        assert(response.ok,'Owned page product action succeeds');
+        return response.json();
+      };
+      caseStage.mark('target-creation');
+      await action({action:'create_request_interception_experiment'});
+      try {
+        const created=await action({action:'create_experiment_page',url:origin+'/owned-open'});
+        const captured=await reportRows(['/owned-open','/owned-open-inline'],'owned Experiment initial document and inline response',{requireBodies:true});
+        for(const path of ['/owned-open','/owned-open-inline']) {
+          const row=rowFor(captured,path);
+          assert.equal(servedCounts.get(path),1,'Owned opening sends each authored request once');
+          assert.equal(row.target_id,created.target_id,'Initial requests retain the created page identity');
+          assert.equal(row.state,'complete');
+          assert.equal(row.timing_evidence?.completion_source,'loadingFinished');
+        }
+        assert.equal(rowFor(captured,'/owned-open-inline').response.body.text,'synthetic:/owned-open-inline');
+      } finally {await action({action:'dispose_request_interception_experiment'});}
     });
     socket.close();socket=undefined;
     await runCase('owned shutdown',[],async()=>{

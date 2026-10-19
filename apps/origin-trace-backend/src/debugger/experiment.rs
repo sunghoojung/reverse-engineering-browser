@@ -410,7 +410,7 @@ impl Debugger {
         }
         Ok(())
     }
-    fn require_scope_idle(&self) -> Result<()> {
+    pub(super) fn require_scope_idle(&self) -> Result<()> {
         let s = self.snapshot();
         if self.experiment.context().is_none() {
             return Err(Error::conflict(
@@ -547,8 +547,13 @@ impl Debugger {
         if address != "about:blank" {
             requests::url(address)?;
         }
-        let page=self.browser_command("Target.createTarget",json!({"url":address,"browserContextId":self.experiment.context(),"background":true})).await?;
-        self.refresh_experiment().await?;
+        let page = if self.options.capture_first_owned {
+            self.create_owned_capture_page(address).await?
+        } else {
+            let page = self.browser_command("Target.createTarget",json!({"url":address,"browserContextId":self.experiment.context(),"background":true})).await?;
+            self.refresh_experiment().await?;
+            page
+        };
         let mut response = self.group_response("action_scope");
         response["target_id"] = page["targetId"].clone();
         Ok(response)

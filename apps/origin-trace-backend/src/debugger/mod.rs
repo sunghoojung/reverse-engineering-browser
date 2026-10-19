@@ -19,6 +19,7 @@ mod network_status;
 mod network_timing;
 pub(crate) use network_request::NetworkRequestSelection;
 mod objects;
+mod owned_navigation;
 mod parse;
 mod repeater;
 mod requests;

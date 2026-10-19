@@ -420,3 +420,21 @@ After proven completion, body retrieval uses the terminal event's exact session;
 it does not transfer unrelated requests or invent response headers/status.
 Missing responses and detached body owners remain incomplete/unavailable. This
 repairs a lifecycle handoff, not passive capture of a target's first requests.
+
+### Owned experiment page opening
+
+In capture-first mode, `create_experiment_page` creates an inert `about:blank`
+page in the current disposable context. It waits for that exact capture owner's
+Network and recursive auto-attach acknowledgments, verifies the page is still
+blank in the same context, and sends navigation through that owner's session.
+Creation and navigation recheck their authority after the transport writer queue.
+The transaction has a 15-second deadline and never retries a navigation. Owner,
+connection, or context replacement aborts it. Passive page creation is unchanged.
+
+On failure or cancellation, a known new target receives a best-effort close on
+its original connection, bounded to three seconds. Cleanup is not a guarantee
+when the browser has disconnected. If target creation has an unknown outcome
+before its target ID is returned, no unrelated target or whole context is closed;
+the user can dispose the owned context. This opening path addresses its own
+initial navigation, not externally-created direct-URL tabs or universal child
+startup coverage. Those remain separately tested limitations.

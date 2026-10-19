@@ -79,7 +79,7 @@ if(process.argv[2]==='--browser') {
         const message={id:m.id,result,...(m.sessionId?{sessionId:m.sessionId}:{})};
         const replyDelay=options.delayCaptureOnly&&!capturing?0:m.method==='Target.detachFromTarget'&&options.detachDelay?options.detachDelay:
           options.delays?.[m.method]&&m.sessionId?.endsWith(':'+options.delayTarget)?options.delays[m.method]:0;
-        if(replyDelay)setTimeout(()=>{log({event:'delayed-reply',browser,method:m.method,sessionId:m.sessionId});emit(message);},replyDelay);else emit(message);
+        if(replyDelay)setTimeout(()=>{log({event:'delayed-reply',browser,method:m.method,sessionId:m.sessionId});emit(message);},replyDelay);else {if(options.ownedNavigation)log({event:'reply',browser,method:m.method,sessionId:m.sessionId});emit(message);}
       };
       const reject=message=>emit({id:m.id,error:{code:-32000,message},...(m.sessionId?{sessionId:m.sessionId}:{})});
       const target=[...sessions].find(([,sid])=>sid===m.sessionId)?.[0];
@@ -98,7 +98,20 @@ if(process.argv[2]==='--browser') {
         // Timeout deliberately never replies; production must bound it.
         if(options.failure==='error'||options.failure==='timeout')continue;
       }
-      if(options.experiment&&m.method==='Target.createBrowserContext')reply({browserContextId:'owned-context'});
+      if(options.ownedNavigation&&capturing&&target==='navigation-new'&&m.method==='Network.enable'&&options.navigationFault==='timeout')continue;
+      if(options.ownedNavigation&&m.method==='Target.createTarget') {
+        if(!existsSync(join(fixtureDirectory,'experiment-created'))){writeFileSync(join(fixtureDirectory,'experiment-created'),'1');reply({targetId:'a'});}
+        else {const targetInfo={targetId:'navigation-new',type:'page',title:'new',url:m.params.url,browserContextId:'owned-context'};writeFileSync(join(fixtureDirectory,'targets'),JSON.stringify([...targets(),targetInfo]));appendFileSync(join(fixtureDirectory,'events'),JSON.stringify({add:'navigation-new'})+'\n');reply({targetId:'navigation-new'});}
+      }
+      else if(options.ownedNavigation&&m.method==='Target.getTargetInfo'){const targetInfo=targets().find(t=>t.targetId===m.params.targetId);reply({targetInfo:options.navigationFault==='context-mismatch'?{...targetInfo,browserContextId:'different-context'}:targetInfo});}
+      else if(options.ownedNavigation&&m.method==='Page.navigate'&&options.navigationFault==='navigate-error')reply({errorText:'synthetic navigation rejected'});
+      else if(options.ownedNavigation&&m.method==='Target.closeTarget') {
+        writeFileSync(join(fixtureDirectory,'targets'),JSON.stringify(targets().filter(t=>t.targetId!==m.params.targetId)));appendFileSync(join(fixtureDirectory,'events'),JSON.stringify({raw:{method:'Target.targetDestroyed',params:{targetId:m.params.targetId}}})+'\n');reply({success:true});
+      }
+      else if(options.ownedNavigation&&m.method==='Target.disposeBrowserContext') {
+        const removed=targets().filter(t=>t.browserContextId===m.params.browserContextId);writeFileSync(join(fixtureDirectory,'targets'),JSON.stringify(targets().filter(t=>t.browserContextId!==m.params.browserContextId)));for(const t of removed)appendFileSync(join(fixtureDirectory,'events'),JSON.stringify({raw:{method:'Target.targetDestroyed',params:{targetId:t.targetId}}})+'\n');reply({});
+      }
+      else if(options.experiment&&m.method==='Target.createBrowserContext')reply({browserContextId:'owned-context'});
       else if(options.experiment&&m.method==='Target.createTarget')reply({targetId:'a'});
       else if(m.method==='Target.setDiscoverTargets'){if(browser)capturing=m.params.discover;reply({});}
       else if(m.method==='Target.getTargets')reply({targetInfos:targets()});
@@ -142,12 +155,13 @@ if(process.argv[2]==='--browser') {
   },15);
 } else {
   const selected=process.env.REB_CAPTURE_FIRST_CASES;
-  assert(!selected||['worker-controller','malformed-attachments','duplicate-owners','ordered-init'].includes(selected),'Unknown REB_CAPTURE_FIRST_CASES selector');
+  assert(!selected||['worker-controller','malformed-attachments','duplicate-owners','ordered-init','owned-navigation'].includes(selected),'Unknown REB_CAPTURE_FIRST_CASES selector');
   const root=resolve(process.argv[2]??'.');
   const binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:type==='page'?'about:blank':`http://localhost/${id}.js`,...(parent?{parent}:{})});
   const alive=pid=>{try{process.kill(pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;throw error;}};
   async function fixture(initial,options,run) {
+    if(selected==='owned-navigation'&&!options.ownedNavigation||selected&&selected!=='owned-navigation'&&options.ownedNavigation)return;
     if(selected==='ordered-init'&&!options.orderedInit||selected==='worker-controller'&&!options.experiment||selected==='malformed-attachments'&&!options.malformed||selected==='duplicate-owners'&&!options.duplicates)return;
     const directory=await mkdtemp(join(tmpdir(),'reb-capture-first-'));
     let owned,external,address,diagnostics='',failure;
@@ -178,11 +192,12 @@ if(process.argv[2]==='--browser') {
       address??=(await readFile(join(directory,'endpoint'),'utf8')).trim();
       return(await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)})).json();
     };
-    const action=async(value)=>{
+    const actionResult=async(value)=>{
       address??=(await readFile(join(directory,'endpoint'),'utf8')).trim();
-      const response=await fetch(new URL('/api/debugger/actions',address),{method:'POST',headers:{'Content-Type':'application/json',Origin:address},body:JSON.stringify(value),signal:AbortSignal.timeout(10000)});
-      const body=await response.text();assert(response.ok,`Action failed: ${response.status} ${body}`);return JSON.parse(body);
+      const response=await fetch(new URL('/api/debugger/actions',address),{method:'POST',headers:{'Content-Type':'application/json',Origin:address},body:JSON.stringify(value),signal:AbortSignal.timeout(options.ownedNavigation?25000:10000)});
+      const body=await response.text();return {ok:response.ok,status:response.status,body:JSON.parse(body)};
     };
+    const action=async(value)=>{const result=await actionResult(value);assert(result.ok,`Action failed: ${result.status} ${JSON.stringify(result.body)}`);return result.body;};
     const waitState=(predicate,label,timeout)=>until(async()=>{const s=await state();return predicate(s)&&s;},label,timeout);
     try {
       let mode=['--capture-first-browser',join(directory,'browser'),'--capture-first-headless'];
@@ -193,7 +208,7 @@ if(process.argv[2]==='--browser') {
         mode=['--devtools-active-port',join(profile,'DevToolsActivePort')];
       }
       owned=start(binary,['--port',String(options.port??0),'--endpoint-file',join(directory,'endpoint'),'--debugger-transport',join(directory,'transport'),'--capture-network-content',...mode,...(options.limit?['--capture-target-limit',String(options.limit)]:[])]);
-      await run({commands,send,state,action,until,waitState,signal:name=>owned.child.kill(name),exited:async(timeout=10000)=>{
+      await run({commands,send,state,action,actionResult,until,waitState,signal:name=>owned.child.kill(name),exited:async(timeout=10000)=>{
         assert(await waitForClose(owned.closed,timeout),`Backend did not exit: ${diagnostics}`);
         return {code:owned.child.exitCode,signal:owned.child.signalCode,diagnostics};
       },stop:async()=>{
@@ -222,6 +237,42 @@ if(process.argv[2]==='--browser') {
     const all=capture(commands),resume=all.findIndex(c=>c.method==='Runtime.runIfWaitingForDebugger'&&c.sessionId?.endsWith(':'+id));
     const detach=all.findIndex(c=>c.method==='Target.detachFromTarget'&&c.params.sessionId?.endsWith(':'+id));
     assert(resume>=0&&detach>resume,`${id}: held target must receive resume before detach`);
+  }
+  for(const navigationFault of ['success','timeout','replacement','context-mismatch','navigate-error','disposal','passive']) {
+    const passive=navigationFault==='passive';
+    await fixture([{...info('a'),browserContextId:'owned-context'}],{ownedNavigation:true,experiment:true,passive,navigationFault,delayTarget:'navigation-new',delayCaptureOnly:true,delays:{'Network.enable':800,'Target.setAutoAttach':800}},async({commands,send,action,actionResult,waitState,until})=>{
+      await waitState(s=>s.state==='running'&&s.network.capture_status.attached_targets===1,'Owned navigation baseline ready');
+      await action({action:'create_request_interception_experiment'});
+      await waitState(s=>s.request_interception.isolated===true,'Disposable context established');
+      const wanted='http://localhost/owned-navigation-fixture';
+      const pending=actionResult({action:'create_experiment_page',url:wanted});
+      await until(()=>capture(commands).filter(c=>c.method==='Target.createTarget').length===2,'New page created once');
+      const created=capture(commands).filter(c=>c.method==='Target.createTarget').at(-1);
+      assert.equal(created.params.url,passive?wanted:'about:blank','Owned page creation must be inert before capture readiness');
+      if(!passive){
+        const enable=await until(()=>capture(commands).find(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':navigation-new')),'Exact new capture owner initializes');
+        assert(!capture(commands).some(c=>c.method==='Page.navigate'&&c.params.url===wanted),'Navigation must wait for Network and recursive attach ACKs');
+        if(navigationFault==='replacement'){await delay(100);send({detach:'navigation-new'});}
+        if(navigationFault==='disposal'){await delay(100);const disposal=await actionResult({action:'dispose_request_interception_experiment'});assert.equal(disposal.status,409,'Concurrent disposal is rejected by the public action gate');assert.equal(disposal.body.code,'state_conflict');}
+        const result=await pending;
+        const navigations=capture(commands).filter(c=>c.method==='Page.navigate'&&c.params.url===wanted);
+        if(navigationFault==='success'||navigationFault==='disposal'){
+          assert(result.ok,JSON.stringify(result));assert.equal(result.body.target_id,'navigation-new');assert.equal(navigations.length,1);
+          assert.equal(navigations[0].sessionId,enable.sessionId,'Page.navigate must use exact capture owner session');assert.equal(navigations[0].pid,enable.pid);
+          const all=commands();
+          // Compare stable command identity because each read creates fresh objects.
+          const navIndex=all.findIndex(c=>c.event==='command'&&c.pid===navigations[0].pid&&c.id===navigations[0].id);
+          for(const method of ['Network.enable','Target.setAutoAttach'])assert(all.findIndex(c=>c.event==='delayed-reply'&&c.method===method&&c.sessionId===enable.sessionId)<navIndex&&all.some(c=>c.event==='delayed-reply'&&c.method===method&&c.sessionId===enable.sessionId),'Both exact-session initialization ACKs precede navigation');
+        }else{
+          assert(!result.ok,`${navigationFault}: action must fail`);assert.equal(navigations.length,navigationFault==='navigate-error'?1:0,`${navigationFault}: no implicit navigation retry`);
+          if(navigationFault!=='disposal'){const cleanup=await until(()=>capture(commands).find(c=>c.method==='Target.closeTarget'&&c.params.targetId==='navigation-new'),'Failed owned blank cleaned up');assert.equal(cleanup.pid,enable.pid,'Cleanup uses original capture connection');}
+          assert(!capture(commands).some(c=>c.method==='Target.closeTarget'&&c.params.targetId!=='navigation-new'),'Failure cannot close unrelated page');
+        }
+      }else{assert((await pending).ok);assert(!capture(commands).some(c=>c.method==='Page.navigate'&&c.params.url===wanted),'Passive page creation remains direct');}
+      if(navigationFault==='disposal')await action({action:'dispose_request_interception_experiment'});
+      assert.equal(capture(commands).filter(c=>c.method==='Target.createTarget').length,2,'No implicit page creation retry');
+      console.log(`PASS create_experiment_page product path: ${navigationFault}`);
+    });
   }
   await fixture([info('a')],{orderedInit:true,enableReplyDelay:1000},async({commands,waitState,until,add,state})=>{
     await waitState(s=>s.network.capture_status.attached_targets===1,'Owned page ready before ordered worker');

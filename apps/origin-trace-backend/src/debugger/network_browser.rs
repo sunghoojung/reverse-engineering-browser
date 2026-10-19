@@ -106,6 +106,7 @@ pub(super) struct BrowserCapture {
     cleanup: Arc<tokio::sync::Semaphore>,
     cleanup_queue: Mutex<CleanupQueue>,
     cleanup_closing: AtomicBool,
+    owned_auto_attach_ready: AtomicBool,
 }
 impl BrowserCapture {
     pub fn new() -> Self {
@@ -124,7 +125,15 @@ impl BrowserCapture {
             cleanup: Arc::new(tokio::sync::Semaphore::new(4)),
             cleanup_queue: Mutex::new(CleanupQueue::default()),
             cleanup_closing: AtomicBool::new(false),
+            owned_auto_attach_ready: AtomicBool::new(false),
         }
+    }
+    pub(super) fn owned_ready_connection(&self) -> Option<Arc<Connection>> {
+        let current = self.connection.lock().unwrap_or_else(|e| e.into_inner());
+        current
+            .as_ref()
+            .filter(|c| self.owned_auto_attach_ready.load(Ordering::Acquire) && !c.is_closed())
+            .cloned()
     }
     pub(super) fn current(&self, c: &Arc<Connection>) -> bool {
         self.connection
@@ -651,6 +660,10 @@ impl Debugger {
                 .browser
                 .cleanup_closing
                 .store(false, Ordering::Release);
+            self.capture
+                .browser
+                .owned_auto_attach_ready
+                .store(false, Ordering::Release);
             *current = Some(c.clone());
         }
         self.start_capture_hold_watchdog(c.clone());
@@ -688,6 +701,22 @@ impl Debugger {
             )
             .await
             .map_err(|e| BrowserSetupFailure::at(BrowserSetupStage::RootAutoAttach, e))?;
+            let current = self
+                .capture
+                .browser
+                .connection
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if current
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &c))
+                && !c.is_closed()
+            {
+                self.capture
+                    .browser
+                    .owned_auto_attach_ready
+                    .store(true, Ordering::Release);
+            }
         } else {
             // Passive capture must never enable the browser-root popup throttle.
             self.schedule_capture_admission(&c);

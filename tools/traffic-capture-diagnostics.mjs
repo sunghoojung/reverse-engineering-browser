@@ -62,7 +62,7 @@ export async function readCaptureDiagnostics(directory) {
   return JSON.stringify(result);
 }
 export const captureFirstFixturePaths = [
-  '/initial','/initial-inline','/popup','/popup-inline','/contexts',
+  '/owned-open','/owned-open-inline','/initial','/initial-inline','/popup','/popup-inline','/contexts',
   '/dedicated.js','/dedicated-inline','/nested-worker.js','/nested-inline',
   '/outer-frame','/outer-inline','/inner-frame','/inner-inline','/frame-worker.js','/frame-worker-inline',
   ...Array.from({length:4},(_,i)=>`/early-tab/${i}`),

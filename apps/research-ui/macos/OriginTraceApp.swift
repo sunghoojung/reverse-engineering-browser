@@ -3027,7 +3027,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       window.deminiaturize(nil)
     }
     NSApp.activate(ignoringOtherApps: true)
-    window.makeKeyAndOrderFront(nil)
+    // Activation and reopen callbacks can run inside an alert's modal loop.
+    // Rekeying the evidence window there steals Return from the safe default.
+    (NSApp.modalWindow ?? window).makeKeyAndOrderFront(nil)
   }
 
   private func customBraveApplicationURL() -> URL? {

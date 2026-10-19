@@ -39,8 +39,8 @@ The four serial scenarios verify:
 - `retry`: explicit Start Unverified Session reaches the inert executable,
   its real startup failure offers Retry, and Retry requires another decision
 - `modal-reopen`: Launch Services reopens the same app while the warning is
-  modal; one decision remains, one dismissal suffices, and later reopen stays
-  offline
+  modal; one decision retains keyboard focus, Return dismisses it, and later
+  reopen stays offline
 
 Initial Return, explicit Continue Offline, and final reopen each observe a
 65-second quiet window, exceeding the coordinator's 60-second startup deadline.

@@ -353,7 +353,9 @@ final class LiveSessionCoordinator {
     }
     let tail = data.suffix(4 * 1_024)
     let lines = String(decoding: tail, as: UTF8.self).split(separator: "\n")
-    let cause = lines.last.map(String.init)
+    // Teardown diagnostics follow the startup error in the same log. Keep the
+    // actionable cause instead of reporting that cleanup completed successfully.
+    let cause = lines.last(where: { !$0.hasPrefix("Live session cleanup") }).map(String.init)
       ?? "The live capture coordinator stopped before startup completed."
     return cause + "\n\nSession log: " + logURL.path
   }

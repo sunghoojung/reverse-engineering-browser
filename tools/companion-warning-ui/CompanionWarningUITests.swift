@@ -93,7 +93,8 @@ final class CompanionWarningUITests: XCTestCase {
                    "Reopen must not nest a second compatibility alert")
     attachScreenshot(app, name: "modal-reopen-single-warning")
 
-    app.dialogs.containing(.staticText, identifier: warningTitle).element.buttons["Continue Offline"].click()
+    // Reopen must preserve modal keyboard focus, not just leave a clickable alert.
+    app.typeKey(.return, modifierFlags: [])
     assertOffline(app)
     // An explicit offline decision also suppresses automatic live startup on
     // a later OS reopen. Activating the app alone would not test that callback.

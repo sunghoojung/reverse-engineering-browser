@@ -51,6 +51,13 @@ export async function checkPackageContract() {
   const coordinator = await readFile(join(root, 'apps/research-ui/macos/LiveSessionCoordinator.swift'), 'utf8');
   assert(coordinator.includes('resourcesURL.appendingPathComponent("research-ui", isDirectory: true)'));
   assert(coordinator.includes('resourcesURL.appendingPathComponent("run-live-session.sh")'));
+  assert(native.includes('(NSApp.modalWindow ?? window).makeKeyAndOrderFront(nil)'),
+    'Activation/reopen must preserve the active modal alert keyboard target');
+  assert(coordinator.includes('lines.last(where: { !$0.hasPrefix("Live session cleanup") })'),
+    'Startup failure summaries must ignore our trailing teardown diagnostics');
+  const warningUI = await readFile(join(root, 'tools/companion-warning-ui/CompanionWarningUITests.swift'), 'utf8');
+  assert.equal([...warningUI.matchAll(/app\.typeKey\(\.return, modifierFlags: \[\]\)/g)].length, 2,
+    'Real Return must cover both initial activation and modal reopen');
   assert(native.includes('resourcesURL.appendingPathComponent("OriginTrace.icns")'));
   const removedBytes = (await Promise.all([...publicAssets, 'analyst_runner_core.js'].map(async asset => (await stat(join(root, 'apps/research-ui', asset))).size))).reduce((a, b) => a + b, 0);
   await checkClientProjectScreenshotContract();

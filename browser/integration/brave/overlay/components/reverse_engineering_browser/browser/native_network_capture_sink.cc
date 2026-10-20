@@ -80,8 +80,8 @@ NativeProbeEvent MakeNetworkEvent(const NativeProbeType type,
 }  // namespace
 
 NativeNetworkCaptureSink& NativeNetworkCaptureSink::Get() {
-  static NativeNetworkCaptureSink sink;
-  return sink;
+  static base::NoDestructor<NativeNetworkCaptureSink> sink;
+  return *sink;
 }
 
 bool NativeNetworkCaptureSink::IsEnabled() const noexcept {

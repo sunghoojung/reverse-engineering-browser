@@ -4640,10 +4640,14 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm :is(input[type="text"], input[type="search"], select) { min-height: 28px; border: 1px solid var(--line); border-radius: 3px; background: var(--bg); color: var(--text); padding: 4px 7px; font: 11px var(--sans); }
 #screen-vm input[type="file"]::file-selector-button { border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--text); padding: 5px 8px; margin-right: 8px; font: 11px var(--sans); }
 #screen-vm :where(#vm-owned-debugger, #vm-owned-controls) button { border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--text); padding: 5px 8px; font: 11px var(--sans); }
-#screen-vm :where(#vm-owned-debugger, #vm-owned-controls) button:disabled { color: var(--muted); background: var(--chrome); }
 #screen-vm .owned-vm-debugger-actions { display: flex; flex-wrap: wrap; gap: 5px; }
 #screen-vm .owned-vm-debugger-toolbar { padding: 9px 12px; gap: 7px; font-size: 11px; }
 #screen-vm .owned-vm-debugger-toolbar p { margin: 3px 0; line-height: 1.5; }
+#screen-vm .owned-vm-debugger-notice:empty { margin: 0; }
+@media (min-width: 1100px) {
+  #screen-vm .owned-vm-debugger-toolbar { padding: 6px 12px; gap: 2px 8px; }
+  #screen-vm .owned-vm-debugger-toolbar > p { margin: 2px 0; }
+}
 #screen-vm .owned-vm-debugger-panes { font-size: 11px; line-height: 1.5; }
 #screen-vm .owned-vm-debugger-panes h3 { font-size: 12px; }
 #screen-vm .owned-vm-debugger-tabs { display: flex; gap: 4px; margin: 8px 0; }

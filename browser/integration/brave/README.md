@@ -80,6 +80,12 @@ root stays ineligible rather than admitting a fallback browser profile.
   destination paths.
 - `patches/` contains small edits to upstream-owned files.
 
+Keep V8 edits in `patches/v8/`, relative to the independent V8 checkout.
+The synchronization script rejects destinations belonging to a nested Git
+checkout before changing any stack. Its temporary-index replay includes added
+patch files, so overlapping patches can be recognized without rewriting the
+working tree or real index on repeated builds.
+
 Apply the tracked integration to the local checkout with:
 
 ```sh
@@ -158,7 +164,7 @@ unattributed because both queues can mix tabs and frames. Sequence discontinuiti
 and queue-drop reports may describe the same missing records and must not be
 added together.
 
-Native quiet mode is an explicit launch-time option. Its Chromium patch adds a
+Native quiet mode is an explicit launch-time option. Its V8 patch adds a
 disabled-by-default V8 flag that returns from the shared debugger-statement
 runtime handler before Inspector pause handling. Because compiled `debugger;`
 statements from normal scripts, `eval`, functions, frames, and workers all use

@@ -37,7 +37,8 @@ class StateGuards(unittest.TestCase):
             git(path, "init", "-q")
             git(path, "config", "user.name", "Fixture")
             git(path, "config", "user.email", "fixture@example.invalid")
-            (path / ".gitignore").write_text("brave/\nv8/\nignored/\nbuild/\nout/\n")
+            ignored = "/build/\n/out/\n__pycache__/\n" if path == self.repo else "brave/\nv8/\nignored/\nbuild/\nout/\n"
+            (path / ".gitignore").write_text(ignored)
             (path / "tracked.txt").write_text("original\n")
             git(path, "add", ".gitignore", "tracked.txt")
             git(path, "commit", "-qm", "fixture")
@@ -121,6 +122,7 @@ class StateGuards(unittest.TestCase):
         helper_dir = self.repo / "tools"
         helper_dir.mkdir(exist_ok=True)
         shutil.copyfile(HELPER, helper_dir / HELPER.name)
+        shutil.copyfile(HELPER.with_name("brave_patch_contract.py"), helper_dir / "brave_patch_contract.py")
         git(self.repo, "add", "scripts", "tools")
         git(self.repo, "commit", "-qm", "wrapper fixture")
         mocks = self.root / "bin"
@@ -277,6 +279,7 @@ class StateGuards(unittest.TestCase):
         helper_dir = self.repo / "tools"
         helper_dir.mkdir()
         shutil.copyfile(HELPER, helper_dir / HELPER.name)
+        shutil.copyfile(HELPER.with_name("brave_patch_contract.py"), helper_dir / "brave_patch_contract.py")
         output = self.chromium / "out/Component_arm64"
         executable = output / "Brave Browser.app/Contents/MacOS/Brave Browser"
         phases = self.root / "phases"
@@ -350,6 +353,158 @@ class StateGuards(unittest.TestCase):
         self.assertEqual(self.call("record").returncode, 0)
         self.assertEqual(self.call("complete").returncode, 0)
         return executable
+
+    def next_source(self, changes):
+        number = getattr(self, "handoff_number", 0) + 1
+        self.handoff_number = number
+        repository = self.root / f"next-source-{number}"
+        git(self.repo, "worktree", "add", "--detach", str(repository), "HEAD")
+        for name, content in changes.items():
+            path = repository / name
+            if content is None:
+                path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+        git(repository, "add", "-A")
+        git(repository, "commit", "-qm", "compatible tooling fixture")
+        return repository
+
+    def adopt(self, repository):
+        receipt = repository / "build/integrated-brave-state.json"
+        result = subprocess.run([
+            sys.executable, str(HELPER), "adopt", "--repository", str(repository),
+            "--brave", str(self.brave), "--receipt", str(receipt),
+            "--previous-repository", str(self.repo), "--previous-receipt", str(self.receipt),
+        ], capture_output=True, text=True, check=False)
+        return result, receipt
+
+    def test_handoff_preserves_proof_and_reuses_only_identical_inputs(self):
+        self.assertEqual(self.call("record").returncode, 0)
+        before = self.receipt.read_bytes()
+        repository = self.next_source({"tools/build-note.py": "# tooling only\n"})
+        result, receipt = self.adopt(repository)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.receipt.read_bytes(), before)
+        self.assertEqual(json.loads(receipt.read_text())["integration"], git(repository, "rev-parse", "HEAD"))
+        self.assertEqual(self.adopt(repository)[0].returncode, 0)
+
+    def test_handoff_refuses_upstream_edits_and_preserves_destination(self):
+        self.assertEqual(self.call("record").returncode, 0)
+        repository = self.next_source({"docs/build.md": "Tooling update\n"})
+        target = self.v8 / "tracked.txt"
+        target.write_text("private upstream edit\n")
+        result, receipt = self.adopt(repository)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(receipt.exists())
+        self.assertEqual(target.read_text(), "private upstream edit\n")
+
+    def test_handoff_does_not_replace_an_existing_or_symlinked_receipt(self):
+        self.assertEqual(self.call("record").returncode, 0)
+        before = self.receipt.read_bytes()
+        repository = self.next_source({"docs/build.md": "Tooling update\n"})
+        receipt = repository / "build/integrated-brave-state.json"
+        receipt.parent.mkdir()
+        receipt.symlink_to(self.receipt)
+        self.assertNotEqual(self.adopt(repository)[0].returncode, 0)
+        self.assertTrue(receipt.is_symlink())
+        self.assertEqual(self.receipt.read_bytes(), before)
+        receipt.unlink()
+        receipt.write_text('{"preserve":"existing proof"}\n')
+        self.assertNotEqual(self.adopt(repository)[0].returncode, 0)
+        self.assertEqual(receipt.read_text(), '{"preserve":"existing proof"}\n')
+
+    def test_handoff_refuses_production_and_overlay_changes(self):
+        self.assertEqual(self.call("record").returncode, 0)
+        for relative in ("apps/new.cpp", "browser/integration/brave/overlay/ignored/overlay.cc"):
+            with self.subTest(relative=relative):
+                repository = self.next_source({relative: "changed production input\n"})
+                result, receipt = self.adopt(repository)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(receipt.exists())
+
+    def test_handoff_allows_exact_patch_owner_relocation_but_not_hunk_changes(self):
+        old = "browser/integration/brave/patches/chromium/0003.patch"
+        new = "browser/integration/brave/patches/v8/0000.patch"
+        text = ("diff --git a/v8/tracked.txt b/v8/tracked.txt\n"
+                "--- a/v8/tracked.txt\n+++ b/v8/tracked.txt\n"
+                "@@ -1 +1 @@\n-original\n+patched\n")
+        path = self.repo / old
+        path.parent.mkdir(parents=True)
+        path.write_text(text)
+        git(self.repo, "add", "browser")
+        git(self.repo, "commit", "-qm", "historical nested patch fixture")
+        (self.v8 / "tracked.txt").write_text("patched\n")
+        self.assertEqual(self.call("record").returncode, 0)
+        before = self.receipt.read_bytes()
+        relocated = text.replace("a/v8/", "a/").replace("b/v8/", "b/")
+        repository = self.next_source({old: None, new: relocated})
+        result, receipt = self.adopt(repository)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.receipt.read_bytes(), before)
+        check = subprocess.run([sys.executable, str(HELPER), "check", "--repository", str(repository),
+                                "--brave", str(self.brave), "--receipt", str(receipt)],
+                               capture_output=True, text=True, check=False)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        changed = self.next_source({old: None, new: relocated.replace("+patched", "+different")})
+        result, receipt = self.adopt(changed)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(receipt.exists())
+
+    def sync_fixture(self, nested=False):
+        scripts = self.repo / "scripts"
+        scripts.mkdir()
+        shutil.copyfile(HELPER.parent.parent / "scripts/sync-browser-integration.sh", scripts / "sync.sh")
+        tools = self.repo / "tools"
+        tools.mkdir()
+        shutil.copyfile(HELPER.with_name("brave_patch_contract.py"), tools / "brave_patch_contract.py")
+        patches = self.repo / "browser/integration/brave/patches"
+        for folder, value in (("", "Brave"), ("chromium", "Chromium")):
+            directory = patches / folder
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "0001.patch").write_text(
+                "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n"
+                f"@@ -1 +1 @@\n-original\n+{value}\n")
+        if nested:
+            (patches / "chromium/0002.patch").write_text(
+                "diff --git a/v8/tracked.txt b/v8/tracked.txt\n--- a/v8/tracked.txt\n+++ b/v8/tracked.txt\n"
+                "@@ -1 +1 @@\n-original\n+nested\n")
+        else:
+            directory = patches / "v8"
+            directory.mkdir()
+            (directory / "0001.patch").write_text(
+                "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n"
+                "@@ -1 +1,2 @@\n-original\n+first\n+context\n"
+                "diff --git a/added.txt b/added.txt\nnew file mode 100644\n--- /dev/null\n+++ b/added.txt\n"
+                "@@ -0,0 +1 @@\n+owned regression\n")
+            (directory / "0002.patch").write_text(
+                "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n"
+                "@@ -1,2 +1,2 @@\n-first\n+second\n context\n")
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("REB_")}
+        environment["REB_BRAVE_DIRECTORY"] = str(self.brave)
+        return lambda: subprocess.run(["bash", str(scripts / "sync.sh")], env=environment,
+                                      capture_output=True, text=True, check=False)
+
+    def test_sync_keeps_applied_added_files_and_real_indexes_untouched(self):
+        sync = self.sync_fixture()
+        first = sync()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        target = self.v8 / "added.txt"
+        stamp = 900_000_000_000_000_000
+        os.utime(target, ns=(stamp, stamp))
+        second = sync()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("Already applied: V8 patch stack", second.stdout)
+        self.assertEqual(target.stat().st_mtime_ns, stamp)
+        self.assertEqual(git(self.v8, "diff", "--cached"), "")
+        self.assertEqual((self.v8 / "tracked.txt").read_text(), "second\ncontext\n")
+
+    def test_sync_refuses_nested_owner_before_any_source_mutation(self):
+        result = self.sync_fixture(nested=True)()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("belongs to nested checkout", result.stderr)
+        for root in (self.brave, self.chromium, self.v8):
+            self.assertEqual((root / "tracked.txt").read_text(), "original\n")
 
     def test_first_incomplete_and_unproven_build_disk_reserve(self):
         first = str(150 * 1024 * 1024)

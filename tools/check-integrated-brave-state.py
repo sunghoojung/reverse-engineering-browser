@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 
+from brave_patch_contract import monitored_paths, patch_projection
+
 
 def git(directory, *arguments):
     return subprocess.check_output(
@@ -162,49 +164,103 @@ def repeat_reserve_kib(output):
     return max(50 * 1024 * 1024, int(result[0]))
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check", "record", "reserve", "complete"))
-    parser.add_argument("--brave", type=Path, required=True)
-    parser.add_argument("--repository", type=Path, required=True)
-    parser.add_argument("--receipt", type=Path, required=True)
-    parser.add_argument("--require-clean", action="store_true")
-    args = parser.parse_args()
-    roots = (args.brave, args.brave.parent, args.brave.parent / "v8")
+def source_states(repository, brave, require_clean=False):
+    roots = (brave, brave.parent, brave.parent / "v8")
     pins = ("brave-core", "chromium", "v8")
-    integration = args.repository / "browser/integration/brave"
-    overlay_root = integration / "overlay"
-    monitored = {name: set() for name in pins}
-    monitored["brave-core"].update(path.relative_to(overlay_root)
-                                  for path in overlay_root.rglob("*") if path.is_file())
-    for name, folder in zip(pins, ("", "chromium", "v8")):
-        for patch in (integration / "patches" / folder).glob("*.patch"):
-            for line in patch.read_text().splitlines():
-                if line.startswith(("+++ b/", "--- a/")):
-                    relative = Path(line[6:].split("\t", 1)[0])
-                    if relative.is_absolute() or ".." in relative.parts:
-                        raise ValueError(f"Unsafe patch path in {patch}")
-                    monitored[name].add(relative)
-    monitored["chromium"].add(Path("build/config/siso/brave_siso_config.star"))
+    monitored = monitored_paths(repository)
     states = {}
     for name, directory in zip(pins, roots):
-        pin = (args.repository / "browser/config" / f"{name}.rev").read_text().strip()
+        pin = (repository / "browser/config" / f"{name}.rev").read_text().strip()
         if directory.is_symlink():
             raise ValueError(f"Symlinked upstream checkout: {directory}")
-        # src/ can exist before Chromium initialization, but is not yet a repo.
         if name == "chromium" and not (directory / ".git").exists():
             if directory.exists() and any(path.name != "brave" for path in directory.iterdir()):
                 raise ValueError(f"Nonempty Chromium path is not a checkout: {directory}")
             states[name] = None
         else:
             states[name] = snapshot(directory, pin, sorted(monitored[name]),
-                                    allow_unborn=name == "brave-core" and args.require_clean)
+                                    allow_unborn=name == "brave-core" and require_clean)
+    return states
+
+
+def adopt_known_inputs(args, identity):
+    previous_repository = args.previous_repository
+    if previous_repository is None or args.previous_receipt is None or args.require_clean:
+        raise ValueError("adopt requires --previous-repository and --previous-receipt, without --require-clean")
+    for repository in (previous_repository, args.repository):
+        if Path(os.fsdecode(git(repository, "rev-parse", "--show-toplevel")).strip()).resolve() != repository.resolve():
+            raise ValueError("Handoff requires independent source checkout roots")
+        if git(repository, "status", "--porcelain", "--untracked-files=all"):
+            raise ValueError("Handoff requires clean previous and current source checkouts")
+    if args.previous_receipt.is_symlink() or not args.previous_receipt.is_file():
+        raise ValueError("Previous source receipt is missing or symlinked")
+    previous_commit = git(previous_repository, "rev-parse", "HEAD").decode().strip()
+    previous = json.loads(args.previous_receipt.read_text())
+    expected = {"integration": previous_commit, "brave": identity["brave"],
+                "upstream": source_states(previous_repository, args.brave)}
+    if previous != expected or any(value is None for value in expected["upstream"].values()):
+        raise ValueError("Previous receipt does not match the unchanged upstream inputs")
+    git(args.repository, "merge-base", "--is-ancestor", previous_commit, identity["integration"])
+    changed = git(args.repository, "diff", "--name-only", "-z", "--no-renames",
+                  previous_commit, identity["integration"], "--").split(b"\0")
+    for raw in changed:
+        path = os.fsdecode(raw)
+        if path and not (path.endswith(".md") or path.startswith((
+            "scripts/", "tools/", "docs/", ".agents/", "browser/integration/brave/patches/"
+        ))):
+            raise ValueError(f"Production inputs changed; use a fresh checkout: {path}")
+    for name in ("brave-core", "chromium", "v8"):
+        relative = Path("browser/config") / f"{name}.rev"
+        if (previous_repository / relative).read_bytes() != (args.repository / relative).read_bytes():
+            raise ValueError("Pinned revisions changed during handoff")
+    overlay = "browser/integration/brave/overlay"
+    if git(args.repository, "rev-parse", f"{previous_commit}:{overlay}") != git(
+        args.repository, "rev-parse", f"{identity['integration']}:{overlay}"
+    ) or patch_projection(previous_repository) != patch_projection(args.repository):
+        raise ValueError("Effective overlays or ordered patch contents changed; use a fresh checkout")
+    audit = {
+        "previous_integration": previous_commit, "integration": identity["integration"],
+        "previous_receipt_sha256": file_digest(args.previous_receipt),
+        "unchanged_production_inputs": True,
+    }
+    audit_path = args.receipt.with_name("integrated-brave-handoff.json")
+    for path, value in ((args.receipt, identity), (audit_path, audit)):
+        if path.is_symlink() or (path.exists() and json.loads(path.read_text()) != value):
+            raise ValueError("Destination receipt already exists or is symlinked; preserve it before an explicit handoff")
+    changed = False
+    for path, value in ((audit_path, audit), (args.receipt, identity)):
+        if not path.exists():
+            write_receipt(path, value)
+            changed = True
+    return changed
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("check", "record", "reserve", "complete", "adopt"))
+    parser.add_argument("--brave", type=Path, required=True)
+    parser.add_argument("--repository", type=Path, required=True)
+    parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--require-clean", action="store_true")
+    parser.add_argument("--previous-repository", type=Path)
+    parser.add_argument("--previous-receipt", type=Path)
+    args = parser.parse_args()
+    if args.mode != "adopt" and (args.previous_repository is not None or args.previous_receipt is not None):
+        parser.error("Previous-source options apply only to adopt")
+    states = source_states(args.repository, args.brave, args.require_clean)
     identity = {
         "integration": git(args.repository, "rev-parse", "HEAD").decode().strip(),
         "brave": str(args.brave.resolve()),
         "upstream": states,
     }
     completion_receipt = args.receipt.with_name("integrated-brave-complete.json")
+    if args.mode == "adopt":
+        changed = adopt_known_inputs(args, identity)
+        print("status: " + ("adopted" if changed else "already_adopted"))
+        print("integration: " + json.dumps(identity["integration"]))
+        print("receipt: " + json.dumps(str(args.receipt)))
+        print("previous_receipt: preserved")
+        return
     if args.mode == "reserve":
         required = 150 * 1024 * 1024
         if not args.require_clean and all(value is not None for value in states.values()):
@@ -240,6 +296,13 @@ if __name__ == "__main__":
     try:
         main()
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        if len(sys.argv) > 1 and sys.argv[1] == "adopt":
+            message = ("Cannot verify the requested source or pinned checkout" if isinstance(
+                error, subprocess.CalledProcessError) else str(error))
+            print("error: SOURCE_HANDOFF_REFUSED")
+            print("message: " + json.dumps(message[:500]))
+            print('help: "Preserve existing inputs and receipts; inspect the stated mismatch or use a fresh pinned checkout"')
+            sys.exit(1)
         print(f"Build stopped: {error}. Preserve your edits and use a fresh pinned "
               "checkout; no stash/reset/clean was performed.", file=sys.stderr)
         sys.exit(1)

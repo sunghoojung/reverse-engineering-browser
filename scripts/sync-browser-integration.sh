@@ -13,6 +13,12 @@ readonly v8_directory="${chromium_directory}/v8"
 readonly integration_directory="${REB_BRAVE_INTEGRATION_DIRECTORY:-${repository_root}/browser/integration/brave}"
 readonly overlay_directory="${integration_directory}/overlay"
 readonly patches_directory="${integration_directory}/patches"
+readonly patch_contract="${repository_root}/tools/brave_patch_contract.py"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Python 3.8 or newer is required to validate independent patch ownership." >&2
+  exit 1
+fi
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else "Python 3.8 or newer is required")'
 readonly brave_revision="${REB_BRAVE_CORE_REVISION:-$(
   tr -d '[:space:]' <"${repository_root}/browser/config/brave-core.rev"
 )}"
@@ -114,18 +120,42 @@ if ((${#v8_patch_files[@]} > 0)); then
   verify_revision "${v8_directory}" "V8" "${v8_revision}"
 fi
 
+# A nested Git checkout is an independent patch owner. Validate every stack
+# before any preflight can reverse/reapply an overlapping patch.
+if ((${#brave_patch_files[@]} > 0)); then
+  python3 "${patch_contract}" verify --checkout "${brave_directory}" "${brave_patch_files[@]}"
+fi
+if ((${#chromium_patch_files[@]} > 0)); then
+  python3 "${patch_contract}" verify --checkout "${chromium_directory}" "${chromium_patch_files[@]}"
+fi
+if ((${#v8_patch_files[@]} > 0)); then
+  python3 "${patch_contract}" verify --checkout "${v8_directory}" "${v8_patch_files[@]}"
+fi
+
 patch_stack_is_applied() {
   local checkout_directory="$1"
   shift
   local temporary_directory
   local temporary_index
   local -a patch_files=("$@")
+  local -a patch_paths=()
+  local patch_path
   local patch_index
   temporary_directory="$(mktemp -d)"
   temporary_index="${temporary_directory}/index"
 
+  if ! python3 "${patch_contract}" paths "${patch_files[@]}" >"${temporary_directory}/paths"; then
+    rm -rf "${temporary_directory}"
+    return 1
+  fi
+  while IFS= read -r -d '' patch_path; do
+    patch_paths+=("${patch_path}")
+  done <"${temporary_directory}/paths"
+  # Include added patch files, without staging unrelated untracked content or
+  # touching the real index. add -u alone omits new inspector regression files.
   if ! GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" read-tree HEAD ||
-    ! GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" add -u; then
+    ! GIT_INDEX_FILE="${temporary_index}" git --literal-pathspecs -C "${checkout_directory}" \
+      add -A -f -- "${patch_paths[@]}" 2>/dev/null; then
     rm -rf "${temporary_directory}"
     return 1
   fi

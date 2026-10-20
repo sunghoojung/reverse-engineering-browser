@@ -10,6 +10,14 @@ does not establish CDP collection, body retrieval scheduling, backend clipping,
 real reconnections, or native Brave probes. Those require their own tests. The
 native route here is live HTTP WebKit, not custom `reb://` stored-evidence mode.
 
+For separately authorized public-site observation, see the optional
+[passive public-demo smoke recipe](public-demo-passive-qa.md). Those observations
+do not replace this controlled fixture or any CI acceptance gate.
+
+For independent same-navigation HTTP capture comparison, owned server receipts,
+and a NetLog crosscheck, use the [capture completeness harness](capture-completeness.md).
+Its request and known-body metrics are separate from these UI export checks.
+
 ## Build and start
 
 Record the exact source revision and dirty status, macOS version/architecture,

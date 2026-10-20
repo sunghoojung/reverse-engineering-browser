@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import {request} from 'node:http';
+import {runInNewContext} from 'node:vm';
 import {readFile,mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {fixtureServer,selfTest} from './traffic-capture-qa.mjs';
 const root=resolve(process.argv[2]||'.');
+await checkTrafficActivation(root);
 await selfTest(root);
 const {server,change}=await fixtureServer(root);
 function get(path,method='GET',host) {
@@ -40,4 +42,76 @@ try {
 } finally {
   if(original===undefined)delete process.env.REB_QA_ASSET_DIR;else process.env.REB_QA_ASSET_DIR=original;
   await rm(temporary,{recursive:true,force:true});
+}
+
+// Exercise production refresh and navigation functions, not a copied rendering
+// condition. Other workspaces are spies: this checks the Traffic lifecycle only.
+async function checkTrafficActivation(root) {
+  const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
+  const extract = (start, end) => {
+    const first = app.indexOf(start), last = app.indexOf(end, first);
+    assert(first >= 0 && last > first, `Missing production boundary: ${start}`);
+    return app.slice(first, last);
+  };
+  const refresh = extract('      async function refreshDebugger(', '      async function refreshArtifacts()');
+  const show = extract('      function showScreen(', '      async function refresh()');
+  const screens = ['traffic', 'sources', 'experiments', 'api-collection'].map(name =>
+    ({id: 'screen-' + name, hidden: name !== 'sources'}));
+  const old = {id: 'old'}, added = {id: 'captured-while-hidden'};
+  const state = {debuggerSession: {scripts: [], breakpoints: [], state: 'running'},
+    requests: [old], openScriptIds: [], openArtifactIds: [], selectedScriptId: null,
+    selectedRequestId: old.id, editingBreakpointId: null};
+  let painted = [old], summary = old, inspector = old, status = 200, fetches = 0;
+  let body = {scripts: [], breakpoints: [], state: 'running', network: {requests: [old, added]}};
+  const context = {
+    state, location: {protocol: 'http:'},
+    document: {hidden: false, activeElement: null,
+      querySelector(selector) {
+        if (selector === '#advanced-navigation') return {contains: () => false};
+        return screens.find(screen => '#' + screen.id === selector);
+      },
+      querySelectorAll: selector => selector === '.screen' ? screens : []},
+    fetch: async () => {
+      fetches++;
+      return {status, ok: true, json: async () => body, headers: {get: () => '"debugger-fixture"'}};
+    },
+    isDebuggerResponse: () => true, debuggerScriptCatalogSignature: () => '',
+    syncExperimentSession: (_, next) => next,
+    rebuildTrafficRequests: () => { state.requests = body.network.requests; },
+    resetRequestSelection: () => { state.selectedRequestId = null; },
+    renderRequests: () => { painted = state.requests.slice(); },
+    updateSelectionSummary: selected => { summary = selected; },
+    renderInspector: () => { inspector = state.requests.find(row => row.id === state.selectedRequestId) ?? null; },
+    evidenceWorkspace: {setVisible() {}}, sourceFactsPanel: {cancel() {}}, float32Panel: {cancel() {}}
+  };
+  for (const name of ['syncMemorySession', 'applyMemoryOriginTrace', 'renderLiveBrowserTabCount',
+    'pruneLiveScriptContent', 'renderDebugger', 'renderShellStatus', 'renderNetworkNotice',
+    'renderMemory', 'renderFieldProvenance', 'scheduleDebuggerRefresh', 'investigationBeforeScreen',
+    'retireCanvasPreviews', 'renderRuntimeHookTraffic']) context[name] = () => {};
+  const api = runInNewContext(refresh + '\n' + show + '\n;({refreshDebugger, showScreen})', context);
+  const navigationButton = {classList: {contains: () => true}};
+  await api.refreshDebugger();
+  assert.equal(state.debuggerError, null);
+  assert.deepEqual(painted, [old], 'Hidden refresh must not repaint the ledger');
+  assert.deepEqual(state.requests, [old, added], 'Hidden refresh retains new requests');
+  const beforeActivation = fetches;
+  api.showScreen('traffic', navigationButton);
+  assert.equal(screens[0].hidden, false);
+  assert.deepEqual(painted, [old, added], 'Traffic activation paints already retained requests');
+  assert.equal(summary, old); assert.equal(inspector, old);
+  assert.equal(fetches, beforeActivation, 'Activation needs no request or capture action');
+  status = 304;
+  await api.refreshDebugger();
+  assert.deepEqual(painted, [old, added], 'Quiet 304 responses preserve the current ledger');
+  // A reconnect/clear while hidden also invalidates the old detail selection.
+  screens[0].hidden = true; screens[1].hidden = false;
+  status = 200; body = {...body, network: {requests: []}};
+  await api.refreshDebugger();
+  assert.equal(state.debuggerError, null); assert.equal(state.selectedRequestId, null);
+  assert.equal(summary, old, 'Hidden refresh has not repainted the old summary');
+  api.showScreen('traffic', navigationButton);
+  assert.deepEqual(painted, []); assert.equal(summary, null); assert.equal(inspector, null);
+  api.showScreen('traffic', navigationButton);
+  assert.deepEqual(painted, [], 'Repeated activation keeps the empty state');
+  console.log('PASS Traffic activation after hidden capture/clear, quiet 304, retained/expired selection and repeated navigation (function harness; not rendered/native runtime)');
 }

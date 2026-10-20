@@ -55,6 +55,26 @@ backend and serves them only to matching disposable-target requests; it performs
 no third-party/provider upload. Native macOS file-picker behavior requires native
 validation. See [Scoped local overrides v1](../../protocol/local-overrides-v1.md).
 
+## Traffic identity and resource filters
+
+Traffic classifies a CDP response as **Wasm** when its recorded MIME type is
+`application/wasm` (case-insensitive, ignoring surrounding whitespace and MIME
+parameters), including responses loaded by Fetch or XHR. A `.wasm` URL alone
+never establishes that type. Other responses retain their CDP resource category.
+
+Each retained CDP row must have a unique public ID. A snapshot with duplicate
+public IDs is rejected and the last valid evidence stays visible. Raw protocol
+request IDs may repeat across targets or redirect hops when the public row IDs
+remain distinct.
+
+Changing the selected debugger target preserves a selected HTTP row and comparison
+baseline only when its immutable capture owner, exact row identity, and backend
+instance remain uniquely retained. Closing another target does not discard that
+history. Missing ownership, reused or ambiguous rows, a cleared window, backend
+restart, generation regression, or same-target reconnection expires the selection.
+This is a local viewer continuity check: old catalog links and pending details
+keep their original epoch guards; WebSocket and action ownership are unchanged.
+
 ## Connected investigations
 
 **Advanced** is a manually opened workspace chooser. Completed workspace
@@ -97,7 +117,9 @@ is a copied template, never captured evidence; no request is sent.
 Console URL links open a bounded, explicitly unverified source search. The
 separate disposable browser is not assigned a captured-artifact identity, and
 Console line offsets are never applied to search candidates. Debugger/native
-host-and-time correlations likewise cannot become exact captured trace links.
+host-and-time correlations likewise cannot become exact captured trace links,
+request-specific signal profiles, or request-filtered VM candidates. CDP content
+and raw native events remain available independently.
 See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
 for the identity boundary, retained limits and integration points.
 
@@ -453,6 +475,32 @@ Rejected debugger actions, including a full Watch list, retain their own error
 without marking active network capture or the live tab count disconnected.
 Short windows keep at least one request row visible when status warnings wrap.
 
+HTTP coverage reports its active target mode and attached/eligible counts. Passive
+browser target discovery supports page, worker and out-of-process iframe targets
+without requesting startup holds. Browser-root auto-attach is disabled to avoid
+its popup-throttling side effect; captured owners retain recursive child attachment. Worker attachment can affect worker lifecycle and timeout
+behavior. It improves early discovery but cannot guarantee the first
+request: traffic preceding attachment and `Network.enable` remains unavailable.
+If browser target discovery is unavailable, the notice identifies page-target polling
+fallback and its missing worker/iframe coverage. Overflow and unattached targets
+remain explicit in either mode; native-only requests are not merged into this CDP
+list, and WebSockets retain their selected-debugger-target scope.
+
+`make traffic-capture-check` includes a live Chromium → native transport →
+backend → actual Traffic UI regression using authored loopback origins. A separate
+viewer browser prevents self-capture. It checks automatic new-tab and subsequent
+navigation arrivals, concurrent requests, view and target-scope continuity, popup
+traffic, and retained closed-tab history without manual refresh. Screenshots are
+written under `build/traffic-live-ui/` and retained by CI. Blank-target readiness
+is deliberate; this continuity test does not establish lossless startup capture
+or replace native macOS acceptance.
+
+The backend command-line option `--capture-target-limit` sets the HTTP owner cap
+(default 32, allowed range 1–128). This is a backend launch option, not an in-app
+setting. Raising it permits more capture owners; the existing 1,000-request window
+and 128 KiB per-side body limits still apply.
+
+
 The live launcher disables Brave background networking, component updates, and
 sync for its isolated research profile. Browser diagnostics are retained in the
 session's private `brave.log`, separate from coordinator failures. The native
@@ -537,6 +585,10 @@ Traffic, Collection, Sources, and Fingerprinting are available in the sidebar.
 Expand **Advanced** for Backtraces, Memory, Experiments, Analyst, and Tools.
 Navigation into an advanced tool reveals its group automatically on desktop. On
 narrow windows navigation moves above the workspace and closes after selection.
+
+Returning to Traffic immediately redraws retained requests and the selection, even
+when the last capture arrived while another workspace was open and the backend
+has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
@@ -1720,6 +1772,18 @@ Binding requires a unique complete UTF-8 digest match and strict synchronous-bod
 worker admission, never a copied script ID or URL match. Original evidence remains
 separate and returnable; no field values are saved to the notebook. See the
 [identity, consent, bounds and research contract](../../docs/product/candidate-experiment-v1.md).
+While Sources Runtime Hooks is open, visible Link context reserves a bounded, keyboard-
+focusable scroll area. Asynchronous expiry warnings remain readable without
+moving disposable action controls when the notice expands or wraps.
+
+Runtime Hooks mutation controls, including Open, Remove and Disarm, stay disabled
+until acknowledged changes reconcile with a current debugger snapshot. The
+visible status explains the wait; URL drafts are preserved and no navigation is
+retried automatically.
+
+Bind waits for pending debugger actions and for a fresh debugger snapshot to
+reconcile acknowledged changes. Its status explains the wait; reconciliation
+never automatically retries a binding or restores capture/arming consent.
 
 Traffic includes a bounded read-only [WebSocket message inspector](../../protocol/websocket-capture-v1.md) for enabled CDP content captures. Text/base64 messages, exact connection lifetimes and drop counters stay separate from HTTP rows.
 

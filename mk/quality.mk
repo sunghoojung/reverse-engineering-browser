@@ -99,11 +99,13 @@ workflow-check:
 clean:
 	rm -rf $(BUILD_DIR)
 
-javascript-check:
+javascript-check: capture-completeness-check
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-traffic-capture.mjs
+	node tools/check-traffic-retained-focus.mjs
 	node tools/check-traffic-capture-qa.mjs
+	node tools/check-public-demo-passive-smoke.mjs
 	node tools/check-websocket-inspection.mjs
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs
@@ -142,3 +144,18 @@ javascript-check:
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-package.mjs --contract-only
 	node tools/check-origin-trace-native-close.mjs --contract-only
+
+.PHONY: capture-completeness-check capture-completeness-browser-check
+capture-completeness-check:
+	node tools/check-capture-completeness-response-evidence.mjs
+	node tools/check-capture-completeness-startup.mjs
+	node tools/check-capture-completeness-reference.mjs
+	node tools/check-capture-completeness-lifecycle.mjs
+	node tools/check-capture-completeness-fixture.mjs
+	node tools/check-capture-completeness-netlog.mjs
+	node tools/check-capture-completeness-integration.mjs
+	node tools/check-capture-completeness-report.mjs
+
+# Exact browser version must be explicitly selected with REB_REFERENCE_BROWSER_VERSION.
+capture-completeness-browser-check: capture-completeness-check origin-trace-backend debugger-transport
+	node tools/check-capture-completeness-browser.mjs .

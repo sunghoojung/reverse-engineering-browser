@@ -447,6 +447,23 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: make e2e
 
+      - name: Verify multi-tab HTTP capture with installed Chrome
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          ORIGIN_TRACE_TEST_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export ORIGIN_TRACE_TEST_BROWSER
+          test -n "$ORIGIN_TRACE_TEST_BROWSER"
+          make traffic-capture-check
+
+      - name: Upload live Traffic continuity screenshots
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: traffic-live-ui-${{ github.run_id }}
+          path: build/traffic-live-ui/
+          if-no-files-found: warn
+          retention-days: 3
+
       - name: Run sanitizers
         if: matrix.os == 'ubuntu-latest'
         run: make sanitize

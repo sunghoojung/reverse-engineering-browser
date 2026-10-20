@@ -1,11 +1,14 @@
-use super::{Debugger, network_timing};
+use super::{Debugger, network_capture::Owner, network_timing};
 use crate::{
     error::{Error, Result},
     provenance, validation,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 fn bounded(v: &Value, max: usize) -> (String, bool) {
     let s = v.as_str().unwrap_or("");
     (validation::truncate(s, max), s.len() > max)
@@ -50,18 +53,18 @@ fn mime(headers: &[Value], fallback: &str) -> String {
         .unwrap_or(fallback)
         .into()
 }
-fn record<'a>(state: &'a mut Value, id: &str) -> Option<&'a mut Value> {
+fn record<'a>(state: &'a mut Value, owner: &Owner, id: &str) -> Option<&'a mut Value> {
     state["network"]["requests"]
         .as_array_mut()?
         .iter_mut()
         .rev()
-        .find(|r| r["protocol_request_id"] == id)
+        .find(|r| r["capture_owner"] == owner.id && r["protocol_request_id"] == id)
 }
-fn response(state: &mut Value, p: &Value, redirected: bool) {
+fn response(state: &mut Value, owner: &Owner, p: &Value, redirected: bool) {
     let Some(id) = p["requestId"].as_str() else {
         return;
     };
-    let Some(record) = record(state, id) else {
+    let Some(record) = record(state, owner, id) else {
         return;
     };
     let r = &p["response"];
@@ -71,6 +74,11 @@ fn response(state: &mut Value, p: &Value, redirected: bool) {
     network_timing::response(record, p, redirected);
     let (h, headers_truncated) = headers(&r["headers"]);
     let (m, _) = bounded(&r["mimeType"], 512);
+    record["status_source"] = json!(if redirected {
+        "redirect-response"
+    } else {
+        "response-received"
+    });
     record["status"] = r["status"]
         .as_f64()
         .map(|n| json!(n as i64))
@@ -92,9 +100,15 @@ fn response(state: &mut Value, p: &Value, redirected: bool) {
         record["response"]["body"]["reason"] = json!("This HTTP response has no body.");
     }
 }
-fn finish(state: &mut Value, p: &Value, failed: bool, redirected: bool) -> Option<String> {
+fn finish(
+    state: &mut Value,
+    owner: &Owner,
+    p: &Value,
+    failed: bool,
+    redirected: bool,
+) -> Option<String> {
     let id = p["requestId"].as_str()?;
-    let record = record(state, id)?;
+    let record = record(state, owner, id)?;
     network_timing::finish(record, p, failed, redirected);
     record["state"] = json!(if failed { "failed" } else { "complete" });
     if let Some(time) = p["timestamp"].as_f64() {
@@ -130,13 +144,40 @@ fn finish(state: &mut Value, p: &Value, failed: bool, redirected: bool) -> Optio
     record["id"].as_str().map(str::to_owned)
 }
 impl Debugger {
+    #[cfg(test)]
     pub(super) async fn network(self: &Arc<Self>, method: &str, p: &Value) {
-        if !self.options.capture_network_content {
+        if method.starts_with("Network.webSocket") && self.options.capture_network_content {
+            self.update(|s| super::websocket::event(s, method, p));
             return;
         }
-        if method.starts_with("Network.webSocket") {
-            self.update(|state| super::websocket::event(state, method, p));
+        let owner = Owner::fixture("test", self.snapshot()["target"].clone());
+        self.network_for(&owner, method, p).await;
+    }
+    pub(super) async fn network_for(self: &Arc<Self>, owner: &Arc<Owner>, method: &str, p: &Value) {
+        self.network_for_body_owner(owner, owner, method, p).await;
+    }
+    pub(super) async fn network_for_body_owner(
+        self: &Arc<Self>,
+        owner: &Arc<Owner>,
+        body_owner: &Arc<Owner>,
+        method: &str,
+        p: &Value,
+    ) {
+        if !self.options.capture_network_content || owner.retired.load(Ordering::Acquire) {
             return;
+        }
+        if matches!(
+            method,
+            "Network.requestWillBeSent" | "Network.responseReceived"
+        ) {
+            // Count even malformed/rejected repeated starts before validation.
+            self.update(|state| {
+                self.capture
+                    .status_evidence
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .observe(state, &owner.id, method, p);
+            });
         }
         let mut retrieve = None;
         match method {
@@ -164,22 +205,97 @@ impl Debugger {
                 } else {
                     json!({"state":if request["hasPostData"]==true {"missing"} else {"empty"},"mime":mime,"text":"","base64":"","truncated":false,"reason":if request["hasPostData"]==true {"CDP reported request data but did not retain its bytes."} else {"This request has no body."}})
                 };
+                let Some(public) = self.capture.row_id(owner) else {
+                    self.update(|s| {
+                        s["network"]["dropped"] = json!(
+                            s["network"]["dropped"]
+                                .as_u64()
+                                .unwrap_or(0)
+                                .saturating_add(1)
+                        )
+                    });
+                    return;
+                };
                 self.update(|s| {
-                    if p["redirectResponse"].is_object() {response(s,&json!({"requestId":id,"response":p["redirectResponse"]}),true);finish(s,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}
-                    let target=s["target"]["id"].as_str().unwrap_or("unknown").to_owned();let title=s["target"]["title"].clone();let initiator=provenance::project(&json!({"operation":"call_sites","initiator":p["initiator"],"target_id":target,"scripts":provenance::catalog(s)})).unwrap_or_else(|_|json!({"sites":[],"gaps":["initiator_unavailable"]}));let requests=s["network"]["requests"].as_array_mut().unwrap();let redirect=requests.iter().filter(|r|r["protocol_request_id"]==id).count();let suffix=if redirect>0 {format!(":redirect:{redirect}")} else {String::new()};
-                    let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":format!("cdp:{target}:{id}{suffix}"),"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
-                    if requests.len()>=1000 {requests.remove(0);let dropped=s["network"]["dropped"].as_u64().unwrap_or(0)+1;s["network"]["dropped"]=json!(dropped);}s["network"]["requests"].as_array_mut().unwrap().push(r);
+                    if owner.retired.load(Ordering::Acquire) {return;}
+                    if p["redirectResponse"].is_object() {response(s,owner,&json!({"requestId":id,"response":p["redirectResponse"]}),true);finish(s,owner,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}
+                    let target = owner.target["id"].as_str().unwrap_or("unknown").to_owned();
+                    let title = owner.target["title"].clone();
+                    // No frame can resolve a script when the stack is absent or empty.
+                    let scripts = if p["initiator"]["stack"]["callFrames"]
+                        .as_array()
+                        .is_some_and(|frames| !frames.is_empty())
+                    {
+                        provenance::catalog(s)
+                    } else {
+                        Value::Null
+                    };
+                    let initiator = provenance::project(&json!({
+                        "operation":"call_sites", "initiator":p["initiator"],
+                        "target_id":target, "scripts":scripts
+                    })).unwrap_or_else(|_| json!({"sites":[],"gaps":["initiator_unavailable"]}));
+                    let requests = s["network"]["requests"].as_array_mut().unwrap();
+                    let r=json!({"timing_evidence":network_timing::begin(p),"initiator":initiator,"id":public,"capture_owner":owner.id,"protocol_request_id":id,"target_id":target,"target_title":title,"url":url,"url_truncated":truncated,"method":method,"method_truncated":method_truncated,"resource_type":bounded(&p["type"],128).0,"document_url":document_url,"document_url_truncated":document_url_truncated,"started_monotonic_ms":timestamp*1000.0,"wall_time_ms":p["wallTime"].as_f64().map(|v|(v*1000.0).round_ties_even() as u64).unwrap_or(0),"state":"pending","status":null,"status_source":"unavailable","wire_status":null,"status_text":"","protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,"from_disk_cache":false,"from_service_worker":false,"error_text":"","request":{"headers":headers,"headers_truncated":headers_truncated,"body":body},"response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Waiting for the response to complete."}}});
+                    // Private provenance follows the bounded ledger; it never
+                    // changes the public request's original target or owner.
+                    let mut provenance = self
+                        .capture
+                        .main_resources
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let evicted = (requests.len() >= 1000).then(|| requests.remove(0));
+                    if let Some(row) = &evicted
+                        && let Some(id) = row["id"].as_str()
+                    {
+                        provenance.remove(id);
+                    }
+                    requests.push(r);
+                    if evicted.is_some() {
+                        let dropped = s["network"]["dropped"].as_u64().unwrap_or(0) + 1;
+                        s["network"]["dropped"] = json!(dropped);
+                    }
+                    if let Some(resource) = super::network_handoff::MainResource::from_event(p) {
+                        provenance.insert(public.clone(), resource);
+                    }
                 });
             }
-            "Network.responseReceived" => self.update(|s| response(s, p, false)),
+            "Network.responseReceived" => self.update(|s| {
+                if !owner.retired.load(Ordering::Acquire) {
+                    response(s, owner, p, false);
+                }
+            }),
             "Network.loadingFinished" | "Network.loadingFailed" => self.update(|s| {
-                let epoch = s["network"]["capture_epoch"].clone();
-                retrieve =
-                    finish(s, p, method.ends_with("Failed"), false).map(|public| (public, epoch));
+                if owner.retired.load(Ordering::Acquire) {
+                    return;
+                }
+                retrieve = finish(s, owner, p, method.ends_with("Failed"), false);
             }),
             _ => (),
         }
-        if let Some((public, epoch)) = retrieve {
+        if matches!(
+            method,
+            "Network.requestWillBeSent" | "Network.responseReceivedExtraInfo"
+        ) {
+            self.update(|state| {
+                if !owner.retired.load(Ordering::Acquire) {
+                    self.capture
+                        .status_evidence
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .observe(
+                            state,
+                            &owner.id,
+                            if method == "Network.requestWillBeSent" {
+                                "reconcile"
+                            } else {
+                                method
+                            },
+                            p,
+                        );
+                }
+            });
+        }
+        if let Some(public) = retrieve {
             let Some(protocol) = p["requestId"].as_str().map(str::to_owned) else {
                 return;
             };
@@ -187,7 +303,7 @@ impl Debugger {
                 Ok(permit) => permit,
                 Err(_) => {
                     self.update(|s| {
-                        if s["network"]["capture_epoch"] != epoch {
+                        if owner.retired.load(Ordering::Acquire) {
                             return;
                         }
                         if let Some(record) = s["network"]["requests"]
@@ -197,23 +313,32 @@ impl Debugger {
                             .find(|r| r["id"] == public)
                         {
                             record["response"]["body"]["state"] = json!("error");
-                            record["response"]["body"]["reason"] =
-                                json!("The bounded response-body retrieval queue was full.");
+                            record["response"]["body"]["reason"] = json!(if body_owner
+                                .retired
+                                .load(Ordering::Acquire)
+                            {
+                                "Completion target detached before response body retrieval finished"
+                            } else {
+                                "The bounded response-body retrieval queue was full."
+                            });
                         }
                     });
                     return;
                 }
             };
-            let connection = self.connection.lock().await.clone();
+            let connection = body_owner.connection.clone();
+            let body_owner = body_owner.clone();
+            let owner = owner.clone();
             let weak = Arc::downgrade(self);
             tokio::spawn(async move {
                 let _permit = permit;
                 let result = if let Some(connection) = connection {
                     connection
-                        .command(
+                        .command_session(
                             "Network.getResponseBody",
                             json!({"requestId":protocol}),
                             Duration::from_secs(5),
+                            body_owner.session.as_deref(),
                         )
                         .await
                         .and_then(|v| body(&v))
@@ -222,9 +347,16 @@ impl Debugger {
                 };
                 if let Some(debugger) = weak.upgrade() {
                     debugger.update(|s| {
-                        if s["network"]["capture_epoch"] != epoch {
+                        if owner.retired.load(Ordering::Acquire) {
                             return;
                         }
+                        let result = if body_owner.retired.load(Ordering::Acquire) {
+                            Err(Error::conflict(
+                                "Completion target detached before response body retrieval finished",
+                            ))
+                        } else {
+                            result
+                        };
                         if let Some(record) = s["network"]["requests"]
                             .as_array_mut()
                             .unwrap()
@@ -296,6 +428,44 @@ mod tests {
             "headers":{"Authorization":"Bearer synthetic-auth","Cookie":"sid=synthetic-cookie",
                 "Proxy-Authorization":"Basic synthetic-proxy","X-Custom-Token":"synthetic-custom"}
         }})
+    }
+
+    #[tokio::test]
+    async fn capture_initiator_projection_preserves_missing_empty_and_resolved_stacks() {
+        let debugger = debugger(true);
+        debugger.update(|s| {
+            s["scripts"] = json!([{
+                "script_id":"public-script", "cdp_script_id":"raw-script",
+                "target_id":"synthetic", "hash":"synthetic-hash"
+            }]);
+        });
+        let cases = [
+            Value::Null,
+            json!({"stack":{"callFrames":[]}}),
+            json!({"stack":{"callFrames":[],"parentId":{"id":"unresolved"}}}),
+            json!({"stack":{"callFrames":[{
+                "scriptId":"raw-script", "lineNumber":0, "columnNumber":1,
+                "url":"http://localhost/synthetic.js", "functionName":"synthetic"
+            }]}}),
+        ];
+        for (index, initiator) in cases.into_iter().enumerate() {
+            let mut event = request(&index.to_string(), "");
+            event["initiator"] = initiator;
+            let expected = provenance::project(&json!({
+                "operation":"call_sites", "initiator":event["initiator"],
+                "target_id":"synthetic", "scripts":provenance::catalog(&debugger.snapshot())
+            }))
+            .unwrap();
+            debugger.network("Network.requestWillBeSent", &event).await;
+            assert_eq!(
+                debugger.snapshot()["network"]["requests"][index]["initiator"],
+                expected
+            );
+        }
+        assert_eq!(
+            debugger.snapshot()["network"]["requests"][3]["initiator"]["sites"][0]["script_id"],
+            "public-script"
+        );
     }
 
     #[tokio::test]

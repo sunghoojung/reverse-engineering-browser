@@ -14519,7 +14519,12 @@
           },
           "network": {
             "type": "object",
-            "additionalProperties": true
+            "additionalProperties": true,
+            "properties": {
+              "capture_status": {
+                "$ref": "#/components/schemas/HttpTrafficCaptureStatus"
+              }
+            }
           },
           "heap_diff_baseline": {
             "anyOf": [
@@ -22802,6 +22807,31 @@
           },
           "timing_evidence": {
             "$ref": "#/components/schemas/NetworkTimingEvidence"
+          },
+          "capture_owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "description": "Opaque immutable HTTP connection-owner token; never substitute it for capture_epoch."
+          },
+          "status_source": {
+            "description": "Provenance of effective status. Optional for older producers; current producers initialize every row to unavailable.",
+            "type": "string",
+            "enum": [
+              "unavailable",
+              "response-received",
+              "redirect-response",
+              "response-received-extra-info"
+            ]
+          },
+          "wire_status": {
+            "description": "Uniquely attributable ExtraInfo wire status, distinct from effective cached response status; null on missing or ambiguous evidence.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 100,
+            "maximum": 599
           }
         },
         "x-schema-completeness": "partial",
@@ -25311,6 +25341,194 @@
           }
         },
         "x-source": "protocol/vm-host-links-v1.schema.json"
+      },
+      "HttpTrafficCaptureStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "state",
+          "attached_targets",
+          "eligible_targets",
+          "target_limit",
+          "target_overflow",
+          "failed_targets",
+          "gaps",
+          "last_error",
+          "message"
+        ],
+        "properties": {
+          "scope": {
+            "enum": [
+              "http-page-targets",
+              "http-browser-targets"
+            ]
+          },
+          "state": {
+            "enum": [
+              "disabled",
+              "waiting",
+              "ready",
+              "partial"
+            ]
+          },
+          "attached_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "eligible_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "target_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 128
+          },
+          "target_overflow": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 511
+          },
+          "failed_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "gaps": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "attached_target_ids": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "unattached_targets": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "title"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 128
+                }
+              }
+            }
+          },
+          "unattached_targets_omitted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "catalog_incomplete": {
+            "type": "boolean",
+            "description": "Known-target catalog is incomplete; bounded reconciliation is pending and counts exclude unknown targets."
+          },
+          "discovery_stale": {
+            "type": "boolean",
+            "description": "Target enumeration failed. Existing owners may continue, but new targets cannot be confirmed or attached."
+          },
+          "transport_mode": {
+            "enum": [
+              "page-fallback",
+              "browser-sessions"
+            ]
+          },
+          "cleanup_already_gone": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional cumulative confirmed-ended cleanup jobs; not a missing-request count."
+          },
+          "cleanup_failures": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional cumulative failed cleanup jobs on the current browser connection at observation; not a missing-request count."
+          },
+          "startup_mode": {
+            "const": "passive"
+          },
+          "browser_setup_failure": {
+            "description": "Last failed browser setup attempt; survives page fallback and clears after successful browser setup. Not a claim of unsupported capability.",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "stage",
+                  "reason"
+                ],
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "endpoint",
+                      "transport-open",
+                      "discover-targets",
+                      "get-targets",
+                      "get-targets-shape"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "timeout",
+                      "disconnected",
+                      "transport-failure",
+                      "invalid-reply",
+                      "protocol-error",
+                      "command-rejected",
+                      "dependency-unavailable",
+                      "resource-limit",
+                      "invalid-request",
+                      "state-conflict",
+                      "stale-generation",
+                      "target-unavailable",
+                      "cancelled",
+                      "outcome-unknown",
+                      "unspecified"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "status_extra_info_overflow": {
+            "type": "boolean",
+            "description": "Sticky saturation of the bounded 2048-entry ExtraInfo identity history; disables ExtraInfo attribution without discarding HTTP rows or authoritative response status."
+          }
+        },
+        "description": "Bounded HTTP capture coverage. Passive browser sessions cover supported page, worker and out-of-process iframe targets; page polling is a compatibility fallback. Ready never promises first-navigation or pre-attachment completeness. WebSocket v1 remains selected-target scoped."
       }
     }
   },

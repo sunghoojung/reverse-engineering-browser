@@ -222,6 +222,66 @@ Sources are inert metadata; this endpoint does not fetch URLs, read evidence, ru
 source, or write the VM cache. The [analysis catalog guide](../docs/product/analysis-catalog-v1.md)
 explains evidence levels and compatibility.
 
+## HTTP Traffic capture coverage
+
+`GET /api/debugger` retains one shared bounded HTTP ledger across debugger target
+selection. A single browser CDP connection uses flattened, owner-qualified
+sessions for supported page, dedicated/shared/service worker and out-of-process
+iframe targets. Browser Target events trigger bounded explicit root attachment;
+recursive attachment on captured owners discovers nested contexts. This avoids
+one-per-second admission while leaving earliest requests best-effort. No startup pause, reload,
+navigation or Runtime evaluation is requested. Passive attachment can still
+change worker lifecycle/timeouts, and requests before attachment or
+`Network.enable`, including short-lived popups, remain unavailable.
+
+`network.capture_status` reports `scope: http-browser-targets`,
+`transport_mode: browser-sessions`, and `startup_mode: passive`. Standalone
+`--capture-target-limit` defaults to 32 and accepts 1–128; the limit counts both
+initializing and ready capture sessions across all supported target types.
+Existing owners retain their slots, and waiting targets are admitted oldest-first
+as slots become free. Selection does not silently evict another target.
+A bounded 512-target catalog feeds `eligible_targets`; `attached_targets`,
+`target_limit`, `target_overflow`, `failed_targets`, cumulative `gaps`, bounded
+`last_error` and `message` describe current coverage. `state` is `disabled`,
+`waiting`, `ready` or `partial`. Ready means known eligible targets initialized
+capture, never first-navigation completeness. Failed target initialization
+retries after five seconds. `attached_target_ids` identifies ready owners;
+`unattached_targets` includes up to 16 missing target IDs/current titles and
+`unattached_targets_omitted` counts the remainder. Worker IDs are not page IDs
+and must not be assigned the selected page's identity.
+Optional cumulative `cleanup_already_gone` and `cleanup_failures` counters report
+confirmed-ended cleanup jobs and unsuccessful cleanup jobs, respectively. They
+are cleanup diagnostics, not counts of missing requests. Only jobs belonging to
+the then-current browser connection may increment them; late replies from a
+replaced connection cannot alter the new connection's status. Counters retain
+history across ordinary connection replacement and are absent until observed.
+
+When browser Target setup fails, compatibility fallback reports
+`scope: http-page-targets`, `transport_mode: page-fallback`: the previous eight
+independent page connections and one-second discovery remain, without independent
+worker/OOPIF coverage. Browser setup is retried after 30 seconds. Transport
+changes retain completed history and explicitly retire unfinished owners.
+`discovery_stale` marks failed discovery; healthy owners may continue while new
+target coverage cannot be confirmed. Browser discovery is independent of the
+selected debugger's HTTP page enumeration.
+
+Each new HTTP row receives an opaque, instance-unique public `id` and a string
+`capture_owner` token. Raw `protocol_request_id` values are only meaningful within
+that owner. Redirect hops and replacement connections never reuse public IDs,
+even after eviction. Asynchronous bodies are fetched from the original owner;
+closure marks unfinished evidence unavailable and rejects late owner events.
+The global 1000-row limit and eight concurrent body retrieval jobs remain.
+Browser sessions share one 64 MiB event queue and a requested 128 MiB aggregate
+Network buffer budget divided by the configured session limit (not a total
+process-memory guarantee). The page fallback retains its former 512 MiB aggregate
+transport/128 MiB browser-buffer bounds. The focused debugger is additional.
+Row titles are attachment-time metadata and may precede a later navigation.
+
+The existing `network.capture_epoch` still advances on debugger focus/reconnect
+for selection and screenshot compatibility. HTTP rows survive those changes;
+clients must obtain the current snapshot epoch when selecting a retained row.
+The epoch is not interchangeable with `capture_owner`.
+
 ## Exact retained Traffic request
 
 `GET /api/network/request` (`get_network_request`) returns one unchanged retained
@@ -537,3 +597,64 @@ selected.reb-evidence.json` with the usual endpoint option. See
 request shape, safe persistence, exact limits, lease compatibility and stable
 error reasons. Backend event clear now also requires matching exclusive guards
 for all existing configured outputs; legacy unguarded clear returns 503.
+
+Passive browser-session HTTP capture uses browser target discovery and bounded
+explicit root attachments, with recursive attachment on captured page/worker
+sessions. It does not enable browser-root auto-attachment: Chromium's browser-root
+popup throttling can affect `window.open` even when `waitForDebuggerOnStart` is
+false. Admission runs immediately on discovery events with at most four attach
+commands in flight; the target capacity still includes pending attachments. The
+periodic refresh retries known targets; incomplete catalogs are reconciled as
+described below. First requests remain
+best-effort, and this change does not establish lossless early navigation capture.
+
+`catalog_incomplete` is true when the 512-target catalog omitted discovered
+candidates. Counts then cover known targets only, and coverage cannot report
+ready. Bounded reconciliation scans at most 4096 target descriptions per reply,
+retries at most every five seconds while incomplete, and becomes eligible on the
+next refresh after a catalog slot frees. Omitted stable targets can recover
+without another creation event. Rejected-session cleanup runs independently with
+a deduplicated FIFO of at most512 queued/in-flight session identities and four
+concurrent commands; queue overload closes that capture connection with an explicit
+gap rather than blocking healthy Network event dispatch indefinitely.
+
+Optional `capture_status.browser_setup_failure` is null or a fixed `{stage, reason}`
+object describing the last failed browser capture setup attempt. It survives page
+fallback status updates and clears on successful browser setup. It does not prove
+that browser-wide capture is unsupported. Stages separate endpoint validation,
+native transport opening, discovery enablement, target enumeration, and malformed
+successful enumeration output. Reasons come only from structured error codes and
+causes, never from browser-supplied error text. Missing endpoint publication is
+still a waiting condition; all existing retry timing remains unchanged.
+
+### HTTP status provenance
+
+Current Traffic rows include top-level `status_source` and `wire_status`; both
+properties remain optional in the contract for older producers. `status_source`
+is `unavailable`, `response-received`, `redirect-response`, or
+`response-received-extra-info`. Fresh rows initialize it to `unavailable` with
+`status: null` and `wire_status: null`.
+
+`Network.responseReceived` and the explicit `redirectResponse` evidence are
+authoritative for the effective `status`. A uniquely attributable
+`Network.responseReceivedExtraInfo.statusCode` can supply a missing effective
+status and records `wire_status` independently. Wire status must be an integer
+100–599. ExtraInfo alone with wire status 304 never supplies an effective status:
+a cached `responseReceived` status 200 with wire status 304 retains effective 200.
+
+Attribution requires exactly one unredirected request and one valid ExtraInfo
+observation for the same capture owner and raw protocol request ID, with complete
+retained history. ExtraInfo may precede the request. Duplicate or malformed
+observations (including duplicate response events), raw-ID reuse, any explicit
+redirectResponse field (including null), or lost history invalidate ExtraInfo
+attribution: `wire_status` becomes null and any ExtraInfo-derived effective status
+returns to null/`unavailable`. Genuine response or redirect status remains intact.
+No attribution crosses a capture owner or connection generation. These fields do
+not imply a response body, complete request capture, or replayable traffic.
+
+Optional `capture_status.status_extra_info_overflow` becomes true when the private
+2048-entry `(capture owner, protocol request ID)` history saturates. This sticky
+flag makes the attribution limit visible: all ExtraInfo-derived status and wire
+status are retracted, and later ExtraInfo attribution remains disabled. HTTP rows,
+`responseReceived`, and redirect response status continue normally. Identity
+history is not evicted and later reused as a false proof of uniqueness.

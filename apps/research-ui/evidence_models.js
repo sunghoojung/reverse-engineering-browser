@@ -421,13 +421,38 @@
         return true;
       }
 
+      function isDebuggerNetworkCaptureStatus(status) {
+        return isPlainObject(status) && ['http-page-targets', 'http-browser-targets'].includes(status.scope) &&
+          ['disabled', 'waiting', 'ready', 'partial'].includes(status.state) &&
+          (status.transport_mode === undefined ||
+            status.transport_mode === (status.scope === 'http-browser-targets' ? 'browser-sessions' : 'page-fallback')) &&
+          (status.startup_mode === undefined || status.startup_mode === 'passive') &&
+          (status.discovery_stale === undefined || typeof status.discovery_stale === 'boolean') &&
+          (status.catalog_incomplete === undefined || typeof status.catalog_incomplete === 'boolean') &&
+          isSafeIntegerInRange(status.attached_targets, 0, 128) &&
+          (status.attached_target_ids === undefined || Array.isArray(status.attached_target_ids) &&
+            status.attached_target_ids.length <= 128 && status.attached_target_ids.every(id => isBoundedText(id, 4096))) &&
+          (status.unattached_targets === undefined || Array.isArray(status.unattached_targets) &&
+            status.unattached_targets.length <= 16 && status.unattached_targets.every(target =>
+              isPlainObject(target) && isBoundedText(target.id, 4096) && isBoundedText(target.title, 128))) &&
+          (status.unattached_targets_omitted === undefined || isSafeIntegerInRange(status.unattached_targets_omitted, 0, 512)) &&
+          isSafeIntegerInRange(status.eligible_targets, 0, 512) && isSafeIntegerInRange(status.target_limit, 1, 128) &&
+          isSafeIntegerInRange(status.target_overflow, 0, 511) &&
+          isSafeIntegerInRange(status.failed_targets, 0, 512) &&
+          isSafeIntegerInRange(status.gaps, 0, Number.MAX_SAFE_INTEGER) &&
+          (status.last_error === null || isBoundedText(status.last_error, 512)) &&
+          isBoundedText(status.message, 1024);
+      }
+
       function isDebuggerNetwork(network) {
         return isPlainObject(network) && typeof network.capture_enabled === 'boolean' &&
+          (network.capture_status === undefined || isDebuggerNetworkCaptureStatus(network.capture_status)) &&
           (network.instance_id === undefined || isBoundedText(network.instance_id, 128)) &&
           (network.capture_epoch === undefined || isSafeIntegerInRange(network.capture_epoch, 0, Number.MAX_SAFE_INTEGER)) &&
           (network.target_id === null || isBoundedText(network.target_id, 4 * 1024)) &&
           Array.isArray(network.requests) && network.requests.length <= 1000 &&
           network.requests.every(isDebuggerNetworkRequest) &&
+          new Set(network.requests.map(request => request.id)).size === network.requests.length &&
           isSafeIntegerInRange(network.dropped, 0, Number.MAX_SAFE_INTEGER) &&
           isPlainObject(network.limits) && network.limits.requests === 1000 &&
           network.limits.body_bytes === 128 * 1024 && network.limits.headers === 128 &&
@@ -1703,7 +1728,9 @@
             method: record.method,
             status: record.state === 'failed' ? 'failed' : record.status ?? 'pending',
             time: terminal && record.duration_ms !== null ? record.duration_ms : 'pending',
-            type: typeMap.get(record.resource_type) ?? 'other',
+            // Response MIME identifies Wasm even when CDP calls its loader Fetch/XHR.
+            type: record.mime_type.split(';', 1)[0].trim().toLowerCase() === 'application/wasm'
+              ? 'wasm' : typeMap.get(record.resource_type) ?? 'other',
             origin: 'live',
             targetKind: 'url',
             hostOnly: false,

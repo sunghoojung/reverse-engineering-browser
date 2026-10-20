@@ -93,3 +93,10 @@ Use `node tools/vm-agent.mjs create-opcode-ledger --definition VM.json` for an
 empty hash-bound ledger on stdout, or
 `node tools/vm-semantics.mjs create-ledger VM.json NEW-LEDGER.json` for a private,
 no-overwrite local file. Both create the existing reimportable ledger contract.
+
+`make traffic-capture-check` owns the HTTP capture regression gate used by CI
+and `make backend-e2e`. It checks owned-process cleanup, deterministic page
+discovery (including initialization errors/timeouts and retry), flattened CDP
+session lifecycle, and actual Chromium capture. Set `ORIGIN_TRACE_TEST_BROWSER`
+to the installed browser path for the real-browser check. Synthetic checks cover
+faults deterministically; they do not replace real-browser acceptance.

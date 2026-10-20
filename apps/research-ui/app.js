@@ -234,8 +234,10 @@
       }
 
       function networkContentCaptureActive() {
+        const coverage = state.debuggerSession?.network?.capture_status;
         return networkContentCaptureEnabled() && !state.debuggerRefreshFailed &&
-          ['running', 'paused'].includes(state.debuggerSession?.state);
+          (coverage ? coverage.attached_targets > 0 && ['ready', 'partial'].includes(coverage.state)
+            : ['running', 'paused'].includes(state.debuggerSession?.state));
       }
 
       // Both refresh paths project the same status so neither can erase the other's gaps.
@@ -275,6 +277,32 @@
               : state.debuggerSession?.state === 'crashed' ? 'The captured browser target crashed.'
                 : 'Network capture is waiting for an attached browser target.');
             messages.push(state.requests.length ? 'The last recorded requests remain visible.' : 'No captured network requests are available.');
+          }
+          const coverage = state.debuggerSession.network.capture_status;
+          if (coverage) {
+            if (kind === 'active' && (coverage.state !== 'ready' || coverage.gaps > 0 || coverage.catalog_incomplete)) kind = 'gap';
+            const earlyTargets = coverage.scope === 'http-browser-targets';
+            const targetKind = earlyTargets ? 'browser targets' : 'page targets';
+            messages.push(`HTTP capture: ${coverage.attached_targets} of ${coverage.eligible_targets} eligible ${targetKind} attached (limit ${coverage.target_limit}).`);
+            messages.push(earlyTargets ? 'Mode: passive browser target discovery.' : 'Mode: page-target polling fallback; worker and out-of-process iframe targets are not attached.');
+            if (coverage.catalog_incomplete) messages.push('Target catalog is incomplete; counts cover only known targets while recovery is pending.');
+            if (coverage.discovery_stale) messages.push('Target discovery is unavailable; counts are last known and new tabs may not attach.');
+            if (coverage.target_overflow > 0) messages.push(`${coverage.target_overflow} ${targetKind} exceed the capture limit and are not attached.`);
+            if (coverage.failed_targets > 0) messages.push(`${coverage.failed_targets} target attachments failed; retry is pending.`);
+            if (coverage.gaps > 0) messages.push(`${coverage.gaps} HTTP capture owner losses or retirements recorded; coverage may be incomplete.`);
+            const unattached = coverage.unattached_targets ?? [];
+            if (unattached.length) {
+              const labels = unattached.slice(0, 3).map(target => `${target.title || 'Untitled target'} [${target.id.length > 48 ? target.id.slice(0, 48) + '…' : target.id}]`);
+              const remaining = unattached.length - labels.length + (coverage.unattached_targets_omitted ?? 0);
+              messages.push(`Not attached: ${labels.join('; ')}${remaining ? `; ${remaining} more targets not listed here` : ''}.`);
+            }
+            const selectedTarget = state.debuggerSession.target?.id;
+            if (selectedTarget && Array.isArray(coverage.attached_target_ids) && !coverage.attached_target_ids.includes(selectedTarget)) {
+              if (kind === 'active') kind = 'gap';
+              messages.push('The selected debugger page is not attached for HTTP capture; its new requests are not being recorded here.');
+            }
+            if (earlyTargets) messages.push('Supported page, worker and out-of-process iframe targets are attached without requesting startup pauses. Initial requests can still precede Network.enable; first-request capture is not guaranteed. Attaching worker targets can affect their lifecycle and timeout behavior.');
+            messages.push('Requests before attachment, including short-lived targets, are unavailable. Requests observed only by native probes are not included in this CDP list. WebSockets remain scoped to the selected debugger target.');
           }
           const dropped = state.debuggerSession.network.dropped;
           if (dropped) {
@@ -422,7 +450,9 @@
       }
 
       function requestSignalRoot(request) {
-        if (!request || request.origin === 'sample') return null;
+        // Host/method/time correlation cannot identify an exact native request.
+        if (!request || request.origin === 'sample' || request.protocolRequestId ||
+            String(request.operation).startsWith('cdp_')) return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
@@ -905,6 +935,11 @@
 
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
+        if (selectedRequest?.protocolRequestId || String(selectedRequest?.operation).startsWith('cdp_')) {
+          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty',
+            'This CDP request has no exact native-event link. Host, method and timing matches cannot establish request-specific signal relationships.'));
+          return;
+        }
         if (state.signalProfileStatus === 'loading') {
           elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile...'));
           return;
@@ -1297,7 +1332,9 @@
         renderFingerprintDetail(orderedEvents.find(event => signalEventKey(event) === state.selectedSignalEventKey) ?? null);
       }
 
-      function rebuildTrafficRequests() {
+      function rebuildTrafficRequests(previousSession = null) {
+        const previousSelection = state.selectedCaptureIdentity
+          ? apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record : null;
         const cdpRequests = requestsFromDebuggerNetwork(
           state.debuggerSession?.network, state.nativeRequests, state.debuggerNetworkBodyCache
         );
@@ -1307,8 +1344,21 @@
         } else {
           state.requests = state.nativeRequests;
         }
+        const oldOwner = trafficHttpSnapshotOwner(previousSession, state.sessionMode);
+        const newOwner = trafficHttpSnapshotOwner(state.debuggerSession, state.sessionMode);
+        const snapshotReset = previousSession && previousSelection && !trafficHttpSnapshotContinues(oldOwner, newOwner);
+        const retainedSelection = previousSelection && trafficRetainedFocusRequest(previousSelection, state.requests, oldOwner, newOwner);
+        if (retainedSelection) {
+          state.selectedCaptureIdentity = apiCatalogRequestIdentity(retainedSelection);
+          // Old-epoch asynchronous details must not relabel the renewed selection.
+          state.originTraceController?.abort();
+          state.originTraceGeneration += 1;
+          state.signalProfileGeneration += 1;
+        }
         syncTrafficComparison();
-        if (state.selectedCaptureIdentity && !apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record) {
+        const selected = apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record;
+        const previousRetention = trafficRetainedHttpIdentity(previousSelection);
+        if (state.selectedCaptureIdentity && (snapshotReset || !selected || previousRetention && trafficRetainedHttpIdentity(selected) !== previousRetention)) {
           resetRequestSelection();
           state.trafficSelectionNotice = 'The selected captured request expired or its exact source changed. Choose another request.';
           investigationNotice(state.trafficSelectionNotice, 'stale');
@@ -2235,15 +2285,16 @@
 
       function renderRequestScopes() {
         const groups = requestTabGroups();
+        const targetScope = state.debuggerSession?.network?.capture_status?.scope === 'http-browser-targets';
         const availableTabs = new Set(groups.map(group => group.id));
         if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
         const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
-        const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
+        const buttons = [{id: 'all', label: targetScope ? 'All targets' : 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
           const domains = [...new Set(group.requests.map(requestDomain))];
           return {
             id: group.id,
-            label: group.id === 'unattributed' ? 'Unattributed' : `Tab ${index + 1}`,
+            label: group.id === 'unattributed' ? 'Unattributed' : `${targetScope ? 'Target' : 'Tab'} ${index + 1}`,
             count: group.requests.length,
             domains
           };
@@ -2262,9 +2313,9 @@
           button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
           if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
           if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
-          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab'
-            : scope.id === 'unattributed' ? 'Events without a browser tab identifier'
-              : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
+          button.title = scope.id === 'all' ? targetScope ? 'Show requests from every captured browser target' : 'Show requests from every captured browser tab'
+            : scope.id === 'unattributed' ? targetScope ? 'Events without a browser target identifier' : 'Events without a browser tab identifier'
+              : `${scope.label} · ${scope.domains.join(', ')} · ${targetScope ? 'target' : 'tab'} id ${scope.id}`;
           if (created) button.addEventListener('click', () => {
             state.requestTabId = scope.id;
             state.requestDomain = 'all';
@@ -2733,6 +2784,10 @@
           elements.prompt.textContent = 'Fingerprint activity before this request';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
+          if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
+            renderInspectorMessage('This CDP request has no exact native-event link. Host, method and timing matches cannot establish request-specific signal relationships. Raw fingerprint events remain available in Fingerprinting.');
+            return;
+          }
           if (state.signalProfileStatus === 'loading') {
             renderInspectorMessage('Building a bounded profile from retained browser-signal evidence.');
             return;
@@ -2783,6 +2838,9 @@
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
             const details = [{ key: 'correlation', value: request.id, type: 'id' }];
+            if (request.protocolRequestId || String(request.operation).startsWith('cdp_')) {
+              details.unshift({key: 'link confidence', value: 'Unverified host, method and timing match. These native identifiers may belong to another request or tab.', type: 'Correlated'});
+            }
             if (contextEvent) {
               details.push({ key: 'browser context', value: browserContextToken(contextEvent), type: 'token' });
             }
@@ -2818,7 +2876,7 @@
               { key: 'last event', value: request.lastTimestamp, type: 'ns' },
               { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
               { key: 'lifecycle', value: request.operation, type: 'state' },
-              { key: 'events', value: request.events.length, type: 'count' },
+              { key: request.protocolRequestId || String(request.operation).startsWith('cdp_') ? 'unverified native candidate events' : 'events', value: request.events.length, type: 'count' },
               { key: 'phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
             ]);
           } else if (request) {
@@ -4154,7 +4212,7 @@
             `${definition.target_type} ${definition.target_id.slice(0, 12)} · ${sourceName({url: definition.url, source_type: 'script', script_id: definition.script_id})}:${definition.line + 1}:${definition.column + 1} · ${location}${resolved} · ${behavior}${definition.url_truncated ? ' · source URL truncated' : ''}`);
           meta.title = definition.url;
           const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'hook-remove';
-          remove.textContent = 'Remove'; remove.disabled = active || state.experimentPending || state.debuggerActionPending;
+          remove.textContent = 'Remove'; remove.disabled = active || state.experimentPending || state.debuggerActionPending || state.experimentNeedsRefresh;
           remove.setAttribute('aria-label', `Remove ${definition.label}`);
           remove.addEventListener('click', () => runExperimentAction({action: 'remove_runtime_hook', hook_id: definition.id}));
           row.append(title, remove, phase, meta);
@@ -4323,7 +4381,7 @@
         const requestBusy = ['running', 'cancelling'].includes(repeaterState()?.state);
         const automationBusy = automationRecipesState()?.auto_armed ||
           ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
-        const contextWorking = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) ||
+        const contextWorking = state.experimentPending || state.experimentNeedsRefresh || ['creating', 'disposing'].includes(experiment?.state) ||
           objectBusy || requestBusy || automationBusy;
         const contextReady = attached && experiment?.isolated && hooks?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && hooks.target_id === state.debuggerSession?.target?.id &&
@@ -4358,6 +4416,7 @@
         elements.experimentTitle.textContent = 'Runtime Hooks';
         elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page or its worker.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
+        else if (state.experimentNeedsRefresh) setExperimentNotice('working', 'Waiting for a current debugger snapshot. Runtime Hooks controls are paused until reconciliation.');
         else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
         else if (hooks.last_failure) setExperimentNotice('error', hooks.last_failure);
@@ -4405,13 +4464,13 @@
           (functionMode && !elements.hooksFunctionExpression.value.trim()) || state.debuggerActionPending;
         elements.hooksConfirm.disabled = !contextReady || active || !hooks?.definitions.length || contextWorking;
         elements.hooksArm.disabled = !editable || !hooks?.definitions.length || !elements.hooksConfirm.checked || state.debuggerActionPending;
-        elements.hooksDisarm.disabled = !active || state.debuggerActionPending;
+        elements.hooksDisarm.disabled = !active || state.debuggerActionPending || state.experimentNeedsRefresh;
         renderRuntimeHookDefinitions(hooks, active);
         renderRuntimeHookHits(hooks);
         renderRuntimeFieldTest(hooks, editable, contextReady && !contextWorking &&
           !['arming', 'handling', 'stopping'].includes(hooks?.state));
         elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
-        elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentError && !hooks.last_failure
+        elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentNeedsRefresh && !state.experimentError && !hooks.last_failure
           ? `Armed · ${hooks.total_hits} ${hooks.total_hits === 1 ? 'hit' : 'hits'}`
           : elements.experimentNotice.textContent;
         elements.sourceHooksNotice.hidden = !state.sourceHooksOpen ||
@@ -11326,7 +11385,7 @@
           const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
           body = syncExperimentSession(previousSession, body, experimentReceiptAtStart);
           state.debuggerSession = body;
-          rebuildTrafficRequests();
+          rebuildTrafficRequests(previousSession);
           syncMemorySession(previousSession, body);
           applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = state.experimentNeedsRefresh ? null : response.headers.get('ETag');
@@ -11538,7 +11597,14 @@
         if (navigation.contains(document.activeElement)) navigation.querySelector('summary').focus({ preventScroll: true });
         navigation.open = false;
         if (screenName === 'signals') renderFingerprintActivity();
-        if (screenName === 'traffic') renderRuntimeHookTraffic();
+        if (screenName === 'traffic') {
+          // Hidden debugger refreshes update the model without painting Traffic.
+          // A quiet backend may return 304 indefinitely after we return here.
+          renderRequests();
+          updateSelectionSummary(state.requests.find(request => request.id === state.selectedRequestId) ?? null);
+          renderInspector();
+          renderRuntimeHookTraffic();
+        }
         if (screenName === 'backtrace') renderBacktrace();
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'api-collection') {
@@ -11970,6 +12036,10 @@
       });
       elements.requestVmCandidates.addEventListener('click', async () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
+          investigationNotice('This CDP request has no exact native-event link. Host, method and timing matches cannot identify request-specific VM candidates.', 'unavailable');
+          return;
+        }
         const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;
         if (requestId) await refreshVmAnalysis(requestId);
         showScreen('vm', elements.requestVmCandidates);

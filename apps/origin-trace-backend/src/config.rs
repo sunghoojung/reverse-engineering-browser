@@ -52,6 +52,9 @@ pub struct Options {
     pub devtools_active_port: Option<PathBuf>,
     #[arg(long)]
     pub capture_network_content: bool,
+    /// Maximum multiplexed HTTP capture sessions; shares a fixed browser buffer budget.
+    #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=128))]
+    pub capture_target_limit: u16,
     #[arg(long)]
     pub demo_evidence: bool,
     #[arg(long)]

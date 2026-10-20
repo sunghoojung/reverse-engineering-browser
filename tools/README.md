@@ -112,3 +112,10 @@ handoffs, without changing the previous receipt. The bounded Git fixtures in
 receipt preservation and rejected production/upstream changes. See the
 [integrated build guide](../docs/development/integrated-brave-build.md) for the
 complete command and remaining runtime gates.
+
+The integrated input guard also provides `advance-patch` for a one-file native
+patch compatibility fix. It validates the prior receipt, clean source ancestry,
+unchanged pins/overlays/patch inventory and ordered replay before changing the
+verified destination. Private before/after backups and an audit permit checked
+recovery; unknown edits and conflicting receipts are preserved. See
+[the integrated build guide](../docs/development/integrated-brave-build.md).

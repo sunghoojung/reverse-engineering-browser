@@ -127,16 +127,17 @@ make demo native-probe-admission-check native-proxy-policy-check
 ./scripts/brave-toolchain.sh build --prepare_only
 ./scripts/brave-toolchain.sh build --target components/policy:generate_policy_templates
 python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
-# Let Brave generate its component args before the direct GN object/test checks.
+# Preparation/policy generation created component args. Compile the native
+# integration and run its separate proxy test before the aggregate browser.
+test -f "${brave_directory}/../out/Component_arm64/args.gn"
+make brave-foundation-check
+python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
 if [[ -n "${REB_BRAVE_JOBS:-}" ]]; then
   ./scripts/brave-toolchain.sh build --ninja "j:${REB_BRAVE_JOBS}"
 else
   ./scripts/brave-toolchain.sh build
 fi
-# Includes the Console runtime object, worker objects, and the separate proxy test.
-test -f "${brave_directory}/../out/Component_arm64/args.gn"
 python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
-make brave-foundation-check
 make app-build native-console-check
 codesign --verify --deep --strict "build/Origin Trace.app"
 python3 tools/check-integrated-brave-state.py complete "${state_arguments[@]}"

@@ -300,3 +300,12 @@ and teardown. `tests/fixtures/runtime-buffer-checkpoint.html` is the owned brows
 runtime regression for indexed/set/DataView initialization and cross-script
 identity. It requires a rebuilt patched browser; component tests and pinned
 patch applicability do not substitute for running that fixture in Chromium.
+
+For a one-file patch compatibility repair in a recorded initialized checkout,
+use the guarded `advance-patch` procedure in
+[the integrated build guide](../../../docs/development/integrated-brave-build.md).
+It preflights the complete old/new ordered stack and preserves source receipts,
+backups and real index entries; do not hand-edit the generated checkout. The
+runtime buffer callback obtains its isolate from Blink's execution context,
+which is supported at the pinned V8 revision; a missing context emits the
+existing omission reason.

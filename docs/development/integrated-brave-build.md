@@ -68,8 +68,9 @@ fresh pinned worktree. Never stash/reset/clean or discard edits to bypass this
 guard. The helper does none of those operations.
 
 The wrapper runs the existing doctor and sync, offline native foundations,
-and Brave's prepare-only stage before recording the compilation inputs. That
-stage copies branding into tracked Chromium paths; the source guard records
+Brave's prepare-only stage, and the `components/policy:generate_policy_templates`
+target before recording the compilation inputs. These stages copy branding and
+policy definitions into Chromium's source tree; the source guard records
 those authorized copies before the full build and still rejects unexpected
 changes before preparation or after compilation. It then runs
 the full development browser build (which prepares Brave's component GN args),
@@ -84,6 +85,9 @@ proxy tests; `make brave-probe-check` still compiles the probe objects alone.
 The focused commands support `REB_BRAVE_OUTPUT_DIRECTORY`; this wrapper rejects
 that override so the browser and focused checks both use `out/Component_arm64`.
 `REB_BRAVE_JOBS` applies to both the full browser and focused native builds.
+The wrapper explicitly caps Siso's local executor because pinned Brave's
+`--ninja j` option only sets its remote execution limit. Existing tighter local
+limits and other `SISO_LIMITS` entries are preserved.
 
 The output is **Brave plus the matched Origin Trace companion**, including its
 bundled backend, native tools and UI. They are two cooperating applications, not

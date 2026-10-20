@@ -52,6 +52,28 @@ if [[ -n "${REB_BRAVE_JOBS:-}" && ! "${REB_BRAVE_JOBS}" =~ ^[1-9][0-9]*$ ]]; the
   echo "REB_BRAVE_JOBS must be a positive integer." >&2
   exit 2
 fi
+if [[ -n "${REB_BRAVE_JOBS:-}" ]]; then
+  # Pinned Brave consumes --ninja j only for remote Siso builds. Bound the
+  # local executor explicitly, preserving other limits and any tighter cap.
+  SISO_LIMITS="$(python3 - "${REB_BRAVE_JOBS}" <<'PY'
+import os
+import sys
+
+limit = int(sys.argv[1])
+other = []
+for entry in os.environ.get("SISO_LIMITS", "").split(","):
+    key, separator, value = entry.partition("=")
+    if key.strip() == "local":
+        if not separator or not value.strip().isdigit() or int(value) < 1:
+            sys.exit("SISO_LIMITS local must be a positive integer")
+        limit = min(limit, int(value))
+    elif entry.strip():
+        other.append(entry)
+print(",".join([*other, f"local={limit}"]))
+PY
+  )"
+  export SISO_LIMITS
+fi
 readonly worktree="${REB_BRAVE_WORKTREE:-${repository_root}/browser/worktree}"
 readonly brave_directory="${REB_BRAVE_DIRECTORY:-${worktree}/src/brave}"
 if [[ "${initialize}" == true && "${brave_directory}" != "${worktree}/src/brave" ]]; then
@@ -100,9 +122,10 @@ python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
 python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
 make demo native-probe-admission-check native-proxy-policy-check
 ./build/reb-event-demo
-# Brave's preparation copies branding into tracked Chromium paths. Record those
-# authorized inputs before compilation; later unexpected changes still stop us.
+# Branding and policy generation both copy inputs into Chromium's source tree.
+# Complete those authorized preparations before recording compilation inputs.
 ./scripts/brave-toolchain.sh build --prepare_only
+./scripts/brave-toolchain.sh build --target components/policy:generate_policy_templates
 python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
 # Let Brave generate its component args before the direct GN object/test checks.
 if [[ -n "${REB_BRAVE_JOBS:-}" ]]; then

@@ -46,7 +46,7 @@ try {
  const {sessionId}=await send('Target.attachToTarget',{targetId,flatten:true});
  const command=(method,params={})=>send(method,params,sessionId);
  const evaluate=async expression=>{const result=await command('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(result.exceptionDetails.text);return result.result.value;};
- const until=async expression=>{for(let i=0;i<100;i++){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('UI state timeout: '+expression);};
+ const until=async expression=>{for(let i=0;i<100;i++){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('UI state timeout: '+expression+'; '+await evaluate('ui.notice.textContent'));};
  await command('Page.enable');await until("Boolean(globalThis.ui)");
  const click=async selector=>{
   // Native scrolling + hit test and pointer events; no programmatic DOM click.
@@ -104,8 +104,10 @@ try {
  await click('.vm-review-tabs [role="tab"]:nth-child(1)');
  await click('[data-ledger-action="edit-selected"]');
  assert.deepEqual(await evaluate('JSON.parse(ui.editors.ledger.value.slice(ui.editors.ledger.selectionStart,ui.editors.ledger.selectionEnd))'),ledger.entries[0]);
- await click('textarea[aria-label="Opcode ledger JSON editor"]');
- await command('Input.dispatchKeyEvent',{type:'keyDown',key:'End',code:'End',windowsVirtualKeyCode:35,modifiers:2});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'End',code:'End',windowsVirtualKeyCode:35,modifiers:2});
+ assert(await evaluate('document.activeElement===ui.editors.ledger'));
+ // Collapse the selected entry before inserting valid JSON whitespace. Ctrl+End
+ // is platform dependent and can leave the entry selected on macOS.
+ await command('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});await command('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
  await command('Input.insertText',{text:' '});await until('ui.download.disabled');
  assert.match(await evaluate('ui.notice.textContent'),/stale/);
  for(const width of [1180,760,390]){

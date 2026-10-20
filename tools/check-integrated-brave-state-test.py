@@ -286,6 +286,8 @@ class StateGuards(unittest.TestCase):
             f"printf '%s\\n' \"$*\" >> {shlex.quote(str(phases))}\n"
             # Actual Brave build preparation rewrites tracked branding inputs.
             f"printf 'prepared branding\\n' > {shlex.quote(str(self.chromium / 'tracked.txt'))}\n"
+            # A Ninja policy action also copies source inputs after prepare-only.
+            f"if [ \"$*\" != 'build --prepare_only' ]; then printf 'derived policy\\n' > {shlex.quote(str(self.chromium / 'policy.yaml'))}; fi\n"
             f"mkdir -p {shlex.quote(str(executable.parent))}\n"
             f"printf 'is_component_build = true\\n' > {shlex.quote(str(output / 'args.gn'))}\n"
             f"printf 'built browser\\n' > {shlex.quote(str(executable))}\n"
@@ -314,12 +316,20 @@ class StateGuards(unittest.TestCase):
             target.chmod(0o755)
         environment = {key: value for key, value in os.environ.items() if not key.startswith("REB_")}
         environment.update(PATH=str(mocks) + os.pathsep + os.environ["PATH"],
-                           REB_BRAVE_DIRECTORY=str(self.brave))
+                           REB_BRAVE_DIRECTORY=str(self.brave), REB_BRAVE_JOBS="6",
+                           SISO_LIMITS="remote=2,local=3")
+        with toolchain.open("a") as stream:
+            stream.write(f"printf '%s\\n' \"$SISO_LIMITS\" >> {shlex.quote(str(self.root / 'limits'))}\n")
+        git(self.repo, "add", "scripts")
+        git(self.repo, "commit", "-qm", "local executor fixture")
         command = ["bash", str(wrapper)]
         result = subprocess.run(command, env=environment, capture_output=True,
                                 text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(phases.read_text().splitlines(), ["build --prepare_only", "build"])
+        self.assertEqual(phases.read_text().splitlines(), [
+            "build --prepare_only", "build --target components/policy:generate_policy_templates",
+            "build --ninja j:6"])
+        self.assertEqual((self.root / "limits").read_text().splitlines(), ["remote=2,local=3"] * 3)
         self.assertTrue((demo.parent / "integrated-brave-complete.json").is_file())
         before = phases.read_bytes()
         (self.chromium / "tracked.txt").write_text("private user edit\n")

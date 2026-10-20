@@ -89,19 +89,45 @@ REB_BRAVE_DIRECTORY=/existing/worktree/src/brave ./scripts/build-integrated-brav
 
 The command writes a new receipt and `build/integrated-brave-handoff.json`;
 it never modifies the previous receipt. Preserve an existing destination receipt
-separately before requesting a handoff. For production input changes, continue
-to use a fresh pinned checkout.
+separately before requesting a handoff. Other production input changes require a fresh pinned checkout.
+
+For a compatibility fix that changes exactly one existing patch-owned source
+file, `advance-patch` can preserve an interrupted build. Both source checkouts
+must be clean committed revisions with recorded ancestry. Pins, overlays,
+ordered patch names and destination inventories must stay identical. All three
+upstream checkouts must match the previous receipt exactly before preflight.
+The command reverses the old stack and applies the new stack in a temporary
+index, refuses additions/deletions/mode changes and files above 16 MiB, and
+updates only the single preflighted file. Real Git index entries stay unchanged.
+
+```sh
+python3 tools/check-integrated-brave-state.py advance-patch \
+  --repository "$PWD" --brave /existing/worktree/src/brave \
+  --receipt "$PWD/build/integrated-brave-state.json" \
+  --previous-repository /previous/source-checkout \
+  --previous-receipt /previous/source-checkout/build/integrated-brave-state.json
+REB_BRAVE_DIRECTORY=/existing/worktree/src/brave ./scripts/build-integrated-brave.sh
+```
+
+The previous receipt is preserved. Private before/after backups and
+`build/integrated-brave-patch-advance.json` record the exact transition. A normal
+failure restores only the command's own known bytes; concurrent unknown edits
+are preserved and marked `needs_review`. Repeating an interrupted operation
+accepts only its recorded before/after file with unchanged surrounding inputs
+and index entries. A completed repeat is a no-op. Preserve conflicting receipts
+or audits separately; never edit them to admit an unexplained source state.
+Successful-build proof and the smaller disk reserve are not inherited.
 
 The wrapper runs the existing doctor and sync, offline native foundations,
 Brave's prepare-only stage, and the `components/policy:generate_policy_templates`
 target before recording the compilation inputs. These stages copy branding and
 policy definitions into Chromium's source tree; the source guard records
 those authorized copies before the full build and still rejects unexpected
-changes before preparation or after compilation. It then runs
-the full development browser build (which prepares Brave's component GN args),
-pinned probe compilation (including the native Console runtime), the separate
-proxy adapter unit-test executable, and
-Origin Trace packaging/Console checks. It verifies the companion signature.
+changes before preparation or after compilation. Preparation and policy generation create Brave's component GN args. It then
+runs pinned probe compilation (including the native Console runtime) and the
+separate proxy adapter unit-test executable before the full development browser
+build. Native compilation failures therefore stop before the aggregate compile.
+Origin Trace packaging/Console checks follow the browser build. It verifies the companion signature.
 The ordinary `make native-console-check` uses the real C++ bridge and Rust HTTP
 backend with a synthetic Python browser peer. Companion JavaScriptCore checks are a separate layer. Neither establishes
 execution in the patched Brave renderer.

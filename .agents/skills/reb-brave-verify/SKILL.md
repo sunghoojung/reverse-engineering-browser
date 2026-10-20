@@ -46,8 +46,12 @@ integration, rather than adding a second patch repository or exporter.
   it cannot establish this path's browser-build result.
   The guide's explicit `adopt` command supports tooling-only or exactly
   equivalent patch-routing handoffs after verifying the old receipt against
-  unchanged upstream inputs. Preserve the old receipt; production input changes
-  and unknown upstream edits still require a fresh checkout.
+  unchanged upstream inputs. Its `advance-patch` command additionally supports
+  one existing patch-owned source-file change after exact old-state validation
+  and temporary-index replay. Preserve old receipts and transition backups;
+  unknown edits, pin/overlay/inventory changes and broader production updates
+  still require a fresh checkout. Native foundation checks run before the
+  aggregate browser compile.
 - Focused native iteration: use `make brave-doctor`, then `make brave-probe-check`
   or `make brave-foundation-check` as appropriate on the initialized supported
   host. Inspect the helper's target list: probe-check compiles selected objects

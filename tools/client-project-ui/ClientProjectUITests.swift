@@ -25,6 +25,33 @@ final class ClientProjectUITests: XCTestCase {
       XCTAssertTrue(window.waitForExistence(timeout: 30), "Missing native phase " + phase)
       let save = window.sheets.buttons["Save"].firstMatch
       XCTAssertTrue(save.waitForExistence(timeout: 15), "Missing real Save button: " + app.debugDescription)
+      // NSSavePanel.directoryURL can report the new fixture while Apple's
+      // out-of-process panel still shows the previous phase's directory. Select
+      // the owned path through Go to Folder, then verify the rendered location
+      // before approving Save. Never accept an unexpected overwrite prompt.
+      let destination = URL(fileURLWithPath: output).appendingPathComponent("destinations")
+        .appendingPathComponent(phase, isDirectory: true).path
+      app.typeKey("g", modifierFlags: [.command, .shift])
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeText(destination)
+      // Prove typing reached a separate path field, not Save As. Focus that
+      // exact field before Return rather than relying on the shortcut's focus.
+      let folder = app.textFields.matching(NSPredicate(format: "value == %@", destination)).firstMatch
+      XCTAssertTrue(folder.exists && folder.isHittable, "Go to Folder did not receive the exact owned path")
+      let filename = window.sheets.textFields.matching(
+        NSPredicate(format: "value == %@", "reb-client-project.raw.zip")).firstMatch
+      XCTAssertTrue(filename.exists, "Go to Folder unexpectedly changed the Save As filename")
+      folder.click()
+      XCTAssertTrue(folder.value as? String == destination, "Go to Folder path changed before Return")
+      let navigation = XCTAttachment(screenshot: app.screenshot())
+      navigation.name = phase + "-native-go-to-folder"
+      navigation.lifetime = .keepAlways
+      add(navigation)
+      folder.typeKey(.return, modifierFlags: [])
+      let location = window.sheets.popUpButtons.matching(
+        NSPredicate(format: "value == %@ OR label == %@", phase, phase)).firstMatch
+      XCTAssertTrue(location.waitForExistence(timeout: 10),
+                    "Save panel did not select the owned phase directory: " + app.debugDescription)
       XCTAssertTrue(save.isEnabled, "Real Save button is disabled")
       let screenshot = app.screenshot()
       // The UI-test runner is sandboxed. XCTest owns screenshot persistence;

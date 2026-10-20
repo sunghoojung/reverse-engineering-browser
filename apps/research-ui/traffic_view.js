@@ -164,6 +164,7 @@ function renderTrafficRows(container, requests, {selectedId, newIds, matches, on
       const status = trafficNode('span', request.failed || numericStatus >= 400 ? 'status-error'
         : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? 'Failed' : request.status === 'pending' ? 'Pending' : String(request.status));
       status.title = request.failed ? 'Request failed. Inspect the retained response state for details.'
+        : request.interrupted ? 'Native proxy observation ended; final network outcome is unavailable.'
         : request.status === 'pending' ? 'No terminal lifecycle event has been captured.' : `HTTP status ${request.status}`;
       const type = trafficNode('span', 'request-type', trafficTableTypeLabel(request.type));
       type.title = trafficTypeLabel(request.type);
@@ -635,21 +636,78 @@ function renderTrafficDetails(container, request, tab, onDecode, onTrace, find =
   }
 }
 
+// HTTP row owners are immutable and independent of the selected debugger target.
+// Missing ownership fails closed: legacy snapshots cannot survive an epoch change.
+function trafficRetainedHttpIdentity(request) {
+  const row = request?.captureRecord;
+  const text = value => typeof value === 'string' && value.length > 0;
+  if (request?.origin !== 'live' || !String(request.operation).startsWith('cdp_') || !row ||
+      !text(request.captureOwner?.[0]) || !text(row.capture_owner) ||
+      !text(row.id) || request.id !== row.id || !text(row.target_id) || request.tabId !== row.target_id ||
+      !text(row.protocol_request_id) || request.protocolRequestId !== row.protocol_request_id ||
+      !Number.isFinite(row.started_monotonic_ms) || row.started_monotonic_ms < 0 ||
+      !Number.isSafeInteger(row.wall_time_ms) || row.wall_time_ms < 0) return null;
+  return JSON.stringify([request.captureOwner[0], row.capture_owner, row.id, row.target_id,
+    row.protocol_request_id, row.started_monotonic_ms, row.wall_time_ms]);
+}
+
+function trafficHttpSnapshotOwner(session, mode) {
+  return {mode, target: session?.network?.target_id ?? session?.target?.id ?? null,
+    capture: session?.network?.capture_enabled ?? false, generation: session?.generation ?? null,
+    instance: session?.network?.instance_id ?? null, epoch: session?.network?.capture_epoch ?? null};
+}
+
+function trafficHttpSnapshotContinues(previous, next) {
+  return previous?.mode === 'live' && next?.mode === 'live' && previous.capture === true && next.capture === true &&
+    typeof previous.instance === 'string' && previous.instance.length > 0 && previous.instance === next.instance &&
+    Number.isSafeInteger(previous.generation) && previous.generation >= 0 &&
+    Number.isSafeInteger(next.generation) && next.generation >= previous.generation &&
+    Number.isSafeInteger(previous.epoch) && previous.epoch >= 0 && Number.isSafeInteger(next.epoch) && next.epoch >= previous.epoch;
+}
+
+function trafficHttpFocusTransition(previous, next) {
+  return trafficHttpSnapshotContinues(previous, next) &&
+    typeof previous.target === 'string' && previous.target.length > 0 &&
+    typeof next.target === 'string' && next.target.length > 0 && previous.target !== next.target && next.epoch > previous.epoch;
+}
+
+function trafficRetainedFocusRequest(previous, requests, oldOwner, newOwner) {
+  const identity = trafficRetainedHttpIdentity(previous);
+  if (!identity || !trafficHttpFocusTransition(oldOwner, newOwner) ||
+      previous.captureOwner[0] !== oldOwner.instance || previous.captureOwner[1] !== oldOwner.epoch) return null;
+  const candidates = requests.filter(request => trafficRetainedHttpIdentity(request) === identity &&
+    request.captureOwner[0] === newOwner.instance && request.captureOwner[1] === newOwner.epoch);
+  return candidates.length === 1 && requests.filter(request => request.id === previous.id).length === 1 ? candidates[0] : null;
+}
+
 // A baseline is an exact reference into the retained window, never a body copy.
-// Observed target/restart changes retire it permanently, even across A → B → A.
+// Restarts and lost ownership retire it permanently. Verified focus-only changes
+// may retain the same immutable HTTP row, without weakening endpoint epoch guards.
 function createTrafficComparisonController(identityOf, sameIdentity) {
-  let baseline = null, scope = null, generation = null, notice = '';
-  const exact = (identity, requests) => requests.filter(value => sameIdentity(identity, identityOf(value)));
+  let baseline = null, retention = null, scope = null, generation = null, previousOwner = null, notice = '';
+  const exact = (identity, requests, retained = null) => requests.filter(value => sameIdentity(identity, identityOf(value)) &&
+    (!retained || trafficRetainedHttpIdentity(value) === retained));
   function sync(requests, owner) {
-    const nextScope = JSON.stringify([owner.mode, owner.target, owner.capture]);
-    const replaced = scope !== null && (scope !== nextScope ||
-      Number.isSafeInteger(generation) && Number.isSafeInteger(owner.generation) && owner.generation < generation);
-    scope = nextScope; generation = owner.generation;
-    if (baseline && (replaced || exact(baseline, requests).length !== 1)) {
-      baseline = null;
+    const nextScope = JSON.stringify([owner.mode, owner.target, owner.capture, owner.instance, owner.epoch]);
+    let replaced = scope !== null && (scope !== nextScope ||
+      Number.isSafeInteger(generation) && Number.isSafeInteger(owner.generation) && owner.generation < generation ||
+      retention && previousOwner && !trafficHttpSnapshotContinues(previousOwner, owner));
+    if (replaced && retention && trafficHttpFocusTransition(previousOwner, owner)) {
+      const retained = requests.filter(value => trafficRetainedHttpIdentity(value) === retention &&
+        value.captureOwner[0] === owner.instance && value.captureOwner[1] === owner.epoch);
+      if (retained.length === 1 && requests.filter(value => value.id === retained[0].id).length === 1) {
+        const renewed = identityOf(retained[0]);
+        if (renewed) { baseline = renewed; replaced = false; }
+      }
+    }
+    const matches = baseline ? exact(baseline, requests, retention) : [];
+    const unique = matches.length === 1 && requests.filter(value => value.id === matches[0].id).length === 1;
+    scope = nextScope; generation = owner.generation; previousOwner = {...owner};
+    if (baseline && (replaced || !unique)) {
+      baseline = null; retention = null;
       notice = 'Baseline expired: its exact capture is no longer uniquely retained or the capture session changed. Select it again explicitly.';
     }
-    return baseline ? exact(baseline, requests)[0] : null;
+    return baseline ? matches[0] : null;
   }
   return {
     sync,
@@ -659,17 +717,16 @@ function createTrafficComparisonController(identityOf, sameIdentity) {
       if (!identity || exact(identity, requests).length !== 1 || requests.filter(value => value.id === request.id).length !== 1) {
         notice = 'A unique retained capture identity is required. Sample data cannot be pinned.'; return false;
       }
-      baseline = identity; notice = ''; return true;
+      baseline = identity; retention = trafficRetainedHttpIdentity(request); notice = ''; return true;
     },
-    clear() {baseline = null; notice = 'Baseline cleared.';},
+    clear() {baseline = null; retention = null; notice = 'Baseline cleared.';},
     get identity() {return baseline;},
     get notice() {return notice;}
   };
 }
 
 function trafficComparisonOwner() {
-  return {mode: state.sessionMode, target: state.debuggerSession?.network?.target_id ?? state.debuggerSession?.target?.id ?? null,
-    capture: state.debuggerSession?.network?.capture_enabled ?? false, generation: state.debuggerSession?.generation ?? null};
+  return trafficHttpSnapshotOwner(state.debuggerSession, state.sessionMode);
 }
 
 // Lazy initialization keeps pure viewer/model fixtures independent of navigation.

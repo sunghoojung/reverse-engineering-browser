@@ -3,6 +3,7 @@ import {constants} from 'node:fs';
 import {open} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import vm from '../apps/research-ui/vm_semantics.js';
+import opcodeLedger from '../apps/research-ui/vm_opcode_ledger.js';
 import {saveArchive} from './captured-request-export.mjs';
 
 async function read(path) {
@@ -15,26 +16,29 @@ async function read(path) {
     while(length<data.length){const r=await file.read(data,length,data.length-length,null);if(!r.bytesRead)break;length+=r.bytesRead;}
     if(length>1048576)throw Error('File exceeds 1 MiB');
     const bytes=data.subarray(0,length);
-    return {document:vm.parse(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes)),sha256:createHash('sha256').update(bytes).digest('hex')};
+    const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);
+    return {document:vm.parse(text),text,sha256:createHash('sha256').update(bytes).digest('hex')};
   } finally { await file?.close(); }
 }
 
-function sequence(text) {
-  if(!/^(0|[1-9][0-9]*)$/.test(text)||!Number.isSafeInteger(Number(text)))throw Error('Expected exact sequence');
+function sequence(text,label='sequence') {
+  if(!/^(0|[1-9][0-9]*)$/.test(text)||!Number.isSafeInteger(Number(text)))throw Error('Expected exact nonnegative safe-integer '+label);
   return Number(text);
 }
 
 try {
   const args=process.argv.slice(2);
   if(args.length===1&&args[0]==='--help') {
-    console.log('node tools/vm-semantics.mjs inspect TRACE.json OUTPUT.json\nnode tools/vm-semantics.mjs path TRACE.json OUTPUT.json\nnode tools/vm-semantics.mjs step TRACE.json SEQUENCE OUTPUT.json\nnode tools/vm-semantics.mjs validate TRACE.json HYPOTHESES.json OUTPUT.json\nnode tools/vm-semantics.mjs compare LEFT.json LEFT_SEQUENCE RIGHT.json RIGHT_SEQUENCE OUTPUT.json\nOffline, bounded supplied evidence only; never executes captured code.');
+    console.log('node tools/vm-semantics.mjs inspect TRACE.json OUTPUT.json\nnode tools/vm-semantics.mjs path TRACE.json OUTPUT.json\nnode tools/vm-semantics.mjs occurrences TRACE.json LOCATION PAGE PAGE_SIZE OUTPUT.json\nnode tools/vm-semantics.mjs step TRACE.json SEQUENCE OUTPUT.json\nnode tools/vm-semantics.mjs validate TRACE.json HYPOTHESES.json OUTPUT.json\nnode tools/vm-semantics.mjs compare LEFT.json LEFT_SEQUENCE RIGHT.json RIGHT_SEQUENCE OUTPUT.json\nnode tools/vm-semantics.mjs create-ledger DEFINITION.json OUTPUT.json\nLOCATION: pc, halted, registers:N, stack:N or memory:N. PAGE starts at 0; PAGE_SIZE is 1..64.\nOUTPUT must be a new path; private files, no overwrite. Created ledgers are directly reimportable.\nOffline, bounded supplied evidence only; never executes captured code.');
   } else {
     const [command,input,third,fourth,fifth,sixth]=args;
-    const arity={inspect:3,path:3,step:4,validate:4,compare:6};
+    const arity={inspect:3,path:3,occurrences:6,step:4,validate:4,compare:6,'create-ledger':3};
     if(!Object.hasOwn(arity,command)||args.length!==arity[command])throw Error('Use --help for explicit offline commands');
-    const source=await read(input),trace=vm.trace(source.document);
+    const source=await read(input),trace=command==='create-ledger'?null:vm.trace(source.document);
     let report,outputPath;
-    if(command==='compare') {
+    if(command==='create-ledger') {
+      report=await opcodeLedger.createLedger(source.text);outputPath=third;
+    } else if(command==='compare') {
       const right=await read(fourth);
       const result=vm.compareSteps(trace,sequence(third),vm.trace(right.document),sequence(fifth));
       // These hashes bind exact saved JSON bytes, independently of the supplied
@@ -45,6 +49,7 @@ try {
       let result,hypothesisHash=null;
       if(command==='inspect')result=vm.inspect(trace);
       if(command==='path')result=vm.observedPath(trace);
+      if(command==='occurrences')result=vm.occurrences(trace,third,sequence(fourth,'page'),sequence(fifth,'page size'));
       if(command==='step') {
         const selected=vm.step(trace,sequence(third));
         result={format:selected.format,identity:selected.identity,step:selected.step,changes:selected.changes,reads:'unknown'};
@@ -55,7 +60,7 @@ try {
       }
       // Keep the established single-input report envelope unchanged.
       report={source_sha256:source.sha256,hypotheses_sha256:hypothesisHash,result};
-      outputPath=['inspect','path'].includes(command)?third:fourth;
+      outputPath=command==='occurrences'?sixth:['inspect','path'].includes(command)?third:fourth;
     }
     const output=Buffer.from(JSON.stringify(report,null,2)+'\n');
     if(output.length>4194304)throw Error('Report exceeds 4 MiB');

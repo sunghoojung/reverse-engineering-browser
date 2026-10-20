@@ -141,7 +141,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/investigation_notebook.js", "/traffic_view.js", "/api_catalog.js", "/captured_client.js", "/passive_security.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/traffic_comparison.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js", "/element_screenshot.js", "/local_override_manager.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/investigation_notebook.js", "/traffic_view.js", "/api_catalog.js", "/captured_client.js", "/captured_export_formats.js", "/passive_security.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/traffic_comparison.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js", "/element_screenshot.js", "/local_override_manager.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -2683,6 +2683,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var selectedCaptureMode = LiveCaptureMode.content
   private var selectedSystemKeychain = false
   private var automaticSessionSuppressed = false
+  private var liveSessionDecisionOpen = false
   private var localApplicationURL: URL?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -2924,7 +2925,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     captureMode: LiveCaptureMode,
     useSystemKeychain: Bool
   ) {
-    guard !liveSessionCoordinator.isRunning else { return }
+    guard !liveSessionCoordinator.isRunning, !liveSessionDecisionOpen else { return }
     guard let braveURL = customBraveApplicationURL(),
       let braveBundle = Bundle(url: braveURL),
       let braveExecutableURL = braveBundle.executableURL
@@ -2936,6 +2937,27 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         useSystemKeychain: useSystemKeychain
       )
       return
+    }
+    if Bundle.main.object(forInfoDictionaryKey: "OriginTraceReleaseType") as? String == "companion" {
+      liveSessionDecisionOpen = true
+      defer { liveSessionDecisionOpen = false }
+      // This companion release has no validated native-browser pair. Bundle identity
+      // alone cannot establish support for the newer native capture capabilities.
+      let compatibility = NSAlert()
+      compatibility.alertStyle = .warning
+      compatibility.messageText = "This browser pairing has not been verified"
+      compatibility.informativeText =
+        "Origin Trace 0.3.2 is a companion-only release. Brave supplied with 0.3.0 or 0.3.1 lacks newer native runtime-buffer and VM capture features. CDP Traffic may work, but native capture completeness is not established. Continue only if you accept these limits."
+      let offlineButton = compatibility.addButton(withTitle: "Continue Offline")
+      compatibility.addButton(withTitle: "Start Unverified Session")
+      // Keep Return explicitly bound to the safe choice on every macOS alert style.
+      offlineButton.keyEquivalent = "\r"
+      compatibility.window.defaultButtonCell = offlineButton.cell as? NSButtonCell
+      presentOriginTraceWindow()
+      guard compatibility.runModal() == .alertSecondButtonReturn else {
+        automaticSessionSuppressed = true
+        return
+      }
     }
     liveSessionCoordinator.start(
       braveExecutableURL: braveExecutableURL,
@@ -3005,7 +3027,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       window.deminiaturize(nil)
     }
     NSApp.activate(ignoringOtherApps: true)
-    window.makeKeyAndOrderFront(nil)
+    // Activation and reopen callbacks can run inside an alert's modal loop.
+    // Rekeying the evidence window there steals Return from the safe default.
+    (NSApp.modalWindow ?? window).makeKeyAndOrderFront(nil)
   }
 
   private func customBraveApplicationURL() -> URL? {

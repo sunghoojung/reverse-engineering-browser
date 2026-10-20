@@ -9,7 +9,12 @@ mod heap;
 mod hooks;
 mod marker_fuzz;
 mod network;
+mod network_browser;
+mod network_capture;
+mod network_handoff;
+mod network_handoff_bridge;
 mod network_request;
+mod network_status;
 mod network_timing;
 pub(crate) use network_request::NetworkRequestSelection;
 mod objects;
@@ -47,6 +52,7 @@ pub struct Debugger {
     refreshing: AsyncMutex<()>,
     stop: Notify,
     network_workers: Arc<Semaphore>,
+    capture: network_capture::Capture,
     watch_id: AtomicU64,
     console_id: AtomicU64,
     heap: heap::Heap,
@@ -72,6 +78,11 @@ impl Debugger {
         }
         state["network"]["capture_enabled"] = json!(options.capture_network_content);
         state["network"]["capture_epoch"] = json!(0);
+        state["network"]["capture_status"]["state"] = json!(if options.capture_network_content {
+            "waiting"
+        } else {
+            "disabled"
+        });
         state["network"]["instance_id"] = json!(format!(
             "{}:{}",
             std::process::id(),
@@ -95,6 +106,7 @@ impl Debugger {
             refreshing: AsyncMutex::new(()),
             stop: Notify::new(),
             network_workers: Arc::new(Semaphore::new(8)),
+            capture: network_capture::Capture::new(),
             watch_id: AtomicU64::new(1),
             console_id: AtomicU64::new(1),
             heap: heap::Heap::new(),
@@ -159,6 +171,7 @@ impl Debugger {
         self.stopping.store(true, Ordering::Release);
         self.stop.notify_waiters();
         let _refresh = self.refreshing.lock().await;
+        self.close_captures().await;
         if self.experiment.context().is_some() {
             let _ = self.dispose_experiment().await;
         }
@@ -167,13 +180,20 @@ impl Debugger {
         }
     }
     fn endpoint(&self) -> Result<(u16, String)> {
+        self.endpoint_if_published()?
+            .ok_or_else(|| Error::conflict("Waiting for the authorized browser debugger"))
+    }
+    // Absence during browser startup is not evidence of unsupported browser
+    // capture. Keep malformed/unreadable endpoint failures distinct.
+    fn endpoint_if_published(&self) -> Result<Option<(u16, String)>> {
         let path = self
             .options
             .devtools_active_port
             .as_ref()
             .ok_or_else(|| Error::conflict("Live debugging is not enabled"))?;
-        let bytes = durable::read_private(path, 4096)?
-            .ok_or_else(|| Error::conflict("Waiting for the authorized browser debugger"))?;
+        let Some(bytes) = durable::read_private(path, 4096)? else {
+            return Ok(None);
+        };
         let body = std::str::from_utf8(&bytes)
             .map_err(|_| Error::conflict("The browser debugger endpoint is malformed"))?;
         let lines = body.lines().collect::<Vec<_>>();
@@ -193,7 +213,7 @@ impl Debugger {
             lines[1].into()
         };
         connection::local_websocket(&url)?;
-        Ok((port, url))
+        Ok(Some((port, url)))
     }
     async fn discover(&self) -> Result<Vec<Value>> {
         let (port, _) = self.endpoint()?;
@@ -254,22 +274,49 @@ impl Debugger {
         if self.stopping.load(Ordering::Acquire) {
             return Err(Error::conflict("Debugger is stopping"));
         }
-        let targets = self.discover().await?;
+        let browser_capture =
+            self.options.capture_network_content && self.refresh_browser_capture().await;
+        let targets = match self.discover().await {
+            Ok(targets) => targets,
+            Err(error) => {
+                if self.options.capture_network_content && !browser_capture {
+                    self.update(|s| {
+                        s["network"]["capture_status"]["state"] = json!("partial");
+                        s["network"]["capture_status"]["discovery_stale"] = json!(true);
+                        s["network"]["capture_status"]["last_error"] = json!(validation::truncate(
+                            &format!("Target discovery unavailable: {}", error.message),
+                            512
+                        ));
+                    });
+                }
+                return Err(error);
+            }
+        };
+        if !browser_capture {
+            self.refresh_captures(&targets).await;
+        }
         let public = targets
             .iter()
             .take(128)
             .map(public_target)
             .collect::<Vec<_>>();
         let tabs = targets.iter().filter(|t| t["type"] == "page").count();
-        if self.snapshot()["targets"] != json!(public) || self.snapshot()["live_tab_count"] != tabs
-        {
+        let public = json!(public);
+        let targets_changed = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state["targets"] != public || state["live_tab_count"] != tabs
+        };
+        if targets_changed {
             self.update(|s| {
-                s["targets"] = json!(public);
+                s["targets"] = public;
                 s["live_tab_count"] = json!(tabs);
             });
         }
         let current = self.connection.lock().await.clone();
-        let current_target = self.snapshot()["target"]["id"].as_str().map(str::to_owned);
+        let current_target = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state["target"]["id"].as_str().map(str::to_owned)
+        };
         let preferred = self
             .preferred
             .lock()
@@ -326,9 +373,7 @@ impl Debugger {
                     .saturating_add(1)
             );
             s["network"]["target_id"] = target["id"].clone();
-            s["network"]["requests"] = json!([]);
             s["network"]["websockets"] = websocket::empty();
-            s["network"]["dropped"] = json!(0);
         });
         *self.connection.lock().await = Some(connection.clone());
         let weak = Arc::downgrade(self);
@@ -360,6 +405,28 @@ impl Debugger {
                 }
             }
         });
+        if let Err(error) = self.initialize_connection(&connection).await {
+            // A live transport is not a ready debugger. Retire a partially
+            // initialized owner so the next refresh retries every domain.
+            // A concurrent target selection may already have removed it.
+            {
+                let mut current = self.connection.lock().await;
+                if current
+                    .as_ref()
+                    .is_some_and(|c| Arc::ptr_eq(c, &connection))
+                {
+                    current.take();
+                }
+            }
+            connection.close().await;
+            return Err(error);
+        }
+        if self.snapshot()["paused"].is_null() && self.snapshot()["state"] != "crashed" {
+            self.set_state("running", None);
+        }
+        Ok(())
+    }
+    async fn initialize_connection(&self, connection: &Arc<Connection>) -> Result<()> {
         for (method, params) in [
             ("Inspector.enable", json!({})),
             ("Runtime.enable", json!({})),
@@ -376,9 +443,6 @@ impl Debugger {
             connection.command("Network.enable",json!({"maxTotalBufferSize":16777216,"maxResourceBufferSize":2097152,"maxPostDataSize":131072}),Duration::from_secs(3)).await?;
         }
         self.restore().await?;
-        if self.snapshot()["paused"].is_null() && self.snapshot()["state"] != "crashed" {
-            self.set_state("running", None);
-        }
         Ok(())
     }
     async fn command(&self, method: &str, params: Value) -> Result<Value> {
@@ -830,7 +894,15 @@ impl Debugger {
             "Inspector.targetCrashed"=>self.update(|s| {s["state"]=json!("crashed");s["paused"]=Value::Null;s["error"]=json!("Browser renderer crashed. Reload the browser tab to reconnect. Captured evidence is retained.");}),
             "Inspector.targetReloadedAfterCrash"=>self.set_state("running",None),
             "HeapProfiler.addHeapSnapshotChunk"=>self.heap_chunk(p).await,
-            _ if method.starts_with("Network.")=>{let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();if self.experiment.context().is_some()&&self.snapshot()["runtime_hooks"]["target_id"]==target {self.hook_network(&target,method,p).await;}self.network(method,p).await;},
+            _ if method.starts_with("Network.") => {
+                let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();
+                if self.experiment.context().is_some() && self.snapshot()["runtime_hooks"]["target_id"]==target {
+                    self.hook_network(&target,method,p).await;
+                }
+                if self.options.capture_network_content && method.starts_with("Network.webSocket") {
+                    self.update(|s|websocket::event(s,method,p));
+                }
+            },
             _=>(),
         }
     }

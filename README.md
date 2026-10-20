@@ -24,6 +24,29 @@ local research notes in one macOS workspace.
 · [Release validation](https://github.com/sunghoojung/reverse-engineering-browser/actions/runs/38192572669)
 · [Changes since v0.3.0](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.3.0...v0.3.1)
 
+### Preparing v0.3.2: Origin Trace companion only
+
+The v0.3.2 candidate updates Origin Trace without building or distributing Brave.
+The latest published paired release remains v0.3.1 until this candidate passes
+acceptance and is explicitly published. The companion ZIP targets Apple silicon; macOS 15 acceptance is required before
+publication. Earlier macOS versions are unverified; no Intel, Windows or Linux
+app is supplied.
+
+This candidate has **no validated native-browser pair**. Brave distributed with
+v0.3.0/v0.3.1 lacks newer native runtime-buffer and VM capture features. A matching
+bundle ID does not establish compatibility. Before starting a discovered browser,
+Origin Trace warns about these limits and defaults to **Continue Offline**;
+**Start Unverified Session** remains an explicit choice for each session.
+Offline evidence inspection remains available. Stock Chrome CDP package checks
+exercise the launcher, backend and relocated UI, not native Brave instrumentation
+or Finder automatic launch. Stock Chrome is not automatically discovered by the
+native app's normal live-session flow.
+
+The companion workflow records source/run identity, SHA256 checksums and these
+compatibility limits. It uses ad-hoc signing, without Apple notarization. The
+paired workflow and historical browser-equivalence guard remain separate and are
+not relaxed. See [companion release procedure](docs/development/companion-release.md).
+
 ### Latest release: v0.3.1
 
 - **Native Close/Quit repair:** an aborted Close sheet cannot approve a fresh

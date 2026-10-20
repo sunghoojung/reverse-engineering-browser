@@ -77,7 +77,10 @@ impl Connection {
             .ok_or_else(|| Error::conflict("Debugger transport diagnostics are unavailable"))?;
         let ready = tokio::time::timeout(Duration::from_secs(3), frame(&mut stdout))
             .await
-            .map_err(|_| Error::conflict("Native debugger transport startup timed out"))??;
+            .map_err(|_| {
+                Error::conflict("Native debugger transport startup timed out")
+                    .with_reason(Reason::new(Code::StateConflict).with_cause(Cause::Timeout))
+            })??;
         if !ready.is_empty() {
             return Err(Error::protocol(
                 "Native debugger transport returned a malformed startup frame",
@@ -334,8 +337,11 @@ impl Connection {
             })?;
         Ok(Some(result.clone()))
     }
-    pub async fn close(&self) {
+    pub fn request_close(&self) {
         let _ = self.closed.send(true);
+    }
+    pub async fn close(&self) {
+        self.request_close();
         let mut child = self.child.lock().await;
         let _ = child.kill().await;
         let _ = child.wait().await;
@@ -359,10 +365,10 @@ async fn fail_pending(connection: &Weak<Connection>, failure: &Error) {
 }
 async fn frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>> {
     let mut header = [0; 8];
-    reader
-        .read_exact(&mut header)
-        .await
-        .map_err(|_| Error::conflict("Debugger WebSocket closed"))?;
+    reader.read_exact(&mut header).await.map_err(|_| {
+        Error::conflict("Debugger WebSocket closed")
+            .with_reason(Reason::new(Code::StateConflict).with_cause(Cause::Disconnected))
+    })?;
     if &header[..4] != b"REB\x01" {
         return Err(Error::protocol(
             "Native debugger transport returned an invalid protocol header",
@@ -373,10 +379,10 @@ async fn frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>> {
         return Err(Error::protocol("Debugger WebSocket message is oversized"));
     }
     let mut body = vec![0; length];
-    reader
-        .read_exact(&mut body)
-        .await
-        .map_err(|_| Error::conflict("Debugger WebSocket closed"))?;
+    reader.read_exact(&mut body).await.map_err(|_| {
+        Error::conflict("Debugger WebSocket closed")
+            .with_reason(Reason::new(Code::StateConflict).with_cause(Cause::Disconnected))
+    })?;
     Ok(body)
 }
 pub fn local_websocket(value: &str) -> Result<()> {

@@ -421,13 +421,38 @@
         return true;
       }
 
+      function isDebuggerNetworkCaptureStatus(status) {
+        return isPlainObject(status) && ['http-page-targets', 'http-browser-targets'].includes(status.scope) &&
+          ['disabled', 'waiting', 'ready', 'partial'].includes(status.state) &&
+          (status.transport_mode === undefined ||
+            status.transport_mode === (status.scope === 'http-browser-targets' ? 'browser-sessions' : 'page-fallback')) &&
+          (status.startup_mode === undefined || status.startup_mode === 'passive') &&
+          (status.discovery_stale === undefined || typeof status.discovery_stale === 'boolean') &&
+          (status.catalog_incomplete === undefined || typeof status.catalog_incomplete === 'boolean') &&
+          isSafeIntegerInRange(status.attached_targets, 0, 128) &&
+          (status.attached_target_ids === undefined || Array.isArray(status.attached_target_ids) &&
+            status.attached_target_ids.length <= 128 && status.attached_target_ids.every(id => isBoundedText(id, 4096))) &&
+          (status.unattached_targets === undefined || Array.isArray(status.unattached_targets) &&
+            status.unattached_targets.length <= 16 && status.unattached_targets.every(target =>
+              isPlainObject(target) && isBoundedText(target.id, 4096) && isBoundedText(target.title, 128))) &&
+          (status.unattached_targets_omitted === undefined || isSafeIntegerInRange(status.unattached_targets_omitted, 0, 512)) &&
+          isSafeIntegerInRange(status.eligible_targets, 0, 512) && isSafeIntegerInRange(status.target_limit, 1, 128) &&
+          isSafeIntegerInRange(status.target_overflow, 0, 511) &&
+          isSafeIntegerInRange(status.failed_targets, 0, 512) &&
+          isSafeIntegerInRange(status.gaps, 0, Number.MAX_SAFE_INTEGER) &&
+          (status.last_error === null || isBoundedText(status.last_error, 512)) &&
+          isBoundedText(status.message, 1024);
+      }
+
       function isDebuggerNetwork(network) {
         return isPlainObject(network) && typeof network.capture_enabled === 'boolean' &&
+          (network.capture_status === undefined || isDebuggerNetworkCaptureStatus(network.capture_status)) &&
           (network.instance_id === undefined || isBoundedText(network.instance_id, 128)) &&
           (network.capture_epoch === undefined || isSafeIntegerInRange(network.capture_epoch, 0, Number.MAX_SAFE_INTEGER)) &&
           (network.target_id === null || isBoundedText(network.target_id, 4 * 1024)) &&
           Array.isArray(network.requests) && network.requests.length <= 1000 &&
           network.requests.every(isDebuggerNetworkRequest) &&
+          new Set(network.requests.map(request => request.id)).size === network.requests.length &&
           isSafeIntegerInRange(network.dropped, 0, Number.MAX_SAFE_INTEGER) &&
           isPlainObject(network.limits) && network.limits.requests === 1000 &&
           network.limits.body_bytes === 128 * 1024 && network.limits.headers === 128 &&
@@ -1575,12 +1600,19 @@
           const lastTimestamp = previous && previous.lastTimestamp > timestamp ? previous.lastTimestamp : timestamp;
           const incomingRank = lifecycleRanks.get(event.type) ?? 0;
           const rank = Math.max(previous?.rank ?? 0, incomingRank);
-          const failed = previous?.failed || event.type === 'request_failed' || (event.protocol_version >= 2 && event.error_code !== 0);
+          // These native proxy dispositions end observation, not the underlying
+          // network operation (a redirect may continue in a different loader).
+          const interruption = event.protocol_version >= 3 && event.type === 'request_failed' &&
+            event.error_code === -3 && ['proxy_destroyed', 'redirect_handoff'].includes(payload);
+          const interrupted = previous?.interrupted || interruption;
+          const failed = previous?.failed || (!interruption && (event.type === 'request_failed' || (event.protocol_version >= 2 && event.error_code !== 0)));
           const numericStatus = event.protocol_version >= 2 ? event.status_code : 0;
           const previousStatusRank = previous?.statusRank ?? 0;
           const hasNewerStatus = numericStatus > 0 && incomingRank >= previousStatusRank;
           const status = failed
             ? 'failed'
+            : interrupted
+              ? 'incomplete'
             : hasNewerStatus
               ? numericStatus
               : previous?.status ?? 'pending';
@@ -1605,6 +1637,7 @@
             event: incomingRank >= (previous?.rank ?? 0) ? event : previous.event,
             events: [...(previous?.events ?? []), event],
             failed,
+            interrupted,
             rank,
             statusRank: hasNewerStatus ? incomingRank : previousStatusRank,
             targetRank,
@@ -1703,7 +1736,9 @@
             method: record.method,
             status: record.state === 'failed' ? 'failed' : record.status ?? 'pending',
             time: terminal && record.duration_ms !== null ? record.duration_ms : 'pending',
-            type: typeMap.get(record.resource_type) ?? 'other',
+            // Response MIME identifies Wasm even when CDP calls its loader Fetch/XHR.
+            type: record.mime_type.split(';', 1)[0].trim().toLowerCase() === 'application/wasm'
+              ? 'wasm' : typeMap.get(record.resource_type) ?? 'other',
             origin: 'live',
             targetKind: 'url',
             hostOnly: false,
@@ -2282,6 +2317,8 @@
           label: handler.label || (handler.opcode === null ? 'Unbound dispatch arm' : `handler ${handler.handler_index ?? handler.opcode}`),
           state: handler.state,
           samples: handler.sample_count,
+          operandWidth: handler.operand_width,
+          retainedSamples: workspace.samples.filter(sample => sample.opcode === handler.opcode),
           positions: workspace.samples.filter(sample => sample.opcode === handler.opcode).slice(0, 4).map(sample =>
             `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`),
           retainedPositions: workspace.samples.filter(sample => sample.opcode === handler.opcode).length,
@@ -2353,4 +2390,53 @@
         return Boolean(left && right && fields.every(key=>left[key]===right[key]) && left.inputs && right.inputs &&
           ['left','right'].every(key=>left.inputs[key]===right.inputs[key]) && left.expected && right.expected &&
           ['operation','value','next_pc','branch_taken'].every(key=>left.expected[key]===right.expected[key]));
+      }
+
+      function isVmHostLinksDocument(document, workspaceDocument) {
+        if (!vmWorkspaceExact(document, ['contract_version', 'document_kind', 'workspace_document_digest', 'workspaces', 'document_digest']) ||
+          document.contract_version !== 1 || document.document_kind !== 'vm-host-links' ||
+          !vmWorkspaceDigest(document.document_digest) || !vmWorkspaceDigest(document.workspace_document_digest) ||
+          document.workspace_document_digest !== workspaceDocument?.document_digest ||
+          !Array.isArray(document.workspaces) || document.workspaces.length > 256) return false;
+        const categories = ['canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc', 'network', 'runtime'];
+        const types = ['api_call', 'property_read', 'request_started', 'request_initiated', 'request_redirected', 'response_started', 'response_completed', 'request_completed', 'request_failed'];
+        const omissions = ['dispatch-samples-unavailable', 'dispatch-sample-retention-limit', 'host-link-limit', 'host-events-unavailable'];
+        const sources = new Set(); let total = 0;
+        for (const row of document.workspaces) {
+          if (!vmWorkspaceExact(row, ['interpreter_artifact_id', 'source_artifact_sha256', 'links', 'omissions']) ||
+            sources.has(row.interpreter_artifact_id) || !Array.isArray(row.links) || row.links.length > 256 ||
+            !Array.isArray(row.omissions) || row.omissions.length > 4 || new Set(row.omissions).size !== row.omissions.length ||
+            !row.omissions.every(reason => omissions.includes(reason))) return false;
+          sources.add(row.interpreter_artifact_id);
+          const workspace = workspaceDocument.workspaces.find(item => item.interpreter_artifact_id === row.interpreter_artifact_id &&
+            item.source_artifact_sha256 === row.source_artifact_sha256);
+          if (!workspace) return false;
+          const hosts = new Set();
+          for (const link of row.links) {
+            if (!vmWorkspaceExact(link, ['host_event', 'category', 'type', 'state', 'reason', 'guest_position']) ||
+              !vmSampleEvent(link.host_event) || !categories.includes(link.category) || !types.includes(link.type) ||
+              !['observed', 'correlated', 'unknown'].includes(link.state)) return false;
+            const key = vmSampleEventKey(link.host_event);
+            if (hosts.has(key)) return false;
+            hosts.add(key);
+            const position = link.guest_position;
+            if (link.state !== 'observed') {
+              if (position !== null || !['dispatch-samples-unavailable', 'guest-position-unproven'].includes(link.reason)) return false;
+              continue;
+            }
+            if (link.reason !== 'direct-dispatch-parent' || !vmWorkspaceExact(position, ['sample_event', 'invocation_event',
+              'invocation_id', 'instruction_pointer', 'instruction_pointer_units']) || !vmSampleEvent(position.sample_event) ||
+              !vmSampleEvent(position.invocation_event) || !isCanonicalInteger(position.invocation_id, 1n, uint64Max) ||
+              !['byte-offset', 'instruction-index'].includes(position.instruction_pointer_units) ||
+              !isSafeIntegerInRange(position.instruction_pointer, 0, 0xffffffff) ||
+              position.sample_event.session_id !== link.host_event.session_id || position.sample_event.process_id !== link.host_event.process_id ||
+              BigInt(position.sample_event.sequence_number) >= BigInt(link.host_event.sequence_number) ||
+              !workspace.samples.some(sample => vmSampleEventKey(sample.event) === vmSampleEventKey(position.sample_event) &&
+                sample.invocation_event && vmSampleEventKey(sample.invocation_event) === vmSampleEventKey(position.invocation_event) &&
+                sample.invocation_id === position.invocation_id && sample.instruction_pointer === position.instruction_pointer &&
+                sample.instruction_pointer_units === position.instruction_pointer_units)) return false;
+          }
+          total += row.links.length;
+        }
+        return total <= 4096;
       }

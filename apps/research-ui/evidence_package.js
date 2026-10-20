@@ -441,12 +441,22 @@ function evidencePayload(event) {
   } catch { return {text: event.payload ?? '', encoding: 'hex'}; }
 }
 function evidenceObservationLabel(event, payload) {
+  if (event.category === 'network' && event.type === 'request_failed' && event.protocol_version >= 3 &&
+      event.error_code === -3 && payload.encoding === 'UTF-8' && ['proxy_destroyed', 'redirect_handoff'].includes(payload.text)) {
+    return 'Network observation ended';
+  }
   const labels = {request_initiated: 'Request initiated', request_started: 'Request started', request_redirected: 'Request redirected', response_started: 'Response started', response_completed: 'Response completed', request_completed: 'Request completed', request_failed: 'Request failed', artifact_captured: 'Artifact retained', artifact_capture_failed: 'Artifact capture failed', module_compiled: 'Module compiled', module_instantiated: 'Module instantiated', vm_finding: 'VM finding recorded', property_read: 'Property read', api_call: 'API operation marker'};
   return ['api_call', 'property_read'].includes(event.type) && payload.encoding === 'UTF-8' && payload.text
     ? payload.text.slice(0, 160) : labels[event.type] ?? event.type.replaceAll('_', ' ');
 }
 function evidenceObservationOutcome(event) {
   if (event.type === 'api_call' || event.type === 'property_read') return 'Outcome not recorded';
+  if (event.category === 'network' && event.type === 'request_failed' && event.protocol_version >= 3 && event.error_code === -3) {
+    const payload = evidencePayload(event);
+    if (payload.encoding === 'UTF-8' && ['proxy_destroyed', 'redirect_handoff'].includes(payload.text)) {
+      return `Observation ended · ${payload.text === 'redirect_handoff' ? 'redirect handoff' : 'proxy destroyed'}; final network outcome unavailable`;
+    }
+  }
   if (event.type === 'request_failed') return `Failure recorded · error ${event.error_code}`;
   if (event.type === 'request_completed' || event.type === 'response_completed') return `Completion record${event.status_code > 0 ? ` · HTTP ${event.status_code}` : ''}`;
   if (event.type === 'artifact_captured') return 'Receiver acknowledgment recorded';

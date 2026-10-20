@@ -34,6 +34,7 @@ readonly probe_objects=(
   "obj/brave/components/reverse_engineering_browser/browser/native_probe_host.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_probe_session.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_probe_socket_client.o"
+  "obj/brave/browser/core/brave_browser_main_parts.o"
   "obj/brave/browser/core/brave_proxying_url_loader_factory.o"
   "obj/brave/browser/core/brave_content_browser_client.o"
   "obj/chrome/renderer/renderer/brave_content_renderer_client.o"

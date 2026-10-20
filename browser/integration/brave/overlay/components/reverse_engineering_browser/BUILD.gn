@@ -114,8 +114,8 @@ static_library("renderer") {
   sources = [
     "common/native_console_messages.cc",
     "common/native_console_messages.h",
-    "common/native_vm_finding.h",
     "common/native_vm_dispatch.h",
+    "common/native_vm_finding.h",
     "renderer/native_console_agent.cc",
     "renderer/native_console_agent.h",
     "renderer/native_console_runtime.cc",
@@ -163,13 +163,14 @@ source_set("browser") {
     "browser/native_worker_transfer_gate.cc",
     "browser/native_worker_transfer_gate.h",
     "common/native_artifact_header.h",
-    "common/native_runtime_snapshot_queue.h",
     "common/native_console_io.cc",
     "common/native_console_io.h",
+    "common/native_network_lifecycle.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
-    "common/native_vm_finding.h",
+    "common/native_runtime_snapshot_queue.h",
     "common/native_vm_dispatch.h",
+    "common/native_vm_finding.h",
   ]
 
   deps = [

@@ -347,14 +347,21 @@ final class LiveSessionCoordinator {
     return url
   }
 
+  static func failureCause(in data: Data?) -> String {
+    let fallback = "The live capture coordinator stopped before startup completed."
+    guard let data, !data.isEmpty else { return fallback }
+    let prefix = "REB_LIVE_SESSION_FAILURE: "
+    let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
+    // Read the explicit launcher cause, not whichever teardown or Bash job
+    // diagnostic happened to arrive last. Child output lives in separate logs.
+    guard let marked = lines.last(where: {
+      $0.hasPrefix(prefix) && !$0.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces).isEmpty
+    }) else { return fallback }
+    return String(marked.dropFirst(prefix.count).prefix(4 * 1_024))
+  }
+
   private func failureMessage(logURL: URL) -> String {
-    guard let data = try? Data(contentsOf: logURL), !data.isEmpty else {
-      return "The live capture coordinator stopped before startup completed."
-    }
-    let tail = data.suffix(4 * 1_024)
-    let lines = String(decoding: tail, as: UTF8.self).split(separator: "\n")
-    let cause = lines.last.map(String.init)
-      ?? "The live capture coordinator stopped before startup completed."
+    let cause = Self.failureCause(in: try? Data(contentsOf: logURL))
     return cause + "\n\nSession log: " + logURL.path
   }
 

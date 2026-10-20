@@ -335,3 +335,7 @@ value/next instruction index, then run a separate disposable native helper.
 Results are stored separately as confirmed for those inputs, mismatch, unsupported
 or unknown; no handler receives a universal confirmed label. See the
 [experiment contract](../../protocol/owned-opcode-experiments-v1.md).
+
+## Host event positions
+
+The [host-links report](../../protocol/vm-host-links-v1.md) records a guest position only for an exact scoped parent dispatch sample with validated invocation. VM Lab shows unknown otherwise. Shared frame/invocation and request correlations do not become exact value provenance. The opt-in owned clock fixture provides a real, explicitly synthetic native callback boundary for validation.

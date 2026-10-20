@@ -49,11 +49,39 @@ process groups, validates bounded replies, and retires ambiguous exchanges. See
 [Native Console v2](../../protocol/native-console-v2.md).
 
 Each browser connection owns a native transport process, a bounded event queue,
-and command deadlines. Experiment actions verify browser-context ownership.
+and command deadlines. Failed domain initialization retires that connection so
+the next refresh retries the complete setup. `make backend-e2e` also exercises
+startup success, domain errors and timeouts, and disabled content capture using
+a synthetic local CDP transport before its browser checks. Experiment actions verify browser-context ownership.
 Disposal stops owned pages, workers, recipes, requests, and retained objects.
 Worker cancellation terminates its process group, including descendants. Network
 capture is opt-in for standalone sessions and enabled by the packaged research
-profile. Captured Traffic values are raw by default; sensitive field selection
+profile. HTTP Traffic uses a single browser-level CDP transport with flattened
+sessions, passive Target events and recursive attachment for page, iframe and
+worker targets. `--capture-target-limit` defaults to 32 (range 1–128), covering
+initializing and ready targets with stable owners and oldest-waiting admission
+when slots free. The shared event budget is 64 MiB; requested browser Network
+buffers share a 128 MiB aggregate budget divided across the configured limit.
+The selected debugger remains separate, and the global ledger retains 1000 rows
+and eight body retrieval jobs. Exact owner/session-qualified bodies cannot cross
+focus switches, target replacement or reconnect. Retired owners leave retained
+history and explicit unfinished-evidence gaps. `network.capture_epoch` remains
+the focused debugger/selection identity, not the HTTP owner token.
+
+Passive capture does not pause startup or guarantee first navigation: requests
+before attachment/Network.enable and very short-lived targets can be absent.
+Worker attachment can affect lifecycle/timeouts. No baseline startup-hold mode
+is enabled. WebSocket v1 remains selected-target scoped. The coverage notice
+identifies attached/missing target IDs, failures, overflow and gaps. Browser Target
+setup failure visibly falls back to eight page-only polling connections (512 MiB
+aggregate event budget, 128 MiB requested browser buffers) and retries browser
+setup after 30 seconds. Independent worker/OOPIF capture is absent in fallback.
+The focused debugger's transport and buffers are additional in both modes.
+
+`tools/check-traffic-multitarget-browser.mjs` exercises real Chromium with the
+native transport against synthetic loopback pages, including blank new tabs,
+navigation, background fetches, focus changes and target closure; Linux CI runs
+it in addition to the fault-injected HTTP/CDP lifecycle regressions. Captured Traffic values are raw by default; sensitive field selection
 for disposable experiments still requires confirmation.
 
 The API CLI embeds the versioned OpenAPI document and requires an explicit
@@ -87,6 +115,11 @@ VM documents persist exact session launch provenance from
 [`capture-provenance-v1`](../../protocol/capture-provenance-v1.md). Missing metadata
 stays unknown, and a current debugger connection never relabels saved findings.
 
+
+The offline `origin-trace-vm-pack apply` and `compare` commands add declarative
+relevance rankings or compare digest-bound workspace v2 documents. They preserve
+generic evidence and uncertainty, never execute source, and write private
+no-clobber reports. See [VM analysis packs v1](../../protocol/vm-analysis-pack-v1.md).
 Offline `reb-api describe OPERATION --action ACTION` also exposes source-backed
 advisory effects and prerequisites while retaining the operation's common
 guards. See the [execution metadata contract](../../protocol/http-api.md#execution-metadata).
@@ -302,3 +335,20 @@ PNG and DOM text/attributes are never retained in debugger state or written to
 files. The feature refuses observed form/private/editable content and frames,
 while explicitly retaining unknown pixel sensitivity, timing and occlusion.
 See [Element screenshot v1](../../protocol/element-screenshot-v1.md).
+
+VM Lab host positions are a separate digest-bound [host-links v1 report](../../protocol/vm-host-links-v1.md). Host payloads are not duplicated; missing dispatch evidence stays unknown.
+### Main-resource terminal handoffs
+
+A document or worker main-script request can begin in a parent CDP session and
+finish in its child session. Capture keeps the original public request ID,
+target and owner. It accepts a child `loadingFinished` only with a single
+pending candidate, exact bounded loader/frame or worker-target identity,
+compatible observed ancestry, a nondecreasing timestamp and live owners on the
+same connection. Completed collisions and dropped request history block this
+adoption; ambiguous events never become guessed completions. Private provenance
+is capped by the 1,000-row ledger and 512-entry target-lineage limit.
+
+After proven completion, body retrieval uses the terminal event's exact session;
+it does not transfer unrelated requests or invent response headers/status.
+Missing responses and detached body owners remain incomplete/unavailable. This
+repairs a lifecycle handoff, not passive capture of a target's first requests.

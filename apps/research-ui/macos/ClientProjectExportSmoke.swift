@@ -42,8 +42,12 @@ final class ClientProjectExportSmoke: NSObject {
               "cannot retain native smoke diagnostics")
     }
     NSApp.activate(ignoringOtherApps: true)
-    directory = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("reb-client-project-smoke-" + UUID().uuidString,
-                                                                 isDirectory: true)
+    guard let output = ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT_OUTPUT"]
+    else { fail("native UI-test receipt destination is missing"); return }
+    // The driver owns a fresh output directory. Share this deterministic child
+    // with XCTest so it can select the exact fixture through the real panel UI.
+    directory = URL(fileURLWithPath: output).resolvingSymlinksInPath()
+      .appendingPathComponent("destinations", isDirectory: true)
     do { try manager.createDirectory(at: directory, withIntermediateDirectories: false) }
     catch { fail("cannot create owned temporary directory") }
     exporter.installSmokeObservers(panel: { [weak self] panel in self?.presented(panel) },
@@ -178,7 +182,17 @@ final class ClientProjectExportSmoke: NSObject {
 
   private func willWrite(_ url: URL) {
     stage("atomic-write")
-    require(url.resolvingSymlinksInPath() == destination.resolvingSymlinksInPath(), "unexpected write destination")
+    let actual = url.resolvingSymlinksInPath()
+    let expected = destination.resolvingSymlinksInPath()
+    // Keep the exact destination guard. Diagnose URL representation versus
+    // navigation/filename mismatches without recording arbitrary selected paths.
+    let mismatch = "unexpected write destination"
+      + " pathMatch=\(actual.path == expected.path)"
+      + " standardizedMatch=\(actual.standardizedFileURL == expected.standardizedFileURL)"
+      + " parentMatch=\(actual.deletingLastPathComponent().path == expected.deletingLastPathComponent().path)"
+      + " filenameMatch=\(actual.lastPathComponent == expected.lastPathComponent)"
+      + " ownedRoot=\(actual.pathComponents.starts(with: directory.resolvingSymlinksInPath().pathComponents))"
+    require(actual == expected, mismatch)
     if phase == .writeFailure {
       // Force a genuine atomic-write error after ordinary panel approval: a
       // directory cannot be replaced by file bytes. Only our new temp path is touched.

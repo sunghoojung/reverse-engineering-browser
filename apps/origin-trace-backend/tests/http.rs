@@ -593,7 +593,8 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 36, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 39, "Review route coverage when the API changes");
+    assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -775,7 +776,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 36);
+    assert_eq!(operation_count, 39);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -2027,6 +2028,69 @@ async fn vm_opcode_workspace_has_etag_and_failure_isolated_from_vm_analysis() {
     assert_eq!(blocked.get("/api/analysis/vm").await.status(), 200);
     assert_eq!(blocked.get("/api/analysis/vm/opcodes").await.status(), 500);
 }
+#[tokio::test]
+async fn vm_host_links_are_digest_bound_payload_free_and_failure_isolated() {
+    let server = Server::start().await;
+    vm_artifact(
+        &server.root.path().join("artifacts"),
+        include_bytes!("../../../tools/fixtures/vm-dynamic-debug/stack-vm.js"),
+        "3",
+    );
+    let mut host = vm_event("runtime", 1, 7, "1");
+    host["payload"] = json!("PRIVATE HOST PAYLOAD");
+    server.file("events.jsonl", &jsonl(&[host]));
+    let response = server.get("/api/analysis/vm/host-links").await;
+    assert_eq!(response.status(), 200);
+    let etag = response.headers()["etag"].clone();
+    let document: Value = response.json().await.unwrap();
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../protocol/vm-host-links-v1.schema.json"
+    ))
+    .unwrap();
+    jsonschema::validator_for(&schema)
+        .unwrap()
+        .validate(&document)
+        .unwrap();
+    assert!(!document.to_string().contains("PRIVATE HOST PAYLOAD"));
+    assert_eq!(document["workspaces"][0]["links"][0]["state"], "unknown");
+    assert!(document["workspaces"][0]["links"][0]["guest_position"].is_null());
+    let workspace: Value = server
+        .get("/api/analysis/vm/opcodes")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        document["workspace_document_digest"],
+        workspace["document_digest"]
+    );
+    assert_eq!(
+        server
+            .client
+            .get(format!("{}/api/analysis/vm/host-links", server.url))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        304
+    );
+    let blocked = Server::start().await;
+    std::fs::create_dir_all(
+        blocked
+            .root
+            .path()
+            .join("artifacts/analysis/vm-host-links-v1.json"),
+    )
+    .unwrap();
+    assert_eq!(blocked.get("/api/analysis/vm").await.status(), 200);
+    assert_eq!(blocked.get("/api/analysis/vm/opcodes").await.status(), 200);
+    assert_eq!(
+        blocked.get("/api/analysis/vm/host-links").await.status(),
+        500
+    );
+}
+
 #[tokio::test]
 async fn vm_capture_mode_is_persisted_digest_bound_and_refreshes_with_provenance() {
     let server = Server::start().await;

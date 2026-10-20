@@ -14,6 +14,15 @@ const output = process.env.REB_VM_WORKSPACE_UI_OUTPUT || join(root, 'build/vm-wo
 const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
 const model = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const fixture = JSON.parse(await readFile(join(root, 'tests/research_ui/fixtures/vm-opcode-workspace-v2.json'), 'utf8'));
+const hostWorkspace = structuredClone(fixture), hostSource = hostWorkspace.workspaces[0], sample = hostSource.samples[0];
+const hostLinks = {contract_version: 1, document_kind: 'vm-host-links', workspace_document_digest: hostWorkspace.document_digest,
+  document_digest: 'e'.repeat(64), workspaces: [{interpreter_artifact_id: hostSource.interpreter_artifact_id,
+    source_artifact_sha256: hostSource.source_artifact_sha256, omissions: [], links: [{
+      host_event: {...sample.event, sequence_number: '50'}, category: 'runtime', type: 'api_call', state: 'observed',
+      reason: 'direct-dispatch-parent', guest_position: {sample_event: sample.event, invocation_event: sample.invocation_event,
+        invocation_id: sample.invocation_id, instruction_pointer: sample.instruction_pointer,
+        instruction_pointer_units: sample.instruction_pointer_units}}]}]};
+assert(runInNewContext(`${model}\nisVmHostLinksDocument(hostLinks, hostWorkspace)`, {hostLinks, hostWorkspace, TextEncoder}));
 const workspace = fixture.workspaces[0];
 workspace.runtime = 'webassembly'; workspace.model = 'unknown'; workspace.samples = []; workspace.sample_count = 0;
 workspace.handlers = [
@@ -31,9 +40,58 @@ const renders = app.slice(app.indexOf('      function vmField('), app.indexOf(' 
 assert(helper.includes('function textElement')); assert(renders.includes('function renderVmOpcodeWorkspace'));
 console.log('PASS authored WASM workspace fixture and shipped-renderer boundaries (model check, not rendered QA)');
 
+// Renderer-level exhaustive paging checks; authored inputs are never executed.
+class TestElement {
+  constructor(tag) { this.tagName = tag; this.children = []; this.events = {}; this.attributes = {}; this.dataset = {}; this.style = {}; this.value = ''; this.text = ''; }
+  set textContent(value) { this.text = String(value); this.children = []; }
+  get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
+  append(...items) { this.children.push(...items); }
+  replaceChildren(...items) { this.text = ''; this.children = items; }
+  setAttribute(key, value) { this.attributes[key] = String(value); }
+  addEventListener(key, action) { this.events[key] = action; }
+  focus() { testDocument.activeElement = this; }
+  click() { if (!this.disabled) this.events.click?.(); }
+}
+const testDocument = {createElement: tag => new TestElement(tag), createTextNode: text => { const node = new TestElement('#text'); node.textContent = text; return node; }, querySelector: () => null};
+const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmWorkspaceCoverage,appendVmPagedRows,vmOpcodeRows})`, {document: testDocument, state: {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'}, TextEncoder});
+const descendants = element => [element, ...element.children.flatMap(descendants)];
+const findButton = (root, label) => descendants(root).find(node => node.tagName === 'button' && node.textContent === label);
+const many = structuredClone(hostSource);
+const effect = {effect_id:'e', operation:'constant', evidence_class:'inferred',instruction_size:1,operand_layout:[],reads:[],writes:[],flow:{kind:'next',target_operand:null,target_offset:null},atomic_group:null,superoperator:null};
+many.handlers = Array.from({length:257}, (_,index) => ({...hostSource.handlers[0],opcode:index,effects:[{...effect,effect_id:`effect-${index}`}]}));
+many.traversal = {...many.traversal,instructions:Array.from({length:257}, (_,index) => ({artifact_id:'108',byte_offset:index,opcode:1,byte_size:1,effect_id:`effect-${index}`})),edges:[]};
+for (const [node,label,needle] of [[renderApi.renderVmEffects(many),'effects','effect-256'],[renderApi.renderVmReachability(many),'reachable instructions','byte 256']]) {
+  const rows = () => descendants(node).find(item => item.dataset.vmPagedRows === label);
+  assert.equal(rows().children.length,32); assert(!rows().textContent.includes(needle));
+  const next = findButton(node,`Next ${label}`), previous = findButton(node,`Previous ${label}`);
+  for(let page=0;page<8;page++)next.click();
+  assert.equal(rows().children.length,1);assert(rows().textContent.includes(needle));assert(next.disabled);assert.equal(testDocument.activeElement,previous);
+  previous.click();assert.equal(rows().children.length,32);assert(!next.disabled);
+}
+many.snapshots = [{artifact_id:'108',origin:'runtime-typed-array',byte_count:1,preview_hex:'01',truncated:false,unavailable_reason:null},{artifact_id:'109',origin:'runtime-typed-array',byte_count:2,preview_hex:'aabb',truncated:true,unavailable_reason:'authored partial'}];many.bytecode_artifact_id='108';
+const bytesView=renderApi.renderVmBytecode(many),selector=descendants(bytesView).find(node=>node.tagName==='select');
+assert.equal(selector.children.length,2);assert(bytesView.textContent.includes('01'));
+selector.value='1';selector.events.change();assert(bytesView.textContent.includes('aa bb'));assert(bytesView.textContent.includes('authored partial'));
+const noBytes=renderApi.renderVmBytecode({...many,snapshots:[]});assert(descendants(noBytes).find(node=>node.tagName==='select').disabled);assert(noBytes.textContent.includes('No bytecode preview'));
+const originalLinks=hostLinks.workspaces[0].links;hostLinks.workspaces[0].links=Array.from({length:65},(_,index)=>({...originalLinks[0],host_event:{...originalLinks[0].host_event,sequence_number:String(50+index)}}));
+const hostView=renderApi.renderVmHostLinks(hostSource);findButton(hostView,'Next host links').click();findButton(hostView,'Next host links').click();assert(hostView.textContent.includes('event 1:1:114'));assert(findButton(hostView,'Next host links').disabled);hostLinks.workspaces[0].links=originalLinks;
+const sampleWorkspace={...hostSource,samples:Array.from({length:65},(_,index)=>({...sample,sample_index:index})),handlers:[{...hostSource.handlers.find(handler=>handler.opcode===sample.opcode),sample_count:65}]};
+const sampleRow=renderApi.vmOpcodeRows(sampleWorkspace)[0];assert.equal(sampleRow.positions.length,4);assert.equal(sampleRow.retainedSamples.length,65);assert.equal(sampleRow.operandWidth,sampleWorkspace.handlers[0].operand_width);
+const samplePanel = new TestElement('section');
+renderApi.appendVmPagedRows(samplePanel, sampleRow.retainedSamples, 'retained samples', record => { const row = new TestElement('p'); row.textContent = `Sample ${record.sample_index}`; return row; });
+assert.equal(descendants(samplePanel).find(node=>node.dataset.vmPagedRows==='retained samples').children.length,32);
+findButton(samplePanel,'Next retained samples').click();findButton(samplePanel,'Next retained samples').click();
+assert(samplePanel.textContent.includes('Sample 64'));assert(findButton(samplePanel,'Next retained samples').disabled);
+const coverageWorkspace={...hostSource,coverage:{...hostSource.coverage,attributions:Array.from({length:65},(_,index)=>({artifact_id:'401',byte_offset:index,byte_size:1,opcode:1,kind:'opcode',evidence_class:'inferred'}))}};
+const coveragePanel=renderApi.renderVmWorkspaceCoverage(coverageWorkspace);
+findButton(coveragePanel,'Next byte attributions').click();findButton(coveragePanel,'Next byte attributions').click();
+assert(coveragePanel.textContent.includes('bytes [64, 65)'));assert(findButton(coveragePanel,'Next byte attributions').disabled);
+console.log('PASS complete bounded Findings paging: 257 effects/instructions, 65 host links/samples, multi-snapshot selection, empty inputs and keyboard focus');
+
 if (process.argv.includes('--browser')) {
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
   const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
+const hostWorkspace=${JSON.stringify(hostWorkspace)},hostLinks=${JSON.stringify(hostLinks)};
 const state={vmOpcodeWorkspace:fixture,lastValidVmOpcodeWorkspace:fixture,vmOpcodeWorkspaceStatus:'ready',selectedVmHandlerKey:null,vmFindings:[selected],selectedVmFindingId:selected.findingId,
 vmAnalysisDocument:{document_digest:fixture.analysis_digest,capture_mode:'unknown'}};
 const elements={vmSessionStatus:document.querySelector('#status')};
@@ -103,7 +161,15 @@ render();`;
       for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40});
       assert.equal(await evaluate("document.activeElement === document.querySelectorAll('.vm-handler-row')[1]"), true);
       assert.equal(await evaluate("document.activeElement.getAttribute('aria-selected')"), 'true');
+      assert.equal(await evaluate("document.querySelector('.vm-selection-inspector h3').textContent"), 'call_indirect target');
+      assert((await evaluate("document.querySelector('.vm-selection-inspector').textContent")).includes('50 + 3 bytes'));
+      assert.equal(await evaluate("document.querySelectorAll('.vm-selection-inspector img').length"), 0);
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      for (const panel of ['bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'effects']) {
+        await evaluate(`document.querySelector('[data-vm-panel="${panel}"]').click()`);
+        assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
+        assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
+      }
       await evaluate('scrollTo(0,0)');
       const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
       await writeFile(join(output, `wasm-${width}.png`), Buffer.from(data, 'base64'));
@@ -121,6 +187,19 @@ render();`;
       await evaluate("state.vmAnalysisDocument={document_digest:fixture.analysis_digest,capture_mode:'unknown'};renderVmSessionStatus()");
 
     }
+    await evaluate("state.vmOpcodeWorkspace=hostWorkspace;state.vmHostLinks=hostLinks;state.vmHostLinksStatus='ready';state.vmWorkspacePanel='host-links';render()");
+    assert.equal(await evaluate("document.querySelector('[data-vm-panel-content=\"host-links\"]').hidden"), false);
+    assert((await evaluate('document.body.textContent')).includes('event 1:1:50'));
+    assert((await evaluate('document.body.textContent')).includes('exact request-value provenance'));
+    for (const width of [1440, 390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `host-links-${width}.png`), Buffer.from(data, 'base64'));
+    }
+    await evaluate("hostLinks.workspace_document_digest='stale';render()");
+    assert((await evaluate('document.body.textContent')).includes('Guest position unknown'));
+    await evaluate("state.vmOpcodeWorkspace=fixture;state.vmHostLinks=null;render()");
     await evaluate("retainVmOpcodeWorkspaceOnFailure(state,'malformed','synthetic malformed fixture');render()");
     assert((await evaluate('document.body.textContent')).includes('last valid workspace is retained'));
     await evaluate("state.vmOpcodeWorkspace={...fixture,workspaces:[]};state.vmOpcodeWorkspaceStatus='ready';render()");

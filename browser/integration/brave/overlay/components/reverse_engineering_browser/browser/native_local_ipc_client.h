@@ -14,7 +14,9 @@
 namespace reb {
 
 // Connects to a user-owned local receiver and authenticates the session before
-// returning the descriptor. The token file must be a user-owned regular file
+// returning the descriptor (sending the hello is not a receiver acknowledgment).
+// Connect and hello are non-blocking and fail closed on pending/backpressure.
+// The token file must be a user-owned regular file
 // with mode 0600. Returns -1 without leaving a connected descriptor on error.
 [[nodiscard]] int ConnectNativeLocalIpc(const std::string& socket_path,
                                         const base::FilePath& token_path,

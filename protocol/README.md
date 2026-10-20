@@ -35,6 +35,9 @@ ingestion are not implemented by that contract.
 [Literal marker fuzz workflow v1](marker-fuzz-v1.md) defines offline reviewed
 plans and explicitly armed, bounded disposable Repeater execution.
 
+[VM analysis packs v1](vm-analysis-pack-v1.md) defines inert relevance overlays
+and conservative offline comparison of exact workspace v2 documents.
+
 ## Two representations
 
 1. Native hot paths use the fixed 320-byte C++ `EventRecord` in

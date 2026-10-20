@@ -1,5 +1,7 @@
 # Offline HAR export v1
 
+Traffic **Export… → Format → HAR** exposes raw and redacted policies (redacted by default) using this same offline generator and strict timing validator. Browser development downloads the file; the native **Clipboard** destination writes text to the local clipboard only when explicitly selected.
+
 Export one reviewed, saved `get_network_request` response without contacting its
 URL or executing anything in it:
 

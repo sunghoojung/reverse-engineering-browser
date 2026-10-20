@@ -12,7 +12,7 @@ magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decode
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
 
-check: all wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark
+check: all wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
@@ -32,6 +32,9 @@ native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 
 native-probe-admission-check:
 	CXX="$(CXX)" ./tools/check-native-probe-admission.sh
+
+native-network-capture-check:
+	CXX="$(CXX)" ./tools/check-native-network-capture.sh
 
 native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
 	$(NATIVE_PROXY_POLICY_TEST)
@@ -58,6 +61,7 @@ sanitize:
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
 		all wire-decoder-check magic-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check native-tests
+	REB_PROBE_TEST_SANITIZERS="$(SANITIZERS)" CXX="$(CXX)" ./tools/check-native-network-capture.sh
 
 format:
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
@@ -80,6 +84,7 @@ shellcheck:
 	shellcheck $(SHELL_SOURCES)
 
 python-check:
+	python3 tools/release-companion-test.py
 	python3 tools/write-release-pair-test.py
 	python3 tools/publish-release-pair-test.py
 	python3 tools/check-integrated-brave-state-test.py
@@ -99,15 +104,18 @@ workflow-check:
 clean:
 	rm -rf $(BUILD_DIR)
 
-javascript-check:
+javascript-check: capture-completeness-check
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-traffic-capture.mjs
+	node tools/check-traffic-retained-focus.mjs
 	node tools/check-traffic-capture-qa.mjs
+	node tools/check-public-demo-passive-smoke.mjs
 	node tools/check-websocket-inspection.mjs
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
+	node tools/check-captured-export-ui.mjs
 	node tools/check-local-overrides.mjs
 	node tools/check-local-override-manager.mjs
 	node tools/check-graphql-sdl.mjs
@@ -117,10 +125,13 @@ javascript-check:
 	node tools/check-owned-vm-integration.mjs
 	node tools/check-owned-vm-debugger-ui.mjs
 	node tools/check-vm-semantics.mjs
+	node tools/check-vm-analysis-packs.mjs
 	node tools/check-vm-agent.mjs
 	node tools/check-vm-opcode-ledger.mjs
+	node tools/check-vm-opcode-ledger-ui.mjs
 	node tools/check-vm-workspace-contract.mjs
 	node tools/check-vm-opcode-workspace-ui.mjs
+	node tools/check-vm-full-shell-ui.mjs --fixture-only
 	node tools/check-owned-opcode-experiments.mjs
 	node tools/owned-opcode-experiment-ui-cases.mjs --validate-fixtures
 	node tools/check-vm-static.mjs
@@ -136,5 +147,21 @@ javascript-check:
 	node tools/check-element-screenshot.mjs
 	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
+	node tools/check-origin-trace-launcher.mjs --cleanup-only
 	node tools/check-origin-trace-package.mjs --contract-only
 	node tools/check-origin-trace-native-close.mjs --contract-only
+
+.PHONY: capture-completeness-check capture-completeness-browser-check
+capture-completeness-check:
+	node tools/check-capture-completeness-response-evidence.mjs
+	node tools/check-capture-completeness-startup.mjs
+	node tools/check-capture-completeness-reference.mjs
+	node tools/check-capture-completeness-lifecycle.mjs
+	node tools/check-capture-completeness-fixture.mjs
+	node tools/check-capture-completeness-netlog.mjs
+	node tools/check-capture-completeness-integration.mjs
+	node tools/check-capture-completeness-report.mjs
+
+# Exact browser version must be explicitly selected with REB_REFERENCE_BROWSER_VERSION.
+capture-completeness-browser-check: capture-completeness-check origin-trace-backend debugger-transport
+	node tools/check-capture-completeness-browser.mjs .

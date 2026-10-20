@@ -4958,6 +4958,421 @@
           ]
         }
       }
+    },
+    "/api/analysis/vm/host-links": {
+      "get": {
+        "operationId": "get_vm_host_links",
+        "summary": "Read bounded host-event links to retained guest dispatch positions",
+        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis.",
+        "tags": [
+          "analysis"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VmHostLinks"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Workspace generation, storage, or validation failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "local-state-write",
+                "filesystem-write"
+              ],
+              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store_documents, writes artifacts/analysis/vm-opcode-workspace-v2.json, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
+            }
+          ],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Builds or returns the local opcode workspace; this GET is not guaranteed read-only. A workspace failure does not hide a valid VM analysis document.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm.rs",
+              "symbol": "store_documents"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/vm_opcode.rs",
+              "symbol": "store"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "analysis_input_signature"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/analysis/vm/packs/apply": {
+      "post": {
+        "operationId": "vm_pack_apply",
+        "summary": "Apply a declarative VM ranking pack",
+        "tags": [
+          "vm-analysis"
+        ],
+        "responses": {
+          "200": {
+            "description": "Complete data-only report; original evidence and limitations retained.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "contract_version",
+                    "document_kind",
+                    "document_digest"
+                  ],
+                  "properties": {
+                    "contract_version": {
+                      "const": 1
+                    },
+                    "document_kind": {
+                      "const": "vm-pack-application"
+                    },
+                    "document_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed, oversized, duplicate-key, schema-invalid or digest/source-identity mismatched input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Bounded pack-analysis capacity unavailable; retry explicitly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Controls require application/json with optional UTF-8 charset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired before control admission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/vm_pack.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-max-body-bytes": 16777216,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pack",
+                  "analysis"
+                ],
+                "properties": {
+                  "pack": {
+                    "type": "object"
+                  },
+                  "analysis": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm_pack.rs",
+              "symbol": "request"
+            }
+          ]
+        }
+      }
+    },
+    "/api/analysis/vm/packs/compare": {
+      "post": {
+        "operationId": "vm_pack_compare",
+        "summary": "Compare exact source-bound VM workspace instructions",
+        "tags": [
+          "vm-analysis"
+        ],
+        "responses": {
+          "200": {
+            "description": "Complete data-only report; original evidence and limitations retained.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "contract_version",
+                    "document_kind",
+                    "document_digest"
+                  ],
+                  "properties": {
+                    "contract_version": {
+                      "const": 1
+                    },
+                    "document_kind": {
+                      "const": "vm-instruction-set-comparison"
+                    },
+                    "document_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed, oversized, duplicate-key, schema-invalid or digest/source-identity mismatched input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Bounded pack-analysis capacity unavailable; retry explicitly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Controls require application/json with optional UTF-8 charset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired before control admission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/vm_pack.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-max-body-bytes": 16777216,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pack",
+                  "left",
+                  "left_artifact",
+                  "right",
+                  "right_artifact"
+                ],
+                "properties": {
+                  "pack": {
+                    "type": "object"
+                  },
+                  "left": {
+                    "type": "object"
+                  },
+                  "left_artifact": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,19}$"
+                  },
+                  "right": {
+                    "type": "object"
+                  },
+                  "right_artifact": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,19}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm_pack.rs",
+              "symbol": "request"
+            }
+          ]
+        }
+      }
     }
   },
   "components": {
@@ -14104,7 +14519,12 @@
           },
           "network": {
             "type": "object",
-            "additionalProperties": true
+            "additionalProperties": true,
+            "properties": {
+              "capture_status": {
+                "$ref": "#/components/schemas/HttpTrafficCaptureStatus"
+              }
+            }
           },
           "heap_diff_baseline": {
             "anyOf": [
@@ -22387,6 +22807,31 @@
           },
           "timing_evidence": {
             "$ref": "#/components/schemas/NetworkTimingEvidence"
+          },
+          "capture_owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "description": "Opaque immutable HTTP connection-owner token; never substitute it for capture_epoch."
+          },
+          "status_source": {
+            "description": "Provenance of effective status. Optional for older producers; current producers initialize every row to unavailable.",
+            "type": "string",
+            "enum": [
+              "unavailable",
+              "response-received",
+              "redirect-response",
+              "response-received-extra-info"
+            ]
+          },
+          "wire_status": {
+            "description": "Uniquely attributable ExtraInfo wire status, distinct from effective cached response status; null on missing or ambiguous evidence.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 100,
+            "maximum": 599
           }
         },
         "x-schema-completeness": "partial",
@@ -24660,6 +25105,430 @@
             ]
           }
         }
+      },
+      "VmHostLinks": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contract_version",
+          "document_kind",
+          "workspace_document_digest",
+          "workspaces",
+          "document_digest"
+        ],
+        "properties": {
+          "contract_version": {
+            "const": 1
+          },
+          "document_kind": {
+            "const": "vm-host-links"
+          },
+          "workspace_document_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "workspaces": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/VmHostLinks/$defs/workspace"
+            }
+          },
+          "document_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "$defs": {
+          "eventIdentity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "session_id",
+              "process_id",
+              "sequence_number"
+            ],
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "process_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "sequence_number": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            }
+          },
+          "position": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sample_event",
+              "invocation_event",
+              "invocation_id",
+              "instruction_pointer",
+              "instruction_pointer_units"
+            ],
+            "properties": {
+              "sample_event": {
+                "$ref": "#/components/schemas/VmHostLinks/$defs/eventIdentity"
+              },
+              "invocation_event": {
+                "$ref": "#/components/schemas/VmHostLinks/$defs/eventIdentity"
+              },
+              "invocation_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "instruction_pointer": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "instruction_pointer_units": {
+                "enum": [
+                  "byte-offset",
+                  "instruction-index"
+                ]
+              }
+            }
+          },
+          "link": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "host_event",
+              "category",
+              "type",
+              "state",
+              "reason",
+              "guest_position"
+            ],
+            "properties": {
+              "host_event": {
+                "$ref": "#/components/schemas/VmHostLinks/$defs/eventIdentity"
+              },
+              "category": {
+                "enum": [
+                  "canvas",
+                  "webgl",
+                  "web_audio",
+                  "navigator",
+                  "permissions",
+                  "storage",
+                  "webrtc",
+                  "network",
+                  "runtime"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "api_call",
+                  "property_read",
+                  "request_started",
+                  "request_initiated",
+                  "request_redirected",
+                  "response_started",
+                  "response_completed",
+                  "request_completed",
+                  "request_failed"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "observed",
+                  "correlated",
+                  "unknown"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "direct-dispatch-parent",
+                  "dispatch-samples-unavailable",
+                  "guest-position-unproven"
+                ]
+              },
+              "guest_position": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/VmHostLinks/$defs/position"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "state": {
+                      "const": "observed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "guest_position": {
+                      "$ref": "#/components/schemas/VmHostLinks/$defs/position"
+                    },
+                    "reason": {
+                      "const": "direct-dispatch-parent"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "guest_position": {
+                      "type": "null"
+                    },
+                    "reason": {
+                      "enum": [
+                        "dispatch-samples-unavailable",
+                        "guest-position-unproven"
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "workspace": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "interpreter_artifact_id",
+              "source_artifact_sha256",
+              "links",
+              "omissions"
+            ],
+            "properties": {
+              "interpreter_artifact_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$"
+              },
+              "source_artifact_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "links": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "$ref": "#/components/schemas/VmHostLinks/$defs/link"
+                }
+              },
+              "omissions": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                  "enum": [
+                    "dispatch-samples-unavailable",
+                    "dispatch-sample-retention-limit",
+                    "host-link-limit",
+                    "host-events-unavailable"
+                  ]
+                },
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        "x-source": "protocol/vm-host-links-v1.schema.json"
+      },
+      "HttpTrafficCaptureStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "state",
+          "attached_targets",
+          "eligible_targets",
+          "target_limit",
+          "target_overflow",
+          "failed_targets",
+          "gaps",
+          "last_error",
+          "message"
+        ],
+        "properties": {
+          "scope": {
+            "enum": [
+              "http-page-targets",
+              "http-browser-targets"
+            ]
+          },
+          "state": {
+            "enum": [
+              "disabled",
+              "waiting",
+              "ready",
+              "partial"
+            ]
+          },
+          "attached_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "eligible_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "target_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 128
+          },
+          "target_overflow": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 511
+          },
+          "failed_targets": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "gaps": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "attached_target_ids": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "unattached_targets": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "title"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 128
+                }
+              }
+            }
+          },
+          "unattached_targets_omitted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 512
+          },
+          "catalog_incomplete": {
+            "type": "boolean",
+            "description": "Known-target catalog is incomplete; bounded reconciliation is pending and counts exclude unknown targets."
+          },
+          "discovery_stale": {
+            "type": "boolean",
+            "description": "Target enumeration failed. Existing owners may continue, but new targets cannot be confirmed or attached."
+          },
+          "transport_mode": {
+            "enum": [
+              "page-fallback",
+              "browser-sessions"
+            ]
+          },
+          "cleanup_already_gone": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional cumulative confirmed-ended cleanup jobs; not a missing-request count."
+          },
+          "cleanup_failures": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional cumulative failed cleanup jobs on the current browser connection at observation; not a missing-request count."
+          },
+          "startup_mode": {
+            "const": "passive"
+          },
+          "browser_setup_failure": {
+            "description": "Last failed browser setup attempt; survives page fallback and clears after successful browser setup. Not a claim of unsupported capability.",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "stage",
+                  "reason"
+                ],
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "endpoint",
+                      "transport-open",
+                      "discover-targets",
+                      "get-targets",
+                      "get-targets-shape"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "timeout",
+                      "disconnected",
+                      "transport-failure",
+                      "invalid-reply",
+                      "protocol-error",
+                      "command-rejected",
+                      "dependency-unavailable",
+                      "resource-limit",
+                      "invalid-request",
+                      "state-conflict",
+                      "stale-generation",
+                      "target-unavailable",
+                      "cancelled",
+                      "outcome-unknown",
+                      "unspecified"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "status_extra_info_overflow": {
+            "type": "boolean",
+            "description": "Sticky saturation of the bounded 2048-entry ExtraInfo identity history; disables ExtraInfo attribution without discarding HTTP rows or authoritative response status."
+          }
+        },
+        "description": "Bounded HTTP capture coverage. Passive browser sessions cover supported page, worker and out-of-process iframe targets; page polling is a compatibility fallback. Ready never promises first-navigation or pre-attachment completeness. WebSocket v1 remains selected-target scoped."
       }
     }
   },

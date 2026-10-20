@@ -21,6 +21,7 @@
 #include "base/command_line.h"
 #include "base/containers/span.h"
 #include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
@@ -29,6 +30,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
 #include "brave/components/reverse_engineering_browser/browser/native_local_ipc_client.h"
+#include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 
 namespace reb {
@@ -140,6 +142,16 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   const std::uint64_t expires_at_monotonic_ns = now + duration_ns;
   const bool capture_canvas_images = command_line.HasSwitch(kCaptureCanvasImagesSwitch);
 
+  const base::FilePath user_data_root =
+      command_line.HasSwitch("user-data-dir")
+          ? base::MakeAbsoluteFilePath(command_line.GetSwitchValuePath("user-data-dir"))
+          : base::FilePath();
+  if (user_data_root.empty()) {
+    LOG(ERROR) << "Native capture requires an explicit existing user-data-dir";
+    return false;
+  }
+  NativeNetworkCaptureSink::Get().SetOwnedProfilePath(user_data_root.AppendASCII("Default"));
+
   const base::FilePath token_path = command_line.GetSwitchValuePath(kBrokerTokenFileSwitch);
   socket_descriptor_ = ConnectNativeLocalIpc(command_line.GetSwitchValueASCII(kBrokerSocketSwitch),
                                              token_path, session_id, true);
@@ -180,6 +192,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
     NativeArtifactSocketClient::Get().Stop();
     return false;
   }
+  LOG(INFO) << "Native capture armed before profile startup; network metadata scope is proxy-only; "
+               "service-worker synthetic and renderer memory-cache coverage unavailable";
   return true;
 }
 

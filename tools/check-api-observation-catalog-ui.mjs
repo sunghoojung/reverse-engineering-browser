@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Authored local fixtures only. No real captures, target requests or mutation.
 import assert from 'node:assert/strict';
+import {trafficBrowserDownloadObserver} from './browser-download-observer.mjs';
 import {readFile, writeFile, mkdtemp, mkdir, rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
@@ -29,6 +30,14 @@ export async function catalogActivationPoint() {
     throw Error('Catalog activation target is not ready: '+JSON.stringify(receipt));
   }
   return receipt;
+}
+
+// A forced refresh can return immediately while an older poll is in flight.
+// Select only after the expected fixture has reached the real Traffic model.
+function catalogCaptureFixtureReady(generation, identity, evidence) {
+  if (state.debuggerSession?.generation !== generation) return false;
+  const record = apiCatalogResolveSource(identity, state.requests).record;
+  return Boolean(record && JSON.stringify(record.captureRecord) === JSON.stringify(evidence));
 }
 
 function checkCatalogActivationReadiness() {
@@ -161,8 +170,41 @@ console.log('PASS catalog validator, independent coverage, five-value identity, 
 checkComparison();
 await checkController();
 await checkHistory();
+await checkCaptureFixtureReadiness();
 
 if (process.argv.includes('--browser') || process.argv.includes('--serve')) await checkBrowser();
+async function checkCaptureFixtureReadiness() {
+  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const refresh=app.slice(app.indexOf('      async function refreshDebugger(force = false)'),app.indexOf('      async function refreshArtifacts()'));
+  const rebuildStart=app.indexOf('      function rebuildTrafficRequests(');
+  const rebuildEnd=app.indexOf('      function renderShellStatus(',rebuildStart);
+  assert(rebuildStart>=0 && rebuildEnd>rebuildStart,'Traffic rebuild fixture must use the shipped function');
+  const rebuild=app.slice(rebuildStart,rebuildEnd);
+  const next=copy(fixture.debuggerState);next.generation++;next.network.requests[0].started_monotonic_ms=1000;
+  const evidence=next.network.requests[0],expected=api.apiCatalogRequestIdentity(api.requestsFromDebuggerNetwork(next.network)[0]);
+  const state={debuggerRefreshing:true,debuggerSession:copy(fixture.debuggerState),sessionMode:'live',nativeRequests:[],requests:api.requestsFromDebuggerNetwork(fixture.debuggerState.network),
+    selectedRequestId:requests[0].id,selectedCaptureIdentity:copy(identity)};
+  let fetches=0;
+  const model=runInNewContext(`${traffic}\n${refresh}\n${rebuild}\n${catalogCaptureFixtureReady}\n;({refreshDebugger,rebuildTrafficRequests,catalogCaptureFixtureReady})`,
+    {state,location:{protocol:'http:'},...api,fetch:()=>{fetches++;throw Error('An active poll must not be replaced');},
+      syncTrafficComparison:()=>{},resetRequestSelection:()=>{state.selectedRequestId=null;state.selectedCaptureIdentity=null;},investigationNotice:()=>{},apiCatalogPanel:{sync(){}}});
+  await model.refreshDebugger(true);
+  assert.equal(fetches,0,'Forced refresh returns while the existing poll still owns the request');
+  assert.equal(state.selectedCaptureIdentity.started,100.0000001);
+  assert.equal(model.catalogCaptureFixtureReady(next.generation,expected,evidence),false,'Awaiting refresh does not establish fixture readiness');
+  state.debuggerSession=next;model.rebuildTrafficRequests();
+  assert.equal(state.selectedRequestId,null,'The real model expires a selection made before the new identity arrives');
+  assert.match(state.trafficSelectionNotice,/expired or its exact source changed/);
+  assert.equal(model.catalogCaptureFixtureReady(next.generation,expected,evidence),true);
+  assert.equal(model.catalogCaptureFixtureReady(next.generation+1,expected,evidence),false,'Fixture generation must match');
+  const changed=copy(evidence);changed.response.body.text+=' changed';
+  assert.equal(model.catalogCaptureFixtureReady(next.generation,expected,changed),false,'Exact evidence, including export inputs, must match');
+  state.requests.push({...state.requests[0]});
+  assert.equal(model.catalogCaptureFixtureReady(next.generation,expected,evidence),false,'Ambiguous retained identities remain refused');
+  state.requests.pop();state.selectedRequestId=evidence.id;state.selectedCaptureIdentity=expected;model.rebuildTrafficRequests();
+  assert.equal(state.selectedRequestId,evidence.id,'Selection after readiness survives an unchanged poll');
+  console.log('PASS export fixture readiness: actual in-flight refresh early return, stale selection expiration, exact generation/identity/evidence and ambiguity refusal (model; not rendered QA)');
+}
 function checkComparison() {
   const catalog = comparisonFixture(fixture.catalog);
   assert(api.isApiObservationCatalog(catalog));
@@ -238,11 +280,11 @@ async function checkBrowser() {
   await mkdir(output,{recursive:true});
   await rm(join(output,'validation.json'),{force:true});
   await rm(join(output,'failure.png'),{force:true});
-  let browser, socket, sequence=0, diagnostics='', phase='fixture startup', firstFailure=null, browserClosed=false, catalogActivation=null; const commands=new Map();
+  let browser, socket, downloadSocket, downloadObserver, sequence=0, diagnostics='', phase='fixture startup', firstFailure=null, browserClosed=false, catalogActivation=null; const commands=new Map(), downloadReceipts=[];
   const grouped=process.platform!=='win32';
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   async function until(check,description) {phase=description;for(let i=0;i<200;i++){const value=await check();if(value)return value;await delay(50);}throw new Error(`Timed out: ${description}`);}
-  const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{commands.delete(id);reject(new Error(`CDP timeout: ${method}`));},10000);commands.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params}));});
+  const send=(method,params={},connection=socket)=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{commands.delete(id);reject(new Error(`CDP timeout: ${method}`));},10000);commands.set(id,{resolve,reject,timer});connection.send(JSON.stringify({id,method,params}));});
   const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.text+' '+JSON.stringify(result.exceptionDetails.exception));return result.result.value;};
   const key=async (key,code,options={})=>{
     const windowsVirtualKeyCode={Tab:9,Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowUp:38}[key];
@@ -276,7 +318,14 @@ async function checkBrowser() {
     const pages=await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     socket=new WebSocket(pages.find(page=>page.type==='page').webSocketDebuggerUrl);
     await new Promise((ready,reject)=>{socket.addEventListener('open',ready,{once:true});socket.addEventListener('error',reject,{once:true});});
-    socket.addEventListener('message',event=>{const message=JSON.parse(event.data);if(message.method==='Runtime.exceptionThrown'){errors.push(message.params.exceptionDetails);if(errors.length>32)errors.shift();}const command=commands.get(message.id);if(command){clearTimeout(command.timer);commands.delete(message.id);if(message.error)command.reject(new Error(message.error.message));else command.resolve(message.result);}});
+    const onMessage=event=>{const message=JSON.parse(event.data);downloadObserver?.observe(message);if(message.method==='Runtime.exceptionThrown'){errors.push(message.params.exceptionDetails);if(errors.length>32)errors.shift();}const command=commands.get(message.id);if(command){clearTimeout(command.timer);commands.delete(message.id);if(message.error)command.reject(new Error(message.error.message));else command.resolve(message.result);}};
+    socket.addEventListener('message',onMessage);
+    const version=await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    downloadSocket=new WebSocket(version.webSocketDebuggerUrl);
+    await new Promise((ready,reject)=>{downloadSocket.addEventListener('open',ready,{once:true});downloadSocket.addEventListener('error',reject,{once:true});});
+    downloadSocket.addEventListener('message',onMessage);
+    downloadSocket.addEventListener('close',()=>downloadObserver?.close('Browser download connection closed'));
+    downloadSocket.addEventListener('error',()=>downloadObserver?.close('Browser download connection failed'));
     await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});
     await until(()=>evaluate("typeof state !== 'undefined' && state.requests.length===1"),'loaded real Traffic UI');
@@ -420,7 +469,7 @@ async function checkBrowser() {
       return {ledger:Math.min(rows.bottom,pane.bottom,table.bottom)-Math.max(rows.top,pane.top,table.top),
         controls:[...document.querySelectorAll('.request-window button:not([hidden])')].map(button=>{const r=button.getBoundingClientRect();
           return {id:button.id,visible:r.width>0&&r.left>=0&&r.right<=innerWidth&&r.top>=pane.top&&r.bottom<=Math.min(pane.bottom,table.bottom,innerHeight)};})};})()`);
-    assert(footer.ledger>=56,JSON.stringify(footer));assert.equal(footer.controls.length,5);
+    assert(footer.ledger>=56,JSON.stringify(footer));assert.deepEqual(footer.controls.map(control=>control.id),['request-window-prev','request-window-next','request-latest','request-order','open-api-catalog','open-captured-export']);
     assert(footer.controls.every(control=>control.visible),JSON.stringify(footer));await shot('catalog-traffic-footer-360');
     // The catalog source opens the same retained capture used by the client workflow.
     await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
@@ -486,18 +535,98 @@ async function checkBrowser() {
     await send('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     await evaluate("showScreen('traffic')");
     if(!await evaluate("document.querySelector('#traffic-capture-export').open"))await click('#traffic-capture-export > summary');
-    await send('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:output});
-    await click('[data-client-capture="raw"]');
-    const downloaded=await until(async()=>{try{return await readFile(join(output,'reb-client-project.raw.zip'));}catch{return null;}},'explicit client ZIP download');
+    await send('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:output,eventsEnabled:true},downloadSocket);
+    const downloadFrame=(await send('Page.getFrameTree')).frameTree.frame.id;
+    const exportDownload=async filename=>{
+      phase='completed local export: '+filename;
+      downloadObserver=trafficBrowserDownloadObserver({timeoutMs:10000});
+      const receipt=downloadObserver.arm(downloadFrame,filename);
+      try {
+        await Promise.all([click('[data-export-submit]'),receipt.completion]);
+        // A filename may exist before its bytes are written. Read once only
+        // after the exact frame/filename/GUID reports completed; never retry
+        // assertions against corrupt or incomplete completed output.
+        return await readFile(join(output,filename));
+      } finally {downloadReceipts.push({filename,events:downloadObserver.receipts()});if(downloadReceipts.length>8)downloadReceipts.shift();receipt.cancel();downloadObserver.close();downloadObserver=null;}
+    };
+    const chooseExport = async (field,index) => selectRenderedOption({evaluate,click,key,selector:'[data-export-'+field+']',index});
+    const openExport = async () => {
+      if(await evaluate("document.querySelector('#captured-export-dialog').open"))await click('[data-export-close]');
+      await click('[data-export-open="capture"]');
+      assert.equal(await evaluate("document.querySelector('#captured-export-dialog').open"),true);
+      assert.equal(await evaluate("document.querySelector('[data-export-policy]').value"),'redacted_copy','Every opening defaults to a redacted copy');
+    };
+    await openExport();await chooseExport('format',1);await chooseExport('policy',1);
+    const downloaded=await exportDownload('reb-client-project.raw.zip');
     assert.equal(downloaded.readUInt32LE(0),0x04034b50);
+    for (const [index,provider] of [[1,'requests'],[2,'httpx']]) {
+      await rm(join(output,'reb-client-project.raw.zip'));
+      await chooseExport('provider',index);
+      const archive=await exportDownload('reb-client-project.raw.zip');
+      assert(archive.includes(Buffer.from(provider+'==')));assert(archive.includes(Buffer.from('reb-client-project/client.py')));
+    }
+    await chooseExport('format',2);await chooseExport('policy',0);await click('[data-export-submit]');
+    assert.match(await evaluate("document.querySelector('[data-export-status]').textContent"),/HAR export unsupported/);
+    await chooseExport('format',3);await click('[data-export-submit]');
+    assert.match(await evaluate("document.querySelector('[data-export-status]').textContent"),/Export failed/);
+    const schema={data:{__schema:{queryType:{name:'Query'},mutationType:null,subscriptionType:null,types:[{kind:'SCALAR',name:'String',description:null},{kind:'OBJECT',name:'Query',description:null,interfaces:[],fields:[{name:'hello',description:null,args:[],type:{kind:'SCALAR',name:'String',ofType:null},isDeprecated:false,deprecationReason:null}]}],directives:[]}}};
+    selected.started_monotonic_ms=1000;selected.protocol='h2';
+    selected.response.headers=[['Content-Type','application/json']];selected.response.body={state:'available',mime:'application/json',text:JSON.stringify(schema),base64:'',truncated:false,reason:''};
+    const a=value=>({state:'available',value}),u=()=>({state:'unavailable'});
+    selected.timing_evidence={format:'reb-network-timing-v1',request_monotonic_seconds:a(1),request_wall_seconds:a(1700000000),response_monotonic_seconds:a(1.06),completion_monotonic_seconds:a(1.1),response_observed:true,completion_observed:true,response_source:'responseReceived',completion_source:'loadingFinished',duplicate_response:false,duplicate_completion:false,response_after_completion:false,resource_timing:{state:'available',fields:{requestTime:a(1.005),proxyStart:u(),proxyEnd:u(),workerStart:u(),dnsStart:a(1),dnsEnd:a(3),connectStart:a(4),connectEnd:a(10),sslStart:a(5),sslEnd:a(9),sendStart:a(12),sendEnd:a(13),receiveHeadersStart:a(40),receiveHeadersEnd:a(45)}}};
+    fixture.debuggerState.generation++;assert(api.isDebuggerResponse(fixture.debuggerState));
+    await click('[data-export-close]');
+    await evaluate('refreshDebugger(true)');
+    const exportIdentity=api.apiCatalogRequestIdentity(api.requestsFromDebuggerNetwork(fixture.debuggerState.network).find(request=>request.id===selected.id));
+    await until(()=>evaluate(`(${catalogCaptureFixtureReady})(${JSON.stringify(fixture.debuggerState.generation)},${JSON.stringify(exportIdentity)},${JSON.stringify(selected)})`),'exact HAR/SDL fixture before selection');
+    await click('[data-request-id="synthetic-json"]');
+    assert.deepEqual(await evaluate('state.selectedCaptureIdentity'),copy(exportIdentity),'Export selects the updated exact capture');
+    if(!await evaluate("document.querySelector('#traffic-capture-export').open"))await click('#traffic-capture-export > summary');
+    await openExport();await chooseExport('format',2);
+    for(const [index,mode,filename] of [[0,'redacted_copy','selected.redacted.har'],[1,'raw','selected.raw.har']]) {
+      await chooseExport('policy',index);
+      const bytes=await exportDownload(filename);
+      const entry=JSON.parse(bytes).log.entries[0];assert.equal(entry._reb.mode,mode);
+      if(mode==='redacted_copy')assert.equal(entry.request.queryString.length,0);
+    }
+    await chooseExport('format',3);
+    const sdl=(await exportDownload('selected.graphql')).toString('utf8');
+    assert.match(sdl,/type Query/);assert.match(sdl,/# Saved REB identity:/);
+    await chooseExport('source',1);assert.equal(await evaluate("document.querySelector('[data-export-submit]').disabled"),true);
+    const input=join(output,'authored-introspection.json');await writeFile(input,JSON.stringify(schema));
+    const dom=await send('DOM.getDocument');const inputNode=await send('DOM.querySelector',{nodeId:dom.root.nodeId,selector:'[data-export-file]'});
+    await send('DOM.setFileInputFiles',{nodeId:inputNode.nodeId,files:[input]});
+    await until(()=>evaluate("!document.querySelector('[data-export-submit]').disabled"),'local schema validated');
+    assert.equal(await readFile(join(output,'schema.graphql')).then(()=>true,()=>false),false,'Choosing a local file never exports it automatically');
+    const fileSDL=(await exportDownload('schema.graphql')).toString('utf8');assert.match(fileSDL,/type Query/);
+    await openExport();await chooseExport('format',1);
+    for(const [width,height] of [[1440,900],[760,560],[360,740]]) {
+      await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+      await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+      const layout=await evaluate("(()=>{const d=document.querySelector('#captured-export-dialog'),b=d.querySelector('.captured-export-body'),r=d.getBoundingClientRect(),f=d.querySelector('footer').getBoundingClientRect();return{left:r.left,right:r.right,top:r.top,bottom:r.bottom,footerBottom:f.bottom,width:innerWidth,height:innerHeight,overflow:b.scrollWidth>b.clientWidth+1};})()");
+      assert(layout.left>=0&&layout.right<=layout.width&&layout.top>=0&&layout.bottom<=layout.height&&layout.footerBottom<=layout.height&&!layout.overflow,'Export dialog and actions fit the viewport: '+JSON.stringify(layout));
+      await shot('export-dialog-'+width);
+    }
+    await openExport();
+    // No native select is opened during this separate parent-dialog Escape check.
+    for(let step=0;step<200;step++) {
+      if(await evaluate("document.activeElement.matches('[data-export-cancel]')"))break;
+      await key('Tab','Tab');
+    }
+    assert.equal(await evaluate("document.activeElement.matches('[data-export-cancel]')"),true,'Cancel receives native keyboard focus');
+    await key('Escape','Escape');assert.equal(await evaluate("document.querySelector('#captured-export-dialog').open"),false);
+    assert.equal(await evaluate("document.activeElement.matches('[data-export-open=\"capture\"]')"),true,'Escape returns focus to the invoking action');
+    await key('Enter','Enter');assert.equal(await evaluate("document.querySelector('#captured-export-dialog').open"),true,'The same action reopens with the keyboard');
+    assert.equal(await evaluate("document.querySelector('[data-export-policy]').value"),'redacted_copy');
+    await click('[data-export-cancel]');
     assert.deepEqual(mutations,[]);assert.deepEqual(errors,[]);
-    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',catalog_activation:catalogActivation,passive_security:passiveSecurity,product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download'],keyboard:['Tab filter focus','Enter clear filters','native keyboard comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
+    await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',download_receipts:downloadReceipts,catalog_activation:catalogActivation,passive_security:passiveSecurity,product_path:'browser development UI with authored loopback fixtures',viewports:[[1440,900],[760,560],[360,740]],catalog_reads:catalogReads,mutations,errors,screenshots:output,states:['deliberate-only','loading','ready','local structural search','response filters','two-observation structural comparison','unknown-side comparison','same-source refusal','comparison selection invalidation','exact Traffic handoff','refresh failure','malformed','epoch replacement','cancel late reply','capture off','empty','unsupported client review','dirty draft replacement','exact capture to Repeater','explicit ZIP download','Python requests/httpx keyboard selection and downloads','HAR raw/redacted downloads and missing-timing refusal','captured and local-file GraphQL SDL','compact export dialog three-viewport geometry and focus return'],keyboard:['Tab filter focus','Enter clear filters','native keyboard comparison selection','Enter endpoint expansion','Enter source handoff','Escape close'],native_macos:'not run; cloud-only scope'},null,2)+'\n');
     console.log(`PASS rendered catalog: keyboard and pointer, three viewports, scrolling, inert markup, raw header preservation, explicit read-only lifecycle, source invalidation. Evidence: ${output}`);
   } catch (error) {
     firstFailure=error;
     // Persist the first failure before browser teardown. Only the authored local
     // fixture is ever loaded; bound text diagnostics independently of screenshots.
-    const failure={status:'failed',phase,catalog_activation:catalogActivation,error:String(error.stack ?? error).slice(0,8192),browser_stderr:diagnostics.slice(-8192),
+    const failure={status:'failed',phase,download_receipts:downloadReceipts,catalog_activation:catalogActivation,error:String(error.stack ?? error).slice(0,8192),browser_stderr:diagnostics.slice(-8192),
       browser_exit:browser?.exitCode ?? null,browser_signal:browser?.signalCode ?? null,catalog_reads:catalogReads,
       requests:logs.slice(-256),mutations:mutations.slice(-64),runtime_errors:JSON.stringify(errors).slice(0,16384),rendered:false};
     if(socket?.readyState===WebSocket.OPEN) {
@@ -523,7 +652,7 @@ async function checkBrowser() {
   } finally {
     const cleanupErrors=[];let profileReleased=!browser?.pid;
     const cleanup=async task=>{try{await task();}catch(error){cleanupErrors.push(String(error).slice(0,2048));}};
-    await cleanup(async()=>{held.splice(0).forEach(release=>release());for(const command of commands.values())clearTimeout(command.timer);socket?.close();});
+    await cleanup(async()=>{held.splice(0).forEach(release=>release());for(const command of commands.values())clearTimeout(command.timer);downloadObserver?.close();downloadSocket?.close();socket?.close();});
     await cleanup(async()=>{
       if(!browser?.pid)return;
       const alive=()=>{if(!grouped)return !browserClosed;try{process.kill(-browser.pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;throw error;}};

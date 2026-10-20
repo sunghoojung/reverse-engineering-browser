@@ -1,3 +1,4 @@
+import {trafficBrowserDownloadObserver} from './browser-download-observer.mjs';
 import {checkMarkerFuzzIntegration} from './marker-fuzz-integration.mjs';
 import {createHash} from 'node:crypto';
 import {elementScreenshotFixtureRoute,checkElementScreenshotCapture} from './check-element-screenshot-capture.mjs';
@@ -784,6 +785,44 @@ const truncatedMethodNetwork=networkSnapshot([networkRecord('method-truncated',{
 assert.equal(networkModels.requestsFromDebuggerNetwork(truncatedMethodNetwork)[0].methodTruncated,true);
 console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
 
+// Public row IDs own selection, search and body-cache entries. Raw CDP IDs may
+// legitimately repeat across targets and redirect hops, public row IDs may not.
+for (const patch of [{}, {target_id:'other-target'}, {protocol_request_id:'other-protocol-id'},
+  {started_monotonic_ms:101, url:'http://fixture.invalid/redirect'}]) {
+  assert.equal(networkModels.isDebuggerNetwork(networkSnapshot([
+    networkRecord('duplicate'), networkRecord('duplicate', patch)
+  ])), false, 'A duplicate public row ID must invalidate the snapshot');
+}
+const distinctOwners = networkSnapshot([
+  networkRecord('cdp:1:1', {protocol_request_id:'raw-shared'}),
+  networkRecord('cdp:2:2', {protocol_request_id:'raw-shared', target_id:'other-target'}),
+  networkRecord('cdp:1:3', {protocol_request_id:'raw-shared', started_monotonic_ms:101, url:'http://fixture.invalid/redirect'})
+]);
+assert.equal(networkModels.isDebuggerNetwork(distinctOwners), true);
+assert.equal(networkModels.isDebuggerNetwork(networkSnapshot([])), true);
+assert.equal(networkModels.isDebuggerNetwork(networkSnapshot(Array.from({length:1000}, (_,i)=>networkRecord(`row-${i}`)))), true);
+assert.equal(networkModels.isDebuggerNetwork(networkSnapshot(Array.from({length:1001}, (_,i)=>networkRecord(`row-${i}`)))), false);
+const types = new Map([['Fetch','xhr'],['XHR','xhr'],['Other','other'],['Document','doc'],
+  ['Script','js'],['Stylesheet','css'],['Image','img'],['Media','media'],['Font','font'],
+  ['WebSocket','socket'],['Manifest','other'],['Unknown','other']]);
+for (const [resource_type, fallback] of types) {
+  for (const [mime_type, expected] of [
+    ['application/wasm','wasm'],['APPLICATION/WASM','wasm'],[' application/wasm ; charset=binary ','wasm'],
+    ['',fallback],['application/wasm-extra',fallback],['application/wasm+json',fallback],
+    ['text/application/wasm',fallback],['application/octet-stream',fallback],['text/plain',fallback]
+  ]) {
+    const snapshot=networkSnapshot([networkRecord('mime', {resource_type,mime_type,url:'http://fixture.invalid/module.wasm'})]);
+    const original=JSON.stringify(snapshot);
+    assert.equal(networkModels.isDebuggerNetwork(snapshot),true);
+    const rows=networkModels.requestsFromDebuggerNetwork(snapshot);
+    assert.equal(rows[0].type,expected,`${resource_type}/${mime_type}: MIME token must match exactly`);
+    assert.equal(rows.filter(row=>row.type==='wasm').length,expected==='wasm'?1:0);
+    assert.equal(JSON.stringify(snapshot),original,'Classification cannot mutate captured evidence');
+  }
+}
+console.log('PASS exact Wasm MIME/resource-type filter matrix and duplicate-public-ID rejection with distinct owner/redirect IDs retained');
+
+
 // A minimal DOM verifies the real reconciliation code and bounded state, not
 // pixels. --traffic-ui-browser below is the separate rendered interaction path.
 class TrafficFixtureNode {
@@ -1273,6 +1312,41 @@ for (const unavailable of ['missing', 'sample', 'file']) {
   assert.equal(fixture.state.signalProfileStatus, 'ready', 'Unchanged exact tuples survive catalog object replacement');
 }
 console.log('PASS request signal profile late headers/bodies/errors, exact owner and response identity, cache recovery and unavailable states (production functions; not rendered QA)');
+// Same-host simultaneous requests in different tabs cannot establish an exact
+// native association. Preserve the candidate metadata but never query with it.
+{
+  const fixture = signalProfileFixture();
+  const native = fixture.state.requests.map((request, index) => ({...request,
+    path:'fixture.invalid', method:'GET', tabId:`native-tab-${index}`,
+    firstTimestamp:100_000_000n, event:request.events[0]}));
+  const cdp = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
+    networkRecord('cdp-tab-b', {target_id:'cdp-tab-b'})
+  ]), native)[0];
+  assert.equal(cdp.event, native[0].event, 'The heuristic can choose the first wrong-tab candidate');
+  assert.equal(cdp.events.length, 1, 'Raw candidate metadata is not silently removed');
+  await fixture.refresh(); const calls = fixture.calls.length;
+  fixture.state.requests = [cdp]; fixture.state.selectedRequestId = cdp.id;
+  assert.equal(fixture.selection(), null); await fixture.refresh();
+  assert.equal(fixture.calls.length, calls, 'CDP correlation must not fetch a native signal profile');
+  assert.equal(fixture.state.signalProfile, null, 'Prior exact profile must not label the CDP request');
+  delete cdp.protocolRequestId;
+  assert.equal(fixture.selection(), null, 'CDP operation marker independently rejects the native root');
+}
+{
+  let click; const queried = [], navigated = [], notices = [];
+  const state = {selectedRequestId:'cdp', requests:[{id:'cdp', protocolRequestId:'raw', operation:'cdp_complete', event:{request_id:'7'}}]};
+  const elements = {requestVmCandidates:{addEventListener(name, handler) {assert.equal(name,'click'); click=handler;}}};
+  runInNewContext(appSection("      elements.requestVmCandidates.addEventListener(", "      elements.sourceWindowPrevious.addEventListener("), {
+    state, elements, refreshVmAnalysis:async id => queried.push(id), showScreen:(...args) => navigated.push(args),
+    investigationNotice:(...args) => notices.push(args)
+  });
+  await click(); assert.equal(queried.length,0); assert.equal(navigated.length,0); assert.match(notices[0][0],/no exact native-event link/);
+  delete state.requests[0].protocolRequestId; await click(); assert.equal(queried.length,0); assert.equal(navigated.length,0);
+  state.requests[0] = {id:'native', event:{request_id:'7'}}; state.selectedRequestId='native';
+  await click(); assert.deepEqual(queried,['7']); assert.equal(navigated.length,1,'Native request pivot remains available');
+}
+console.log('PASS cross-tab heuristic candidates cannot become exact Signal/VM queries; native pivot and raw metadata preserved');
+
 
 // Additive machine-readable failure reasons must not make the bundled UI
 // reject its existing application result envelope. Exercise the actual validators.
@@ -1385,7 +1459,7 @@ console.log('PASS explicit Evidence tab selection preserves sticky selection whi
 
 
 const pivotProfile = {signals: [{category: "canvas", event_count: "1", confidence: "observed", relation: "parent_chain"}]};
-const pivotState = {requests: [uiRequest("selected")], selectedRequestId: "selected", signalProfile: pivotProfile,
+const pivotState = {requests: [uiRequest("selected", {protocolRequestId:undefined, operation:"request_started"})], selectedRequestId: "selected", signalProfile: pivotProfile,
   signalProfileStatus: "ready", trafficDetailOpen: false, inspectorTab: "headers"};
 const pivotElements = {signalRequestProfile: new TrafficFixtureNode(), signalDetail: new TrafficFixtureNode()};
 const signalTab = new TrafficFixtureNode("button");
@@ -1410,7 +1484,11 @@ for (const render of [() => signalPivots.renderSignalRequestProfile(), () => sig
   assert.equal(pivotState.inspectorTab, "signals");
   assert.equal(pivotState.signalProfile, pivotProfile, "Pivots retain the already loaded signal profile");
 }
-console.log("PASS Fingerprinting request-profile and event-detail pivots reopen dismissed Traffic details without resetting evidence");
+pivotState.requests[0].protocolRequestId = 'raw-cdp';
+signalPivots.renderSignalRequestProfile();
+assert.match(pivotElements.signalRequestProfile.textContent, /no exact native-event link/);
+assert.equal(pivotElements.signalRequestProfile.querySelector('button'), null, 'Stale native profile cannot render a CDP request pivot');
+console.log("PASS Fingerprinting native request-profile/event-detail pivots and explicit CDP correlation-only state");
 
 const sourceState = {liveScriptContent: new Map(), staleScriptIds: new Set(), openScriptIds: [], openArtifactIds: [],
   debuggerRefreshing: false, debuggerEtag: null, debuggerSession: null, selectedScriptId: null,
@@ -3335,52 +3413,6 @@ function trafficDevtoolsAddress(text) {
   return `ws://127.0.0.1:${match[1]}${match[2]}`;
 }
 
-// Browser.downloadProgress is the completion boundary. A final filename can be
-// reserved before bytes are written, without any visible .crdownload sibling.
-// One explicit download is allowed per QA run; late events can never own a retry.
-function trafficBrowserDownloadObserver({timeoutMs=5000,setTimer=setTimeout,clearTimer=clearTimeout}={}) {
-  let active=null,used=false,closed=false;
-  const events=[];
-  const finish=(error,value)=>{
-    if(!active)return;
-    const owner=active;active=null;clearTimer(owner.timer);
-    if(error)owner.reject(error);else owner.resolve(value);
-  };
-  return {
-    arm(frameId,filename) {
-      assert(!closed&&!used,'Browser download observer is closed or already used');
-      assert(typeof frameId==='string'&&frameId.length>0&&frameId.length<=256,'A verified download frame is required');
-      assert(typeof filename==='string'&&filename.length>0&&filename.length<=256,'A bounded expected download filename is required');
-      used=true;
-      const completion=new Promise((resolve,reject)=>{active={frameId,filename,guid:null,resolve,reject,timer:null};});
-      // Events, timeout, or socket failure can precede the caller awaiting it.
-      completion.catch(()=>{});
-      active.timer=setTimer(()=>finish(new Error('Browser download did not complete before its deadline')),timeoutMs);
-      return {completion,cancel:()=>finish(new Error('Browser download observation cancelled'))};
-    },
-    observe(message) {
-      if(!active||!['Browser.downloadWillBegin','Browser.downloadProgress'].includes(message.method))return;
-      const p=message.params??{};
-      if(typeof p.guid!=='string'||!p.guid.length||p.guid.length>128){finish(new Error('Invalid browser download GUID'));return;}
-      const event={method:message.method,guid:p.guid,state:typeof p.state==='string'?p.state.slice(0,32):null,
-        frameId:typeof p.frameId==='string'?p.frameId.slice(0,256):null,filename:typeof p.suggestedFilename==='string'?p.suggestedFilename.slice(0,256):null,
-        receivedBytes:Number.isFinite(p.receivedBytes)?p.receivedBytes:null,totalBytes:Number.isFinite(p.totalBytes)?p.totalBytes:null};
-      events.push(event);if(events.length>32)events.shift();
-      if(message.method==='Browser.downloadWillBegin') {
-        if(p.frameId!==active.frameId||p.suggestedFilename!==active.filename){finish(new Error('Unexpected browser download frame or filename'));return;}
-        if(active.guid!==null){finish(new Error('More than one browser download began'));return;}
-        active.guid=p.guid;return;
-      }
-      // An unrelated or pre-begin progress event cannot complete this download.
-      if(p.guid!==active.guid)return;
-      if(p.state==='canceled'){finish(new Error('Browser download was canceled'));return;}
-      if(!['inProgress','completed'].includes(p.state)){finish(new Error('Invalid browser download state'));return;}
-      if(p.state==='completed')finish(null,{guid:active.guid,frameId:active.frameId,filename:active.filename,state:p.state});
-    },
-    close(reason='Browser QA cleanup') {closed=true;finish(new Error(reason));},
-    receipts:()=>events.map(event=>({...event}))
-  };
-}
 
 async function verifyTrafficBrowserDownload({observer,frameId,directory,expectedBytes,trigger}) {
   const filename='selected.reb-evidence.json';
@@ -4267,6 +4299,19 @@ function observationFixtureContext() {
 }
 const observationCode = (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
 const observationUI = runInNewContext(observationCode + ';({evidenceObservationModel,evidenceRequestKey,evidenceArtifactReference,isBrokerResponse,isArtifactResponse})', {TextDecoder, Uint8Array});
+const nativeNetworkProjection = runInNewContext(observationCode + ';({requestsFromEvents,evidenceObservationOutcome,evidenceObservationLabel,evidencePayload})', {TextDecoder, Uint8Array});
+for (const disposition of ['proxy_destroyed', 'redirect_handoff']) {
+  const interrupted = observationEvent(109, 'network', 'request_failed', disposition, {request_id:'19', error_code:-3});
+  const row = nativeNetworkProjection.requestsFromEvents([interrupted])[0];
+  assert.equal(row.status, 'incomplete');
+  assert.equal(Boolean(row.failed), false);
+  assert.match(nativeNetworkProjection.evidenceObservationOutcome(interrupted), /final network outcome unavailable/);
+  assert.equal(nativeNetworkProjection.evidenceObservationLabel(interrupted, nativeNetworkProjection.evidencePayload(interrupted)), 'Network observation ended');
+  const actualError = {...interrupted, error_code:-7};
+  assert.equal(nativeNetworkProjection.requestsFromEvents([actualError])[0].status, 'failed');
+  assert.match(nativeNetworkProjection.evidenceObservationOutcome(actualError), /Failure recorded/);
+}
+console.log('PASS native proxy teardown/handoff is incomplete observation, real network failures preserved');
 const observationContext = observationFixtureContext();
 assert(observationUI.isBrokerResponse({count:observationContext.events.length,events:observationContext.events,capture_mode:'demo'}));
 assert(observationUI.isArtifactResponse({count:observationContext.artifacts.length,artifacts:observationContext.artifacts}));

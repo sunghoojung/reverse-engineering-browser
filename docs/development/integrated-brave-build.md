@@ -67,6 +67,31 @@ If a receipt is missing or no longer matches, preserve the checkout and use a
 fresh pinned worktree. Never stash/reset/clean or discard edits to bypass this
 guard. The helper does none of those operations.
 
+An explicit handoff can preserve an incomplete build across a tooling-only
+update or exact patch-owner relocation. Both source checkouts must be clean,
+the previous commit must be an ancestor, and its unchanged private receipt must
+still match every upstream input. Application code, native interfaces, protocols,
+pins and overlays must remain identical; ordered patch diffs must be identical
+after removing only nested-checkout routing prefixes. Any changed hunk, unknown
+edit or existing conflicting destination receipt is refused. This does not
+transfer successful-build proof or relax the first-build disk reserve.
+
+Keep the previous checkout and receipt, then run from the updated source:
+
+```sh
+python3 tools/check-integrated-brave-state.py adopt \
+  --repository "$PWD" --brave /existing/worktree/src/brave \
+  --receipt "$PWD/build/integrated-brave-state.json" \
+  --previous-repository /previous/source-checkout \
+  --previous-receipt /previous/source-checkout/build/integrated-brave-state.json
+REB_BRAVE_DIRECTORY=/existing/worktree/src/brave ./scripts/build-integrated-brave.sh
+```
+
+The command writes a new receipt and `build/integrated-brave-handoff.json`;
+it never modifies the previous receipt. Preserve an existing destination receipt
+separately before requesting a handoff. For production input changes, continue
+to use a fresh pinned checkout.
+
 The wrapper runs the existing doctor and sync, offline native foundations,
 Brave's prepare-only stage, and the `components/policy:generate_policy_templates`
 target before recording the compilation inputs. These stages copy branding and

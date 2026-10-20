@@ -1,6 +1,6 @@
-diff --git a/v8/src/flags/flag-definitions.h b/v8/src/flags/flag-definitions.h
---- a/v8/src/flags/flag-definitions.h
-+++ b/v8/src/flags/flag-definitions.h
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
 @@ -3204,6 +3204,9 @@ DEFINE_INT(cpu_profiler_sampling_interval, 1000,
             "CPU profiler sampling interval in microseconds")
  
@@ -11,9 +11,9 @@ diff --git a/v8/src/flags/flag-definitions.h b/v8/src/flags/flag-definitions.h
  DEFINE_BOOL(simulator_debugger, false,
              "Start a debugger when a simulator hits a breakpoint")
  DEFINE_NEG_IMPLICATION(fuzzing, simulator_debugger)
-diff --git a/v8/src/runtime/runtime-debug.cc b/v8/src/runtime/runtime-debug.cc
---- a/v8/src/runtime/runtime-debug.cc
-+++ b/v8/src/runtime/runtime-debug.cc
+diff --git a/src/runtime/runtime-debug.cc b/src/runtime/runtime-debug.cc
+--- a/src/runtime/runtime-debug.cc
++++ b/src/runtime/runtime-debug.cc
 @@ -178,6 +178,9 @@ RUNTIME_FUNCTION(Runtime_DebugBreakAtEntry) {
  RUNTIME_FUNCTION(Runtime_HandleDebuggerStatement) {
    SealHandleScope shs(isolate);
@@ -24,20 +24,20 @@ diff --git a/v8/src/runtime/runtime-debug.cc b/v8/src/runtime/runtime-debug.cc
    if (isolate->debug()->break_points_active()) {
      isolate->debug()->HandleDebugBreak(
          kIgnoreIfTopFrameBlackboxed,
-diff --git a/v8/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt b/v8/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt
+diff --git a/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt b/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt
 new file mode 100644
 --- /dev/null
-+++ b/v8/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt
++++ b/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt
 @@ -0,0 +1,5 @@
 +Native debugger-statement suppression leaves explicit breakpoints active
 +
 +Running test: testNativeDebuggerStatementSuppression
 +Debugger statement continued: true
 +Explicit breakpoint paused with reason other and 1 hit breakpoint.
-diff --git a/v8/test/inspector/debugger/reb-ignore-debugger-statements.js b/v8/test/inspector/debugger/reb-ignore-debugger-statements.js
+diff --git a/test/inspector/debugger/reb-ignore-debugger-statements.js b/test/inspector/debugger/reb-ignore-debugger-statements.js
 new file mode 100644
 --- /dev/null
-+++ b/v8/test/inspector/debugger/reb-ignore-debugger-statements.js
++++ b/test/inspector/debugger/reb-ignore-debugger-statements.js
 @@ -0,0 +1,43 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be

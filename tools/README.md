@@ -100,3 +100,15 @@ discovery (including initialization errors/timeouts and retry), flattened CDP
 session lifecycle, and actual Chromium capture. Set `ORIGIN_TRACE_TEST_BROWSER`
 to the installed browser path for the real-browser check. Synthetic checks cover
 faults deterministically; they do not replace real-browser acceptance.
+
+## Integrated browser inputs
+
+`brave_patch_contract.py` validates patch destinations against their independent
+Git checkout owners and supplies scoped paths for temporary-index replay.
+`check-integrated-brave-state.py` preserves pinned source receipts; its explicit
+`adopt` mode accepts only verified tooling or byte-equivalent patch-routing
+handoffs, without changing the previous receipt. The bounded Git fixtures in
+`check-integrated-brave-state-test.py` exercise replay, added files, ownership,
+receipt preservation and rejected production/upstream changes. See the
+[integrated build guide](../docs/development/integrated-brave-build.md) for the
+complete command and remaining runtime gates.

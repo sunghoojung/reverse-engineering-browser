@@ -12,6 +12,7 @@
 #include <utility>
 
 #define COMPONENT_EXPORT(component)
+#define UNSAFE_BUFFERS(...) __VA_ARGS__
 
 namespace base {
 inline std::atomic<std::int64_t> test_now_ns{100};

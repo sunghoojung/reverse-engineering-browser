@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <span>
 #include <string_view>
 
+#include "base/compiler_specific.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
@@ -166,7 +168,7 @@ constexpr std::size_t AlignUp(const std::size_t value, const std::size_t alignme
   return (value + alignment - 1U) & ~(alignment - 1U);
 }
 
-void MaskScriptSource(char* const text, const std::size_t length) noexcept {
+void MaskScriptSource(const std::span<char> text, const std::size_t length) noexcept {
   bool line = false;
   bool block = false;
   bool escaped = false;
@@ -209,14 +211,14 @@ void MaskScriptSource(char* const text, const std::size_t length) noexcept {
   }
 }
 
-std::size_t MatchFunctionBrace(const char* const text,
+std::size_t MatchFunctionBrace(const std::span<const char> text,
                                const std::size_t length,
                                const std::size_t index) noexcept {
-  constexpr char kWord[] = "function";
-  constexpr std::size_t kLen = sizeof(kWord) - 1U;
+  constexpr std::string_view kWord = "function";
+  constexpr std::size_t kLen = kWord.size();
   if (index + kLen > length ||
       (index > 0 && IsAsciiWord(static_cast<unsigned char>(text[index - 1]))) ||
-      std::memcmp(text + index, kWord, kLen) != 0 ||
+      !std::ranges::equal(text.subspan(index, kLen), kWord) ||
       (index + kLen < length && IsAsciiWord(static_cast<unsigned char>(text[index + kLen])))) {
     return length;
   }
@@ -231,7 +233,7 @@ std::size_t MatchFunctionBrace(const char* const text,
   return length;
 }
 
-std::size_t MatchParenArrowBrace(const char* const text,
+std::size_t MatchParenArrowBrace(const std::span<const char> text,
                                  const std::size_t length,
                                  const std::size_t index) noexcept {
   if (index >= length || text[index] != '(') {
@@ -260,7 +262,7 @@ std::size_t MatchParenArrowBrace(const char* const text,
   return cursor < length && text[cursor] == '{' ? cursor : length;
 }
 
-std::size_t MatchIdentArrowBrace(const char* const text,
+std::size_t MatchIdentArrowBrace(const std::span<const char> text,
                                  const std::size_t length,
                                  const std::size_t index) noexcept {
   if (index >= length || !IsIdentStart(static_cast<unsigned char>(text[index])) ||
@@ -284,7 +286,7 @@ std::size_t MatchIdentArrowBrace(const char* const text,
   return cursor < length && text[cursor] == '{' ? cursor : length;
 }
 
-std::size_t MatchSignatureBrace(const char* const text,
+std::size_t MatchSignatureBrace(const std::span<const char> text,
                                 const std::size_t length,
                                 const std::size_t index) noexcept {
   const std::size_t function_brace = MatchFunctionBrace(text, length, index);
@@ -299,8 +301,8 @@ std::size_t MatchSignatureBrace(const char* const text,
 }
 
 struct RegionScan final {
-  const char* text = nullptr;
-  const std::uint16_t* owner = nullptr;
+  std::span<const char> text;
+  std::span<const std::uint16_t> owner;
   std::uint16_t id = 0;
   std::size_t begin = 0;
   std::size_t end = 0;
@@ -323,9 +325,9 @@ struct RegionScan final {
 
 bool EqualsAt(const RegionScan& scan,
               const std::size_t index,
-              const char* const word,
-              const std::size_t length,
+              const std::string_view word,
               const bool ignore_case) noexcept {
+  const std::size_t length = word.size();
   if (index + length > scan.end) {
     return false;
   }
@@ -342,14 +344,14 @@ bool EqualsAt(const RegionScan& scan,
 }
 
 bool ContainsBoundedWord(const RegionScan& scan,
-                         const char* const word,
-                         const std::size_t length,
+                         const std::string_view word,
                          const bool ignore_case) noexcept {
+  const std::size_t length = word.size();
   if (length == 0 || scan.end - scan.begin < length) {
     return false;
   }
   for (std::size_t index = scan.begin; index + length <= scan.end; ++index) {
-    if (!scan.WordBefore(index) && EqualsAt(scan, index, word, length, ignore_case) &&
+    if (!scan.WordBefore(index) && EqualsAt(scan, index, word, ignore_case) &&
         !scan.WordAfter(index + length)) {
       return true;
     }
@@ -363,9 +365,9 @@ bool ContainsLoop(const RegionScan& scan) noexcept {
   constexpr std::size_t kWhileLen = sizeof(kWhile) - 1U;
   constexpr std::size_t kForLen = sizeof(kFor) - 1U;
   for (std::size_t index = scan.begin; index < scan.end; ++index) {
-    const std::size_t length = EqualsAt(scan, index, kWhile, kWhileLen, false) ? kWhileLen
-                               : EqualsAt(scan, index, kFor, kForLen, false)   ? kForLen
-                                                                               : 0U;
+    const std::size_t length = EqualsAt(scan, index, kWhile, false) ? kWhileLen
+                               : EqualsAt(scan, index, kFor, false) ? kForLen
+                                                                    : 0U;
     if (length == 0 || scan.WordBefore(index) || scan.WordAfter(index + length)) {
       continue;
     }
@@ -430,7 +432,7 @@ bool ContainsSwitch(const RegionScan& scan) noexcept {
   constexpr char kSwitch[] = "switch";
   constexpr std::size_t kLen = sizeof(kSwitch) - 1U;
   for (std::size_t index = scan.begin; index + kLen <= scan.end; ++index) {
-    if (scan.WordBefore(index) || !EqualsAt(scan, index, kSwitch, kLen, false) ||
+    if (scan.WordBefore(index) || !EqualsAt(scan, index, kSwitch, false) ||
         scan.WordAfter(index + kLen)) {
       continue;
     }
@@ -446,17 +448,17 @@ bool ContainsSwitch(const RegionScan& scan) noexcept {
 }
 
 bool ContainsIpUpdate(const RegionScan& scan) noexcept {
-  constexpr const char* kWords[] = {"instructionPointer", "offset", "cursor", "pc", "ip"};
-  constexpr std::size_t kLens[] = {19U, 6U, 6U, 2U, 2U};
+  constexpr std::array<std::string_view, 5> kWords = {"instructionPointer", "offset", "cursor",
+                                                      "pc", "ip"};
   for (std::size_t index = scan.begin; index < scan.end; ++index) {
     if (scan.WordBefore(index)) {
       continue;
     }
     std::size_t matched = 0;
     for (std::size_t word = 0; word < 5U; ++word) {
-      if (EqualsAt(scan, index, kWords[word], kLens[word], false) &&
-          !scan.WordAfter(index + kLens[word])) {
-        matched = kLens[word];
+      if (EqualsAt(scan, index, kWords[word], false) &&
+          !scan.WordAfter(index + kWords[word].size())) {
+        matched = kWords[word].size();
         break;
       }
     }
@@ -482,19 +484,16 @@ bool ContainsIpUpdate(const RegionScan& scan) noexcept {
 }
 
 bool ContainsNamedBracket(const RegionScan& scan,
-                          const char* const* words,
-                          const std::size_t* lengths,
-                          const std::size_t count) noexcept {
+                          const std::span<const std::string_view> words) noexcept {
   for (std::size_t index = scan.begin; index < scan.end; ++index) {
     if (scan.WordBefore(index)) {
       continue;
     }
-    for (std::size_t word = 0; word < count; ++word) {
-      if (!EqualsAt(scan, index, words[word], lengths[word], true) ||
-          scan.WordAfter(index + lengths[word])) {
+    for (std::size_t word = 0; word < words.size(); ++word) {
+      if (!EqualsAt(scan, index, words[word], true) || scan.WordAfter(index + words[word].size())) {
         continue;
       }
-      std::size_t cursor = index + lengths[word];
+      std::size_t cursor = index + words[word].size();
       while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
         ++cursor;
       }
@@ -515,26 +514,23 @@ bool ContainsNamedBracket(const RegionScan& scan,
 }
 
 bool ContainsBytecodeRead(const RegionScan& scan) noexcept {
-  constexpr const char* kWords[] = {"instructions", "bytecode", "opcodes",
-                                    "program",      "bytes",    "code"};
-  constexpr std::size_t kLens[] = {12U, 8U, 7U, 7U, 5U, 4U};
-  if (ContainsNamedBracket(scan, kWords, kLens, 6U) ||
-      ContainsBoundedWord(scan, "Uint8Array", 10U, false) ||
-      ContainsBoundedWord(scan, "DataView", 8U, false)) {
+  constexpr std::array<std::string_view, 6> kWords = {"instructions", "bytecode", "opcodes",
+                                                      "program",      "bytes",    "code"};
+  if (ContainsNamedBracket(scan, kWords) || ContainsBoundedWord(scan, "Uint8Array", false) ||
+      ContainsBoundedWord(scan, "DataView", false)) {
     return true;
   }
   return false;
 }
 
 bool ContainsDotMutation(const RegionScan& scan) noexcept {
-  constexpr const char* kNames[] = {".unshift", ".shift", ".push", ".pop"};
-  constexpr std::size_t kLens[] = {8U, 6U, 5U, 4U};
+  constexpr std::array<std::string_view, 4> kNames = {".unshift", ".shift", ".push", ".pop"};
   for (std::size_t index = scan.begin; index < scan.end; ++index) {
     for (std::size_t name = 0; name < 4U; ++name) {
-      if (!EqualsAt(scan, index, kNames[name], kLens[name], false)) {
+      if (!EqualsAt(scan, index, kNames[name], false)) {
         continue;
       }
-      std::size_t cursor = index + kLens[name];
+      std::size_t cursor = index + kNames[name].size();
       while (cursor < scan.end && IsAsciiSpace(static_cast<unsigned char>(scan.At(cursor)))) {
         ++cursor;
       }
@@ -547,17 +543,17 @@ bool ContainsDotMutation(const RegionScan& scan) noexcept {
 }
 
 bool ContainsStateWord(const RegionScan& scan) noexcept {
-  constexpr const char* kWords[] = {"accumulator", "registers", "register", "memory", "stack"};
-  constexpr std::size_t kLens[] = {11U, 9U, 8U, 6U, 5U};
+  constexpr std::array<std::string_view, 5> kWords = {"accumulator", "registers", "register",
+                                                      "memory", "stack"};
   for (std::size_t index = scan.begin; index < scan.end; ++index) {
     if (scan.WordBefore(index)) {
       continue;
     }
     std::size_t matched = 0;
     for (std::size_t word = 0; word < 5U; ++word) {
-      if (EqualsAt(scan, index, kWords[word], kLens[word], true) &&
-          !scan.WordAfter(index + kLens[word])) {
-        matched = kLens[word];
+      if (EqualsAt(scan, index, kWords[word], true) &&
+          !scan.WordAfter(index + kWords[word].size())) {
+        matched = kWords[word].size();
         break;
       }
     }
@@ -587,7 +583,7 @@ bool ContainsCaseLabel(const RegionScan& scan) noexcept {
   constexpr char kCase[] = "case";
   constexpr std::size_t kLen = sizeof(kCase) - 1U;
   for (std::size_t index = scan.begin; index + kLen <= scan.end; ++index) {
-    if (scan.WordBefore(index) || !EqualsAt(scan, index, kCase, kLen, true) ||
+    if (scan.WordBefore(index) || !EqualsAt(scan, index, kCase, true) ||
         scan.WordAfter(index + kLen)) {
       continue;
     }
@@ -634,15 +630,13 @@ bool ContainsCaseLabel(const RegionScan& scan) noexcept {
 }
 
 bool ContainsHandler(const RegionScan& scan) noexcept {
-  constexpr const char* kWords[] = {"handlers", "handler", "opcodes", "opcode"};
-  constexpr std::size_t kLens[] = {8U, 7U, 7U, 6U};
-  return ContainsCaseLabel(scan) || ContainsNamedBracket(scan, kWords, kLens, 4U);
+  constexpr std::array<std::string_view, 4> kWords = {"handlers", "handler", "opcodes", "opcode"};
+  return ContainsCaseLabel(scan) || ContainsNamedBracket(scan, kWords);
 }
 
 bool ContainsExit(const RegionScan& scan) noexcept {
-  return ContainsBoundedWord(scan, "return", 6U, false) ||
-         ContainsBoundedWord(scan, "break", 5U, false) ||
-         ContainsBoundedWord(scan, "throw", 5U, false);
+  return ContainsBoundedWord(scan, "return", false) || ContainsBoundedWord(scan, "break", false) ||
+         ContainsBoundedWord(scan, "throw", false);
 }
 
 struct RegionScore final {
@@ -702,12 +696,22 @@ RegionScore ScoreRegion(const RegionScan& scan) noexcept {
   if (block == nullptr) {
     return {};
   }
-  std::memset(block, 0, total);
-  char* const text = static_cast<char*>(block);
-  auto* const owner = reinterpret_cast<std::uint16_t*>(text + owner_off);
-  auto* const marks = reinterpret_cast<unsigned char*>(text + marks_off);
-  auto* const brace_stack = reinterpret_cast<std::size_t*>(text + stack_off);
-  std::memcpy(text, source.data(), length);
+  // SAFETY: malloc returned exactly total bytes. All subsequent partitions
+  // are bounded subspans; owner/stack offsets are aligned for their value type.
+  const auto storage = UNSAFE_BUFFERS(std::span(static_cast<std::byte*>(block), total));
+  std::ranges::fill(storage, std::byte{0});
+  const auto typed = []<typename T>(const std::span<std::byte> bytes) {
+    // SAFETY: callers supply an aligned partition containing whole T objects
+    // in this malloc allocation. No unbounded pointer escapes the partition.
+    return UNSAFE_BUFFERS(std::span(reinterpret_cast<T*>(bytes.data()), bytes.size() / sizeof(T)));
+  };
+  const auto text = typed.template operator()<char>(storage.first(length));
+  const auto owner = typed.template operator()<std::uint16_t>(
+      storage.subspan(owner_off, length * sizeof(std::uint16_t)));
+  const auto marks = typed.template operator()<unsigned char>(storage.subspan(marks_off, length));
+  const auto brace_stack = typed.template operator()<std::size_t>(
+      storage.subspan(stack_off, length * sizeof(std::size_t)));
+  std::ranges::copy(std::as_bytes(source.first(length)), std::as_writable_bytes(text).begin());
   MaskScriptSource(text, length);
 
   std::size_t opening_count = 0;
@@ -739,7 +743,7 @@ RegionScore ScoreRegion(const RegionScan& scan) noexcept {
     return {};
   }
 
-  RuntimeRegion regions[kRuntimeSourceMaxFunctions + 1U];
+  std::array<RuntimeRegion, kRuntimeSourceMaxFunctions + 1U> regions{};
   regions[0] = {0U, length, 0U};
   std::size_t region_count = 1;
   std::size_t depth = 0;
@@ -844,6 +848,8 @@ void SetPayload(NativeProbeEvent& event,
 }
 
 }  // namespace
+
+NativeProbeSink::NativeProbeSink() noexcept = default;
 
 NativeProbeSink& NativeProbeSink::Get() {
   static NativeProbeSink sink;
@@ -1328,7 +1334,10 @@ void NativeProbeSink::RecordCanvasToDataUrl(const std::string_view data_url) noe
   CaptureGeneratedArtifact(
       NativeArtifactKind::kCanvasDataUrl, NativeArtifactCaptureOrigin::kCanvasToDataUrl,
       creator_event_id, 0, 0, "canvas://readback",
-      std::span(reinterpret_cast<const std::uint8_t*>(data_url.data()), data_url.size()));
+      // SAFETY: both pointer and byte count come from the same retained view;
+      // uint8_t aliases its char storage without changing length or ownership.
+      UNSAFE_BUFFERS(
+          std::span(reinterpret_cast<const std::uint8_t*>(data_url.data()), data_url.size())));
 }
 
 void NativeProbeSink::RecordWebAudioCall(const std::string_view operation) noexcept {

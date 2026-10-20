@@ -15,8 +15,8 @@ const server = createServer((request,response)=>{response.setHeader('content-typ
   const profile = await mkdtemp(join(tmpdir(), 'reb-vm-workspace-'));
   let browser, socket, closed = false, diagnostics = '', sequence = 0;
   const pending = new Map(), errors = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const until = async (test, label) => {
-    const end = Date.now() + 10000;
+  const until = async (test, label, timeoutMs = 10000) => {
+    const end = Date.now() + timeoutMs;
     while (Date.now() < end) { if (await test()) return; await pause(40); }
     throw Error(`Timed out: ${label}`);
   };
@@ -38,11 +38,12 @@ const server = createServer((request,response)=>{response.setHeader('content-typ
     browser.once('close', () => { closed = true; }); browser.on('error', error => { diagnostics += String(error); });
     browser.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8192); });
     let port;
+    // Shared CI hosts can take longer to start a browser than to perform a UI action.
     await until(async () => {
       if (closed) throw Error(`Sandboxed Chromium startup failed: ${diagnostics}`);
       try { port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; return !!port; }
       catch { return false; }
-    }, 'sandboxed Chromium startup');
+    }, 'sandboxed Chromium startup', 30000);
     const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
     await new Promise((ready, reject) => { socket.addEventListener('open', ready, {once: true}); socket.addEventListener('error', reject, {once: true}); });

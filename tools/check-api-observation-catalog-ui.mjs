@@ -176,13 +176,16 @@ if (process.argv.includes('--browser') || process.argv.includes('--serve')) awai
 async function checkCaptureFixtureReadiness() {
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const refresh=app.slice(app.indexOf('      async function refreshDebugger(force = false)'),app.indexOf('      async function refreshArtifacts()'));
-  const rebuild=app.slice(app.indexOf('      function rebuildTrafficRequests()'),app.indexOf('      function renderShellStatus()'));
+  const rebuildStart=app.indexOf('      function rebuildTrafficRequests(');
+  const rebuildEnd=app.indexOf('      function renderShellStatus(',rebuildStart);
+  assert(rebuildStart>=0 && rebuildEnd>rebuildStart,'Traffic rebuild fixture must use the shipped function');
+  const rebuild=app.slice(rebuildStart,rebuildEnd);
   const next=copy(fixture.debuggerState);next.generation++;next.network.requests[0].started_monotonic_ms=1000;
   const evidence=next.network.requests[0],expected=api.apiCatalogRequestIdentity(api.requestsFromDebuggerNetwork(next.network)[0]);
   const state={debuggerRefreshing:true,debuggerSession:copy(fixture.debuggerState),sessionMode:'live',nativeRequests:[],requests:api.requestsFromDebuggerNetwork(fixture.debuggerState.network),
     selectedRequestId:requests[0].id,selectedCaptureIdentity:copy(identity)};
   let fetches=0;
-  const model=runInNewContext(`${refresh}\n${rebuild}\n${catalogCaptureFixtureReady}\n;({refreshDebugger,rebuildTrafficRequests,catalogCaptureFixtureReady})`,
+  const model=runInNewContext(`${traffic}\n${refresh}\n${rebuild}\n${catalogCaptureFixtureReady}\n;({refreshDebugger,rebuildTrafficRequests,catalogCaptureFixtureReady})`,
     {state,location:{protocol:'http:'},...api,fetch:()=>{fetches++;throw Error('An active poll must not be replaced');},
       syncTrafficComparison:()=>{},resetRequestSelection:()=>{state.selectedRequestId=null;state.selectedCaptureIdentity=null;},investigationNotice:()=>{},apiCatalogPanel:{sync(){}}});
   await model.refreshDebugger(true);

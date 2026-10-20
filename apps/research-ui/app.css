@@ -4209,7 +4209,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .owned-vm-debugger-history { list-style: none; padding: 0; }
 .owned-vm-debugger-history button { width: 100%; text-align: left; margin: 2px 0; }
 .owned-vm-debugger-history [aria-pressed="true"], .owned-vm-debugger-tabs [aria-selected="true"], .owned-vm-debugger-opcodes [aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
-.owned-vm-debugger-table-scroll { max-width: 100%; overflow: auto; }
+/* Leave space below the final row for macOS overlay scrollbars while scrolling. */
+.owned-vm-debugger-table-scroll { max-width: 100%; overflow: auto; padding-bottom: 12px; }
 .owned-vm-debugger-table-scroll table { width: 100%; border-collapse: collapse; font: 11px ui-monospace, monospace; }
 .owned-vm-debugger-table-scroll td, .owned-vm-debugger-table-scroll th { text-align: left; padding: 5px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .owned-vm-debugger-table-scroll [data-changed="true"] { background: var(--accent-soft); }

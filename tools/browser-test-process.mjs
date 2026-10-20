@@ -12,7 +12,10 @@ export async function waitForClose(closed, timeoutMs) {
 }
 
 export async function stopBrowserTestProcess({child, closed}, timeoutMs = 3000) {
-  const running = () => child.exitCode === null && child.signalCode === null;
+  // A failed spawn has no PID. On macOS, signaling its native handle can target
+  // the caller's process group instead of an owned child.
+  const running = () => Number.isInteger(child.pid) && child.pid > 0 &&
+    child.exitCode === null && child.signalCode === null;
   if (running()) child.kill('SIGTERM');
   if (await waitForClose(closed, timeoutMs)) return;
   if (running()) child.kill('SIGKILL');

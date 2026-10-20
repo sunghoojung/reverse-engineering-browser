@@ -43,7 +43,7 @@ await stopBrowserTestProcess({child: missing, closed: new Promise(resolve => mis
 // Refuse profile removal when the owned process cannot be confirmed closed.
 const signals = [];
 await assert.rejects(stopBrowserTestProcess({
-  child: {pid: 'fixture', exitCode: null, signalCode: null, kill: signal => signals.push(signal)},
+  child: {pid: 12345, exitCode: null, signalCode: null, kill: signal => signals.push(signal)},
   closed: new Promise(() => {}),
 }, 5), /did not close; preserving its profile/);
 assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);

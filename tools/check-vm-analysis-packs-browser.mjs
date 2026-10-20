@@ -42,24 +42,31 @@ try {
  });
  socket=new WebSocket(endpoint);await new Promise((resolve,reject)=>{socket.addEventListener('open',resolve,{once:true});socket.addEventListener('error',reject,{once:true});});
  let seq=0;const pending=new Map();
- socket.addEventListener('message',event=>{const message=JSON.parse(event.data);if(message.id){const request=pending.get(message.id);if(request){pending.delete(message.id);clearTimeout(request.timer);message.error?request.reject(Error(message.error.message)):request.resolve(message.result);}}});
- const send=(method,params={},sessionId)=>new Promise((resolve,reject)=>{const id=++seq;const timer=setTimeout(()=>{pending.delete(id);reject(Error(method+' deadline'));},10000);pending.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));});
+ socket.addEventListener('message',event=>{const message=JSON.parse(event.data);if(message.id){const request=pending.get(message.id);if(request){pending.delete(message.id);clearTimeout(request.timer);message.error?request.reject(Error(request.method+': '+message.error.message)):request.resolve(message.result);}}});
+ const send=(method,params={},sessionId)=>new Promise((resolve,reject)=>{const id=++seq;const timer=setTimeout(()=>{pending.delete(id);reject(Error(method+' deadline'));},10000);pending.set(id,{resolve,reject,timer,method});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));});
  const {targetId}=await send('Target.createTarget',{url:base});
  const {sessionId}=await send('Target.attachToTarget',{targetId,flatten:true});
  const command=(method,params={})=>send(method,params,sessionId);
  const evaluate=async expression=>{const result=await command('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(result.exceptionDetails.text);return result.result.value;};
  const until=async expression=>{for(let i=0;i<100;i++){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('UI state timeout: '+expression);};
  await command('Page.enable');await until("Boolean(globalThis.ui)");
+ // Runtime object handles survive DOM frontend tree refreshes. Resolve the
+ // selected element directly, without retaining getDocument/querySelector IDs.
+ const withElement=async (selector,action)=>{
+  const result=await command('Runtime.evaluate',{expression:`document.querySelector(${JSON.stringify(selector)})`});
+  assert(!result.exceptionDetails&&result.result.subtype==='node'&&result.result.objectId,selector+' must exist');
+  const objectId=result.result.objectId;
+  try{return await action(objectId);}finally{await command('Runtime.releaseObject',{objectId});}
+ };
  const click=async selector=>{
   // Native scrolling + hit test and pointer events; no programmatic DOM click.
-  const {root:doc}=await command('DOM.getDocument');const {nodeId}=await command('DOM.querySelector',{nodeId:doc.nodeId,selector});await command('DOM.scrollIntoViewIfNeeded',{nodeId});
+  await withElement(selector,objectId=>command('DOM.scrollIntoViewIfNeeded',{objectId}));
   const box=await evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)}),r=element.getBoundingClientRect();const x=r.x+r.width/2,y=r.y+r.height/2;return {x,y,visible:r.width>0&&r.height>0&&x>=0&&x<innerWidth&&y>=0&&y<innerHeight&&element.contains(document.elementFromPoint(x,y))};})()`);
   assert(box.visible,selector+' must be visibly clickable');await command('Input.dispatchMouseEvent',{type:'mousePressed',x:box.x,y:box.y,button:'left',clickCount:1});await command('Input.dispatchMouseEvent',{type:'mouseReleased',x:box.x,y:box.y,button:'left',clickCount:1});
  };
  await click('[data-pack-inputs="compare"] > summary');
  for(const [label,name] of [['Analysis pack','pack.json'],['Left opcode workspace','build-a.workspace.json'],['Right opcode workspace','build-b.workspace.json']]){
-  const {root:doc}=await command('DOM.getDocument');const {nodeId}=await command('DOM.querySelector',{nodeId:doc.nodeId,selector:`input[aria-label="${label}"]`});
-  await command('DOM.setFileInputFiles',{nodeId,files:[join(root,'tools/fixtures/vm-analysis-packs',name)]});
+  await withElement(`input[aria-label="${label}"]`,objectId=>command('DOM.setFileInputFiles',{objectId,files:[join(root,'tools/fixtures/vm-analysis-packs',name)]}));
   await until(`document.querySelector('input[aria-label="${label}"]').parentElement.textContent.includes('bytes')`);
  }
  assert(!await evaluate(`document.querySelector('[role="status"]').textContent.includes('ready')`));
@@ -107,8 +114,7 @@ try {
    })) : original(...args);
  })()`);
  for(const label of ['Analysis pack','VM analysis (apply)']) {
-   const {root:doc}=await command('DOM.getDocument');const {nodeId}=await command('DOM.querySelector',{nodeId:doc.nodeId,selector:`input[aria-label="${label}"]`});
-   await command('DOM.setFileInputFiles',{nodeId,files:[join(root,'tools/fixtures/vm-analysis-packs/pack.json')]});
+   await withElement(`input[aria-label="${label}"]`,objectId=>command('DOM.setFileInputFiles',{objectId,files:[join(root,'tools/fixtures/vm-analysis-packs/pack.json')]}));
    await until(`document.querySelector('input[aria-label="${label}"]').parentElement.textContent.includes('bytes')`);
  }
  await click('#vm-packs-workspace > .vm-tool-toolbar button:first-child');await until(`document.querySelector('.vm-pack-status').textContent.includes('ready')`);

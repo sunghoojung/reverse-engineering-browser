@@ -8,8 +8,15 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string_view>
+
+#include "base/files/file_path.h"
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+
+namespace content {
+class BrowserContext;
+}
 
 namespace net {
 struct RedirectInfo;
@@ -36,6 +43,11 @@ class NativeNetworkCaptureSink final {
   NativeNetworkCaptureSink& operator=(const NativeNetworkCaptureSink&) = delete;
 
   [[nodiscard]] bool IsEnabled() const noexcept;
+  // UI sequence only. Set once from the explicit disposable user-data directory,
+  // before activation; never admit OTR/system/other profile contexts.
+  void SetOwnedProfilePath(base::FilePath path);
+  [[nodiscard]] bool IsOwnedContext(content::BrowserContext* context) const;
+  [[nodiscard]] std::uint64_t generation() const noexcept;
   void SetEmitter(NativeProbeEmitter emitter,
                   std::uint64_t session_id,
                   std::uint64_t category_mask,
@@ -66,7 +78,8 @@ class NativeNetworkCaptureSink final {
       std::uint64_t frame_id,
       std::uint64_t browser_context_id_high,
       std::uint64_t browser_context_id_low,
-      const network::mojom::URLResponseHead& response_head) noexcept;
+      const network::mojom::URLResponseHead& response_head,
+      bool synthetic = false) noexcept;
   void RecordRequestCompleted(std::uint64_t request_id,
                               std::int32_t initiator_request_id,
                               std::uint32_t initiator_process_id,
@@ -74,11 +87,14 @@ class NativeNetworkCaptureSink final {
                               std::uint64_t frame_id,
                               std::uint64_t browser_context_id_high,
                               std::uint64_t browser_context_id_low,
-                              const network::URLLoaderCompletionStatus& status) noexcept;
+                              const network::URLLoaderCompletionStatus& status,
+                              std::string_view disposition = {}) noexcept;
 
  private:
   NativeNetworkCaptureSink() = default;
 
+  base::FilePath owned_profile_path_;
+  std::atomic<std::uint64_t> generation_{0};
   std::atomic<NativeProbeEmitter> emitter_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};
   std::atomic<std::uint64_t> category_mask_{0};

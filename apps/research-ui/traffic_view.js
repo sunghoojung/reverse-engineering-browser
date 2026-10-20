@@ -164,6 +164,7 @@ function renderTrafficRows(container, requests, {selectedId, newIds, matches, on
       const status = trafficNode('span', request.failed || numericStatus >= 400 ? 'status-error'
         : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? 'Failed' : request.status === 'pending' ? 'Pending' : String(request.status));
       status.title = request.failed ? 'Request failed. Inspect the retained response state for details.'
+        : request.interrupted ? 'Native proxy observation ended; final network outcome is unavailable.'
         : request.status === 'pending' ? 'No terminal lifecycle event has been captured.' : `HTTP status ${request.status}`;
       const type = trafficNode('span', 'request-type', trafficTableTypeLabel(request.type));
       type.title = trafficTypeLabel(request.type);

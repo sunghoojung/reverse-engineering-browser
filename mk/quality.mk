@@ -12,7 +12,7 @@ magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decode
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
 
-check: all wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark
+check: all wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
@@ -32,6 +32,9 @@ native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 
 native-probe-admission-check:
 	CXX="$(CXX)" ./tools/check-native-probe-admission.sh
+
+native-network-capture-check:
+	CXX="$(CXX)" ./tools/check-native-network-capture.sh
 
 native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
 	$(NATIVE_PROXY_POLICY_TEST)
@@ -58,6 +61,7 @@ sanitize:
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
 		all wire-decoder-check magic-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check native-tests
+	REB_PROBE_TEST_SANITIZERS="$(SANITIZERS)" CXX="$(CXX)" ./tools/check-native-network-capture.sh
 
 format:
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \

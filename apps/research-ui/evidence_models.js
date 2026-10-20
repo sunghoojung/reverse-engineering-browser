@@ -1600,12 +1600,19 @@
           const lastTimestamp = previous && previous.lastTimestamp > timestamp ? previous.lastTimestamp : timestamp;
           const incomingRank = lifecycleRanks.get(event.type) ?? 0;
           const rank = Math.max(previous?.rank ?? 0, incomingRank);
-          const failed = previous?.failed || event.type === 'request_failed' || (event.protocol_version >= 2 && event.error_code !== 0);
+          // These native proxy dispositions end observation, not the underlying
+          // network operation (a redirect may continue in a different loader).
+          const interruption = event.protocol_version >= 3 && event.type === 'request_failed' &&
+            event.error_code === -3 && ['proxy_destroyed', 'redirect_handoff'].includes(payload);
+          const interrupted = previous?.interrupted || interruption;
+          const failed = previous?.failed || (!interruption && (event.type === 'request_failed' || (event.protocol_version >= 2 && event.error_code !== 0)));
           const numericStatus = event.protocol_version >= 2 ? event.status_code : 0;
           const previousStatusRank = previous?.statusRank ?? 0;
           const hasNewerStatus = numericStatus > 0 && incomingRank >= previousStatusRank;
           const status = failed
             ? 'failed'
+            : interrupted
+              ? 'incomplete'
             : hasNewerStatus
               ? numericStatus
               : previous?.status ?? 'pending';
@@ -1630,6 +1637,7 @@
             event: incomingRank >= (previous?.rank ?? 0) ? event : previous.event,
             events: [...(previous?.events ?? []), event],
             failed,
+            interrupted,
             rank,
             statusRank: hasNewerStatus ? incomingRank : previousStatusRank,
             targetRank,

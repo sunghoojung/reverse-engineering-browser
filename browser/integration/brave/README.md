@@ -6,6 +6,16 @@ ignored by the parent repository. Project-wide authorization and capture policy
 is in [SAFETY.md](../../../SAFETY.md); this guide describes the
 browser integration's enforcement details.
 
+## Early native network capture
+
+The source candidate now activates the existing opt-in transport before profile
+startup and snapshots owned-profile request admission before Shields decisions.
+It records bounded lifecycle metadata and explicit incomplete teardown/handoff
+observations. See [the startup contract and coverage matrix](../../../protocol/native-network-startup-v1.md)
+for unsupported SW-synthetic/renderer-memory-cache paths and the required patched
+browser build/runtime acceptance. Source/component checks do not prove complete
+initial traffic capture.
+
 ## Native worker source foundation
 
 The dormant dedicated-worker source foundation adds bounded native compile

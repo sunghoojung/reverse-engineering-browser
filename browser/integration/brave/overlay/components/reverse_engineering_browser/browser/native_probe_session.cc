@@ -14,6 +14,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
+#include "content/public/browser/render_process_host.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 
 namespace reb {
@@ -29,6 +30,10 @@ NativeProbeSession::~NativeProbeSession() = default;
 
 void NativeProbeSession::BindHost(const int renderer_process_id,
                                   mojo::PendingReceiver<mojom::NativeProbeHost> receiver) {
+  auto* process = content::RenderProcessHost::FromID(renderer_process_id);
+  if (!process || !NativeNetworkCaptureSink::Get().IsOwnedContext(process->GetBrowserContext())) {
+    return;
+  }
   mojo::MakeSelfOwnedReceiver(std::make_unique<NativeProbeHost>(*this, renderer_process_id),
                               std::move(receiver));
 }
@@ -106,7 +111,8 @@ void NativeProbeSession::Emit(const NativeProbeEvent& event) const noexcept {
   const std::uint64_t category_bit = NativeProbeCategoryMask(event.header.category);
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
-  if (category_bit != 0 && (category_mask_.load(std::memory_order_relaxed) & category_bit) != 0 &&
+  if (event.header.session_id == session_id_.load(std::memory_order_acquire) && category_bit != 0 &&
+      (category_mask_.load(std::memory_order_relaxed) & category_bit) != 0 &&
       now < expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
     downstream(event);
   }

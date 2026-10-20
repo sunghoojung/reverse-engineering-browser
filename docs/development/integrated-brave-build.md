@@ -68,6 +68,10 @@ fresh pinned worktree. Never stash/reset/clean or discard edits to bypass this
 guard. The helper does none of those operations.
 
 The wrapper runs the existing doctor and sync, offline native foundations,
+and Brave's prepare-only stage before recording the compilation inputs. That
+stage copies branding into tracked Chromium paths; the source guard records
+those authorized copies before the full build and still rejects unexpected
+changes before preparation or after compilation. It then runs
 the full development browser build (which prepares Brave's component GN args),
 pinned probe compilation (including the native Console runtime), the separate
 proxy adapter unit-test executable, and

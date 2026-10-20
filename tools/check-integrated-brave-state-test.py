@@ -4,6 +4,7 @@
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 from pathlib import Path
 import subprocess
@@ -251,6 +252,83 @@ class StateGuards(unittest.TestCase):
     def test_wrapper_refuses_override(self):
         self.assertIn("Unset REB_BRAVE_OUTPUT_DIRECTORY",
                       self.wrapper({"REB_BRAVE_OUTPUT_DIRECTORY": "out/Other"}).stderr)
+
+    def test_bootstrap_retains_pinned_release_tag(self):
+        revision = "v1.2.3"
+        git(self.brave, "tag", "-a", revision, "-m", "owned release fixture")
+        worktree = self.root / "fresh-bootstrap"
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("REB_")}
+        environment["REB_BRAVE_WORKTREE"] = str(worktree)
+        result = subprocess.run(
+            ["bash", str(HELPER.parent.parent / "scripts/bootstrap-brave.sh"),
+             "--remote", str(self.brave), "--revision", revision],
+            env=environment, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        checkout = worktree / "src/brave"
+        self.assertEqual(git(checkout, "rev-parse", f"{revision}^{{commit}}"),
+                         git(checkout, "rev-parse", "HEAD"))
+
+    def test_wrapper_records_prepared_sources_and_still_rejects_user_edits(self):
+        scripts = self.repo / "scripts"
+        scripts.mkdir()
+        wrapper = scripts / "build-integrated-brave.sh"
+        shutil.copyfile(HELPER.parent.parent / "scripts/build-integrated-brave.sh", wrapper)
+        helper_dir = self.repo / "tools"
+        helper_dir.mkdir()
+        shutil.copyfile(HELPER, helper_dir / HELPER.name)
+        output = self.chromium / "out/Component_arm64"
+        executable = output / "Brave Browser.app/Contents/MacOS/Brave Browser"
+        phases = self.root / "phases"
+        toolchain = scripts / "brave-toolchain.sh"
+        toolchain.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f"printf '%s\\n' \"$*\" >> {shlex.quote(str(phases))}\n"
+            # Actual Brave build preparation rewrites tracked branding inputs.
+            f"printf 'prepared branding\\n' > {shlex.quote(str(self.chromium / 'tracked.txt'))}\n"
+            f"mkdir -p {shlex.quote(str(executable.parent))}\n"
+            f"printf 'is_component_build = true\\n' > {shlex.quote(str(output / 'args.gn'))}\n"
+            f"printf 'built browser\\n' > {shlex.quote(str(executable))}\n"
+            f"chmod 755 {shlex.quote(str(executable))}\n"
+        )
+        toolchain.chmod(0o755)
+        sync = scripts / "sync-browser-integration.sh"
+        sync.write_text("#!/bin/sh\nexit 0\n")
+        sync.chmod(0o755)
+        demo = self.repo / "build/reb-event-demo"
+        demo.parent.mkdir()
+        demo.write_text("#!/bin/sh\nexit 0\n")
+        demo.chmod(0o755)
+        git(self.repo, "add", "scripts", "tools")
+        git(self.repo, "commit", "-qm", "build preparation fixture")
+        mocks = self.root / "bin"
+        mocks.mkdir()
+        for name, content in {
+            "uname": 'if [ "$1" = -s ]; then echo Darwin; else echo arm64; fi',
+            "xcodebuild": "exit 0",
+            "df": "printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 999999999 0 999999999 0%% /\\n'",
+            "make": "exit 0", "cargo": "exit 0", "c++": "exit 0", "codesign": "exit 0",
+        }.items():
+            target = mocks / name
+            target.write_text("#!/bin/sh\n" + content + "\n")
+            target.chmod(0o755)
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("REB_")}
+        environment.update(PATH=str(mocks) + os.pathsep + os.environ["PATH"],
+                           REB_BRAVE_DIRECTORY=str(self.brave))
+        command = ["bash", str(wrapper)]
+        result = subprocess.run(command, env=environment, capture_output=True,
+                                text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(phases.read_text().splitlines(), ["build --prepare_only", "build"])
+        self.assertTrue((demo.parent / "integrated-brave-complete.json").is_file())
+        before = phases.read_bytes()
+        (self.chromium / "tracked.txt").write_text("private user edit\n")
+        result = subprocess.run(command, env=environment, capture_output=True,
+                                text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Upstream edits", result.stderr)
+        self.assertEqual(phases.read_bytes(), before)
+        self.assertEqual((self.chromium / "tracked.txt").read_text(), "private user edit\n")
 
     def completed_browser_fixture(self):
         output = self.chromium / "out/Component_arm64"

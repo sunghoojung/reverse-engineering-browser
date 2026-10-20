@@ -147,8 +147,16 @@ else
   git -C "${brave_directory}" remote add origin "${brave_remote}"
 fi
 
+brave_fetch_revision="${brave_revision}"
+# A shallow FETCH_HEAD alone does not retain the release name used by sync's
+# pin check. Fetch the exact tag ref without fetching unrelated release history.
+if [[ "${brave_revision}" == refs/tags/* ]]; then
+  brave_fetch_revision="${brave_revision}:${brave_revision}"
+elif [[ "${brave_revision}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  brave_fetch_revision="refs/tags/${brave_revision}:refs/tags/${brave_revision}"
+fi
 git -C "${brave_directory}" fetch --quiet --depth 1 \
-  "${brave_fetch_remote}" "${brave_revision}"
+  "${brave_fetch_remote}" "${brave_fetch_revision}"
 requested_commit="$(git -C "${brave_directory}" rev-parse 'FETCH_HEAD^{commit}')"
 readonly requested_commit
 

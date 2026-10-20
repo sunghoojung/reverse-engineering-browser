@@ -49,6 +49,8 @@ Chromium checkout shallow. Use `--init --full-history` only when an
 investigation needs complete Chromium Git history.
 Bootstrap refuses to switch a checkout with local changes when its revision
 does not match the requested pin.
+Pinned release tags are retained locally so synchronization can resolve the
+exact release name after a shallow bootstrap.
 The sync command verifies `browser/config/brave-core.rev`,
 `browser/config/chromium.rev`, and `browser/config/v8.rev` before copying or
 patching anything. A mismatch is reported with the current and pinned commits,

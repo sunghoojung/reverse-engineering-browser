@@ -100,6 +100,10 @@ python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
 python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
 make demo native-probe-admission-check native-proxy-policy-check
 ./build/reb-event-demo
+# Brave's preparation copies branding into tracked Chromium paths. Record those
+# authorized inputs before compilation; later unexpected changes still stop us.
+./scripts/brave-toolchain.sh build --prepare_only
+python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
 # Let Brave generate its component args before the direct GN object/test checks.
 if [[ -n "${REB_BRAVE_JOBS:-}" ]]; then
   ./scripts/brave-toolchain.sh build --ninja "j:${REB_BRAVE_JOBS}"

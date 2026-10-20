@@ -127,6 +127,11 @@ xcrun swiftc -parse-as-library \
 "${repo_root}/build/check-origin-trace-gaps" \
   "${repo_root}/apps/origin-trace-backend/assets/origin-trace-gap-cases.json"
 
+xcrun swiftc -parse-as-library \
+  "${live_session_source}" "${repo_root}/tools/check-live-session-failure.swift" \
+  -o "${repo_root}/build/check-live-session-failure"
+"${repo_root}/build/check-live-session-failure"
+
 node "${repo_root}/tools/check-captured-client-project.mjs"
 xcrun swiftc -parse-as-library -framework Cocoa -framework WebKit \
   "${client_project_export_source}" "${repo_root}/tools/check-client-project-export.swift" \

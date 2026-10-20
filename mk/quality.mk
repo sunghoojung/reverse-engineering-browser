@@ -80,6 +80,7 @@ shellcheck:
 	shellcheck $(SHELL_SOURCES)
 
 python-check:
+	python3 tools/release-companion-test.py
 	python3 tools/write-release-pair-test.py
 	python3 tools/publish-release-pair-test.py
 	python3 tools/check-integrated-brave-state-test.py
@@ -142,6 +143,7 @@ javascript-check: capture-completeness-check
 	node tools/check-element-screenshot.mjs
 	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
+	node tools/check-origin-trace-launcher.mjs --cleanup-only
 	node tools/check-origin-trace-package.mjs --contract-only
 	node tools/check-origin-trace-native-close.mjs --contract-only
 

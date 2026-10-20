@@ -101,6 +101,11 @@ session lifecycle, and actual Chromium capture. Set `ORIGIN_TRACE_TEST_BROWSER`
 to the installed browser path for the real-browser check. Synthetic checks cover
 faults deterministically; they do not replace real-browser acceptance.
 
+The opcode, program and full-shell VM UI checks allow a bounded 30 seconds for
+sandboxed Chromium startup on shared CI hosts. UI readiness and CDP requests keep
+their separate 10-second deadlines. A browser exit fails immediately; there is
+no launch retry or sandbox-policy override.
+
 ## Integrated browser inputs
 
 `brave_patch_contract.py` validates patch destinations against their independent

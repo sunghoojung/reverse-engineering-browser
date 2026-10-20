@@ -108,6 +108,7 @@ javascript-check:
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
+	node tools/check-captured-export-ui.mjs
 	node tools/check-local-overrides.mjs
 	node tools/check-local-override-manager.mjs
 	node tools/check-graphql-sdl.mjs
@@ -117,10 +118,13 @@ javascript-check:
 	node tools/check-owned-vm-integration.mjs
 	node tools/check-owned-vm-debugger-ui.mjs
 	node tools/check-vm-semantics.mjs
+	node tools/check-vm-analysis-packs.mjs
 	node tools/check-vm-agent.mjs
 	node tools/check-vm-opcode-ledger.mjs
+	node tools/check-vm-opcode-ledger-ui.mjs
 	node tools/check-vm-workspace-contract.mjs
 	node tools/check-vm-opcode-workspace-ui.mjs
+	node tools/check-vm-full-shell-ui.mjs --fixture-only
 	node tools/check-owned-opcode-experiments.mjs
 	node tools/owned-opcode-experiment-ui-cases.mjs --validate-fixtures
 	node tools/check-vm-static.mjs

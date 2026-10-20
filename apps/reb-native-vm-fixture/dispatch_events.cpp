@@ -89,7 +89,7 @@ reb::EventRecord Event(const Options& options, std::uint64_t sequence) {
 }
 }  // namespace
 
-int EmitOwnedVmDispatchEvents(int argc, char** argv) {
+int EmitOwnedVmDispatchEvents(int argc, char** argv, bool observe_owned_clock) {
   Options options;
   if (!Parse(argc, argv, options)) {
     std::cerr
@@ -101,21 +101,9 @@ int EmitOwnedVmDispatchEvents(int argc, char** argv) {
     return 1;
   reb::OwnedVmFixture fixture(options.stack ? reb::OwnedVmArchitecture::kStack
                                             : reb::OwnedVmArchitecture::kRegister);
-  for (std::uint64_t tick = 1; !fixture.snapshot().halted && tick <= reb::kOwnedVmDispatchBudget;
-       ++tick) {
-    const auto result = fixture.ExecuteOne(&recorder, options.frame, recorder.generation(), tick);
-    if (result.status != reb::OwnedVmExecuteStatus::kCommitted ||
-        result.recorder_result != reb::VmRecordResult::kRecorded) {
-      std::cerr << "Owned dispatch capture did not retain every instruction\n";
-      return 1;
-    }
-  }
-  if (!fixture.snapshot().halted || recorder.records().size() != fixture.executed_count())
-    return 1;
-
-  // Export after bounded cooperative execution: no I/O occurs in dispatch.
-  // Validate the typed invocation marker and its parent link before using units.
-  std::array<reb::EventRecord, reb::kOwnedVmDispatchBudget + 1> events{};
+  // Fixed event storage is filled at cooperative instruction boundaries; only
+  // the final bounded export writes bytes. This never attaches to a browser.
+  std::array<reb::EventRecord, reb::kOwnedVmDispatchBudget + 2> events{};
   events[0] = Event(options, 1);
   auto invocation = reb::MakeVmFinding(
       reb::VmFindingKind::kInvocation, reb::VmHostRuntime::kUnknown,
@@ -127,7 +115,16 @@ int EmitOwnedVmDispatchEvents(int argc, char** argv) {
   if (!reb::SetVmFindingPayload(events[0], invocation))
     return 1;
   std::size_t count = 1;
-  for (const auto& record : recorder.records()) {
+  bool clock_observed = false;
+  for (std::uint64_t tick = 1; !fixture.snapshot().halted && tick <= reb::kOwnedVmDispatchBudget;
+       ++tick) {
+    const auto result = fixture.ExecuteOne(&recorder, options.frame, recorder.generation(), tick);
+    if (result.status != reb::OwnedVmExecuteStatus::kCommitted ||
+        result.recorder_result != reb::VmRecordResult::kRecorded) {
+      std::cerr << "Owned dispatch capture did not retain every instruction\n";
+      return 1;
+    }
+    const auto& record = recorder.records().back();
     if (record.step.before.pc > std::numeric_limits<std::uint32_t>::max() ||
         record.sequence > std::numeric_limits<std::uint32_t>::max())
       return 1;
@@ -141,7 +138,28 @@ int EmitOwnedVmDispatchEvents(int argc, char** argv) {
     if (!reb::SetVmDispatchSamplePayload(event, sample))
       return 1;
     ++count;
+    if (observe_owned_clock && record.step.before.pc == 2) {
+      // Real owned host operation after instruction-index 2. This is a clock
+      // callback in this compiled fixture, not a captured browser API call.
+      const auto observed_time =
+          static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+      auto& host = events[count];
+      host = Event(options, count + 1);
+      host.header.category = reb::EventCategory::kRuntime;
+      host.header.type = reb::EventType::kApiCall;
+      host.header.parent_event_id = event.header.sequence_number;
+      host.header.monotonic_time_ns = observed_time;
+      if (!reb::SetInlinePayload(host, "owned.monotonic_clock.after_instruction"))
+        return 1;
+      clock_observed = true;
+      ++count;
+    }
   }
+  if (!fixture.snapshot().halted || recorder.records().size() != fixture.executed_count() ||
+      (observe_owned_clock && !clock_observed))
+    return 1;
   for (std::size_t index = 0; index < count; ++index)
     std::cout.write(reinterpret_cast<const char*>(&events[index]), sizeof(events[index]));
   if (!std::cout) {

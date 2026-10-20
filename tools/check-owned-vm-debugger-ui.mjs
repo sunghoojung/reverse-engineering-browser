@@ -223,6 +223,13 @@ export async function checkOwnedVmDebuggerDOM() {
   let prevented = false; row.events.keydown({key: 'ArrowDown', preventDefault() { prevented = true; }});
   assert(prevented); assert.equal(doc.activeElement, ui.history.children[1].children[0]); assert.match(ui.inspector.textContent, /Retained instruction #2/);
   assert.equal(log.filter(item => item.method === 'POST').length, posts, 'History keyboard never executes');
+  const menuCapabilities = {}; root.events['vm-workspace-query']({detail: menuCapabilities});
+  assert.equal(menuCapabilities.search, true); assert.equal(menuCapabilities.previous, true); assert.equal(menuCapabilities.next, false);
+  root.events['vm-workspace-previous'](); assert.match(ui.inspector.textContent, /Retained instruction #1/);
+  root.events['vm-workspace-next'](); assert.match(ui.inspector.textContent, /Retained instruction #2/);
+  root.events['vm-workspace-next'](); assert.match(ui.inspector.textContent, /Retained instruction #2/);
+  root.events['vm-workspace-search'](); assert.equal(doc.activeElement.textContent, 'All retained opcodes');
+  assert.equal(log.filter(item => item.method === 'POST').length, posts, 'Workspace menus only inspect retained history and never execute');
   ui.tabs.instruction.events.keydown({key: 'ArrowRight', preventDefault() {}}); assert.equal(doc.activeElement, ui.tabs.registers);
   const tabFocused = doc.activeElement; await ui.refresh(); assert.equal(doc.activeElement, tabFocused);
   ui.follow.events.click(); assert.match(ui.inspector.textContent, /Following live/); ui.initial.events.click(); assert.match(ui.inspector.textContent, /zero completed instructions/);

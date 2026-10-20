@@ -165,6 +165,25 @@
         }
       }
 
+      async function refreshVmHostLinks() {
+        const workspace = state.vmOpcodeWorkspace;
+        if (!workspace || state.vmOpcodeWorkspaceEmbedded) return;
+        const generation = ++state.vmHostLinksGeneration;
+        try {
+          const response = await fetch('/api/analysis/vm/host-links', {cache: 'no-store'});
+          if (!response.ok) throw new Error(`Host links returned ${response.status}`);
+          const document = await response.json();
+          if (generation !== state.vmHostLinksGeneration || state.vmOpcodeWorkspace?.document_digest !== workspace.document_digest) return;
+          if (!isVmHostLinksDocument(document, workspace)) throw new TypeError('Malformed or stale host links');
+          state.vmHostLinks = document;
+          state.vmHostLinksStatus = 'ready';
+        } catch {
+          if (generation === state.vmHostLinksGeneration && state.vmOpcodeWorkspace?.document_digest === workspace.document_digest) {
+            state.vmHostLinksStatus = 'unavailable';
+          }
+        }
+      }
+
       async function refreshVmAnalysis(requestId = state.vmAnalysisRequestId) {
         if (location.protocol === 'file:') return;
         const normalizedRequestId = requestId || null;
@@ -178,6 +197,7 @@
             state.vmAnalysisStatus = 'ready';
             state.vmAnalysisError = null;
             await refreshVmOpcodeWorkspace(null, normalizedRequestId);
+            await refreshVmHostLinks();
             renderVmLab();
             return;
           }
@@ -192,6 +212,7 @@
           state.lastValidAnalysisFindings = vmFindingsFromAnalysis(document);
           state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
           await refreshVmOpcodeWorkspace(document, normalizedRequestId);
+          await refreshVmHostLinks();
         } catch (error) {
           retainVmAnalysisOnFailure(
             state,
@@ -1466,11 +1487,11 @@
         return lines.join('\n');
       }
 
-      function renderVmHandlers(workspace) {
+      function renderVmHandlers(workspace, onSelection = null) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(
-          textElement('h4', '', 'Handlers'),
+          textElement('h4', '', 'Handler listing'),
           textElement('span', '', workspace.runtime === 'webassembly' ? `${workspace.handlers.length} dispatch-arm candidates` : `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`)
         );
         section.append(heading);
@@ -1484,7 +1505,7 @@
         }
         const header = document.createElement('div'); header.className = 'vm-handler-head';
         header.setAttribute('aria-hidden', 'true');
-        ['opcode', 'label', 'state', 'samples', 'notes'].forEach(label => header.append(textElement('span', '', label)));
+        ['source offset', 'opcode', 'operation / handler', 'evidence', 'samples'].forEach(label => header.append(textElement('span', '', label)));
         const list = document.createElement('div'); list.className = 'vm-handler-list';
         list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Opcode handlers');
         const selectRow = (row, focus = true) => {
@@ -1495,6 +1516,8 @@
             candidate.tabIndex = selected ? 0 : -1;
           });
           if (focus) row.focus({ preventScroll: true });
+          if (onSelection) onSelection(row.dataset.handlerKey);
+          document.querySelectorAll('[data-vm-symbol-key]').forEach(symbol => symbol.setAttribute('aria-pressed', String(symbol.dataset.vmSymbolKey === row.dataset.handlerKey)));
         };
         rows.forEach(rowData => {
           const row = document.createElement('button'); row.className = 'vm-handler-row'; row.type = 'button';
@@ -1511,6 +1534,7 @@
           const epistemic = textElement('span', 'vm-handler-state', rowData.state);
           epistemic.dataset.state = rowData.state;
           row.append(
+            textElement('span', 'vm-handler-source', rowData.source),
             textElement('strong', 'vm-handler-opcode', rowData.opcode),
             label,
             epistemic,
@@ -1521,7 +1545,7 @@
           row.addEventListener('keydown', event => {
             if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
             event.preventDefault();
-            const options = [...list.querySelectorAll('.vm-handler-row')];
+            const options = [...list.querySelectorAll('.vm-handler-row')].filter(option => !option.hidden);
             const current = options.indexOf(row);
             const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
               : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
@@ -1529,8 +1553,60 @@
           });
           list.append(row);
         });
-        section.append(header, list);
+        const toolbar = document.createElement('div'); toolbar.className = 'vm-listing-toolbar';
+        toolbar.setAttribute('role', 'group'); toolbar.setAttribute('aria-label', 'Handler navigation');
+        for (const [label, direction, glyph] of [['Previous handler', -1, '↑'], ['Next handler', 1, '↓']]) {
+          const button = textElement('button', 'secondary-button', glyph); button.type = 'button';
+          button.title = label; button.setAttribute('aria-label', label);
+          button.addEventListener('click', () => {
+            const visible = [...list.children].filter(row => !row.hidden);
+            if (!visible.length) return;
+            const index = visible.findIndex(row => row.dataset.handlerKey === state.selectedVmHandlerKey);
+            const nextIndex = index < 0 ? (direction < 0 ? visible.length - 1 : 0) : (index + direction + visible.length) % visible.length;
+            const next = visible[nextIndex];
+            selectRow(next); next.scrollIntoView({block: 'nearest'});
+          });
+          toolbar.append(button);
+        }
+        const search = document.createElement('input'); search.type = 'search'; search.placeholder = 'Filter handlers';
+        search.setAttribute('aria-label', 'Filter retained handlers'); search.maxLength = 256;
+        const count = textElement('span', 'vm-listing-count', `${rows.length} handlers`);
+        count.setAttribute('role', 'status');
+        search.addEventListener('input', () => {
+          const query = search.value.trim().toLowerCase();
+          const visible = [...list.children].filter((row, index) => {
+            row.hidden = !`${rows[index].source} ${rows[index].opcode} ${rows[index].label}`.toLowerCase().includes(query);
+            return !row.hidden;
+          });
+          [...list.children].forEach(row => { row.tabIndex = -1; });
+          const selected = visible.find(row => row.dataset.handlerKey === state.selectedVmHandlerKey) ?? visible[0];
+          if (selected) selected.tabIndex = 0;
+          count.textContent = `${visible.length} / ${rows.length} handlers`;
+          [...toolbar.querySelectorAll('button')].forEach(button => { button.disabled = !visible.length; });
+          updateVmNavigationMenus();
+        });
+        toolbar.append(search, count);
+        section.append(toolbar, header, list);
         return section;
+      }
+
+      function appendVmPagedRows(target, items, label, renderRow, pageSize = 32) {
+        const controls = document.createElement('div'); controls.className = 'vm-evidence-pager';
+        controls.setAttribute('role', 'group'); controls.setAttribute('aria-label', `${label} pages`);
+        const previous = textElement('button', 'secondary-button', `Previous ${label}`); previous.type = 'button';
+        const next = textElement('button', 'secondary-button', `Next ${label}`); next.type = 'button';
+        const status = textElement('span', 'vm-listing-count', ''); status.setAttribute('role', 'status');
+        const rows = document.createElement('div'); rows.dataset.vmPagedRows = label;
+        let page = 0;
+        const draw = () => {
+          const start = page * pageSize;
+          rows.replaceChildren(...items.slice(start, start + pageSize).map(renderRow));
+          status.textContent = `${items.length ? start + 1 : 0}–${Math.min(items.length, start + pageSize)} of ${items.length} ${label}`;
+          previous.disabled = page === 0; next.disabled = start + pageSize >= items.length;
+        };
+        previous.addEventListener('click', () => { if (previous.disabled) return; page--; draw(); (previous.disabled ? next : previous).focus(); });
+        next.addEventListener('click', () => { if (next.disabled) return; page++; draw(); (next.disabled ? previous : next).focus(); });
+        controls.append(previous, status, next); target.append(controls, rows); draw();
       }
 
       function vmEffectCellText(cell) {
@@ -1544,16 +1620,8 @@
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(textElement('h4', '', 'Declarative effects'), textElement('span', '', 'owned declarations · no execution'));
         section.append(heading);
-        let count = 0;
-        const total = workspace.handlers.reduce((sum, handler) => sum + handler.effects.length, 0);
-        for (const handler of workspace.handlers) {
-          const effects = handler.effects ?? [];
-          if (effects.length > 1 && !vmUniqueWorkspaceEffect(handler)) {
-            section.append(textElement('div', 'vm-workspace-notice', `Opcode ${handler.opcode ?? 'unknown'} has conflicting effects. Every declaration is retained; none is selected for traversal.`));
-          }
-          for (const effect of effects) {
-            if (count >= 256) break;
-            count++;
+        const effects = workspace.handlers.flatMap(handler => handler.effects.map(effect => ({handler, effect})));
+        appendVmPagedRows(section, effects, 'effects', ({handler, effect}) => {
             const row = document.createElement('details'); row.className = 'vm-effect-row';
             const summary = document.createElement('summary');
             summary.textContent = `Opcode ${handler.opcode ?? 'unknown'} · ${effect.operation} · ${effect.evidence_class}`;
@@ -1569,11 +1637,11 @@
             body.append(textElement('div', '', `Operands: ${effect.operand_layout.length ? effect.operand_layout.map(operand => `${operand.name} (${operand.kind}): ${operand.byte_offset === null ? 'byte location unknown' : `+${operand.byte_offset}, ${operand.byte_size} bytes, little-endian`}`).join('; ') : 'none declared'}`),
               textElement('div', '', `Reads: ${effect.reads.length ? effect.reads.map(vmEffectCellText).join('; ') : 'none declared'}`),
               textElement('div', '', `Writes: ${effect.writes.length ? effect.writes.map(vmEffectCellText).join('; ') : 'none declared'}`));
-            row.append(body); section.append(row);
-          }
-        }
-        if (total > count) section.append(textElement('div', 'vm-workspace-notice', `${total - count} additional effects retained in the document; display limited to 256 rows.`));
-        if (count === 0) section.append(textElement('div', 'vm-workspace-empty', 'No source-bound declarative effects are available. Observed changed cells do not establish reads or causes.'));
+            row.append(body);
+            if (handler.effects.length > 1 && !vmUniqueWorkspaceEffect(handler)) row.append(textElement('p', 'vm-workspace-notice', 'Conflicting declarations. None is selected for traversal.'));
+            return row;
+        });
+        if (effects.length === 0) section.append(textElement('div', 'vm-workspace-empty', 'No source-bound declarative effects are available. Observed changed cells do not establish reads or causes.'));
         return section;
       }
 
@@ -1592,16 +1660,15 @@
           if (!outgoing.has(key)) outgoing.set(key, []);
           outgoing.get(key).push(edge);
         }
-        for (const instruction of traversal.instructions.slice(0, 256)) {
+        appendVmPagedRows(rows, traversal.instructions, 'reachable instructions', instruction => {
           const row = document.createElement('details'); row.className = 'vm-effect-row';
           const title = document.createElement('summary');
           title.textContent = `Artifact ${instruction.artifact_id} · byte ${instruction.byte_offset} · opcode ${instruction.opcode} · ${instruction.byte_size} bytes`;
           const edges = outgoing.get(`${instruction.artifact_id}:${instruction.byte_offset}`) ?? [];
           row.append(title, textElement('div', 'vm-effect-detail', `${instruction.effect_id}: ${edges.length ? edges.map(edge => `${edge.kind} → ${edge.to_offset ?? 'unknown'}`).join('; ') : 'halt, no successor'}`));
-          rows.append(row);
-        }
+          return row;
+        });
         section.append(rows);
-        if (traversal.instructions.length > 256) section.append(textElement('div', 'vm-workspace-notice', `${traversal.instructions.length - 256} additional instruction positions retained in the document; display limited to 256.`));
         const frontier = document.createElement('ul'); frontier.className = 'vm-coverage-omissions';
         if (traversal.frontier.length === 0) frontier.append(textElement('li', '', 'No unresolved reachable edge. This does not prove runtime termination or semantics.'));
         for (const stop of traversal.frontier) frontier.append(textElement('li', '', `Artifact ${stop.artifact_id ?? 'unknown'} · byte ${stop.byte_offset ?? 'unknown'}: ${stop.reason}`));
@@ -1614,26 +1681,35 @@
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded snapshot preview'));
         section.append(heading);
-        const snapshot = workspace.snapshots.find(candidate =>
-          candidate.artifact_id === workspace.bytecode_artifact_id) ?? workspace.snapshots[0] ?? null;
-        const fields = document.createElement('div'); fields.className = 'vm-fields vm-bytecode-fields';
-        fields.append(
-          vmField('artifact', snapshot?.artifact_id ?? workspace.bytecode_artifact_id ?? 'not captured'),
-          vmField('digest', snapshot?.sha256 ?? 'not recorded'),
-          vmField('origin', snapshot?.origin ?? 'unavailable'),
-          vmField('snapshot bytes', snapshot?.byte_count ?? 0),
-          vmField('truncation', snapshot?.truncated === true ? 'preview truncated' : snapshot?.truncated === false ? 'complete preview' : 'not recorded'),
-          vmField('unavailable reason', snapshot?.unavailable_reason ?? 'none')
-        );
-        section.append(fields);
-        const preview = formatVmHexPreview(snapshot?.preview_hex);
-        if (preview) {
-          const bytes = textElement('pre', 'vm-bytecode-preview', preview);
-          bytes.setAttribute('aria-label', 'Bytecode hex preview');
-          section.append(bytes);
-        } else {
-          section.append(textElement('div', 'vm-workspace-empty', snapshot?.unavailable_reason || 'No bytecode preview was retained.'));
-        }
+        const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained bytecode snapshot');
+        workspace.snapshots.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.byte_count} bytes`; selector.append(option); });
+        const initial = Math.max(0, workspace.snapshots.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
+        selector.value = String(initial); selector.disabled = workspace.snapshots.length === 0;
+        const label = document.createElement('label'); label.append(document.createTextNode('Retained snapshot '), selector);
+        const previewPanel = document.createElement('div'); section.append(label, previewPanel);
+        const draw = () => {
+          const snapshot = workspace.snapshots[Number(selector.value)] ?? null;
+          previewPanel.replaceChildren();
+          const fields = document.createElement('div'); fields.className = 'vm-fields vm-bytecode-fields';
+          fields.append(
+            vmField('artifact', snapshot?.artifact_id ?? workspace.bytecode_artifact_id ?? 'not captured'),
+            vmField('digest', snapshot?.sha256 ?? 'not recorded'),
+            vmField('origin', snapshot?.origin ?? 'unavailable'),
+            vmField('snapshot bytes', snapshot?.byte_count ?? 0),
+            vmField('truncation', snapshot?.truncated === true ? 'preview truncated' : snapshot?.truncated === false ? 'complete preview' : 'not recorded'),
+            vmField('unavailable reason', snapshot?.unavailable_reason ?? 'none')
+          );
+          previewPanel.append(fields);
+          const preview = formatVmHexPreview(snapshot?.preview_hex);
+          if (preview) {
+            const bytes = textElement('pre', 'vm-bytecode-preview', preview);
+            bytes.setAttribute('aria-label', 'Bytecode hex preview');
+            previewPanel.append(bytes);
+          } else {
+            previewPanel.append(textElement('div', 'vm-workspace-empty', snapshot?.unavailable_reason || 'No bytecode preview was retained.'));
+          }
+        };
+        selector.addEventListener('change', draw); draw();
         return section;
       }
 
@@ -1669,6 +1745,9 @@
           });
         }
         section.append(heading, panel, omissions);
+        section.append(textElement('h4', '', 'Characterized byte ranges'), textElement('p', 'vm-effect-detail', 'Source-bound attributed bytes, not execution coverage. Ranges may overlap; totals count their union.'));
+        appendVmPagedRows(section, coverage.attributions, 'byte attributions', attribution =>
+          textElement('p', 'vm-effect-detail', `Artifact ${attribution.artifact_id} · bytes [${attribution.byte_offset}, ${attribution.byte_offset + attribution.byte_size}) · ${attribution.byte_size} bytes · opcode ${attribution.opcode} · ${attribution.kind} · ${attribution.evidence_class}`));
         return section;
       }
 
@@ -1747,6 +1826,33 @@
         form.append(run,load);section.append(form,output);return section;
       }
 
+      function renderVmHostLinks(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.append(textElement('h4', '', 'Host event positions'));
+        section.append(textElement('p', '', 'A linked dispatch position does not establish exact request-value provenance.'));
+        const report = state.vmHostLinks;
+        const bound = report?.workspace_document_digest === state.vmOpcodeWorkspace?.document_digest;
+        const row = bound && report.workspaces.find(item => item.interpreter_artifact_id === workspace.interpreter_artifact_id &&
+          item.source_artifact_sha256 === workspace.source_artifact_sha256);
+        if (state.vmHostLinksStatus === 'unavailable') {
+          section.append(textElement('p', 'vm-workspace-empty', 'Host links unavailable. Any matching last valid links are retained.'));
+        }
+        if (!row || row.links.length === 0) {
+          section.append(textElement('p', 'vm-workspace-empty', 'Guest position unknown: no proven host-to-dispatch link is available.'));
+        }
+        if (row) {
+          appendVmPagedRows(section, row.links, 'host links', link => {
+            const event = link.host_event, position = link.guest_position;
+            const label = position ? `PC ${position.instruction_pointer} (${position.instruction_pointer_units})` : 'unknown';
+            const item = textElement('details', 'vm-effect-row', '');
+            item.append(textElement('summary', '', `${link.category}/${link.type} · event ${event.session_id}:${event.process_id}:${event.sequence_number} · ${label} · ${link.state}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(link, null, 2)));
+            return item;
+          });
+          for (const omission of row.omissions) section.append(textElement('p', 'vm-workspace-empty', omission));
+        }
+        return section;
+      }
+
       function renderVmOpcodeWorkspace(selected) {
         const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
         const container = document.createElement('section'); container.className = 'vm-workspace';
@@ -1759,17 +1865,92 @@
           textElement('div', '', 'Opcode workspace'),
           textElement('span', '', `${workspace.runtime === 'webassembly' ? 'WebAssembly · ' : ''}${workspace.model ?? 'unknown'} model · interpreter artifact ${workspace.interpreter_artifact_id}`)
         );
-        container.append(
-          head,
-          renderVmHandlers(workspace),
-          renderVmEffects(workspace),
-          renderVmBytecode(workspace),
-          renderVmReachability(workspace),
-          renderVmWorkspaceCoverage(workspace),
-          renderVmWorkspaceUnknowns(workspace),
-          renderVmOwnedExperiment(workspace)
-        );
+        const body = document.createElement('div'); body.className = 'vm-workbench-body';
+        const selectedInspector = document.createElement('aside'); selectedInspector.className = 'vm-selection-inspector';
+        selectedInspector.setAttribute('aria-label', 'Selected handler');
+        const updateSelection = key => {
+          const row = vmOpcodeRows(workspace).find(item => item.key === key);
+          const heading = textElement('div', 'vm-pane-label', 'Selected handler');
+          if (!row) { selectedInspector.replaceChildren(heading, textElement('p', 'vm-selection-empty', 'Select a retained handler to inspect its evidence.')); return; }
+          const title = textElement('h3', '', row.label);
+          const identity = document.createElement('div'); identity.className = 'vm-selection-fields';
+          for (const [label, value] of [['Opcode', row.opcode], ['Source byte range', row.source], ['Evidence', row.state], ['Samples', String(row.samples)], ['Operand width', row.operandWidth ? `${row.operandWidth} bytes (characterized)` : 'unknown']]) {
+            identity.append(textElement('span', '', label), textElement('strong', '', value));
+          }
+          const observations = document.createElement('div'); observations.className = 'vm-selection-observations';
+          observations.append(textElement('h4', '', 'Retained positions'));
+          appendVmPagedRows(observations, row.retainedSamples, 'retained samples', sample => {
+            const item = document.createElement('details'); item.className = 'vm-effect-row';
+            item.append(textElement('summary', '', `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(sample, null, 2)));
+            return item;
+          });
+          if (!row.retainedSamples.length) observations.append(textElement('p', 'vm-selection-empty', 'No retained PC or guest-byte position.'));
+          if (row.samples > row.retainedSamples.length) observations.append(textElement('p', 'vm-workspace-notice', `${row.samples - row.retainedSamples.length} accepted samples are not retained. Missing positions remain unknown.`));
+          const notes = document.createElement('div'); notes.className = 'vm-selection-notes';
+          notes.append(textElement('h4', '', 'Evidence notes'), textElement('p', '', row.notes));
+          selectedInspector.replaceChildren(heading, title, identity, observations, notes);
+        };
+        const handlers = renderVmHandlers(workspace, updateSelection); handlers.classList.add('vm-workbench-listing');
+        updateSelection(state.selectedVmHandlerKey);
+        const inspector = document.createElement('section'); inspector.className = 'vm-workbench-inspector';
+        inspector.setAttribute('aria-label', 'Finding analysis tools');
+        const navigation = document.createElement('nav'); navigation.className = 'vm-workbench-tabs';
+        navigation.setAttribute('aria-label', 'Finding analysis panels');
+        const panels = document.createElement('div'); panels.className = 'vm-workbench-panels';
+        const definitions = [
+          ['effects', 'Effects', renderVmEffects],
+          ['bytecode', 'Bytes', renderVmBytecode],
+          ['reachability', 'Reachability', renderVmReachability],
+          ['coverage', 'Coverage', renderVmWorkspaceCoverage],
+          ['unknowns', 'Unknowns', renderVmWorkspaceUnknowns],
+          ['experiment', 'Experiment', renderVmOwnedExperiment],
+          ['host-links', 'Host links', renderVmHostLinks]
+        ];
+        const active = definitions.some(([key]) => key === state.vmWorkspacePanel) ? state.vmWorkspacePanel : 'effects';
+        const entries = definitions.map(([key, label, renderPanel]) => {
+          const button = textElement('button', 'secondary-button', label); button.type = 'button';
+          button.dataset.vmPanel = key;
+          button.setAttribute('aria-pressed', String(key === active));
+          const panel = renderPanel(workspace); panel.hidden = key !== active;
+          panel.dataset.vmPanelContent = key;
+          button.addEventListener('click', () => {
+            state.vmWorkspacePanel = key;
+            entries.forEach(entry => { entry.panel.hidden = entry.key !== key; entry.button.setAttribute('aria-pressed', String(entry.key === key)); });
+          });
+          navigation.append(button); panels.append(panel);
+          return {key, button, panel};
+        });
+        inspector.append(navigation, panels);
+        body.append(handlers, selectedInspector);
+        container.append(head, body, inspector);
         return container;
+      }
+
+      function vmWorkspaceCommand(action, invoke = false) {
+        const active = document.querySelector('.vm-workspace-switch [aria-pressed="true"]');
+        const root = document.getElementById(active?.getAttribute('aria-controls') || 'vm-findings-workspace');
+        if (!root) return false;
+        if (root.id === 'vm-findings-workspace') {
+          const label = action === 'search' ? 'Filter retained handlers' : action === 'next' ? 'Next handler' : 'Previous handler';
+          const target = root.querySelector(`[aria-label="${label}"]`);
+          if (!target || target.disabled) return false;
+          if (invoke) { if (action === 'search') target.focus(); else target.click(); }
+          return true;
+        }
+        const capabilities = {search: false, previous: false, next: false};
+        root.dispatchEvent(new CustomEvent('vm-workspace-query', {detail: capabilities}));
+        if (!capabilities[action]) return false;
+        if (invoke) root.dispatchEvent(new CustomEvent(`vm-workspace-${action}`));
+        return true;
+      }
+
+      function updateVmNavigationMenus() {
+        const menuBar = document.querySelector('.vm-menu-bar');
+        if (!menuBar) return;
+        menuBar.querySelectorAll('[data-vm-command^="vm-handler-"]').forEach(button => {
+          const action = button.dataset.vmCommand === 'vm-handler-filter' ? 'search' : button.dataset.vmCommand === 'vm-handler-next' ? 'next' : 'previous';
+          button.disabled = !vmWorkspaceCommand(action);
+        });
       }
 
       function renderVmOpcodeWorkspaceInPlace(selected) {
@@ -1781,11 +1962,34 @@
             return node;
           })();
         host.replaceChildren(...(selected ? [renderVmOpcodeWorkspace(selected)] : []));
+        updateVmNavigationMenus();
+        const symbols = document.querySelector('#vm-symbol-list');
+        if (symbols) {
+          const workspace = selected && vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
+          const rows = workspace ? vmOpcodeRows(workspace) : [];
+          symbols.replaceChildren();
+          for (const row of rows) {
+            const button = textElement('button', 'vm-symbol-row', row.label); button.type = 'button';
+            button.dataset.vmSymbolKey = row.key;
+            button.setAttribute('aria-pressed', String(row.key === state.selectedVmHandlerKey));
+            button.title = `Opcode ${row.opcode} · source ${row.source}`;
+            button.addEventListener('click', () => {
+              const target = [...host.querySelectorAll('.vm-handler-row')].find(item => item.dataset.handlerKey === row.key);
+              if (!target) return;
+              const filter = host.querySelector('input[aria-label="Filter retained handlers"]');
+              if (filter && target.hidden) { filter.value = ''; filter.dispatchEvent(new Event('input')); }
+              target.click(); target.scrollIntoView({block: 'nearest'});
+            });
+            symbols.append(button);
+          }
+          if (!rows.length) symbols.append(textElement('p', '', 'No retained handler symbols for this finding.'));
+        }
       }
 
       function renderVmDetail() {
         const selected = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
         if (!selected) {
+          document.querySelector('#vm-symbol-list')?.replaceChildren(textElement('p', '', 'Select a finding to browse its retained handlers.'));
           elements.vmDetail.replaceChildren(textElement('div', 'vm-empty', 'No valid VM findings have been captured. Capture stays separate from interpretation, so the lab does not synthesize sample conclusions.'));
           return;
         }
@@ -1844,9 +2048,12 @@
             row.append(textElement('strong', '', 'unknown'), textElement('span', '', unknown), textElement('b', '', '?'));
             evidence.append(row);
           });
-          card.append(head, fields, evidence);
-          elements.vmDetail.replaceChildren(summary, card);
+          const provenance = document.createElement('details'); provenance.className = 'vm-finding-provenance';
+          provenance.append(textElement('summary', '', 'Detection evidence & provenance'), fields, evidence);
+          card.append(head);
+          elements.vmDetail.replaceChildren(card, summary);
           renderVmOpcodeWorkspaceInPlace(selected);
+          elements.vmDetail.append(provenance);
           return;
         }
         const investigation = state.vmFindings.filter(finding => finding.investigationId === selected.investigationId);
@@ -1892,17 +2099,20 @@
           actions.append(openSource);
         }
         head.append(title, actions);
-        card.append(head, fields);
+        const provenance = document.createElement('details'); provenance.className = 'vm-finding-provenance';
+        provenance.append(textElement('summary', '', 'Finding metadata & provenance'), fields);
+        card.append(head);
         if (coverage) {
           const coveragePanel = document.createElement('div'); coveragePanel.className = 'vm-coverage';
           const line = document.createElement('div'); line.className = 'vm-coverage-line';
           line.append(textElement('span', '', coverage.label), textElement('strong', '', `${coverage.observedCount} / ${coverage.totalCount}`));
           const bar = document.createElement('div'); bar.className = 'vm-coverage-bar';
           const fill = document.createElement('span'); fill.style.width = `${coveragePercent}%`; bar.append(fill);
-          coveragePanel.append(line, bar); card.append(coveragePanel);
+          coveragePanel.append(line, bar); provenance.append(coveragePanel);
         }
-        elements.vmDetail.replaceChildren(summary, card);
+        elements.vmDetail.replaceChildren(card, summary);
         renderVmOpcodeWorkspaceInPlace(selected);
+        elements.vmDetail.append(provenance);
       }
 
       let renderedVmFindings = null;
@@ -1945,7 +2155,7 @@
           state.artifacts.some(artifact => artifact.artifact_id === selectedSourceId)]);
         const workspaceKey = JSON.stringify([
           state.vmOpcodeWorkspaceStatus, state.vmOpcodeWorkspace?.document_digest ?? null,
-          state.selectedVmHandlerKey
+          state.vmHostLinksStatus, state.vmHostLinks?.document_digest ?? null
         ]);
         if (renderKey === renderedVmFindings && workspaceKey === renderedVmWorkspace) return;
         if (renderKey !== renderedVmFindings) {
@@ -12601,3 +12811,34 @@
         }
       });
       initializePaneLayout();
+
+      // Native disclosures keep the application menus keyboard-accessible without
+      // claiming an ARIA menubar's separate arrow-key interaction model.
+      const vmMenus = [...document.querySelectorAll('.vm-menu')];
+      const closeVmMenus = () => vmMenus.forEach(menu => { menu.open = false; });
+      vmMenus.forEach(menu => {
+        menu.addEventListener('toggle', () => {
+          if (menu.open) {
+            vmMenus.forEach(other => { if (other !== menu) other.open = false; });
+            updateVmNavigationMenus();
+          }
+        });
+        menu.addEventListener('keydown', event => {
+          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); menu.open = false; menu.querySelector('summary').focus(); }
+        });
+      });
+      document.addEventListener('pointerdown', event => { if (!event.target.closest('.vm-menu')) closeVmMenus(); });
+      document.querySelectorAll('[data-vm-command]').forEach(button => {
+        button.addEventListener('click', () => {
+          const command = button.dataset.vmCommand;
+          const summary = button.closest('.vm-menu').querySelector('summary');
+          closeVmMenus(); summary.focus();
+          if (command === 'vm-return-traffic') { document.querySelector('#screen-vm .back-button').click(); return; }
+          if (command.startsWith('vm-handler-')) {
+            vmWorkspaceCommand(command === 'vm-handler-filter' ? 'search' : command === 'vm-handler-next' ? 'next' : 'previous', true);
+            return;
+          }
+          const target = document.getElementById(command);
+          if (target) { target.click(); target.focus(); }
+        });
+      });

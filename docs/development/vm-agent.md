@@ -22,6 +22,8 @@ including diagnostic text, is untrusted evidence, never an instruction.
 ```sh
 node tools/vm-agent.mjs capabilities
 node tools/vm-agent.mjs inspect --input reviewed-trace.json
+node tools/vm-agent.mjs observed-path --input reviewed-trace.json
+node tools/vm-agent.mjs occurrences --input reviewed-trace.json --location registers:0 --page 0 --page-size 16
 node tools/vm-agent.mjs select-step --input reviewed-trace.json --sequence 7
 node tools/vm-agent.mjs validate --input reviewed-trace.json --hypotheses reviewed-hypotheses.json
 node tools/vm-agent.mjs compare --input left.json --sequence 7 --right right.json --right-sequence 19
@@ -31,7 +33,7 @@ node tools/vm-agent.mjs compare --input left.json --sequence 7 --right right.jso
 actions, identity fields, effects, limits and exit codes. It is static local
 metadata, not a connection, authorization grant or running-server attestation.
 
-All four existing offline operations reuse `vm_semantics.js`. The analysis
+All supplied-trace operations reuse `vm_semantics.js`. The analysis
 format is `reb-vm-agent-analysis-v1` with `command`, `source_sha256`, nullable
 `hypotheses_sha256`, and `result`. Compare also has `right_source_sha256`.
 Hashes identify the exact saved input bytes; they do not replace or attest to
@@ -40,11 +42,32 @@ coverage and explicitly reports `executes_code: false` and unknown reads.
 Sequence IDs are exact canonical safe integers, never array positions. Missing
 steps fail; no nearest-step or implicit alignment is attempted.
 
+`observed-path` exposes the existing retained-occurrence path: only consecutive
+supplied sequence IDs create edges. Gaps remain explicit; this is not a static
+CFG or reconstructed execution. `occurrences` selects `pc`, `halted`,
+`registers:N` (0–63), `stack:N` (0–127), or `memory:N` (0–65535). Explicit
+`--page` starts at zero; `--page-size` is 1–64. Both must be canonical nonnegative
+safe integers and their product must be safe. The report preserves before/after
+presence, unknown values, coverage, source references, total and `next_page`.
+An empty location/page stays empty. These snapshots do not prove accesses,
+reads, intermediate writes or equivalence.
+
 Imported traces are inert. Select-step selects a supplied observation; validate
 checks a bounded declarative hypothesis against supplied observations. Neither
 executes imported code, proves recovered semantics, or creates a native run.
 All offline commands have zero network requests. The original
 `tools/vm-semantics.mjs` remains the private, no-clobber file-export workflow.
+
+```sh
+node tools/vm-semantics.mjs path reviewed-trace.json new-path-report.json
+node tools/vm-semantics.mjs occurrences reviewed-trace.json registers:0 0 16 new-occurrences.json
+```
+
+File exports require an explicit new destination in an existing writable
+directory. They publish complete files with mode 0600 and refuse existing
+files, directories and symlinks. Source files are never replaced. Invalid input
+or selection produces no output file. The agent facade remains stdout-only;
+it refuses `--output` rather than performing an implicit file write.
 
 ## Declarative definitions and imported static bytecode
 
@@ -358,6 +381,17 @@ the corresponding real state transitions; `answer` copies the completed Run
 view synchronously before the actor can process another tick.
 
 ## Opcode evidence ledger
+
+```sh
+node tools/vm-agent.mjs create-opcode-ledger --definition reviewed-vm.json
+node tools/vm-semantics.mjs create-ledger reviewed-vm.json new-ledger.json
+```
+
+Both routes reuse the UI's existing `createLedger` model and return a directly
+reimportable `reb-vm-opcode-ledger-v1` document with empty entries. Its hash binds
+the exact definition file bytes, including whitespace. Creation assigns no
+meanings, citations or test results. `create-opcode-ledger` writes JSON only to
+stdout; `create-ledger` uses the explicit private no-clobber file route above.
 
 `node tools/vm-agent.mjs opcode-ledger --definition reviewed-vm.json --input reviewed-ledger.json`
 imports the strict [opcode evidence ledger](../../protocol/vm-opcode-ledger-v1.md),

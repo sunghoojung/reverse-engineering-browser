@@ -10,6 +10,7 @@ import owned from '../apps/research-ui/vm_debugger.js';
 import staticVm from '../apps/research-ui/vm_static.js';
 import contextualVm from '../apps/research-ui/vm_contextual.js';
 import contextualEvidence from '../apps/research-ui/vm_contextual_evidence.js';
+import opcodeLedger from '../apps/research-ui/vm_opcode_ledger.js';
 import {inspectLedger, ledgerLimits} from './vm-opcode-ledger.mjs';
 
 const INPUT_LIMIT = 1048576, OUTPUT_LIMIT = 4194304, DEFAULT_TIMEOUT = 9000;
@@ -22,6 +23,8 @@ const errorCodes = ['unspecified', 'invalid_request', 'state_conflict', 'protoco
 const usage = `Usage: node tools/vm-agent.mjs COMMAND [OPTIONS]
   capabilities                              Offline JSON discovery; no connection
   inspect --input TRACE.json                Inspect supplied observations only
+  observed-path --input TRACE.json          Retained occurrence edges, not a static CFG
+  occurrences --input TRACE.json --location registers:0 --page N --page-size N
   select-step --input TRACE.json --sequence N
   validate --input TRACE.json --hypotheses HYPOTHESES.json
   compare --input LEFT.json --sequence N --right RIGHT.json --right-sequence N
@@ -32,6 +35,7 @@ const usage = `Usage: node tools/vm-agent.mjs COMMAND [OPTIONS]
   analyze-contextual --definition BUILD.json --input IMAGE.json
   link-contextual --definition BUILD.json --input IMAGE.json --evidence EVENTS.json
   opcode-ledger --definition VM.json --input LEDGER.json
+  create-opcode-ledger --definition VM.json  Empty hash-bound ledger JSON to stdout
   status --base-url URL                      Read cached owned-fixture state
   trace --base-url URL --state STATE.json    Read the exact saved native run
   action ACTION --base-url URL --state STATE.json --command-id ID
@@ -40,10 +44,12 @@ ACTION: run | pause | step | stop | reset | close. Actions are explicit writes.
 URL: http://127.0.0.1:PORT or http://[::1]:PORT, optional trailing slash.
 Online commands accept --timeout-ms 1..10000 (default ${DEFAULT_TIMEOUT}).
 STATE is a reviewed raw reb-owned-vm-debug-session-v1 view from status/reb-api.
-Imported traces are inert: select-step never executes code. Static commands
-interpret declarative metadata only, never execute imported bytecode. No arbitrary code,
+Imported traces are inert: select-step never executes code.
+Occurrence locations use pc, halted, registers:N, stack:N or memory:N; pages start at 0,
+page size is 1..64. Ledger creation asserts no meanings or verified evidence.
+Static commands interpret declarative metadata only, never execute imported bytecode. No arbitrary code,
 URL targets, port scanning, redirects, proxies, storage writes or automatic retries.
-Create is unavailable here; use the existing owned-fixture UI or reb-api after
+Native fixture creation is unavailable here; use the existing owned-fixture UI or reb-api after
 reviewing reb-api describe vm_debugger_action --action create.
 JSON goes to stdout; JSON errors go to stderr. Exit: 0 confirmed result,
 2 invalid/refused/read failure, 3 command outcome unknown, 4 command pending.
@@ -62,7 +68,8 @@ const decode = bytes => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true})
 
 export function capabilities() {
   return {format: 'reb-vm-agent-capabilities-v1', discovery: 'offline-static-not-server-attestation',
-    offline: {format: 'reb-vm-trace-v1', commands: ['inspect', 'select-step', 'validate', 'compare'], executes_imported_code: false,
+    offline: {format: 'reb-vm-trace-v1', commands: ['inspect', 'observed-path', 'occurrences', 'select-step', 'validate', 'compare'], executes_imported_code: false,
+      occurrence_locations: ['pc', 'halted', 'registers:N', 'stack:N', 'memory:N'], occurrence_page_size: {minimum: 1, maximum: 64},
       semantics: 'existing bounded supplied-observation model; hypotheses are not proof', network_requests: 0},
     imported_static: {definition_format: 'reb-vm-definition-v1', bytecode_format: 'reb-vm-bytecode-v1',
       commands: ['validate-definition', 'decode-bytecode', 'analyze-static', 'select-instruction'],
@@ -77,7 +84,7 @@ export function capabilities() {
       image_format: 'reb-vm-contextual-image-v1', evidence_format: 'reb-vm-contextual-evidence-v1',
       executes_imported_code: false, network_requests: 0, vendor_compatibility: 'unverified',
       semantics: 'hash-bound supplied declarations; explicit supplied jump evidence is separate from declared edges'},
-    opcode_evidence: {format: 'reb-vm-opcode-ledger-v1', commands: ['opcode-ledger'], network_requests: 0,
+    opcode_evidence: {format: 'reb-vm-opcode-ledger-v1', commands: ['opcode-ledger', 'create-opcode-ledger'], network_requests: 0,
       executes_imported_code: false, tests_executed: false, references_verified: false, limits: ledgerLimits},
     owned: {schema: 'reb-owned-vm-debug-session-v1', read_commands: ['status', 'trace'], actions,
       target: 'existing repository-owned cooperative native register/stack fixtures only', exact_scope: scopeKeys,
@@ -88,12 +95,13 @@ export function capabilities() {
       provenance: 'preserves supplied program-manifest and configured-helper hashes; not remote attestation'},
     transport: {hosts: ['127.0.0.1', '::1'], protocol: 'http', explicit_port: true, redirects: false, proxies: false,
       auto_retry: false, timeout_ms: DEFAULT_TIMEOUT, maximum_timeout_ms: 10000, response_bytes: INPUT_LIMIT, request_bytes: 2048},
-    options: {inspect: ['--input'], 'select-step': ['--input', '--sequence'], validate: ['--input', '--hypotheses'],
+    options: {inspect: ['--input'], 'observed-path': ['--input'], occurrences: ['--input', '--location', '--page', '--page-size'],
+      'select-step': ['--input', '--sequence'], validate: ['--input', '--hypotheses'],
       compare: ['--input', '--sequence', '--right', '--right-sequence'],
       'validate-definition': ['--definition'], 'decode-bytecode': ['--definition', '--input'],
       'analyze-static': ['--definition', '--input'], 'select-instruction': ['--definition', '--input', '--pc'],
       'analyze-contextual': ['--definition', '--input'], 'link-contextual': ['--definition', '--input', '--evidence'],
-      'opcode-ledger': ['--definition', '--input'], status: ['--base-url'],
+      'opcode-ledger': ['--definition', '--input'], 'create-opcode-ledger': ['--definition'], status: ['--base-url'],
       trace: ['--base-url', '--state'], action: ['--base-url', '--state', '--command-id'], online_optional: ['--timeout-ms']},
     limits: {input_file_bytes: INPUT_LIMIT, output_bytes: OUTPUT_LIMIT}, writes_files: false,
     exit_codes: {'0': 'confirmed result; Run means scheduling acknowledged', '2': 'invalid/refused/read failure',
@@ -102,14 +110,15 @@ export function capabilities() {
 
 function options(argv) {
   const args = [...argv], command = args.shift(), action = command === 'action' ? args.shift() : null;
-  const required = {capabilities: [], inspect: ['input'], 'select-step': ['input', 'sequence'], validate: ['input', 'hypotheses'],
+  const required = {capabilities: [], inspect: ['input'], 'observed-path': ['input'], occurrences: ['input', 'location', 'page', 'page-size'],
+    'select-step': ['input', 'sequence'], validate: ['input', 'hypotheses'],
     compare: ['input', 'sequence', 'right', 'right-sequence'],
     'validate-definition': ['definition'], 'decode-bytecode': ['definition', 'input'],
     'analyze-static': ['definition', 'input'], 'select-instruction': ['definition', 'input', 'pc'],
     'analyze-contextual': ['definition', 'input'], 'link-contextual': ['definition', 'input', 'evidence'],
-    'opcode-ledger': ['definition', 'input'], status: ['base-url'], trace: ['base-url', 'state'],
+    'opcode-ledger': ['definition', 'input'], 'create-opcode-ledger': ['definition'], status: ['base-url'], trace: ['base-url', 'state'],
     action: ['base-url', 'state', 'command-id']};
-  if (!Object.hasOwn(required, command) || command === 'action' && !actions.includes(action)) fail('usage', 'Use --help for explicit supported commands. Create is not supported by this facade.');
+  if (!Object.hasOwn(required, command) || command === 'action' && !actions.includes(action)) fail('usage', 'Use --help for explicit supported commands. Native fixture creation is not supported by this facade.');
   const online = ['status', 'trace', 'action'].includes(command), result = {};
   const allowed = [...required[command], ...(online ? ['timeout-ms'] : [])];
   while (args.length) {
@@ -147,8 +156,8 @@ async function readBounded(path, parser) {
   } finally { await file?.close(); }
 }
 
-function sequence(value) {
-  if (!/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value))) fail('selection_refused', 'Select an exact canonical safe-integer sequence ID.');
+function sequence(value, label = 'sequence ID') {
+  if (!/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value))) fail('selection_refused', `Select an exact canonical nonnegative safe-integer ${label}.`);
   return Number(value);
 }
 
@@ -242,15 +251,18 @@ export async function execute(argv) {
         definition_source_sha256: definition.sha256, source_sha256: source.sha256, evidence_source_sha256: evidence?.sha256 ?? null, result};
     } catch { fail('analysis_refused', 'Contextual build, image hash, evidence identity or bounded analysis failed.'); }
   }
-  if (command === 'opcode-ledger') {
+  if (['opcode-ledger', 'create-opcode-ledger'].includes(command)) {
     const definition = await readBounded(opts.definition, text => { staticVm.parseDefinition(text); return text; });
+    if (command === 'create-opcode-ledger') return opcodeLedger.createLedger(definition.value);
     return (await readBounded(opts.input, text => inspectLedger(text, definition.value))).value;
   }
-  if (['inspect', 'select-step', 'validate', 'compare'].includes(command)) {
+  if (['inspect', 'observed-path', 'occurrences', 'select-step', 'validate', 'compare'].includes(command)) {
     const source = await readBounded(opts.input, text => vm.trace(vm.parse(text)));
     const report = {format: 'reb-vm-agent-analysis-v1', command, source_sha256: source.sha256, hypotheses_sha256: null, result: null};
     try {
       if (command === 'inspect') report.result = vm.inspect(source.value);
+      if (command === 'observed-path') report.result = vm.observedPath(source.value);
+      if (command === 'occurrences') report.result = vm.occurrences(source.value, opts.location, sequence(opts.page, 'page'), sequence(opts['page-size'], 'page size'));
       if (command === 'select-step') {
         const selected = vm.step(source.value, sequence(opts.sequence));
         report.result = {format: selected.format, identity: selected.identity, coverage: source.value.coverage,

@@ -10,6 +10,23 @@ Project-wide authorization, capture, and privacy policy is in
 [SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
 and limits.
 
+## VM desktop workspace
+
+The compact Analysis, Navigation, Search and Window menus invoke the existing
+workspaces and handler navigation. Escape closes a menu and returns focus to its
+trigger; the toolbar keeps all seven workspace modes directly accessible.
+
+The Findings view uses compact CodeBrowser-style docks: Program Trees holds
+captured findings, Symbol Tree lists the selected finding's retained handlers,
+the central Handler listing drives the linked evidence inspector, and analysis
+tools use a bottom tab strip. The layout keeps the Rosé Pine Moon palette.
+Symbols and the up/down toolbar navigate the same selection. The literal handler
+filter matches retained source offsets, opcodes and labels; selecting a symbol
+clears an excluding filter. Arrow keys, Home and End navigate visible listing
+rows. No-match filters keep the selected evidence available and disable stepping.
+These docks expose existing evidence, not a native-code decompiler or editable
+Ghidra project. The deterministic fixture remains explicitly opt-in.
+
 ## Local file override manager
 
 In **Experiments → Interceptor**, create an isolated context and apply **Target**
@@ -176,6 +193,35 @@ A separate offline repository command, `tools/export-captured-client.mjs`,
 reuses this generator for a reviewed saved exact-request API response.
 See [Client project v1](../../docs/product/client-project-v1.md) for limits,
 unsupported cases, layout, privacy and validation.
+
+The **Client language** selector in both Traffic and retained Repeater-run export
+menus also offers **Python · requests** and **Python · httpx**. Each uses the same
+offline generator as `--python-client`, with fixed source, pinned direct provider,
+shared explicit copy policy and a dry run. Python's timeout is per operation,
+not a whole-request deadline. Native project exports use the existing local Save
+dialog and fixed-path ZIP validation, including the Python-only layout.
+
+Traffic **Export capture** also offers explicit **redacted HAR**, **raw HAR** and
+**captured GraphQL SDL** actions. HAR refuses missing, malformed or ambiguous
+source timing rather than inventing phases. SDL requires a complete retained
+HTTP 200 introspection response. **Export saved introspection JSON as SDL**
+accepts a local `__schema` or `data.__schema` JSON file up to 1 MiB; duplicate keys,
+invalid UTF-8, partial/error schemas and unsafe SDL literals are refused.
+Browser development downloads these text files. In the native shell the actions
+are labeled **Copy** and explicitly place text on the local clipboard; save it
+locally yourself. No clipboard write happens on opening or refreshing the menu.
+SDL is a raw schema export: descriptions and identifiers can be sensitive.
+Captured SDL includes the exact retained identity; the CLI additionally hashes
+the original saved input. Export never queries an introspection endpoint, sends
+a captured request, installs packages, evaluates capture values or changes the
+retained evidence. Status and unsupported/error reasons remain in the menu.
+
+`node tools/check-captured-export-ui.mjs` exercises the real action handlers with
+an in-memory DOM, including native bridge/clipboard routing, both providers and
+copy modes, invalid timing, partial schemas and canceled file reads. The rendered
+API-catalog lane exercises the menu with real keyboard/pointer actions and local
+downloads at three viewport sizes. Native Save-panel testing remains a macOS gate.
+
 
 ## Saved investigation notebook
 
@@ -1901,6 +1947,14 @@ No input is executed, fetched, uploaded, or automatically attached to findings.
 analysis. Invalid imports preserve previous valid inputs; valid replacements
 invalidate the previous report and any pending analysis.
 
+The linked workbench keeps a searchable, paged context listing beside an
+inspector with **Instruction**, **Pseudocode**, **Edges**, **Evidence**, and
+**Inputs and limits** tabs. Filtering does not change the selected context;
+**Reveal selected context** clears the filter and returns to its page.
+Resolved declared-edge buttons navigate only to an exact supplied PC/state
+context. Inputs collapse after successful analysis and remain available in the
+input disclosure. The application Search and Navigation menus target this mode.
+
 Contexts are keyed by byte-offset PC and decoder-state identity. The same opcode
 or PC can have different supplied meanings in different states. Missing mappings
 or state remain explicit unknowns and stop only that context. Select a context
@@ -1944,3 +1998,111 @@ and the expected selected value/next PC, then choose Run isolated native
 experiment. Read saved results does not execute. Results show tested inputs and
 do not generalize; unsupported inputs are retained without execution. See
 [the strict contract](../../protocol/owned-opcode-experiments-v1.md).
+
+## VM analysis packs
+
+**VM → Analysis packs** exposes the same data-only ranking and build-comparison
+functions as the offline `origin-trace-vm-pack` CLI. Import local JSON, specify
+exact interpreter artifact IDs for comparison, then explicitly apply or compare.
+No imported code executes. Invalid schema, stale digests and undeclared source
+families are rejected. Cancel, Clear, bounded preview and complete report download
+are available. The local Rust HTTP backend is required; native stored-evidence
+mode explains how to use the backend or CLI. See the
+[versioned pack contract](../../protocol/vm-analysis-pack-v1.md) for limits and
+agent-facing `vm_pack_apply`/`vm_pack_compare` routes.
+
+Analysis-pack reports use a searchable, paged listing with a linked row and
+provenance inspector. All returned rows remain reachable; the complete report
+export preserves the exact backend response. UI filters and paging do not
+change the analysis or its original evidence.
+
+## Opcode evidence ledger
+
+The VM **Opcode ledger** workspace imports exact definition JSON and a bounded
+ledger JSON locally. The JSON editor exposes all researcher fields, including
+handler byte locations, operand notes, source/test citations and unresolved
+questions. **Create empty ledger** binds a new draft to the exact definition
+source SHA-256 without inventing entries. It refuses to replace nonempty work.
+**Validate ledger** uses the same schema and identity checks as the agent's
+`opcode-ledger` command. **Export validated ledger JSON** downloads only the
+validated ledger, with no extra analysis envelope; edits invalidate export.
+In the native shell, **Copy validated ledger JSON** explicitly copies that same
+validated document to the clipboard instead. Clipboard refusal leaves the draft
+intact and displays an error; native Blob downloads are not attempted.
+The searchable coverage listing pages through every declared opcode and links
+the selected row to its full researcher entry and definition provenance.
+The inspector's edit action opens the existing JSON draft; it does not infer
+meaning, generate citations or change test outcomes. Filtering and selection
+do not modify the draft or the validated export.
+Previous coverage remains visible but is explicitly stale after edits or errors.
+
+Coverage counts declared opcodes, never runtime execution or verified meanings.
+Observed/inferred labels, citations and test outcomes remain supplied assertions.
+Nothing executes imported code, fetches references, runs tests, promotes VM
+semantics, persists inputs automatically or uploads data. Review private data
+before exporting. See [ledger v1](../../protocol/vm-opcode-ledger-v1.md).
+
+## VM findings workbench
+
+Effects, Reachability, Host links, byte attributions and selected retained samples
+page through all retained data in groups of 32. The Bytes view offers every
+retained snapshot; the compact handler listing keeps its four-sample preview.
+Operand width zero means unknown, matching the producer contract. Source locations
+show exact retained byte ranges without guessing a source line number.
+
+Findings opens retained evidence for the selected finding. The handler listing
+sits beside explicit Effects, Bytes, Reachability, Coverage, Unknowns, and
+Experiment panels. Panel switching only changes the view; the isolated
+experiment still requires its separate explicit run action. Handler highlighting
+does not establish an opcode binding or filter the finding-wide analysis.
+Execution workspace, Live owned fixture, Static bytecode, and Contextual build
+remain separate modes with their existing ownership and execution controls.
+
+The collapsed **Explore a deterministic owned VM example** is an authored
+fixture demonstration, not the active capture. Its replay only reveals fixed
+fixture transitions. Back/Forward, Go to PC, and arrow/Home/End listing navigation
+share the selected instruction with State and Evidence & source. PC units are
+instruction indexes; gaps, unknown bytes, unconfirmed effects, and refused
+source digests remain explicit. The example never supplies capture provenance.
+
+### Full-page VM navigation check
+
+`node tools/check-vm-full-shell-ui.mjs --fixture-only` validates the authored
+HTTP response contracts without a browser. With `REB_UI_CHROMIUM` pointing to
+installed Chrome/Chromium, omit the flag to load the actual `index.html` and all
+shipped scripts. The loopback fixture admits one authored retained finding
+through the ordinary analysis API. It checks the primary VM entry, every VM
+mode and finding panel, linked keyboard handler selection, and above-fold
+listing visibility at 1440 and 1280 pixels. Real local File imports populate Packs and
+Ledger; one exact bounded comparison request receives an explicitly authored
+presentation response. Raw editors stay collapsed for result captures. Empty
+modes and populated results are captured at 1440, 1280, 900 and 390 pixels.
+Full-page and scrolled-dock screenshots are saved under
+`build/vm-workspace-ui-qa/full-shell`; CI includes them in the VM artifact.
+This verifies product-shell composition with synthetic responses, not native
+capture, guest execution, every feature's semantics or a live backend.
+
+The desktop Findings layout keeps the program navigator, handler listing, and
+selected-handler inspector together above a bottom analysis dock. Handler click
+or arrow-key selection updates the inspector's exact source range, evidence
+class, sample count, retained positions, and notes. These are handler candidates,
+not invented guest instructions. The bottom analysis panels remain scoped to
+the finding; selecting a handler does not narrow or reclassify them. Detection
+scores and artifact identity stay in a compact strip; full detection evidence
+and provenance are available in a disclosure beneath the workspace. Smaller
+windows stack the listing and inspector without removing tools.
+
+### Compact pack and ledger workspaces
+
+Analysis packs and Opcode ledger put local file selection and structured results
+first. Expand **Compare two builds** for the comparison workspace inputs and
+exact artifact IDs. Pack reports show bounded ranking/comparison tables;
+**Inspect raw report JSON** retains the original preview and the export keeps
+the complete exact response. Numeric identities too large for exact browser
+number display are labeled **See exact JSON**, never silently rounded.
+
+Ledger JSON editors are collapsed beneath coverage. **Create empty ledger**
+opens the ledger editor for deliberate authoring. Coverage separates opcode,
+evidence status, asserted meaning and supplied test outcome; definition hashes
+remain available under **Definition identity**. These presentation changes do
+not alter schema checks, research assertions, cancellation or export boundaries.

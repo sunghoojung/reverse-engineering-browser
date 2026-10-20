@@ -202,7 +202,13 @@ ui.input.files=[file(filteredPath)];await ui.input.events.change();ui.go(64,null
 ui.filter.value='aa';ui.filter.events.input();const sequences=listingRows().map(row=>Number(row.attributes['data-vm-sequence']));
 assert.equal(listingRows().length,64);assert.equal(pathEdges().length,0);assert(ui.listingBody.textContent.includes('retained rows hidden by filter'));
 for(const edge of pathEdges()){const [from,to]=edge.attributes['data-vm-path-edge'].split(':').map(Number);assert.equal(to,from+1);assert(sequences.includes(from)&&sequences.includes(to));}
-ui.filter.value='no-match';ui.filter.events.input();assert.equal(pathEdges().length,0);assert.equal(ui.selector.value,'64');ui.focusSelectedRow();assert.equal(ui.filter.value,'');
+const menuCapabilities={};mountedRoot.events['vm-workspace-query']({detail:menuCapabilities});assert(menuCapabilities.next&&menuCapabilities.previous&&menuCapabilities.search);
+mountedRoot.events['vm-workspace-next']();assert.equal(ui.selector.value,'66');assert.equal(ui.filter.value,'aa');
+mountedRoot.events['vm-workspace-previous']();assert.equal(ui.selector.value,'64');assert.equal(ui.filter.value,'aa');
+ui.filter.value='no-match';ui.filter.events.input();mountedRoot.events['vm-workspace-query']({detail:menuCapabilities});assert(!menuCapabilities.next&&!menuCapabilities.previous);
+mountedRoot.events['vm-workspace-next']();assert.equal(ui.selector.value,'64');assert.equal(ui.filter.value,'no-match');
+mountedRoot.events['vm-workspace-search']();assert.equal(document.activeElement,ui.filter);
+assert.equal(pathEdges().length,0);ui.focusSelectedRow();assert.equal(ui.filter.value,'');
 ui.input.files=[file(reg)];await ui.input.events.change();ui.hypothesis.files=[file({format:'reb-vm-hypothesis-v1',trace_id:reg.identity.trace_id,mappings:[{opcode:'03',operation:'register_const'}]})];await ui.hypothesis.events.change();
 assert(rowBySequence(0).attributes['aria-label'].includes('supplied operands 0, 7'));assert(rowBySequence(0).attributes['aria-label'].includes(reg.steps[0].evidence_refs[0]));assert(rowBySequence(0).attributes['aria-label'].includes('; matched;'));assert(rowBySequence(0).textContent.includes('matched'));
 ui.input.files=[file(runtimeOnly)];await ui.input.events.change();assert.equal(listingRows().length,2);assert.equal(pathEdges().length,0);assert(ui.listingBody.textContent.includes('Gap before '+Number.MAX_SAFE_INTEGER));assert(rowBySequence(Number.MAX_SAFE_INTEGER).attributes['aria-label'].includes('Gap before '+Number.MAX_SAFE_INTEGER));
@@ -336,6 +342,9 @@ console.log('PASS production VM Findings refresh/mode interleaving: stable actua
 // Numerical contrast checks cover the actual VM theme tokens. Rendered QA also
 // checks computed colors so selector regressions cannot pass on token math alone.
 const vmCss=await readFile(new URL('../apps/research-ui/app.css',import.meta.url),'utf8');
+// The workbench must inherit the same Moon shell palette as all other screens.
+assert(!vmCss.includes('body:has(#screen-vm:not([hidden]))'), 'VM must not override the shared application palette');
+assert(!vmCss.includes('#83b8ff'), 'Neutral-blue VM override must not return');
 const vmPaletteBlocks=[...vmCss.matchAll(/(?:^|\n)(?:\:root\[data-theme="light"\] )?#screen-vm \{([^}]*--vm-action-bg[^}]*)\}/g)];
 assert.equal(vmPaletteBlocks.length,2);
 const luminance=hex=>{const rgb=hex.match(/[a-f0-9]{2}/gi).map(v=>parseInt(v,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;};

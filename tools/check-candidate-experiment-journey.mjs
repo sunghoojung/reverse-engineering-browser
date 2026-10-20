@@ -40,6 +40,23 @@ export async function candidateSessionEvaluate(command, expression, session) {
   return result.result.value;
 }
 
+// Target.createTarget may return before its initial navigation replaces the
+// blank document. Wait for the owned product document before any paint promise;
+// only that startup context transition is retryable, never application errors.
+export async function candidateWaitForUIStartup(evaluate,uiURL,{now=Date.now,pause=()=>new Promise(resolve=>setTimeout(resolve,40))}={}) {
+  const expression=`Boolean(location.href===${JSON.stringify(new URL(uiURL).href)}&&document.readyState!=='loading'&&document.querySelector('#request-rows')&&document.querySelector('#capture-state')&&document.querySelector('#capture-state').textContent!=='Connecting')`;
+  const deadline=now()+20000;let last=false;
+  while(now()<deadline){
+    try{last=await evaluate(expression);if(last)return;}
+    catch(error){
+      if(error.cdpError?.code!==-32000||!['Execution context was destroyed.','Execution context was destroyed'].includes(error.cdpError.message))throw error;
+      last=error.message;
+    }
+    await pause();
+  }
+  throw Error('Product did not load before initial viewport: '+JSON.stringify(last));
+}
+
 // Native buttons require the character-producing keyDown shape used by the
 // shared Sources-tree driver. rawKeyDown alone exercises key listeners but is
 // not an Enter/Space activation substitute.
@@ -124,6 +141,25 @@ export async function checkCandidateFixture() {
   assert.deepEqual(activationCalls.map(call=>[call.method,call.session]),['original','ui','disposable','ui'].flatMap(session=>[['Page.bringToFront',session],['Runtime.evaluate',session]]));
   assert(activationCalls.filter(call=>call.method==='Runtime.evaluate').every(call=>call.params.awaitPromise),'Foreground repair preserves native paint waits');
   await assert.rejects(candidateSessionEvaluate(async()=>{throw Error('activation refused');},'document.title','owned'),/activation refused/);
+  const startupURL='http://127.0.0.1:1234',startupState={location:{href:startupURL+'/'},document:{readyState:'interactive',querySelector:()=>({textContent:'Live'})}};
+  let startupExpression;
+  await candidateWaitForUIStartup(async expression=>{startupExpression=expression;return runInNewContext(expression,startupState);},startupURL);
+  for(const state of [
+    {...startupState,location:{href:'about:blank'}},
+    {...startupState,document:{...startupState.document,readyState:'loading'}},
+    {...startupState,document:{...startupState.document,querySelector:()=>null}},
+    {...startupState,document:{...startupState.document,querySelector:selector=>selector==='#capture-state'?null:{}}},
+    {...startupState,document:{...startupState.document,querySelector:()=>({textContent:'Connecting'})}},
+  ])assert.equal(runInNewContext(startupExpression,state),false,'Only the loaded exact product document may start paint waits');
+  const startupContextError=Object.assign(Error('initial context replaced'),{cdpError:{code:-32000,message:'Execution context was destroyed.'}});
+  let startupReads=0,startupClock=0;
+  await candidateWaitForUIStartup(async()=>{if(++startupReads===1)throw startupContextError;return startupReads===3;},startupURL,{now:()=>startupClock,pause:async()=>{startupClock+=40;}});
+  assert.equal(startupReads,3,'Startup retries expected context replacement and continues checking actual readiness');
+  for(const error of [Error('Execution context was destroyed.'),Object.assign(Error('unrelated protocol error'),{cdpError:{code:-32000,message:'Target closed'}}),Object.assign(Error('wrong protocol code'),{cdpError:{code:-32601,message:'Execution context was destroyed.'}})]){
+    await assert.rejects(candidateWaitForUIStartup(async()=>{throw error;},startupURL,{pause:async()=>assert.fail('Unrelated errors must not retry')}),actual=>actual===error);
+  }
+  startupClock=0;
+  await assert.rejects(candidateWaitForUIStartup(async()=>{throw startupContextError;},startupURL,{now:()=>startupClock,pause:async()=>{startupClock+=20000;}}),/Product did not load before initial viewport/);
   const response = (path,headers={}) => {let value;const responseHeaders={};assert(candidateFixtureRoute({url:path,headers},{setHeader:(name,v)=>{responseHeaders[name]=v;},end:v=>{value=v;}}));return {value,headers:responseHeaders};};
   const page=response('/candidate-page').value;
   assert.match(page, /id="send-page"/);assert.match(page, /id="send-worker"/);
@@ -171,7 +207,7 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     if(message.method==='Runtime.exceptionThrown')runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
     const request=pending.get(message.id);if(!request)return;
     pending.delete(message.id);clearTimeout(request.timer);
-    if(message.error)request.reject(Error(JSON.stringify(message.error)));else request.resolve(message.result);
+    if(message.error)request.reject(Object.assign(Error(JSON.stringify(message.error)),{cdpError:message.error}));else request.resolve(message.result);
   });
   const command=(method,params={},sessionId=uiSession)=>new Promise((resolve,reject)=>{
     if(method==='Runtime.evaluate'&&sessionId===guardedTargetSession){guardedTargetEvaluations++;reject(Error('Test attempted forbidden Runtime.evaluate in guarded disposable target'));return;}
@@ -286,8 +322,8 @@ export async function checkCandidateExperimentJourney({address, uiURL, fixtureUR
     const originalSession=(await command('Target.attachToTarget',{targetId:original.targetId,flatten:true},null)).sessionId;
     const target=await command('Target.createTarget',{url:uiURL},null);
     uiSession=(await command('Target.attachToTarget',{targetId:target.targetId,flatten:true},null)).sessionId;
-    await command('Page.enable');await command('Runtime.enable');await command('Network.enable',{maxPostDataSize:65536});await viewport(1440,900);
-    await until("document.querySelector('#request-rows')&&document.querySelector('#capture-state').textContent!=='Connecting'",'Product did not load');
+    await command('Page.enable');await command('Runtime.enable');await command('Network.enable',{maxPostDataSize:65536});
+    await candidateWaitForUIStartup(evaluate,uiURL);await viewport(1440,900);
     const services=await fetch(uiURL+'/api/health',{signal:AbortSignal.timeout(5000)}).then(r=>{assert(r.ok);return r.json();});assert.equal(services.capture_mode,'live','Supported owned broker capture must be configured');assert.equal(services.broker_connected,true,'Actual owned broker socket must be ready');
     receipts.push({phase,kind:'service-readiness',capture_mode:services.capture_mode,broker_connected:services.broker_connected,native_event_producer:'not used; owned request evidence is captured through CDP'});
     const backendReady=await readOnlyState();assert.equal(backendReady.target?.id,original.targetId,'Live debugger must own original fixture target');assert.equal(backendReady.network?.capture_enabled,true,'Original fixture capture requires explicit launch consent');receipts.push({phase,kind:'capture-configuration',original_target:original.targetId,cdp_content_capture:backendReady.network.capture_enabled,consent:'Explicit synthetic-fixture launch flag; candidate field Capture and Arm remain separate visible actions'});

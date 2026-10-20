@@ -32,6 +32,10 @@ struct ClientProjectArchive {
     "examples/request-001.mjs", "README.md", "go/go.mod", "go/client/client.go",
     "go/services/service001.go", "go/cmd/request-001/main.go", "go/client/mimic.go"
   ].map { "reb-client-project/" + $0 })
+  static let pythonRequiredPaths: Set<String> = Set([
+    "provenance.json", "requests/request-001.json", "config.example.json",
+    ".gitignore", "client.py", "requirements.txt", "README.md"
+  ].map { "reb-client-project/" + $0 })
   static let evidencePaths: Set<String> = [
     "reb-client-project/evidence/capture.json", "reb-client-project/evidence/repeater-run.json"
   ]
@@ -75,7 +79,7 @@ struct ClientProjectArchive {
     var central = centralStart
     var paths = Set<String>()
     var provenance: Data?
-    let allowedPaths = requiredPaths.union(evidencePaths)
+    let allowedPaths = requiredPaths.union(pythonRequiredPaths).union(evidencePaths)
     for _ in 0..<count {
       try reader.require(local, 30, before: centralStart)
       try reader.require(central, 46, before: end)
@@ -116,7 +120,8 @@ struct ClientProjectArchive {
       central += 46 + nameLength
     }
     guard local == centralStart, central == end,
-      requiredPaths.isSubset(of: paths), !paths.isDisjoint(with: evidencePaths),
+      (paths.subtracting(evidencePaths) == requiredPaths || paths.subtracting(evidencePaths) == pythonRequiredPaths),
+      !paths.isDisjoint(with: evidencePaths),
       let provenance,
       let object = (try? JSONSerialization.jsonObject(with: provenance)) as? [String: Any],
       object["format"] as? String == "reb-client-project-v1",

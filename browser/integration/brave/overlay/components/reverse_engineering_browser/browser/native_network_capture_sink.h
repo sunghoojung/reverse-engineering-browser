@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "base/files/file_path.h"
+#include "base/no_destructor.h"
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 
@@ -91,6 +92,7 @@ class NativeNetworkCaptureSink final {
                               std::string_view disposition = {}) noexcept;
 
  private:
+  friend class base::NoDestructor<NativeNetworkCaptureSink>;
   NativeNetworkCaptureSink() = default;
 
   base::FilePath owned_profile_path_;

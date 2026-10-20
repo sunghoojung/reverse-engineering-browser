@@ -1,7 +1,10 @@
 // Narrow Chromium type boundaries; the sink/lifecycle/queue are production code.
 #pragma once
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <new>
 #include <span>
 #include <string>
 #include <utility>
@@ -9,6 +12,15 @@
 #define BUILDFLAG(flag) (flag)
 #define IS_POSIX 1
 namespace base {
+template <class T>
+class NoDestructor {
+ public:
+  NoDestructor() { ::new (static_cast<void*>(storage_.data())) T; }
+  T& operator*() { return *std::launder(reinterpret_cast<T*>(storage_.data())); }
+
+ private:
+  alignas(T) std::array<std::byte, sizeof(T)> storage_;
+};
 // Preserve std::span deduction guides instead of alias-template CTAD.
 using std::span;
 template <class T>

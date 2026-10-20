@@ -266,7 +266,9 @@ points, and at least 3 rule families. The URL and the buffer length are not
 classification evidence. An unterminated function in a fully visible source,
 or more than 256 functions, fails closed. Source past the 256 KiB prefix is
 not classified. Anti-bot lexical rules stay offline and do not admit buffers.
-The registration API is not page-facing.
+The scanner uses bounded spans and fixed arrays over one checked allocation;
+token lengths come from string views, including `instructionPointer`. Allocation
+failure still declines classification. The registration API is not page-facing.
 
 
 ### Runtime buffer task-checkpoint timing

@@ -11,7 +11,7 @@ readonly fixture
 mkdir -p "$build/include"
 ln -s "$root/browser/integration/brave/overlay" "$build/include/brave"
 headers=(
-  base/component_export.h base/process/process_handle.h
+  base/component_export.h base/compiler_specific.h base/process/process_handle.h
   base/threading/platform_thread.h base/time/time.h
   base/memory/shared_memory_mapping.h base/memory/unsafe_shared_memory_region.h
   base/no_destructor.h base/threading/thread_local.h base/functional/bind.h

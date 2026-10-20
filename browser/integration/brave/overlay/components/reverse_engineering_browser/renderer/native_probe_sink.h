@@ -114,7 +114,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                               std::string_view url) noexcept;
 
  private:
-  NativeProbeSink() = default;
+  NativeProbeSink() noexcept;
 
   std::uint64_t RecordRuntimeBufferEvent(NativeProbeType type,
                                          std::uint64_t frame_id,

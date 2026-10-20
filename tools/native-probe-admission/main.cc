@@ -427,6 +427,8 @@ void RuntimeSourceFeed() {
   assert(Drain(queue) == 0);
   assert(reb::mojom::NativeProbeHost::artifacts == before);
 
+  capture("instructionPointer++;", 32);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
   capture("while(i<n){switch(op){}}", 32);
   assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
   capture(
@@ -454,7 +456,7 @@ void RuntimeSourceFeed() {
   sink.CaptureRuntimeTypedArray(99, 8, "fixture://owned/script.js", std::span(buffer).first(32),
                                 other_context);
   assert(Drain(queue) == 0);
-  assert(reb::mojom::NativeProbeHost::artifacts == before + 5);
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 6);
   std::cout << "PASS runtime source feed for candidate, likely-VM, dispatch and closed failures\n";
 }
 

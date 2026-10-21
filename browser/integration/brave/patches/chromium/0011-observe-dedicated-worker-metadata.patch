@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-index 38ed358..4665fb3 100644
+index 65246254f992589ddfb0e3886e3c7a413a199779..0067c3f92459286846ba209948fe96b6cb30cd2b 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 @@ -24,6 +24,7 @@
@@ -10,7 +10,7 @@ index 38ed358..4665fb3 100644
  
  #include "base/feature_list.h"
  #include "base/metrics/histogram_functions.h"
-@@ -386,6 +387,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript(
+@@ -386,6 +387,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript_ChromiumImpl(
        CaptureNativeDedicatedWorkerScript(
            execution_context, classic_script.SourceText(), file_name,
            reb::NativeWorkerSourceKind::kClassic);
@@ -24,7 +24,7 @@ index 38ed358..4665fb3 100644
      }
      return script;
    }
-@@ -400,6 +408,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript(
+@@ -400,6 +408,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript_ChromiumImpl(
      CaptureNativeDedicatedWorkerScript(
          execution_context, classic_script.SourceText(), file_name,
          reb::NativeWorkerSourceKind::kClassic);
@@ -38,7 +38,7 @@ index 38ed358..4665fb3 100644
    }
  
    TRACE_EVENT_END1(
-@@ -519,6 +534,16 @@ v8::MaybeLocal<v8::Module> V8ScriptRunner::CompileModule(
+@@ -519,6 +534,16 @@ v8::MaybeLocal<v8::Module> V8ScriptRunner::CompileModule_ChromiumImpl(
          params.GetSourceText(), file_name, reb::NativeWorkerSourceKind::kModule);
    }
  
@@ -56,7 +56,7 @@ index 38ed358..4665fb3 100644
                     [&](perfetto::TracedValue context) {
                       inspector_compile_script_event::Data(
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
-index 57dde66..9e07c9c 100644
+index 14a1829b2659bf115945cecccf66e6e1a60fb4ee..3308cff1a48f345524b31e0661955747155bfbc5 100644
 --- a/third_party/blink/renderer/core/BUILD.gn
 +++ b/third_party/blink/renderer/core/BUILD.gn
 @@ -261,6 +261,7 @@ component("core") {
@@ -67,8 +67,20 @@ index 57dde66..9e07c9c 100644
      "core_initializer.cc",
      "core_initializer.h",
    ]
+@@ -479,7 +480,10 @@ component("core") {
+       "Carbon.framework",
+     ]
+   }
+-  visibility += brave_blink_renderer_core_visibility public_deps += brave_blink_renderer_core_public_deps sources += brave_blink_renderer_core_sources deps += brave_blink_renderer_core_deps
++  visibility += brave_blink_renderer_core_visibility
++  public_deps += brave_blink_renderer_core_public_deps
++  sources += brave_blink_renderer_core_sources
++  deps += brave_blink_renderer_core_deps
+ }
+ 
+ # Certain sources should be compiled with heavy optimization enabled.
 diff --git a/third_party/blink/renderer/core/messaging/blink_transferable_message.h b/third_party/blink/renderer/core/messaging/blink_transferable_message.h
-index 497daf1..21ddc9f 100644
+index 497daf11d275fe0c8a637cb6f944aa04d1b5860b..21ddc9f8dbe0cdbb4b15fb65e788282f2c6c009f 100644
 --- a/third_party/blink/renderer/core/messaging/blink_transferable_message.h
 +++ b/third_party/blink/renderer/core/messaging/blink_transferable_message.h
 @@ -5,6 +5,8 @@
@@ -95,7 +107,7 @@ index 497daf1..21ddc9f 100644
  
    mojom::blink::UserActivationSnapshotPtr user_activation;
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker.cc b/third_party/blink/renderer/core/workers/dedicated_worker.cc
-index bc8726d..16efe7c 100644
+index bc8726d68af801c093bc4baf266c7d3271638df8..16efe7c472fc865bbb0091c9fd1d8ca771885825 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker.cc
 @@ -3,6 +3,7 @@
@@ -141,7 +153,7 @@ index bc8726d..16efe7c 100644
  }
  
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
-index d69f66a..5bd7010 100644
+index d69f66ae6a7b5ecf0027db51ca2c2933c3d1a711..5bd70107a31e6d6ef92441ba5c6adf491eac1cab 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
 @@ -29,6 +29,7 @@
@@ -165,7 +177,7 @@ index d69f66a..5bd7010 100644
        WorkerThreadDebugger::From(script_state->GetIsolate());
    transferable_message.sender_stack_trace_id =
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
-index 4255301..0dbb3e7 100644
+index 4255301e2a33753fd09a06c7f9c1ceafd31601ab..0dbb3e782c8e70e86306791b8da38b336224a253 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
 @@ -3,6 +3,7 @@
@@ -198,7 +210,7 @@ index 4255301..0dbb3e7 100644
    }
    debugger->ExternalAsyncTaskFinished(message.sender_stack_trace_id);
 diff --git a/third_party/blink/renderer/core/workers/worker_global_scope.cc b/third_party/blink/renderer/core/workers/worker_global_scope.cc
-index a501bfd..39f0459 100644
+index a501bfda49a9f52fbf525a0166c7cc24cb237653..39f0459ebfe806d0049c39ef220a95586c290a0a 100644
 --- a/third_party/blink/renderer/core/workers/worker_global_scope.cc
 +++ b/third_party/blink/renderer/core/workers/worker_global_scope.cc
 @@ -26,6 +26,7 @@
@@ -241,7 +253,7 @@ index a501bfd..39f0459 100644
    }
  
 diff --git a/third_party/blink/renderer/core/workers/worker_thread.cc b/third_party/blink/renderer/core/workers/worker_thread.cc
-index ef25707..b6981ea 100644
+index ef25707a97c4d7619da664fe5908681c8f659ad8..b6981ea161acbc95dfccbc2afa592932d42e70e1 100644
 --- a/third_party/blink/renderer/core/workers/worker_thread.cc
 +++ b/third_party/blink/renderer/core/workers/worker_thread.cc
 @@ -25,6 +25,7 @@

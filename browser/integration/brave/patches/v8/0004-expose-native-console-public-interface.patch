@@ -1,7 +1,19 @@
 diff --git a/BUILD.gn b/BUILD.gn
+index 1b40a42ddc558a41af1b3ef8753883c69c05813f..701248da7b5007faff4623dcb0a3a288400247a5 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -3548,6 +3548,7 @@
+@@ -903,7 +903,9 @@ config("internal_config_base") {
+     "$target_gen_dir",
+     "$target_gen_dir/include",
+   ]
+-  _include_dirs = include_dirs include_dirs = [] include_dirs = [ "//brave/chromium_src/v8" ] + _include_dirs
++  _include_dirs = include_dirs
++  include_dirs = []
++  include_dirs = [ "//brave/chromium_src/v8" ] + _include_dirs
+ }
+ 
+ config("internal_config") {
+@@ -3548,6 +3550,7 @@ v8_header_set("v8_headers") {
      "include/v8-message.h",
      "include/v8-microtask-queue.h",
      "include/v8-microtask.h",
@@ -9,42 +21,20 @@ diff --git a/BUILD.gn b/BUILD.gn
      "include/v8-object.h",
      "include/v8-persistent-handle.h",
      "include/v8-primitive-object.h",
-diff --git a/src/debug/debug-interface.cc b/src/debug/debug-interface.cc
---- a/src/debug/debug-interface.cc
-+++ b/src/debug/debug-interface.cc
-@@ -10,6 +10,7 @@
- #include <vector>
- 
- #include "include/v8-function.h"
-+#include "include/v8-native-console.h"
- #include "src/api/api-inl.h"
- #include "src/base/logging.h"
- #include "src/base/utils/random-number-generator.h"
-@@ -1317,6 +1318,22 @@
-   }
+@@ -3588,7 +3591,9 @@ v8_header_set("v8_headers") {
+     ":v8_tracing",
+     ":v8_version",
+   ]
+-  import("//brave/v8/sources.gni") sources += brave_v8_headers_sources public_deps += brave_v8_headers_public_deps
++  import("//brave/v8/sources.gni")
++  sources += brave_v8_headers_sources
++  public_deps += brave_v8_headers_public_deps
  }
  
-+MaybeLocal<Value> EvaluateNativeConsole(Isolate* isolate, Local<String> source,
-+                                        NativeConsoleEvaluationMode mode) {
-+  const bool repl = mode == NativeConsoleEvaluationMode::kRepl;
-+  return EvaluateGlobal(
-+      isolate, source,
-+      repl ? EvaluateGlobalMode::kDisableBreaks
-+           : EvaluateGlobalMode::kDisableBreaksAndThrowOnSideEffect,
-+      repl);
-+}
-+
-+void GetNativeConsoleLexicalNames(Local<Context> context,
-+                                  std::vector<Global<String>>* names,
-+                                  uint32_t limit) {
-+  GetConsoleLexicalNames(context, names, limit);
-+}
-+
- void GetConsoleLexicalNames(v8::Local<v8::Context> v8_context,
-                             std::vector<v8::Global<v8::String>>* names,
-                             uint32_t limit) {
+ if (v8_generate_external_defines_header) {
 diff --git a/include/v8-native-console.h b/include/v8-native-console.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..e176c34e4e82f1eb1d8a0e438f8188c6835bc2cb
 --- /dev/null
 +++ b/include/v8-native-console.h
 @@ -0,0 +1,35 @@
@@ -83,3 +73,38 @@ new file mode 100644
 +}  // namespace v8::debug
 +
 +#endif  // INCLUDE_V8_NATIVE_CONSOLE_H_
+diff --git a/src/debug/debug-interface.cc b/src/debug/debug-interface.cc
+index 97d5e226c5cb6d987450275608d0537297ffd9f0..08db237e0fa7e543ada28942dd91c2a506063565 100644
+--- a/src/debug/debug-interface.cc
++++ b/src/debug/debug-interface.cc
+@@ -10,6 +10,7 @@
+ #include <vector>
+ 
+ #include "include/v8-function.h"
++#include "include/v8-native-console.h"
+ #include "src/api/api-inl.h"
+ #include "src/base/logging.h"
+ #include "src/base/utils/random-number-generator.h"
+@@ -1317,6 +1318,22 @@ void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
+   }
+ }
+ 
++MaybeLocal<Value> EvaluateNativeConsole(Isolate* isolate, Local<String> source,
++                                        NativeConsoleEvaluationMode mode) {
++  const bool repl = mode == NativeConsoleEvaluationMode::kRepl;
++  return EvaluateGlobal(
++      isolate, source,
++      repl ? EvaluateGlobalMode::kDisableBreaks
++           : EvaluateGlobalMode::kDisableBreaksAndThrowOnSideEffect,
++      repl);
++}
++
++void GetNativeConsoleLexicalNames(Local<Context> context,
++                                  std::vector<Global<String>>* names,
++                                  uint32_t limit) {
++  GetConsoleLexicalNames(context, names, limit);
++}
++
+ void GetConsoleLexicalNames(v8::Local<v8::Context> v8_context,
+                             std::vector<v8::Global<v8::String>>* names,
+                             uint32_t limit) {

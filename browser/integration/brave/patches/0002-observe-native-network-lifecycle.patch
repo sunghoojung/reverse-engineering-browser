@@ -1,5 +1,5 @@
 diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
-index 554328f6b..f122a632b 100644
+index 554328f6be49d1fb78dbcd76bcf9963101c0ebbd..82185fb97c3709f83e06c6020e3028768248651e 100644
 --- a/browser/net/brave_proxying_url_loader_factory.cc
 +++ b/browser/net/brave_proxying_url_loader_factory.cc
 @@ -5,6 +5,7 @@
@@ -24,7 +24,7 @@ index 554328f6b..f122a632b 100644
  #include "content/public/common/url_utils.h"
  #include "mojo/public/cpp/system/data_pipe_producer.h"
  #include "mojo/public/cpp/system/string_data_source.h"
-@@ -44,6 +47,28 @@
+@@ -44,6 +48,28 @@
  
  namespace {
  
@@ -53,7 +53,7 @@ index 554328f6b..f122a632b 100644
  // Helper struct for crafting responses.
  struct WriteData {
    base::WeakPtr<network::mojom::URLLoaderClient> client;
-@@ -148,6 +173,23 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::~InProgressRequest() {
+@@ -148,6 +174,23 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::~InProgressRequest() {
    }
  }
  
@@ -77,7 +77,7 @@ index 554328f6b..f122a632b 100644
  template <template <typename> class T>
  void BraveProxyingURLLoaderFactory<T>::InProgressRequest::Restart() {
    UpdateRequestInfo();
-@@ -338,6 +380,14 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnComplete(
+@@ -338,6 +381,14 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnComplete(
      OnRequestError(status);
      return;
    }
@@ -92,7 +92,7 @@ index 554328f6b..f122a632b 100644
    target_client_->OnComplete(status);
  
    // Deletes |this|.
-@@ -508,6 +558,15 @@ void BraveProxyingURLLoaderFactory<
+@@ -508,6 +559,15 @@ void BraveProxyingURLLoaderFactory<
    if (!target_loader_.is_bound() && factory_->target_factory_.is_bound()) {
      // Nothing has cancelled us up to this point, so it's now OK to
      // initiate the real network request.
@@ -132,7 +132,7 @@ index 554328f6b..f122a632b 100644
    proxied_client_receiver_.Resume();
    target_client_->OnReceiveResponse(std::move(current_response_head_),
                                      std::move(current_response_body_),
-@@ -636,6 +704,15 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::
+@@ -636,6 +713,15 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::
    } else {
      ctx_->set_redirect_source(request_.url);
    }
@@ -148,7 +148,7 @@ index 554328f6b..f122a632b 100644
    target_client_->OnReceiveRedirect(redirect_info,
                                      std::move(current_response_head_));
    request_.UpdateOnRedirect(redirect_info);
-@@ -689,6 +766,13 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError(
+@@ -689,6 +775,13 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError(
    // Make a non-const copy of status so that |should_collapse_initiator| can be
    // modified.
    network::URLLoaderCompletionStatus collapse_status(status);
@@ -163,7 +163,7 @@ index 554328f6b..f122a632b 100644
    if (base::FeatureList::IsEnabled(
            ::brave_shields::features::kBraveAdblockCollapseBlockedElements) &&
 diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
-index ef12a0d5f..5648f7373 100644
+index ef12a0d5fd48a4df5e90f81678689be202e3acf3..5648f7373417a636172fbd0785cfeb4e56a2e11c 100644
 --- a/browser/net/brave_proxying_url_loader_factory.h
 +++ b/browser/net/brave_proxying_url_loader_factory.h
 @@ -127,6 +127,7 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
@@ -187,14 +187,14 @@ index ef12a0d5f..5648f7373 100644
  
      raw_ptr<content::BrowserContext> browser_context_ = nullptr;
 diff --git a/browser/sources.gni b/browser/sources.gni
-index 882d2864a..fbaff6cf6 100644
+index 882d2864aeb3b58d7db14be7a0e41a09e4ff36cb..89c6c2291f9f53446c3c58cb44cd576b42e85e65 100644
 --- a/browser/sources.gni
 +++ b/browser/sources.gni
-@@ -135,6 +135,7 @@ if (enable_brave_wallet) {
- 
- brave_chrome_browser_deps = [
-   "//base",
+@@ -166,6 +166,7 @@ brave_chrome_browser_deps = [
+   "//brave/common",
+   "//brave/common:mojo_bindings",
+   "//brave/components/ai_chat/core/common/buildflags",
 +  "//brave/components/reverse_engineering_browser:browser",
-   "//brave/app:brave_generated_resources_grit",
-   "//brave/browser:brave_global_features_impl",
-   "//brave/browser:browser_process",
+ 
+   # Unconditional for gn check as the NTP WebUI always needs the mojom
+   # types since typescript cannnot yet conditionally import during typecheck.

@@ -8,6 +8,9 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const script=fileURLToPath(import.meta.url),delay=ms=>new Promise(r=>setTimeout(r,ms));
+// An append can be observed before its newline is visible to the other process.
+// Keep that tail pending; completed malformed records must still fail parsing.
+const completeLines=path=>readFileSync(path,'utf8').split('\n').slice(0,-1).filter(Boolean);
 if(process.argv[2]==='--transport') {
   const directory=process.env.REB_CAPTURE_FIXTURE;
   const browser=process.argv.at(-1).includes('/devtools/browser/');
@@ -16,7 +19,7 @@ if(process.argv[2]==='--transport') {
   const targets=()=>JSON.parse(readFileSync(join(directory,'targets'),'utf8'));
   const options=JSON.parse(readFileSync(join(directory,'options'),'utf8'));
   const sessions=new Map(),alternates=new Map(),autoParents=new Set();let snapshots=0;let serial=0,pending=Buffer.alloc(0),discovering=false,delayedAdmission=false;
-  let cursor=readFileSync(join(directory,'events'),'utf8').split('\n').filter(Boolean).length;
+  let cursor=completeLines(join(directory,'events')).length;
   function attach(info,parent) {
     if(sessions.has(info.targetId))return sessions.get(info.targetId);
     const sessionId=`${process.pid}:${++serial}:${info.targetId}`;sessions.set(info.targetId,sessionId);
@@ -103,7 +106,7 @@ if(process.argv[2]==='--transport') {
     }
   });
   setInterval(()=>{
-    const events=readFileSync(join(directory,'events'),'utf8').split('\n').filter(Boolean);
+    const events=completeLines(join(directory,'events'));
     while(cursor<events.length) {
       const event=JSON.parse(events[cursor++]);if(!browser)continue;
       if(event.disconnect)process.exit(0);
@@ -116,6 +119,35 @@ if(process.argv[2]==='--transport') {
   },15);
 } else {
   const root=resolve(process.argv[2]??'.'),binary=resolve(process.env.ORIGIN_TRACE_BACKEND||join(root,'apps/origin-trace-backend/target/debug/origin-trace-backend'));
+  async function checkPartialFixtureRecord() {
+    const directory=await mkdtemp(join(tmpdir(),'reb-browser-partial-record-'));
+    let child,exited,diagnostics='';
+    const bounded=async(promise,message)=>{
+      let timer;
+      try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(message)),5000);})]);}
+      finally{clearTimeout(timer);}
+    };
+    try {
+      for(const [name,value] of Object.entries({options:'{}',targets:'[]',events:'',commands:''}))await writeFile(join(directory,name),value);
+      child=spawn(process.execPath,[script,'--transport','ws://127.0.0.1/devtools/browser/fixture'],{env:{...process.env,REB_CAPTURE_FIXTURE:directory}});
+      exited=new Promise(r=>{child.once('exit',r);child.once('error',e=>{diagnostics+=e.message;r();});});
+      child.stderr.on('data',chunk=>diagnostics+=chunk);
+      const ready=new Promise((r,reject)=>{child.stdout.once('data',r);child.once('error',reject);child.once('exit',()=>reject(new Error(diagnostics||'Fixture exited before ready')));});
+      child.stdout.resume();
+      await bounded(ready,'Fixture readiness timed out');
+      appendFileSync(join(directory,'events'),'{"disconnect":');
+      await delay(100);
+      assert.equal(child.exitCode,null,`Unterminated fixture record must wait: ${diagnostics}`);
+      appendFileSync(join(directory,'events'),'true}\n');
+      await bounded(exited,'Completed fixture record was not consumed');
+      assert.equal(child.exitCode,0,diagnostics);
+      console.log('PASS fixture event stream waits for a fragmented record before consuming it');
+    } finally {
+      if(child&&child.exitCode===null){child.kill('SIGKILL');await exited;}
+      await rm(directory,{recursive:true,force:true});
+    }
+  }
+  await checkPartialFixtureRecord();
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:`http://localhost/${id}`,...(parent?{parent}:{})});
   async function fixture(initial,options,run) {
     if(process.env.REB_EXTRA_STATUS_ONLY==='1'&&!options.extraStatus)return;
@@ -128,7 +160,7 @@ if(process.argv[2]==='--transport') {
     const server=createServer((_req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(targets.filter(t=>t.type==='page').map(t=>({...t,id:t.targetId,webSocketDebuggerUrl:`ws://127.0.0.1:${server.address().port}/devtools/page/${t.targetId}`}))));});
     await new Promise(r=>server.listen(0,'127.0.0.1',r));
     const send=value=>appendFileSync(join(directory,'events'),JSON.stringify(value)+'\n');
-    const commands=()=>readFileSync(join(directory,'commands'),'utf8').split('\n').filter(Boolean).map(JSON.parse);
+    const commands=()=>completeLines(join(directory,'commands')).map(JSON.parse);
     const state=async()=>{address??=(await readFile(join(directory,'endpoint'),'utf8')).trim();return(await fetch(new URL('/api/debugger',address),{signal:AbortSignal.timeout(2000)})).json();};
     async function until(predicate,label,timeout=15000) {
       const end=Date.now()+timeout;let last;

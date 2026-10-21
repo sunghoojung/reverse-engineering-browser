@@ -151,6 +151,11 @@ Every snapshot records creator event, execution context, frame, source URL
 (credentials/query/fragment stripped), digest, truncation, and an
 unavailable reason when the copy is dropped.
 
+Allocator lookup skips at most eight builtin constructor frames before reading
+the innermost authored JavaScript frame, including its inlined function. It does
+not fall back past an authored frame with unavailable script metadata. This keeps
+typed-array constructors from hiding their allocating script.
+
 ### Dispatch samples
 
 Add `EventType::kVmDispatchSample = 16` with JSON name `vm_dispatch_sample`.

@@ -31,6 +31,9 @@ skills under `.agents/skills/`.
   explicit session selection, guarded CLI inspection, exact evidence correlation,
   and offline client authoring with synthetic tests
 - [Fast local Brave builds](development/fast-browser-builds.md)
+- [October 21, 2026 integrated development build](development/dev-build-2026-10-21.md):
+  source revisions, available companion preview, validation results, and remaining
+  portable-browser packaging work
 
 - [Opt-in passive public-demo QA](development/public-demo-passive-qa.md):
   bounded observations with explicit capture and integration limits

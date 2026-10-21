@@ -183,7 +183,9 @@ def fake_browser(arguments):
 @contextlib.contextmanager
 def bridge(binary, browser=None, binary_mode=True):
     with tempfile.TemporaryDirectory(prefix="reb-console-check.", dir="/tmp") as directory:
-        root = Path(directory)
+        # Chromium canonicalizes aliases such as /tmp on macOS. Keep the
+        # explicitly owned socket, token and profile under that same root.
+        root = Path(directory).resolve()
         token = root / "token"
         token.write_text(secrets.token_hex(32) + "\n")
         token.chmod(0o600)

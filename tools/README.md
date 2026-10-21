@@ -103,6 +103,9 @@ faults deterministically; they do not replace real-browser acceptance.
 The flattened-session fixture waits for complete newline-terminated event and
 command records when the other process is appending. Its subprocess regression
 splits one record across writes before checking that the completed record runs.
+History and ExtraInfo identity-limit fixtures use bounded batches with public
+state barriers so they do not accidentally test transport queue overflow.
+Intentional transport-pressure cases retain their unpaced bursts.
 
 The opcode, program and full-shell VM UI checks allow a bounded 30 seconds for
 sandboxed Chromium startup on shared CI hosts. UI readiness and CDP requests keep

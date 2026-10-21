@@ -275,7 +275,15 @@ if(process.argv[2]==='--transport') {
   });
   await fixture([info('a')],{extraStatus:true},async({send,until})=>{
     await until(s=>s.network.capture_status.attached_targets===1,'ExtraInfo eviction owner ready');
-    for(let i=0;i<999;i++)request(send,'a',`extra-eviction-${i}`);
+    // Fill HTTP history without racing the independent transport queue cap.
+    for(let i=0;i<999;i++){
+      request(send,'a',`extra-eviction-${i}`);
+      if((i+1)%50===0||i===998){
+        const admitted=await until(s=>s.network.requests.some(r=>r.protocol_request_id===`extra-eviction-${i}`),'ExtraInfo history prefill batch admitted');
+        assert.equal(admitted.network.capture_status.gaps,0,'History prefill must not lose transport events');
+        assert.equal(admitted.network.dropped,0,'History prefill must remain below row capacity');
+      }
+    }
     request(send,'a','retained-before-eviction');send({target:'a',method:'Network.responseReceivedExtraInfo',params:{requestId:'retained-before-eviction',statusCode:201,headers:{}}});
     await until(s=>s.network.requests.some(r=>r.protocol_request_id==='retained-before-eviction'&&r.status===201),'Valid fallback exists before history loss');
     request(send,'a','overflow-trigger');
@@ -291,7 +299,17 @@ if(process.argv[2]==='--transport') {
     await until(s=>s.network.capture_status.attached_targets===1,'ExtraInfo capacity owner ready');
     request(send,'a','before-capacity');send({target:'a',method:'Network.responseReceivedExtraInfo',params:{requestId:'before-capacity',statusCode:201,headers:{}}});
     await until(s=>s.network.requests.some(r=>r.protocol_request_id==='before-capacity'&&r.status===201),'Fallback established before tombstone saturation');
-    for(let i=0;i<2048;i++)send({target:'a',method:'Network.responseReceivedExtraInfo',params:{requestId:`extra-capacity-${i}`,statusCode:200,headers:{}}});
+    // A request in the same session is a FIFO processing barrier. These few
+    // rows stay below HTTP history capacity while ExtraInfo identities fill.
+    for(let i=0;i<2048;i++){
+      send({target:'a',method:'Network.responseReceivedExtraInfo',params:{requestId:`extra-capacity-${i}`,statusCode:200,headers:{}}});
+      if((i+1)%50===0||i===2047){
+        const barrier=`extra-capacity-barrier-${i}`;request(send,'a',barrier);
+        const admitted=await until(s=>s.network.requests.some(r=>r.protocol_request_id===barrier),'ExtraInfo identity prefill batch admitted');
+        assert.equal(admitted.network.capture_status.gaps,0,'Identity prefill must not lose transport events');
+        assert.equal(admitted.network.dropped,0,'Identity prefill must not evict HTTP history');
+      }
+    }
     const saturated=await until(s=>s.network.capture_status.status_extra_info_overflow===true,'ExtraInfo identity capacity is visible');
     assert.equal(saturated.network.dropped,0,'Identity cap is separate from HTTP row eviction');
     const prior=saturated.network.requests.find(r=>r.protocol_request_id==='before-capacity');assert.deepEqual([prior.status,prior.status_source,prior.wire_status],[null,'unavailable',null]);

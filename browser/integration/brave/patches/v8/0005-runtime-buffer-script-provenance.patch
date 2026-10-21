@@ -38,34 +38,43 @@ diff --git a/src/api/api.cc b/src/api/api.cc
 index eaa9562..2202299 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -11010,6 +11010,32 @@ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
+@@ -11010,6 +11010,41 @@ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
  CALLBACK_SETTER(RuntimeBufferCallback, RuntimeBufferCallback,
                  runtime_buffer_callback)
  
 +bool Isolate::GetRuntimeBufferAllocatingScript(RuntimeBufferScript* result) {
-+  if (result == nullptr) return false;
++  if (result == nullptr)
++    return false;
 +  *result = {};
 +  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
 +  i::JavaScriptStackFrameIterator iterator(isolate);
-+  if (iterator.done()) return false;
-+  // GetInnermost preserves an inlined allocator's script instead of naming
-+  // the outer optimized function. Only this one JavaScript frame is inspected.
-+  const i::FrameSummary summary = i::FrameSummary::GetInnermost(iterator.frame());
-+  if (!summary.IsJavaScript()) return false;
-+  const auto script_object = summary.AsJavaScript().script();
-+  if (!i::IsScript(*script_object)) return false;
-+  const auto script = i::Cast<i::Script>(script_object);
-+  if (script->id() <= 0 || !i::IsString(script->source())) return false;
-+  result->context = Utils::ToLocal(summary.AsJavaScript().native_context());
-+  result->script_id = script->id();
-+  result->is_eval = script->compilation_type() == i::Script::CompilationType::kEval;
-+  result->source = Utils::ToLocal(
-+      i::direct_handle(i::Cast<i::String>(script->source()), isolate));
-+  const auto name = script->GetNameOrSourceURL();
-+  if (i::IsString(name)) {
-+    result->name = Utils::ToLocal(i::direct_handle(i::Cast<i::String>(name), isolate));
++  // TypedArray constructors are JavaScript-linkage builtins without an
++  // authored script. Skip only that bounded builtin prefix, then inspect
++  // exactly the innermost authored JavaScript frame (including inlining).
++  for (int skipped = 0; skipped < 8 && !iterator.done(); ++skipped, iterator.Advance()) {
++    if (iterator.frame()->function()->shared()->HasBuiltinId())
++      continue;
++    const i::FrameSummary summary = i::FrameSummary::GetInnermost(iterator.frame());
++    if (!summary.IsJavaScript())
++      return false;
++    const auto script_object = summary.AsJavaScript().script();
++    if (!i::IsScript(*script_object))
++      return false;
++    const auto script = i::Cast<i::Script>(script_object);
++    if (script->id() <= 0 || !i::IsString(script->source()))
++      return false;
++    result->context = Utils::ToLocal(summary.AsJavaScript().native_context());
++    result->script_id = script->id();
++    result->is_eval = script->compilation_type() == i::Script::CompilationType::kEval;
++    result->source =
++        Utils::ToLocal(i::direct_handle(i::Cast<i::String>(script->source()), isolate));
++    const auto name = script->GetNameOrSourceURL();
++    if (i::IsString(name)) {
++      result->name = Utils::ToLocal(i::direct_handle(i::Cast<i::String>(name), isolate));
++    }
++    return true;
 +  }
-+  return true;
++  return false;
 +}
 +
  CALLBACK_SETTER(WasmAsyncResolvePromiseCallback,

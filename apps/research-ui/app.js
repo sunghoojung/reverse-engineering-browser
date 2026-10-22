@@ -240,34 +240,8 @@
             : ['running', 'paused'].includes(state.debuggerSession?.state));
       }
 
-      function shownSequenceGaps() {
-        return typeof state.sequenceGaps === 'bigint' ? state.sequenceGaps : countSequenceGaps(state.events);
-      }
-
-      function shownQueueDrops() {
-        return typeof state.queueDrops === 'bigint' ? state.queueDrops : countReportedQueueDrops(state.events);
-      }
-
-      function eventGapLabel(gapCount, reportedDrops) {
-        return `${gapCount} missing event ${gapCount === 1n ? 'ID' : 'IDs'}` +
-          (reportedDrops > 0n ? ` · ${reportedDrops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '');
-      }
-
-      function fingerprintCoverageNotice(eventsLimited, displayLimited, displayLimit, gapCount, reportedDrops) {
-        const limits = [];
-        if (eventsLimited) limits.push('the event window is capped');
-        if (displayLimited) limits.push(`only the newest ${displayLimit} matching events are rendered`);
-        if (gapCount > 0n) {
-          limits.push(`${gapCount} capture-wide event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing`);
-        }
-        if (reportedDrops > 0n) {
-          limits.push(`${reportedDrops} queue ${reportedDrops === 1n ? 'drop was' : 'drops were'} reported (may overlap missing IDs)`);
-        }
-        return `Fingerprint activity is visible with partial coverage: ${limits.join('; ')}.`;
-      }
-
       // Both refresh paths project the same status so neither can erase the other's gaps.
-      // Gap and queue-drop totals come from the capture, not the rendered event window.
+      // Summaries describe the scanned store/tail, independently of either rendered window.
       function renderNetworkNotice() {
         const contentCapture = networkContentCaptureEnabled();
         const active = networkContentCaptureActive();
@@ -284,15 +258,21 @@
         }
         if (state.eventsLimited) {
           if (kind === 'empty') kind = 'gap';
-          messages.push('Showing a 5,000-event window; older events remain recorded on disk.');
+          messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
+        }
+        if (state.networkEventsAvailable) messages.push('Traffic uses a separate newest-network window, independent of canvas and other activity.');
+        if (state.networkEventsLimited) messages.push('The network event window is also capped; older request lifecycle evidence may be incomplete.');
+        if (state.eventCountScope === 'bounded_tail') {
+          if (kind === 'empty') kind = 'gap';
+          messages.push('Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
         }
         if (gapCount > 0n) {
           if (kind === 'empty') kind = 'gap';
-          messages.push(`${gapCount} captured event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing. Native evidence may be incomplete.`);
+          messages.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${eventCountScopeLabel()}; late arrivals may overlap. Native evidence may be incomplete.`);
         }
         if (reportedDrops > 0n) {
           if (kind === 'empty') kind = 'gap';
-          messages.push(`The queue reports ${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : '; no sequence jump is visible in this capture'}.`);
+          messages.push(`The queue reports ${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : `; no sequence jump is visible in ${eventCountScopeLabel()}`}.`);
         }
         if (contentCapture) {
           if (active) {
@@ -343,6 +323,8 @@
           else if (state.sessionMode === 'demo') messages.push('Developer evidence loaded. It does not represent a live capture.');
           else if (state.sessionMode === 'idle') messages.push('No evidence is bundled. Start a live capture to populate the workspace.');
         }
+        const failedNotice = trafficFailedRequestNotice(state.requests);
+        if (failedNotice) messages.push(failedNotice);
         if (messages.length) setNetworkNotice(kind, messages.join(' '));
         else elements.networkNotice.hidden = true;
       }
@@ -1277,9 +1259,9 @@
           setSignalNotice('empty', state.sessionMode === 'demo'
             ? 'Deterministic fingerprint evidence is not available in this build.'
             : 'No fingerprint-relevant browser activity has been captured yet.');
-        } else if (state.eventsLimited || displayLimited || gapCount > 0n || reportedDrops > 0n) {
+        } else if (state.eventsLimited || state.eventCountScope === 'bounded_tail' || displayLimited || gapCount > 0n || reportedDrops > 0n) {
           setSignalNotice('partial', fingerprintCoverageNotice(
-            state.eventsLimited, displayLimited, signalEventDisplayLimit, gapCount, reportedDrops
+            state.eventsLimited, displayLimited, signalEventDisplayLimit, gapCount, reportedDrops, eventCountScopeLabel()
           ));
         } else if (state.sessionMode === 'demo') {
           setSignalNotice('demo', 'Demo mode: both Canvas images are reconstructed locally from the visible calls. They are not native-captured pixels.');
@@ -2231,7 +2213,7 @@
         } else if (state.vmFindings.length === 0) {
           setVmNotice('empty', 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.');
         } else if (gapCount > 0n) {
-          setVmNotice('gap', `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete.`);
+          setVmNotice('gap', `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).`);
         } else {
           elements.vmNotice.hidden = true;
         }
@@ -11753,17 +11735,13 @@
           for (const key of state.signalNewKeys) {
             if (!currentSignalKeys.has(key)) state.signalNewKeys.delete(key);
           }
-          state.eventsLimited = body.count >= 5000;
-          const sequenceGaps = captureWideTotal(body.sequence_gaps);
-          const queueDrops = captureWideTotal(body.queue_drops);
-          if (sequenceGaps !== null) state.sequenceGaps = sequenceGaps;
-          if (queueDrops !== null) state.queueDrops = queueDrops;
+          acceptEventWindow(body);
           const vmModel = vmFindingsFromEvents(state.events);
           state.eventVmFindings = vmModel.findings;
           state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
           state.malformedVmFindings = vmModel.malformedCount;
           const eventOrigin = state.sessionMode === 'demo' ? 'demo' : 'live';
-          state.nativeRequests = requestsFromEvents(state.events, eventOrigin);
+          state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
           rebuildTrafficRequests();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
@@ -11814,6 +11792,11 @@
         state.eventsLimited = false;
         state.sequenceGaps = 0n;
         state.queueDrops = 0n;
+        state.eventCountScope = 'rendered_window';
+        state.networkEventsAvailable = false;
+        state.networkEventsLimited = false;
+        state.sequenceGapsSaturated = false;
+        state.queueDropsSaturated = false;
         state.requests = [];
         state.artifacts = [];
         state.openArtifactIds = [];
@@ -11827,7 +11810,7 @@
         state.selectedField = null;
         state.lastUpdatedLabel = 'start a live capture';
         renderShellStatus();
-        elements.gaps.textContent = '0 missing event IDs';
+        elements.gaps.textContent = eventGapLabel(0n, 0n);
         setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
         renderRequests();
         renderEvidence();

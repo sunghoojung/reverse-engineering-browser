@@ -659,3 +659,37 @@ flag makes the attribution limit visible: all ExtraInfo-derived status and wire
 status are retracted, and later ExtraInfo attribution remains disabled. HTTP rows,
 `responseReceived`, and redirect response status continue normally. Identity
 history is not evicted and later reused as a false proof of uniqueness.
+
+
+## Native event window and summary scope
+
+`GET /api/events?limit=5000` returns `count`/`events` for the newest general
+window and `network_events` for a separate newest network-lifecycle window.
+Each array is capped by the requested limit (maximum 5,000); ordering is file
+arrival order, not numeric sequence order. Network selection includes
+`request_initiated`, `request_started`, `request_redirected`, `response_started`,
+`response_completed`, `request_completed`, and `request_failed` with category
+`network`. General event churn cannot displace this second window within the
+scan budget. Neither array promises a complete request lifecycle.
+
+The reader scans at most the newest 67,108,864 bytes, plus one boundary byte.
+`event_window` reports `scan_start` and `scan_end` as canonical unsigned byte
+offsets (end exclusive), `scan_limit`, and separate `events_limited` and
+`network_events_limited` flags. A cut-through record prefix is omitted, not
+parsed as a new record. `scope: "store"` means the scan starts at byte zero;
+`"bounded_tail"` excludes an older prefix, even if fewer than 5,000 rows remain.
+
+`sequence_gaps` and `queue_drops` are canonical unsigned decimal strings over
+validated records in this declared scope. They are not session totals.
+Sequence gaps count forward jumps of per-session/process high-water marks;
+late arrivals can overlap those observed jumps and do not reduce the total.
+A canonical positive unsigned decimal gap-marker payload contributes its value
+to queue drops, otherwise the marker weighs one. Drop totals may overlap gaps.
+The respective `_saturated` flags distinguish clamping at u64 maximum.
+
+Malformed or incomplete JSON in the scanned records fails the refresh; the UI
+retains its last valid data. A complete final record without a newline is valid.
+The cache verifies exact overlap/boundary bytes and file identity before reuse.
+The Rust endpoint supports this contract; the older Swift stored-evidence URL
+scheme does not yet provide these fields. The UI accepts that legacy response
+but resets old summaries and labels fallback counts as visible-window-only.

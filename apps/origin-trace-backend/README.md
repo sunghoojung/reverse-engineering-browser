@@ -36,6 +36,35 @@ large string IDs, omitted selectors, and malformed/missing session selectors.
 matches are explicitly ambiguous, while an absent exact match remains empty.
 See [exact trace selection](../../protocol/http-api.md#exact-request-trace-selection).
 
+## Bounded native event polling
+
+`GET /api/events` reads at most the newest 64 MiB plus one boundary byte.
+It returns independent newest general and native-network lifecycle windows,
+each capped by `limit` (at most 5,000). Canvas/WebGL floods cannot take network
+slots within the scanned tail. All seven lifecycle types, including redirect,
+failed, and response-completed outcomes, are retained in arrival order. Older
+records remain on disk, but records before the byte budget are not searched.
+
+`event_window.scope` is `store` only when the scan includes byte zero; otherwise
+it is `bounded_tail`. Counts include validated records in that declared scope,
+not just displayed rows, and are **not session totals**. `sequence_gaps` sums
+forward jumps of each session/process high-water mark in arrival order. Late
+arrivals do not subtract earlier jumps. `queue_drops` adds canonical positive
+unsigned marker payloads (one for an invalid/zero marker payload); it may overlap
+sequence jumps. Both totals saturate explicitly rather than wrapping.
+
+The polling cache verifies exact overlapping bytes, the preceding boundary byte,
+and file identity before reusing record summaries. Rotation, truncation, rewrites,
+and malformed/incomplete tails invalidate reuse. A complete final JSON record
+without a newline is accepted but reparsed when appended. Cache waiters do not
+hold any of the four shared reader permits. Work stays bounded by the tail,
+not the total capture size; overlapping records avoid repeated JSON parsing.
+
+The live native application uses this Rust endpoint. The separate Swift
+stored-evidence URL-scheme reader has not yet gained these windows/counters or
+this bounded cache. Its native parity and macOS build/UI acceptance remain an
+explicit gate; the UI labels legacy-reader counts as visible-window-only.
+
 The listener accepts only `127.0.0.1`, `localhost`, or `::1`; every API request
 validates Host, Origin, and fetch-site headers. Static serving allowlists the
 application assets explicitly. Stored identifiers and public response schemas follow

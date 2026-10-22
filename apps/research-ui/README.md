@@ -651,8 +651,16 @@ and summary focus. At most four 128 KiB byte snapshots detect in-place changes;
 leaving the tab releases the result DOM and these snapshots.
 
 The ledger mounts at most 500 fixed-height rows. Previous/Next page through the
-retained window without changing the evidence: the native API retains up to
-5,000 events; the existing CDP window retains up to 1,000 requests. Filtering
+retained window without changing the evidence: the Rust native-event API returns separate newest general and network lifecycle
+windows of up to 5,000 events each from at most the newest 64 MiB; the existing
+CDP window retains up to 1,000 requests. Canvas/WebGL activity does not consume
+network slots within that byte budget. Traffic uses the network window, including
+redirect, failed, and response-completed outcomes. Notices distinguish a capped
+window from the bounded tail and label summary counts by their actual scan scope.
+Sequence-gap counts are arrival-order high-water jumps, not a deduplicated count
+of still-missing IDs after late arrivals, and queue drops may overlap them.
+The separate Swift stored-evidence reader remains a legacy visible-window-only
+path pending native parity; no whole-capture count is inferred for it. Filtering
 and sorting cover the whole retained window. Rows and capture-tab controls are
 reused across refreshes. New arrivals briefly accent the row edge once; pending
 requests use a steady label. Reduced-motion disables animation and transitions.

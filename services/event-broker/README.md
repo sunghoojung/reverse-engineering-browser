@@ -38,6 +38,10 @@ When the tracker reaches capacity, it evicts streams in deterministic insertion
 order so repeated evidence replays produce the same gap accounting.
 If combined gap counts exceed 64-bit range, the count saturates at its maximum
 and a separate saturation flag is reported instead of wrapping silently.
+Accepted gap markers also accumulate explicit queue-drop totals across ring
+eviction. They may overlap observed sequence jumps. The low-level broker
+snapshot is not the Traffic retention policy: the disk-backed HTTP reader owns
+independent bounded general and network windows and reports their scan scope.
 Protocol v2 stores 64-bit values as canonical decimal strings so opaque IDs and
 large counters remain exact in JavaScript clients.
 Protocol v3 additionally carries a browser-global, session-local `tab_id` for

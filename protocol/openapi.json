@@ -8270,7 +8270,8 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Event"
-            }
+            },
+            "maxItems": 5000
           },
           "broker_connected": {
             "type": "boolean"
@@ -8291,14 +8292,14 @@
           },
           "sequence_gaps": {
             "$ref": "#/components/schemas/Uint64String",
-            "description": "Capture-wide missing sequence IDs accumulated the way the event broker does. This is not recomputed from the returned window."
+            "description": "Sum of observed high-water sequence jumps within event_window scope, including gap markers. Late arrivals do not subtract previously observed jumps; this is not the cardinality of currently missing IDs."
           },
           "sequence_gaps_saturated": {
             "type": "boolean"
           },
           "queue_drops": {
             "$ref": "#/components/schemas/Uint64String",
-            "description": "Capture-wide sum of gap-record drop counts. A capped event window does not zero this total."
+            "description": "Sum of validated gap-record drop counts within event_window scope. May overlap sequence gaps; a bounded tail is not a whole-capture total."
           },
           "queue_drops_saturated": {
             "type": "boolean"
@@ -8309,6 +8310,54 @@
               "type": "object",
               "additionalProperties": true
             }
+          },
+          "network_events": {
+            "type": "array",
+            "maxItems": 5000,
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "description": "Independent newest native-network lifecycle window within the scanned bytes. Canvas and other event categories cannot consume this window."
+          },
+          "event_window": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "store",
+                  "bounded_tail"
+                ]
+              },
+              "scan_start": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "scan_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "scan_limit": {
+                "type": "integer",
+                "enum": [
+                  67108864
+                ]
+              },
+              "events_limited": {
+                "type": "boolean"
+              },
+              "network_events_limited": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "scope",
+              "scan_start",
+              "scan_end",
+              "scan_limit",
+              "events_limited",
+              "network_events_limited"
+            ],
+            "description": "Half-open complete-record byte scope of both windows and summaries. A bounded tail excludes the older prefix and is not a session-total claim."
           }
         },
         "required": [
@@ -8321,7 +8370,9 @@
           "sequence_gaps",
           "sequence_gaps_saturated",
           "queue_drops",
-          "queue_drops_saturated"
+          "queue_drops_saturated",
+          "network_events",
+          "event_window"
         ]
       },
       "Artifact": {

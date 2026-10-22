@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -61,37 +62,14 @@ int main() {
 
   const std::vector<reb::EventRecord> window = broker.Snapshot(kWindow);
   Expect(window.size() == kWindow, "snapshot keeps the 5000-event cap");
-  Expect(window.size() >= 5, "window holds the protected records");
-  if (window.size() >= 5) {
-    Expect(window[0].header.type == reb::EventType::kRequestInitiated &&
-               window[0].header.sequence_number == 1,
-           "request_initiated stays in the capped window");
-    Expect(window[1].header.type == reb::EventType::kRequestStarted &&
-               window[1].header.sequence_number == 2,
-           "request_started stays in the capped window");
-    Expect(window[2].header.type == reb::EventType::kResponseStarted &&
-               window[2].header.sequence_number == 3,
-           "response_started stays in the capped window");
-    Expect(window[3].header.type == reb::EventType::kRequestCompleted &&
-               window[3].header.sequence_number == 4,
-           "request_completed stays in the capped window");
-    Expect(window[4].header.type == reb::EventType::kGap && window[4].header.sequence_number == 285,
-           "earlier gap record stays in the capped window");
-    const auto payload = reb::InlinePayload(window[4]);
-    Expect(payload.size() == 3 && payload[0] == std::byte{'2'} && payload[1] == std::byte{'8'} &&
-               payload[2] == std::byte{'0'},
-           "retained gap payload is the decimal count 280");
-    Expect(window[5].header.sequence_number == 292,
-           "oldest displaced canvas calls leave the window");
-  }
-  Expect(std::ranges::none_of(
-             window,
-             [](const reb::EventRecord& event) { return event.header.sequence_number == 286; }),
-         "canvas api_call 286 is displaced by the protected records");
-  Expect(std::ranges::any_of(
-             window,
-             [](const reb::EventRecord& event) { return event.header.sequence_number == 5286; }),
-         "newest canvas call remains inside the cap");
+  Expect(window.front().header.sequence_number == 287,
+         "low-level snapshots remain the newest general suffix");
+  Expect(window.back().header.sequence_number == 5286, "newest record stays visible");
+  Expect(std::ranges::none_of(window,
+                              [](const reb::EventRecord& event) {
+                                return event.header.category == reb::EventCategory::kNetwork;
+                              }),
+         "network retention belongs to the independent disk-backed API window");
 
   reb::EventBroker evicting(4);
   Expect(Accept(evicting, Make(reb::EventCategory::kWebGl, reb::EventType::kApiCall, 1)),
@@ -114,11 +92,29 @@ int main() {
                               }),
          "a full ring of non-canvas events can drop the gap record itself");
 
+  for (const std::string_view payload :
+       {"", "0", "01", "-1", "+1", " 2", "2 ", "18446744073709551616"}) {
+    reb::EventBroker invalid_payload(1);
+    reb::EventRecord event = Make(reb::EventCategory::kWebGl, reb::EventType::kGap, 1);
+    Expect(reb::SetInlinePayload(event, payload), "bounded malformed count payload");
+    Expect(Accept(invalid_payload, event), "gap record envelope remains valid");
+    Expect(invalid_payload.Stats().queue_drops == 1, "noncanonical drop count weighs one");
+  }
+  reb::EventBroker saturating(1);
+  reb::EventRecord maximum = Make(reb::EventCategory::kWebGl, reb::EventType::kGap, 1);
+  Expect(reb::SetInlinePayload(maximum, "18446744073709551615"), "maximum count payload");
+  Expect(Accept(saturating, maximum), "maximum count ingest");
+  Expect(Accept(saturating, Make(reb::EventCategory::kWebGl, reb::EventType::kGap, 2)),
+         "overflow ingest");
+  Expect(saturating.Stats().queue_drops == std::numeric_limits<std::uint64_t>::max(),
+         "drop count saturates");
+  Expect(saturating.Stats().queue_drops_saturated, "saturation is explicit");
+
   if (failures != 0) {
     std::cerr << failures << " event broker window checks failed\n";
     return EXIT_FAILURE;
   }
-  std::cout << "PASS event broker keeps gap and network records in a 5000-event window and "
+  std::cout << "PASS event broker preserves newest general snapshots and "
                "reports 280 capture-wide queue drops\n";
   return EXIT_SUCCESS;
 }

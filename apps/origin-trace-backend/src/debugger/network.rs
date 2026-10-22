@@ -216,7 +216,8 @@ impl Debugger {
                     });
                     return;
                 };
-                let catalog_title = self.catalog_target_title(owner.target["id"].as_str().unwrap_or(""));
+                let catalog_title =
+                    self.catalog_target_title(owner.target["id"].as_str().unwrap_or(""));
                 self.update(|s| {
                     if owner.retired.load(Ordering::Acquire) {return;}
                     if p["redirectResponse"].is_object() {response(s,owner,&json!({"requestId":id,"response":p["redirectResponse"]}),true);finish(s,owner,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}

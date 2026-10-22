@@ -1566,11 +1566,20 @@ mod tests {
             {"target_id":"other","target_title":""}
         ]}});
         fill_empty_target_titles(&mut state, "tab", "Example demo");
-        assert_eq!(state["network"]["requests"][0]["target_title"], "Example demo");
-        assert_eq!(state["network"]["requests"][1]["target_title"], "already named");
+        assert_eq!(
+            state["network"]["requests"][0]["target_title"],
+            "Example demo"
+        );
+        assert_eq!(
+            state["network"]["requests"][1]["target_title"],
+            "already named"
+        );
         assert_eq!(state["network"]["requests"][2]["target_title"], "");
         fill_empty_target_titles(&mut state, "tab", "");
-        assert_eq!(state["network"]["requests"][0]["target_title"], "Example demo");
+        assert_eq!(
+            state["network"]["requests"][0]["target_title"],
+            "Example demo"
+        );
     }
     #[test]
     fn waiting_catalog_cannot_grow_past_target_bound() {

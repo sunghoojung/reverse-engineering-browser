@@ -2194,7 +2194,7 @@
       function isVmOpcodeSnapshot(snapshot) {
         return isPlainObject(snapshot) && hasOnlyKeys(snapshot, new Set([
           'artifact_id', 'origin', 'sha256', 'byte_count', 'preview_hex', 'truncated', 'unavailable_reason'
-        ])) && isCanonicalInteger(snapshot.artifact_id, 0n, uint64Max) && snapshot.origin === 'runtime-typed-array' &&
+        ])) && isCanonicalInteger(snapshot.artifact_id, 0n, uint64Max) && ['runtime-typed-array', 'captured-module'].includes(snapshot.origin) &&
           (snapshot.sha256 === undefined || vmWorkspaceDigest(snapshot.sha256)) &&
           isSafeIntegerInRange(snapshot.byte_count, 0, Number.MAX_SAFE_INTEGER) &&
           (snapshot.preview_hex === null || (typeof snapshot.preview_hex === 'string' &&

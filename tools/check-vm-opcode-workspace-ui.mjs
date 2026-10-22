@@ -73,6 +73,12 @@ const bytesView=renderApi.renderVmBytecode(many),selector=descendants(bytesView)
 assert.equal(selector.children.length,2);assert(bytesView.textContent.includes('01'));
 selector.value='1';selector.events.change();assert(bytesView.textContent.includes('aa bb'));assert(bytesView.textContent.includes('authored partial'));
 const noBytes=renderApi.renderVmBytecode({...many,snapshots:[]});assert(descendants(noBytes).find(node=>node.tagName==='select').disabled);assert(noBytes.textContent.includes('No bytecode preview'));
+const capturedModule=renderApi.renderVmBytecode({snapshots:[{artifact_id:'5',origin:'captured-module',byte_count:2,preview_hex:'0e01',truncated:false,unavailable_reason:null}],bytecode_artifact_id:'5'});
+assert(capturedModule.textContent.includes('0e 01'));
+assert(capturedModule.textContent.includes('Dispatch instruction bytes from the captured module. This is not a runtime memory snapshot.'));
+const capturedWithoutPreview=renderApi.renderVmBytecode({snapshots:[{artifact_id:'5',origin:'captured-module',byte_count:0,preview_hex:null,truncated:false,unavailable_reason:null}]});
+assert(capturedWithoutPreview.textContent.includes('No bytecode preview was retained.'));
+assert(!capturedWithoutPreview.textContent.includes('Dispatch instruction bytes'));
 const originalLinks=hostLinks.workspaces[0].links;hostLinks.workspaces[0].links=Array.from({length:65},(_,index)=>({...originalLinks[0],host_event:{...originalLinks[0].host_event,sequence_number:String(50+index)}}));
 const hostView=renderApi.renderVmHostLinks(hostSource);findButton(hostView,'Next host links').click();findButton(hostView,'Next host links').click();assert(hostView.textContent.includes('event 1:1:114'));assert(findButton(hostView,'Next host links').disabled);hostLinks.workspaces[0].links=originalLinks;
 const sampleWorkspace={...hostSource,samples:Array.from({length:65},(_,index)=>({...sample,sample_index:index})),handlers:[{...hostSource.handlers.find(handler=>handler.opcode===sample.opcode),sample_count:65}]};

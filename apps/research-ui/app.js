@@ -1755,6 +1755,9 @@
             const bytes = textElement('pre', 'vm-bytecode-preview', preview);
             bytes.setAttribute('aria-label', 'Bytecode hex preview');
             previewPanel.append(bytes);
+            if (snapshot?.origin === 'captured-module') {
+              previewPanel.append(textElement('p', 'vm-effect-detail', 'Dispatch instruction bytes from the captured module. This is not a runtime memory snapshot.'));
+            }
           } else {
             previewPanel.append(textElement('div', 'vm-workspace-empty', snapshot?.unavailable_reason || 'No bytecode preview was retained.'));
           }

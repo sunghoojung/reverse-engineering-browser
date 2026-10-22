@@ -270,7 +270,10 @@
           "$ref": "#/$defs/uint64"
         },
         "origin": {
-          "const": "runtime-typed-array"
+          "enum": [
+            "runtime-typed-array",
+            "captured-module"
+          ]
         },
         "sha256": {
           "$ref": "#/$defs/digest"

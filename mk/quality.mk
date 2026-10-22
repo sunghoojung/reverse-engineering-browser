@@ -84,6 +84,7 @@ shellcheck:
 	shellcheck $(SHELL_SOURCES)
 
 python-check:
+	python3 tools/check-brave-services.py
 	python3 tools/release-companion-test.py
 	python3 tools/write-release-pair-test.py
 	python3 tools/publish-release-pair-test.py

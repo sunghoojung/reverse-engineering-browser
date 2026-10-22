@@ -43,8 +43,9 @@ native-console: native-console-build
 native-console-check: native-console-build origin-trace-backend
 	python3 tools/check-native-console.py --binary $(NATIVE_CONSOLE_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
 
-e2e: origin-trace-backend native-vm-fixture producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder native-console-check
+e2e: native-request-identity-check origin-trace-backend native-vm-fixture producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder native-console-check
 	@mkdir -p $(BUILD_DIR)/sessions
+	python3 tools/check-native-request-identity.py --broker $(BROKER_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
 		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
@@ -114,3 +115,7 @@ live: app-build broker artifact-receiver debugger-transport
 deob-benchmark: deob-worker-build
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	python3 tools/run-deobfuscation-benchmark.py
+
+.PHONY: native-request-identity-check
+native-request-identity-check: broker
+	python3 tools/check-native-request-identity.py --broker $(BROKER_BINARY)

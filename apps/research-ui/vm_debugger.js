@@ -215,9 +215,21 @@ function createOwnedVmController(options = {}) {
     options.onState?.(next); emit(); return true;
   };
   const response = async (path, init, timeout) => {
-    const abort = new AbortController(); const handle = schedule(() => abort.abort(), timeout);
+    const abort = new AbortController();
+    let timedOut = false;
+    const handle = schedule(() => {
+      timedOut = true;
+      const reason = new Error('The status read timed out.');
+      reason.name = 'TimeoutError';
+      abort.abort(reason);
+    }, timeout);
     try {
       const reply = await request(path, {...init, signal: abort.signal, cache: 'no-store', credentials: 'same-origin'});
+      if (timedOut) {
+        const error = new Error('The status read timed out.');
+        error.name = 'TimeoutError';
+        throw error;
+      }
       const data = typeof reply?.text === 'function' ? ownedVmParseJSON(await reply.text()) : reply;
       if (reply?.ok === false || ownedVmObject(data) && Object.hasOwn(data, 'error')) {
         const error = new Error(ownedVmText(data?.error, 512) ? data.error : 'The debugger request was rejected.');
@@ -234,7 +246,13 @@ function createOwnedVmController(options = {}) {
         const next = await response('/api/vm-debugger', {method: 'GET'}, 6000);
         if (!disposed && token === epoch) { if (!uncertain) notice = ''; accept(next, recoveryCommand); }
       } catch (error) {
-        if (!disposed && token === epoch) { notice = `Status unavailable. Last confirmed evidence is retained. ${error.message}`; emit(); }
+        if (!disposed && token === epoch) {
+          const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+          notice = timedOut
+            ? (view ? 'Status refresh timed out. The last confirmed fixture state is still shown.' : 'The status read timed out.')
+            : `Status unavailable. Last confirmed evidence is retained. ${error.message}`;
+          emit();
+        }
       } finally { read = null; poll(); }
     })();
     return read;

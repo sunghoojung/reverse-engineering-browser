@@ -1174,7 +1174,7 @@
         }
         state.signalSelectedKeysByTab.set(state.signalTabId, state.selectedSignalEventKey);
 
-        const newCount = signalEvents.filter(event => state.signalNewKeys.has(signalEventKey(event))).length;
+        const newCount = orderedEvents.filter(event => state.signalNewKeys.has(signalEventKey(event))).length;
         elements.signalFeedStatus.textContent = newCount > 0
           ? `${newCount} new ${newCount === 1 ? 'operation' : 'operations'} at the top`
           : 'Newest first · all caught up';
@@ -7652,6 +7652,9 @@
           state.jwtPending = true;
           setToolsNotice('running', action === 'jwt_verify' ? 'Verifying the HMAC signature locally…' : 'Decoding the JWT locally…');
           renderTools();
+          if (action === 'jwt_verify' && toolsElements.jwtSecret.value.length === 0) {
+            throw new TypeError('HMAC verification needs a secret. The previous inspection is unchanged.');
+          }
           const request = action === 'jwt_verify'
             ? {protocol_version: 1, action, token, secret: toolsElements.jwtSecret.value}
             : {protocol_version: 1, action, token};
@@ -7665,7 +7668,6 @@
             ? (action === 'jwt_verify' ? 'JWT signature check completed locally.' : 'JWT decoded without checking its signature.')
             : (body.error || 'JWT inspection failed.'));
         } catch (error) {
-          state.jwtResult = null;
           setToolsNotice('error', error.message);
         } finally {
           toolsElements.jwtSecret.value = '';
@@ -8804,7 +8806,8 @@
       function renderSourceContent(source, view = null, target = {}) {
         const identity = sourceIdentity(source);
         const resetEditor = () => {state.sourceEditorView = null; elements.sourceCode.replaceChildren(); renderSourceWindowControls(null);
-          if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = 'Source text unavailable; nothing searched.';};
+          if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = 'Source text unavailable; nothing searched.';
+          if (elements.sourcePosition) elements.sourcePosition.textContent = '';};
         if (!source) {
           resetEditor();
           elements.sourceLanguage.textContent = 'Plain text';
@@ -8852,6 +8855,7 @@
           retry.type = 'button';
           retry.addEventListener('click', retrySourcePreview.bind(null, sourceReference(source)));
           elements.sourceCodeEmpty.replaceChildren(document.createTextNode(source.loadError || 'This preview was released to keep Sources memory bounded. Reopen its immutable bytes.'), retry);
+          if (source.loadError) elements.sourcePosition.textContent = 'Preview unavailable. The previous caret does not apply to this file.';
           return;
         }
         view ??= sourceDisplayView(source);
@@ -9053,6 +9057,8 @@
       }
 
       function sourceViewLabel(source, view = null) {
+        if (source && source.content === undefined && source.loadError) return 'Preview unavailable';
+        if (source && source.content === undefined && source.loading) return 'Preview loading';
         if (state.sourceWasm && source?.kind === 'wasm' && source.source_type === 'artifact') {
           const report = state.wasmCache.get(wasmKey(source));
           const request = state.wasmRequests.get(wasmKey(source));

@@ -62,7 +62,7 @@ function harness(start = envelope()) {
   let current = copy(start), post = async request => ack(current, request), get = async () => copy(current), sequence = 0;
   const log = [], clock = timers(), modelChanges = [], controller = debuggerUI.createOwnedVmController({
     ...clock, commandId: () => `command-${++sequence}`, onChange: value => modelChanges.push(value),
-    request: async (path, options) => { log.push({path, ...options}); return options.method === 'POST' ? post(JSON.parse(options.body)) : get(); },
+    request: async (path, options) => { log.push({path, ...options}); return options.method === 'POST' ? post(JSON.parse(options.body)) : get(path, options); },
   });
   return {controller, log, clock, modelChanges, set(value) { current = copy(value); }, setPost(handler) { post = handler; }, setGet(handler) { get = handler; }};
 }
@@ -186,6 +186,32 @@ export async function checkOwnedVmDebuggerController() {
   const closeUnknown = harness(paused); await closeUnknown.controller.refresh();
   closeUnknown.setPost(async command => { closeUnknown.set(envelope()); return {...ack(envelope(), command, 'outcome_unknown'), ...annotation}; });
   assert.equal(await closeUnknown.controller.action('close'), false); await flush(); assert.equal(closeUnknown.controller.model().view.session, null); assert(closeUnknown.controller.model().allowed.create); closeUnknown.controller.destroy();
+  const hangStatus = (options) => new Promise((_, reject) => {
+    const fail = () => {
+      const reason = options?.signal?.reason;
+      reject(reason instanceof Error ? reason : Object.assign(new Error('The status read timed out.'), {name: 'TimeoutError'}));
+    };
+    if (options?.signal?.aborted) fail();
+    else options?.signal?.addEventListener('abort', fail, {once: true});
+  });
+  const hung = harness(paused); await hung.controller.refresh();
+  const retained = hung.controller.model().view.session.executed_count;
+  hung.setGet((_path, options) => hangStatus(options));
+  const hungRead = hung.controller.refresh();
+  await hung.clock.advance(6000);
+  await hungRead;
+  assert.equal(hung.controller.model().view.session.executed_count, retained);
+  assert.match(hung.controller.model().notice, /Status refresh timed out\. The last confirmed fixture state is still shown\./);
+  assert.doesNotMatch(hung.controller.model().notice, /aborted without reason/);
+  hung.controller.destroy();
+  const cold = harness();
+  cold.setGet((_path, options) => hangStatus(options));
+  const coldRead = cold.controller.refresh();
+  await cold.clock.advance(6000);
+  await coldRead;
+  assert.equal(cold.controller.model().view, null);
+  assert.equal(cold.controller.model().notice, 'The status read timed out.');
+  cold.controller.destroy();
   console.log('PASS owned VM strict native codec, full uint64, real-action scopes, inert GET/visibility, pending controls, stale reads, unknown reconciliation, no retries, expiry and capability gating');
 }
 

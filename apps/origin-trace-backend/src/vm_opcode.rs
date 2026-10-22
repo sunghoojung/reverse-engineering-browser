@@ -857,13 +857,21 @@ pub(crate) fn workspace(
     let (snapshots, snapshot_omissions) = snapshots(root, artifact, snapshot_artifacts);
     omissions.extend(snapshot_omissions);
     if snapshots.is_empty() {
+        let module = runtime == "webassembly";
         if let Some(snapshot) = result.get("bytecode_snapshot")
             && snapshot["snapshot_hex"].is_string()
         {
             omissions.push(json!({
                 "reason": "static-initializer-only",
-                "detail": "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot names this allocating script in the same session, navigation, and frame."
+                "detail": if module {
+                    "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot was retained for this captured module. The handler list comes from the module bytes."
+                } else {
+                    "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot names this allocating script in the same session, navigation, and frame."
+                }
             }));
+        } else if module {
+            omissions.push(json!({"reason":"runtime-snapshot-unavailable", "detail":
+                "No runtime snapshot was retained for this captured module. The handler list comes from the module bytes, not an allocating script."}));
         } else {
             omissions.push(json!({"reason":"runtime-snapshot-unavailable", "detail":
                 "No runtime snapshot names this captured allocating script in the same session, navigation, and frame. The allocating script may not have been captured."}));
@@ -1164,6 +1172,18 @@ mod tests {
                 assert_eq!(handlers[0]["state"], "inferred");
             }
             assert_eq!(workspace["coverage"]["complete"], false);
+            let snapshot_detail = workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|omission| omission["reason"] == "runtime-snapshot-unavailable")
+                .and_then(|omission| omission["detail"].as_str())
+                .unwrap_or("");
+            assert!(snapshot_detail.contains("module bytes"), "{snapshot_detail}");
+            assert!(
+                !snapshot_detail.contains("may not have been captured"),
+                "{snapshot_detail}"
+            );
             assert_schema(&document);
         }
         let (_, analysis, document) = analyze_artifact(&wasm_fixture("non_vm"), "wasm", &[]);

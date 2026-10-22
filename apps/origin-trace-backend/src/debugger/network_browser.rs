@@ -883,6 +883,57 @@ impl Debugger {
         parent: Option<&str>,
         destroyed_target: Option<&str>,
     ) {
+        // A parent session's teardown also destroys its recursive attachments,
+        // even when their individual detach notifications never reach us. Use
+        // only recorded owners on this connection, and validate the root's
+        // parent route before propagating that proof. Target identity alone in
+        // a detachedFromTarget event does not prove a session ended.
+        let owners = self
+            .capture
+            .owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|owner| {
+                owner
+                    .connection
+                    .as_ref()
+                    .is_some_and(|connection| Arc::ptr_eq(connection, c))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut ended = std::collections::BTreeSet::new();
+        for owner in &owners {
+            let exact_session = owner.session.as_deref() == session
+                && session.is_some()
+                && owner.parent_session.as_deref() == parent;
+            let exact_target =
+                destroyed_target.is_some() && owner.target["id"].as_str() == destroyed_target;
+            if (exact_session || exact_target)
+                && let Some(sid) = &owner.session
+            {
+                ended.insert(sid.clone());
+            }
+        }
+        loop {
+            let before = ended.len();
+            for owner in &owners {
+                if owner
+                    .parent_session
+                    .as_ref()
+                    .is_some_and(|parent| ended.contains(parent))
+                    && let Some(sid) = &owner.session
+                {
+                    ended.insert(sid.clone());
+                }
+            }
+            if ended.len() == before {
+                break;
+            }
+        }
+        // Do not nest owners -> cleanup locks: cleanup saturation takes the
+        // reverse order when it retires a browser connection. The Arc snapshot
+        // above retains only bounded, immutable session ancestry.
         let queue = self
             .capture
             .browser
@@ -896,7 +947,10 @@ impl Debugger {
             let exact_session = session == Some(sid.as_str()) && owner_parent.as_deref() == parent;
             let exact_target =
                 destroyed_target.is_some() && destroyed_target == proof.target.as_deref();
-            if exact_session || exact_target {
+            let ended_ancestor = owner_parent
+                .as_ref()
+                .is_some_and(|parent| ended.contains(parent));
+            if exact_session || exact_target || ended_ancestor {
                 proof.gone.store(true, Ordering::Release);
             }
         }

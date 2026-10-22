@@ -78,6 +78,21 @@ if(process.argv[2]==='--transport') {
       else if(m.method==='Target.detachFromTarget'&&options.detachRace&&m.params.sessionId?.startsWith('alternate:race')) {
         const alternate=alternates.get(m.params.sessionId);
         if(options.detachRace==='transport') {log({event:'cleanup-transport-fault'});process.exit(0);}
+        if(['parent-detached','ancestor-detached','parent-destroyed','wrong-ancestor-session','wrong-ancestor-parent'].includes(options.detachRace)&&alternate) {
+          const owner=[...sessions].find(([,sid])=>sid===alternate.parent)?.[0];
+          const ancestor=options.detachRace==='ancestor-detached'?targets().find(t=>t.targetId===owner)?.parent:owner;
+          const ancestorInfo=targets().find(t=>t.targetId===ancestor),sessionId=sessions.get(ancestor),parent=sessions.get(ancestorInfo?.parent);
+          if(options.detachRace==='wrong-ancestor-session')emit({method:'Target.detachedFromTarget',params:{sessionId:'unrelated-old-parent',targetId:ancestor},...(parent?{sessionId:parent}:{})});
+          else if(options.detachRace==='wrong-ancestor-parent')emit({method:'Target.detachedFromTarget',params:{sessionId,targetId:ancestor},sessionId:'unrelated-outer-parent'});
+          else {
+            invalidate(ancestor);alternates.delete(m.params.sessionId);
+            if(options.detachRace==='parent-destroyed') {
+              writeFileSync(join(directory,'targets'),JSON.stringify(targets().filter(t=>t.targetId!==ancestor)));
+              emit({method:'Target.targetDestroyed',params:{targetId:ancestor}});
+            } else emit({method:'Target.detachedFromTarget',params:{sessionId,targetId:ancestor},...(parent?{sessionId:parent}:{})});
+            log({event:'confirmed-cleanup-ancestor',target:ancestor});
+          }
+        }
         if(options.detachRace==='wrong-parent'&&alternate)emit({method:'Target.detachedFromTarget',params:{sessionId:m.params.sessionId,targetId:alternate.target},sessionId:'unrelated-parent-session'});
         if(options.detachRace==='destroyed'&&alternate){writeFileSync(join(directory,'targets'),JSON.stringify(targets().filter(t=>t.targetId!==alternate.target)));invalidate(alternate.target);alternates.delete(m.params.sessionId);emit({method:'Target.targetDestroyed',params:{targetId:alternate.target}});log({event:'confirmed-cleanup-destroyed'});}
         if(options.detachRace==='wrong-session'&&alternate)emit({method:'Target.detachedFromTarget',params:{sessionId:'unrelated-old-session',targetId:alternate.target},sessionId:alternate.parent});
@@ -151,10 +166,11 @@ if(process.argv[2]==='--transport') {
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:`http://localhost/${id}`,...(parent?{parent}:{})});
   async function fixture(initial,options,run) {
     if(process.env.REB_LIST_DISCOVERY_ONLY==='1'&&!options.listDiscovery)return;
+    if(process.env.REB_ANCESTOR_CLEANUP_ONLY==='1'&&!options.ancestorCleanup)return;
     if(process.env.REB_EXTRA_STATUS_ONLY==='1'&&!options.extraStatus)return;
     if(process.env.REB_ENDPOINT_ONLY==='1'&&!options.endpointCase)return;
     if(process.env.REB_TERMINAL_HANDOFF_ONLY==='1'&&!options.terminalHandoff)return;
-    if(process.env.REB_CLEANUP_REGRESSION_ONLY==='1'&&(options.terminalHandoff||options.endpointCase||options.extraStatus))return;
+    if(process.env.REB_CLEANUP_REGRESSION_ONLY==='1'&&(options.terminalHandoff||options.endpointCase||options.extraStatus||options.ancestorCleanup))return;
     const directory=await mkdtemp(join(tmpdir(),'reb-browser-sessions-'));let backend,exited,address,diagnostics='';let targets=initial;
     await writeFile(join(directory,'options'),JSON.stringify(options));
     const save=()=>writeFileSync(join(directory,'targets'),JSON.stringify(targets));save();await writeFile(join(directory,'events'),'');await writeFile(join(directory,'commands'),'');
@@ -397,6 +413,29 @@ if(process.argv[2]==='--transport') {
     }
     console.log(`PASS terminal handoff: ${label} ${positive?'preserves source evidence and retrieves child body':'rejects unsafe adoption'}`);
   });
+  for(const detachRace of ['parent-detached','ancestor-detached','parent-destroyed'])await fixture([
+    info('service','service_worker'),info('page'),...(detachRace==='ancestor-detached'?[info('frame','iframe','page')]:[]),info('healthy')
+  ],{detachRace,ancestorCleanup:true,snapshotRootsOnly:true},async({send,until,commands})=>{
+    const count=detachRace==='ancestor-detached'?4:3;
+    await until(s=>s.network.capture_status.attached_targets===count,'Ancestor cleanup owners ready');
+    for(const target of ['service','healthy']){request(send,target,`before-${target}`);finish(send,target,`before-${target}`);}
+    const before=await until(s=>s.network.requests.filter(r=>r.response.body.state==='available').length===2,'Unaffected owner evidence before ancestor loss');
+    const owners=new Map(before.network.requests.map(r=>[r.target_id,r.capture_owner]));
+    const opens=commands().filter(c=>c.event==='open'&&c.browser).length;
+    send({duplicate:'service',parent:detachRace==='ancestor-detached'?'frame':'page',key:`race-${detachRace}`});
+    await until(()=>commands().some(c=>c.event==='cleanup-error-reply'),'Ancestor ends before redundant child cleanup rejection');
+    let s=await until(s=>s.network.capture_status.cleanup_already_gone===1||s.network.capture_status.cleanup_failures>0,'Ancestor cleanup reply classified');
+    assert.equal(s.network.capture_status.cleanup_failures??0,0,'Confirmed ancestor loss must not close unrelated capture owners');
+    assert.equal(s.network.capture_status.cleanup_already_gone,1);
+    const lost=detachRace==='ancestor-detached'?2:1;
+    assert.equal(s.network.capture_status.gaps,before.network.capture_status.gaps+lost,'Only actual ancestor owners retire, not unrelated capture');
+    for(const target of ['service','healthy']){request(send,target,`after-${target}`);finish(send,target,`after-${target}`);}
+    s=await until(s=>['service','healthy'].every(target=>s.network.requests.some(r=>r.protocol_request_id===`after-${target}`&&r.response.body.state==='available')),'Unaffected owners continue capturing after ancestor loss');
+    for(const target of ['service','healthy'])assert.equal(s.network.requests.find(r=>r.protocol_request_id===`after-${target}`).capture_owner,owners.get(target));
+    assert.equal(commands().filter(c=>c.event==='open'&&c.browser).length,opens,'Ancestor cleanup cannot reconnect the browser transport');
+    assert(!commands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'||(c.method==='Target.setAutoAttach'&&!c.sessionId)),'Passive capture never holds or resumes startup');
+    console.log(`PASS browser sessions: ${detachRace} proves alternate child cleanup without retiring unrelated owners`);
+  });
   // A negative detach reply is safe only when this exact session's lifetime
   // has already ended. Target identity alone must not retire a live owner.
   await fixture([info('service','service_worker'),info('page')],{detachRace:'confirmed'},async({send,until,commands})=>{
@@ -468,12 +507,12 @@ if(process.argv[2]==='--transport') {
     await until(s=>s.network.requests.some(r=>r.protocol_request_id==='after-target-destroyed'&&r.response.body.state==='available'),'Healthy page survives destroyed alternate target');
     console.log('PASS browser sessions: exact target destruction proves cleanup without retiring unrelated page');
   });
-  for(const detachRace of ['unknown','wrong-session','wrong-parent','transport','confirmed-transport'])await fixture([info('service','service_worker'),info('page')],{detachRace},async({send,state,until,commands})=>{
+  for(const detachRace of ['unknown','wrong-session','wrong-parent','wrong-ancestor-session','wrong-ancestor-parent','transport','confirmed-transport'])await fixture([info('service','service_worker'),info('page')],{detachRace,ancestorCleanup:detachRace.startsWith('wrong-ancestor-')},async({send,state,until,commands})=>{
     await until(s=>s.network.capture_status.attached_targets===2,'Unproven cleanup owners ready');
     const opens=commands().filter(c=>c.event==='open'&&c.browser).length;
     send({duplicate:'service',parent:'page',key:`race-${detachRace}`});
     const recovered=await until(s=>commands().filter(c=>c.event==='open'&&c.browser).length>opens&&s.network.capture_status.attached_targets===2&&s.network.capture_status.gaps>0,'Unproven cleanup still closes and recovers',45000);
-    if(['unknown','wrong-session','wrong-parent'].includes(detachRace)) {
+    if(['unknown','wrong-session','wrong-parent','wrong-ancestor-session','wrong-ancestor-parent'].includes(detachRace)) {
       assert.equal(recovered.network.capture_status.cleanup_failures,1,'Fatal cleanup is counted once');
       assert.match(recovered.network.capture_status.last_error,/^Capture detach failed: /,'First fatal cleanup reason survives ensuing EOF');
       await delay(200);
@@ -486,6 +525,7 @@ if(process.argv[2]==='--transport') {
     await until(s=>s.network.requests.some(r=>r.protocol_request_id===`recovered-${detachRace}`&&r.response.body.state==='available'),'Recovery after unproven cleanup');
     console.log(`PASS browser sessions: ${detachRace} cleanup failure remains fail-closed with explicit gap and recovery`);
   });
+  if(process.env.REB_ANCESTOR_CLEANUP_ONLY==='1')process.exit(0);
   await fixture([info('service','service_worker'),...Array.from({length:8},(_,i)=>info(`page${i}`))],{slowDetach:true},async({send,until,commands})=>{
     let s=await until(s=>s.network.capture_status.attached_targets===9,'Root service worker and eight parent pages ready');
     request(send,'service','before-duplicates');finish(send,'service','before-duplicates');

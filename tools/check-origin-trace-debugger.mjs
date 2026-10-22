@@ -710,16 +710,28 @@ function referenceNativeIds(records, native) {
   });
 }
 const correlationNative = [nativeRequest("tie-first", 110), nativeRequest("tie-second", 90),
-  nativeRequest("post", 100, "fixture.invalid", "POST"), nativeRequest("other-host", 100, "other.invalid")];
+  nativeRequest("native-post", 100, "fixture.invalid", "POST"), nativeRequest("other-host", 100, "other.invalid")];
 const correlationRecords = [networkRecord("first"), networkRecord("second"), networkRecord("third"),
   networkRecord("post", {method: "POST"}), networkRecord("other", {url: "http://other.invalid/redirect"})];
 const nativeIds = (records, native) => Array.from(networkModels.requestsFromDebuggerNetwork(networkSnapshot(records), native), request => request.event?.id ?? null);
-assert.deepEqual(nativeIds(correlationRecords, correlationNative), ["tie-first", "tie-second", null, "post", "other-host"]);
+assert.deepEqual(nativeIds(correlationRecords, correlationNative), ["tie-first", "tie-second", null, "native-post", "other-host"]);
 const correlatedProjection = networkModels.requestsFromDebuggerNetwork(networkSnapshot(correlationRecords), correlationNative);
-assert.deepEqual(correlatedProjection.map(request => request.correlatedNativeId), ["tie-first", "tie-second", null, "post", "other-host"]);
 const visibleWithMiss = networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative.concat([nativeRequest("missed-document", 100, "only-native.invalid")]));
-assert.deepEqual(visibleWithMiss.map(request => request.id), ["first", "second", "third", "post", "other", "missed-document"]);
-assert.equal(networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative).length, correlatedProjection.length);
+assert.deepEqual(visibleWithMiss.map(request => request.id), ["first", "second", "third", "post", "other", "tie-first", "tie-second", "native-post", "other-host", "missed-document"]);
+assert.deepEqual(networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative).slice(correlatedProjection.length), correlationNative);
+const otherTargetNative = {...nativeRequest("native-other-tab", 100), tabId:"999", hostOnly:true};
+const otherTargetProjection = networkModels.requestsFromDebuggerNetwork(networkSnapshot([networkRecord("cdp-other-tab")]), [otherTargetNative]);
+assert.equal(otherTargetProjection[0].event, otherTargetNative.event, "Existing heuristic association is not an exact target join");
+assert.deepEqual(networkModels.trafficRowsForLiveCapture(otherTargetProjection, [otherTargetNative]).map(request => request.id), ["cdp-other-tab", "native-other-tab"], "Same host/method/time on another target cannot erase native evidence");
+const repeatedNative = ["native-repeat-1", "native-repeat-2"].map(id => ({...nativeRequest(id, 100), tabId:"999", hostOnly:true}));
+const repeatedProjection = networkModels.requestsFromDebuggerNetwork(networkSnapshot([networkRecord("cdp-repeat-1"), networkRecord("cdp-repeat-2")]), repeatedNative);
+const repeatedVisible = networkModels.trafficRowsForLiveCapture(repeatedProjection, repeatedNative);
+assert.deepEqual(repeatedVisible.map(request => request.id), ["cdp-repeat-1", "cdp-repeat-2", "native-repeat-1", "native-repeat-2"], "Ambiguous repeated requests retain every independent row");
+assert.equal(repeatedVisible[2], repeatedNative[0], "Native evidence stays host-only and is not merged with CDP content");
+assert.equal(repeatedVisible[3], repeatedNative[1]);
+assert.deepEqual(networkModels.trafficRowsForLiveCapture([], repeatedNative), repeatedNative);
+assert.equal(networkModels.trafficRowsForLiveCapture(correlatedProjection, []), correlatedProjection);
+console.log('PASS independent native Traffic rows survive cross-target and repeated-request heuristic correlations');
 assert.deepEqual(nativeIds([networkRecord("limit", {started_monotonic_ms: 10_100}), networkRecord("past", {started_monotonic_ms: 10_100.001})],
   [nativeRequest("one", 100), nativeRequest("two", 100)]), ["one", null]);
 const variedNative = Array.from({length: 250}, (_, i) => nativeRequest(`native-${i}`, i * 7,
@@ -6401,6 +6413,27 @@ async function checkTrafficBrowser() {
     // Settle any prior offline response before giving the authored state to the
     // comparison fixture. Do not stop or replace production polling handlers.
     await evaluate("(async()=>{const started=performance.now();while(state.refreshing||state.debuggerRefreshing){if(performance.now()-started>5000)throw Error('Prior Traffic refresh did not settle');await new Promise(resolve=>setTimeout(resolve,20));}})()");
+    const nativeRetentionDebugger = JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
+    nativeRetentionDebugger.network = networkSnapshot([networkRecord('cdp-independent-row')]);
+    await viewport(1440,900);
+    await evaluate(`window.nativeRetentionOriginal={requests:state.requests,nativeRequests:state.nativeRequests,debuggerSession:state.debuggerSession,sessionMode:state.sessionMode};
+      state.debuggerSession=${JSON.stringify(nativeRetentionDebugger)};state.sessionMode='live';
+      state.nativeRequests=[{...fixtureRequests[1],id:'native-independent-row',path:'fixture.invalid',method:'GET',firstTimestamp:100000000n,tabId:'999',origin:'live',hostOnly:true,targetKind:'host',operation:'request_started',event:null,events:[],exchange:null}];
+      state.requestTabId='all';state.requestDomain='all';state.requestType='all';elements.requestFilter.value='';state.trafficWindowStart=0;state.trafficWindowAnchor=null;
+      rebuildTrafficRequests();renderRequests();renderInspector();`);
+    assert.equal(await evaluate("document.querySelectorAll('.request-row').length"),2,'Live rebuild must render both independent same-host/time observations');
+    await click('[data-scope-id="999"]');
+    assert.equal(await evaluate("document.querySelectorAll('.request-row').length"),1);
+    await click('[data-request-id="native-independent-row"]');
+    assert.equal(await evaluate('state.selectedRequestId'),'native-independent-row');
+    assert(await evaluate("state.requests.find(row=>row.id==='native-independent-row').hostOnly && !state.requests.find(row=>row.id==='native-independent-row').captureRecord"),'Native selection cannot borrow the heuristic CDP body');
+    await click('[data-scope-id="999"]');await key('Home','Home',{windowsVirtualKeyCode:36});
+    assert.equal(await evaluate('state.requestTabId'),'all','Keyboard scope navigation restores both observations');
+    assert.equal(await evaluate("document.querySelectorAll('.request-row').length"),2);
+    await screenshot('requests-independent-native-evidence');
+    await viewport(360,740);await screenshot('requests-independent-native-evidence-narrow');
+    assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Retained native evidence fits the narrow ledger');
+    await evaluate('resetRequestSelection();Object.assign(state,nativeRetentionOriginal);delete window.nativeRetentionOriginal;renderRequests();renderInspector();');
     const capturedComparison = await checkCapturedComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,emptyDebugger:JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'))});
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
     const websocketInspection=await checkWebSocketInteractions({evaluate,viewport,click,key,screenshot});

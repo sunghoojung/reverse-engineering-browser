@@ -1,0 +1,95 @@
+diff --git a/components/ai_chat/core/common/buildflags/buildflags.gni b/components/ai_chat/core/common/buildflags/buildflags.gni
+index 9e694dab..45375416 100644
+--- a/components/ai_chat/core/common/buildflags/buildflags.gni
++++ b/components/ai_chat/core/common/buildflags/buildflags.gni
+@@ -6,7 +6,9 @@
+ import("//brave/components/brave_origin/buildflags/buildflags.gni")
+ 
+ declare_args() {
+-  enable_ai_chat = !is_brave_origin_branded
++  # REB is a research browser; bundled consumer services are opt-in at build
++  # time.
++  enable_ai_chat = false
+ }
+ 
+ declare_args() {
+diff --git a/components/brave_news/common/buildflags/buildflags.gni b/components/brave_news/common/buildflags/buildflags.gni
+index 35c321cc..5ed115cc 100644
+--- a/components/brave_news/common/buildflags/buildflags.gni
++++ b/components/brave_news/common/buildflags/buildflags.gni
+@@ -6,5 +6,7 @@
+ import("//brave/components/brave_origin/buildflags/buildflags.gni")
+ 
+ declare_args() {
+-  enable_brave_news = !is_brave_origin_branded
++  # REB is a research browser; bundled consumer services are opt-in at build
++  # time.
++  enable_brave_news = false
+ }
+diff --git a/components/brave_rewards/core/buildflags/buildflags.gni b/components/brave_rewards/core/buildflags/buildflags.gni
+index 8c2b1b85..3577c162 100644
+--- a/components/brave_rewards/core/buildflags/buildflags.gni
++++ b/components/brave_rewards/core/buildflags/buildflags.gni
+@@ -6,7 +6,9 @@
+ import("//brave/components/brave_origin/buildflags/buildflags.gni")
+ 
+ declare_args() {
+-  enable_brave_rewards = !is_brave_origin_branded
++  # REB is a research browser; bundled consumer services are opt-in at build
++  # time.
++  enable_brave_rewards = false
+ 
+   # These are public, non-secret endpoints and custodian fee addresses. They
+   # are defaulted here so they don't need to be supplied via the build
+diff --git a/components/brave_talk/buildflags/buildflags.gni b/components/brave_talk/buildflags/buildflags.gni
+index 390d5521..cfaedf9e 100644
+--- a/components/brave_talk/buildflags/buildflags.gni
++++ b/components/brave_talk/buildflags/buildflags.gni
+@@ -6,5 +6,7 @@
+ import("//brave/build/config.gni")
+ 
+ declare_args() {
+-  enable_brave_talk = !is_brave_origin_branded
++  # REB is a research browser; bundled consumer services are opt-in at build
++  # time.
++  enable_brave_talk = false
+ }
+diff --git a/components/brave_vpn/common/buildflags/buildflags.gni b/components/brave_vpn/common/buildflags/buildflags.gni
+index af3b0663..a7c3880c 100644
+--- a/components/brave_vpn/common/buildflags/buildflags.gni
++++ b/components/brave_vpn/common/buildflags/buildflags.gni
+@@ -6,14 +6,13 @@
+ import("//brave/components/brave_origin/buildflags/buildflags.gni")
+ 
+ declare_args() {
+-  # On macOS, vpn is not available w/o signing.
+-  # Build with Brave VPN architecture 1.0 support.
+-  enable_brave_vpn_v1 =
+-      (is_win || is_android || is_mac || is_ios) && !is_brave_origin_branded
++  # REB is a research browser; bundled consumer services are opt-in at build
++  # time. On macOS, vpn is not available w/o signing. Build with Brave VPN
++  # architecture 1.0 support.
++  enable_brave_vpn_v1 = false
+ 
+   # Build with Brave VPN architecture 2.0 support.
+-  enable_brave_vpn_v2 =
+-      (is_win || is_android || is_mac || is_ios) && !is_brave_origin_branded
++  enable_brave_vpn_v2 = false
+ }
+ 
+ # Brave VPN is enabled, if at least one VPN architecture is enabled.
+diff --git a/components/brave_wallet/common/buildflags/buildflags.gni b/components/brave_wallet/common/buildflags/buildflags.gni
+index d8286148..8ea7905d 100644
+--- a/components/brave_wallet/common/buildflags/buildflags.gni
++++ b/components/brave_wallet/common/buildflags/buildflags.gni
+@@ -6,7 +6,9 @@
+ import("//brave/components/brave_origin/buildflags/buildflags.gni")
+ 
+ declare_args() {
+-  enable_brave_wallet = !is_brave_origin_branded
++  # REB is a research browser; bundled consumer services are opt-in at build
++  # time.
++  enable_brave_wallet = false
+ 
+   # Enables unclocking wallet with passoword set by command line.
+   # Only for dev builds.

@@ -45,9 +45,27 @@ network events while preserving the fixed record size.
 
 When `--trace-store` is present, the broker also maintains a bounded cold-path
 correlation index and writes a versioned Origin Trace edge sidecar. The index
-uses identifiers already in accepted events, emits at most three edges per
-event, and never infers value flow. The renderer queue, browser transport, and
-disabled capture path are unchanged. Parent and initiator identifiers are
+uses identifiers already in accepted events and never infers value flow. Each
+event emits at most three direct edges. Renderer and browser request IDs are
+separate namespaces: the exact bridge is the browser event's session ID plus
+`initiator_process_id` and `initiator_request_id`, matched only to a retained
+renderer `request_initiated` event, not to any equal-numbered request record.
+
+Independent process queues may deliver the browser lifecycle first. The index
+retains at most its configured capacity of pending exact-identity links and
+resolves them when the initiation arrives, emitting up to that capacity of
+additional edges in deterministic reference order. Both endpoints must remain
+retained, and observed duplicate initiation identities fail closed for later
+joins. Missing, zero, ambiguous or evicted identities remain unjoined; host,
+URL and timestamp similarity never supply a link. Event and edge wire formats
+are unchanged, and the original request IDs stay intact. Existing sidecars are
+not rewritten. `make native-request-identity-check` exercises the actual broker
+with synthetic disjoint IDs, both process arrival orders, reuse ambiguity and
+retention limits. `make e2e` additionally reads those same broker stores through
+the Rust HTTP API and verifies the repaired edges survive readback. Request signal profiles remain arrival-order snapshots; this
+repair does not backfill their separate sidecar.
+
+The renderer queue, browser transport, and disabled capture path are unchanged. Parent and initiator identifiers are
 observed relationships; artifact/request joins are visibly correlated.
 
 When `--signal-store` is present, a separate bounded cold-path index writes one

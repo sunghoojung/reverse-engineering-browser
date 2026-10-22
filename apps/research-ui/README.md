@@ -848,7 +848,11 @@ Live refresh and DOM updates belong in `app.js`.
 The native scheme handler and packaging script explicitly list shipped assets.
 
 Traffic correlates native requests within method/host buckets, preserving native
-order for equal-time matches. Decoded binary bodies are reused only while their
+order for equal-time matches. These heuristic associations never establish an
+exact native/CDP request join: Traffic retains both independently observed rows,
+including native host-only evidence from another tab or an ambiguous repeated
+request. A native row is not hidden merely because a CDP row has a similar host,
+method and time. Decoded binary bodies are reused only while their
 request remains in the current network window and its encoded bytes are unchanged;
 headers and capture states always come from the latest validated snapshot. Live
 source text is retained only for the current validated script catalog and matching

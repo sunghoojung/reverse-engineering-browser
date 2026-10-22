@@ -1,9 +1,11 @@
 #include "reb/origin_trace.hpp"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 
 namespace reb {
 namespace {
@@ -29,6 +31,16 @@ bool HasBrowserContext(const EventRecord& event) noexcept {
   return event.header.browser_context_id_high != 0 || event.header.browser_context_id_low != 0;
 }
 
+bool IsBrowserRequestLifecycle(const EventRecord& event) noexcept {
+  if (event.header.category != EventCategory::kNetwork || event.header.request_id == 0) {
+    return false;
+  }
+  const EventType type = event.header.type;
+  return type == EventType::kRequestStarted || type == EventType::kRequestRedirected ||
+         type == EventType::kResponseStarted || type == EventType::kResponseCompleted ||
+         type == EventType::kRequestCompleted || type == EventType::kRequestFailed;
+}
+
 bool IsRequestEvidence(const EventRecord& event) noexcept {
   return event.header.request_id != 0 && (event.header.category == EventCategory::kNetwork ||
                                           event.header.category == EventCategory::kArtifact);
@@ -43,6 +55,7 @@ OriginTraceIndex::OriginTraceIndex(const std::size_t capacity) : capacity_(capac
   events_.reserve(capacity);
   requests_.reserve(capacity);
   legacy_requests_.reserve(capacity);
+  pending_initiators_.reserve(capacity);
 }
 
 std::size_t OriginTraceIndex::EventReferenceHash::operator()(
@@ -78,6 +91,68 @@ OriginTraceEventReference OriginTraceIndex::FindLegacyRequest(const LegacyReques
     return {};
   }
   return found->second.event;
+}
+
+OriginTraceEventReference OriginTraceIndex::FindInitiator(const LegacyRequestKey& key) const {
+  const auto found = legacy_requests_.find(key);
+  if (found == legacy_requests_.end() || found->second.ambiguous ||
+      !Contains(found->second.initiator)) {
+    return {};
+  }
+  return found->second.initiator;
+}
+
+void OriginTraceIndex::RememberPendingInitiator(const EventRecord& event,
+                                                const LegacyRequestKey& key) {
+  // Bound the insertion history too: resolved entries may remain as tombstones
+  // in this FIFO, but neither it nor the pending multimap can exceed capacity.
+  if (pending_initiator_order_.size() == capacity_) {
+    const auto& [expired_key, expired_event] = pending_initiator_order_.front();
+    const auto [begin, end] = pending_initiators_.equal_range(expired_key);
+    for (auto pending = begin; pending != end; ++pending) {
+      if (pending->second.from == expired_event) {
+        pending_initiators_.erase(pending);
+        break;
+      }
+    }
+    pending_initiator_order_.pop_front();
+  }
+  const OriginTraceEventReference source = Reference(event);
+  pending_initiators_.emplace(key, OriginTraceEdge{
+                                       .relation = OriginTraceRelation::kRequestInitiator,
+                                       .confidence = OriginTraceConfidence::kObserved,
+                                       .from = source,
+                                       .request_id = event.header.request_id,
+                                       .artifact_id = event.header.artifact_id,
+                                   });
+  pending_initiator_order_.emplace_back(key, source);
+}
+
+void OriginTraceIndex::ResolvePendingInitiators(const EventRecord& event,
+                                                OriginTraceEdgeBatch& batch) {
+  if (event.header.category != EventCategory::kNetwork ||
+      event.header.type != EventType::kRequestInitiated || event.header.request_id == 0) {
+    return;
+  }
+  const LegacyRequestKey key{event.header.session_id, event.header.request_id,
+                             event.header.process_id};
+  const OriginTraceEventReference target = FindInitiator(key);
+  const auto [begin, end] = pending_initiators_.equal_range(key);
+  const std::size_t direct_count = batch.edges.size();
+  for (auto pending = begin; pending != end; ++pending) {
+    OriginTraceEdge edge = pending->second;
+    if (target.session_id != 0 && Contains(edge.from) && edge.from != target) {
+      edge.to = target;
+      batch.edges.push_back(edge);
+    }
+  }
+  pending_initiators_.erase(begin, end);
+  // Hash iteration order is not evidence order. Keep sidecar replays stable.
+  std::sort(batch.edges.begin() + static_cast<std::ptrdiff_t>(direct_count), batch.edges.end(),
+            [](const OriginTraceEdge& left, const OriginTraceEdge& right) {
+              return std::tie(left.from.process_id, left.from.sequence_number) <
+                     std::tie(right.from.process_id, right.from.sequence_number);
+            });
 }
 
 OriginTraceEventReference OriginTraceIndex::FindRequest(const EventRecord& event) const {
@@ -139,9 +214,13 @@ void OriginTraceIndex::RememberRequest(const EventRecord& event,
       legacy_requests_.erase(legacy_request_order_.front());
       legacy_request_order_.pop_front();
     }
-    legacy_requests_.emplace(legacy_key,
-                             LegacyRequestState{reference, event.header.browser_context_id_high,
-                                                event.header.browser_context_id_low, false});
+    legacy_requests_.emplace(
+        legacy_key, LegacyRequestState{reference, event.header.browser_context_id_high,
+                                       event.header.browser_context_id_low, false,
+                                       event.header.category == EventCategory::kNetwork &&
+                                               event.header.type == EventType::kRequestInitiated
+                                           ? reference
+                                           : OriginTraceEventReference{}});
     legacy_request_order_.push_back(legacy_key);
     return;
   }
@@ -155,6 +234,14 @@ void OriginTraceIndex::RememberRequest(const EventRecord& event,
        state.browser_context_id_low != event.header.browser_context_id_low)) {
     state.ambiguous = true;
     return;
+  }
+  if (event.header.category == EventCategory::kNetwork &&
+      event.header.type == EventType::kRequestInitiated) {
+    if (state.initiator.session_id != 0 && state.initiator != reference) {
+      state.ambiguous = true;
+    } else {
+      state.initiator = reference;
+    }
   }
   if (!state.ambiguous) {
     state.event = reference;
@@ -174,22 +261,22 @@ void OriginTraceIndex::AddEdge(OriginTraceEdgeBatch& batch,
   if (target.session_id == 0 || target == source || !Contains(target)) {
     return;
   }
-  for (std::size_t index = 0; index < batch.count; ++index) {
-    if (batch.edges[index].to == target) {
+  for (const OriginTraceEdge& edge : batch.edges) {
+    if (edge.from == source && edge.to == target) {
       return;
     }
   }
-  if (batch.count == batch.edges.size()) {
+  if (batch.edges.size() == kMaxDirectOriginTraceEdgesPerEvent) {
     return;
   }
-  batch.edges[batch.count++] = {
+  batch.edges.push_back({
       .relation = relation,
       .confidence = confidence,
       .from = source,
       .to = target,
       .request_id = event.header.request_id,
       .artifact_id = event.header.artifact_id,
-  };
+  });
 }
 
 OriginTraceEdgeBatch OriginTraceIndex::Ingest(const EventRecord& event) {
@@ -211,12 +298,16 @@ OriginTraceEdgeBatch OriginTraceIndex::Ingest(const EventRecord& event) {
             OriginTraceRelation::kParentEvent, OriginTraceConfidence::kObserved);
   }
 
-  if (event.header.initiator_process_id != 0 && event.header.initiator_request_id != 0) {
-    const OriginTraceEventReference initiator =
-        FindLegacyRequest({event.header.session_id, event.header.initiator_request_id,
-                           event.header.initiator_process_id});
+  if (IsBrowserRequestLifecycle(event) && event.header.initiator_process_id != 0 &&
+      event.header.initiator_request_id != 0) {
+    const LegacyRequestKey key{event.header.session_id, event.header.initiator_request_id,
+                               event.header.initiator_process_id};
+    const OriginTraceEventReference initiator = FindInitiator(key);
     AddEdge(batch, event, initiator, OriginTraceRelation::kRequestInitiator,
             OriginTraceConfidence::kObserved);
+    if (initiator.session_id == 0) {
+      RememberPendingInitiator(event, key);
+    }
   }
 
   const OriginTraceEventReference previous_request_event = FindRequest(event);
@@ -229,8 +320,9 @@ OriginTraceEdgeBatch OriginTraceIndex::Ingest(const EventRecord& event) {
 
   RememberEvent(source);
   RememberRequest(event, source);
+  ResolvePendingInitiators(event, batch);
   ++stats_.indexed_events;
-  stats_.emitted_edges += batch.count;
+  stats_.emitted_edges += batch.edges.size();
   return batch;
 }
 

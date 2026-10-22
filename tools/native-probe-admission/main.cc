@@ -617,9 +617,40 @@ void DisabledExpiredAndMalformed() {
 }
 }  // namespace
 
+void DispatchSampleAdmission() {
+  NativeProbeQueue queue;
+  reb::NativeVmDispatchSamplePayload sample;
+  sample.finding_id = 1;
+  sample.investigation_id = 2;
+  sample.interpreter_artifact_id = 3;
+  Configure(queue, 70, kForever, reb::NativeProbeCategoryMask(kRuntime));
+  sink.RecordVmDispatchSample(sample);
+  assert(Drain(queue) == 0);
+  for (std::uint64_t session : {71U, 72U}) {
+    Configure(queue, session);
+    auto invalid = sample;
+    invalid.finding_id = 0;
+    sink.RecordVmDispatchSample(invalid);
+    for (std::uint32_t index = 0; index < 32; ++index) {
+      sink.RecordVmDispatchSample(sample);
+    }
+    NativeProbeEvent event;
+    std::size_t count = 0;
+    while (queue.TryPop(event)) {
+      assert(event.header.type == reb::NativeProbeType::kVmDispatchSample);
+      assert(event.header.session_id == session);
+      ++count;
+    }
+    assert(count == reb::kNativeVmDispatchSampleBudget);
+  }
+  std::cout << "PASS dispatch sink/transport quota, category rejection, malformed rejection and "
+               "replacement configuration\n";
+}
+
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
+  DispatchSampleAdmission();
   QueueMappingAndCanvasBurst();
   RecoveryAndSaturation();
   ConcurrentSameSite();

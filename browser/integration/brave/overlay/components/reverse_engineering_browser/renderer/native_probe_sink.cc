@@ -1394,4 +1394,44 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
   static_cast<void>(emitter(event, config_generation));
 }
 
+void NativeProbeSink::RecordVmDispatchSample(const NativeVmDispatchSamplePayload& sample) noexcept {
+  if (!IsEmittableVmDispatchSample(sample) || !emitter_.load(std::memory_order_acquire)) {
+    return;
+  }
+  const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
+  if ((config_generation & 1U) != 0) {
+    return;
+  }
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at_monotonic_ns =
+      expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
+      session_id == 0 || (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns) {
+    return;
+  }
+
+  const std::uint32_t recorded = dispatch_sample_budget_.TryReserve(config_generation);
+  if (recorded >= kNativeVmDispatchSampleBudget) {
+    return;
+  }
+
+  const NativeProbeFrameIdProvider frame_id_provider =
+      frame_id_provider_.load(std::memory_order_relaxed);
+  NativeProbeEvent event;
+  if (PrepareVmDispatchProbeEvent(
+          sample, recorded, next_sequence_.fetch_add(1, std::memory_order_relaxed),
+          monotonic_time_ns, session_id, static_cast<std::uint32_t>(base::GetCurrentProcId()),
+          static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw()),
+          frame_id_provider ? frame_id_provider() : 0,
+          event) != NativeVmDispatchPrepareStatus::kReady) {
+    return;
+  }
+  static_cast<void>(emitter(event, config_generation));
+}
+
 }  // namespace reb

@@ -37,6 +37,45 @@ the accepted samples of that opcode; document counts sum workspace counts.
 Unmatched opcodes stay in samples and residual unknowns. No accepted samples
 produces `sampler-unavailable`, preserving static handler candidates.
 
+## Native browser capability boundary
+
+The `vm_finding` and `vm_dispatch_sample` ABIs, a caller-fed bounded writer,
+and an automatic guest-interpreter sampler are separate capabilities. No
+production sampler supplies guest invocation markers and dispatch observations
+from captured JavaScript or Wasm interpreters. A writer can transport observations
+provided by a caller; it cannot derive guest PCs or supply the missing interpreter
+semantics. Runtime source and typed-array checkpoint capture are not a guest
+instruction trace. Canvas observations, a detected dispatch loop, a high static
+score, a Wasm dispatch instruction and a retained buffer
+cannot establish which guest opcode ran or its program counter. More of those
+records cannot fill the missing runtime channel.
+
+A workspace with no admitted samples retains static handlers and the explicit
+`sampler-unavailable` omission, leading with the observed absence of retained
+samples and the automatic sampler limitation, not a claim that every dispatch
+writer is absent. The host-links report keeps `guest_position` null and
+`dispatch-samples-unavailable`. The owned fixture
+below demonstrates the transport/consumer contract only, not support for a
+captured JavaScript or Wasm interpreter. Rebuilding an overlay with a caller-fed
+writer alone will not add the missing sampler.
+
+A future native adapter must first establish exact captured interpreter and
+bytecode identities, invocation boundaries, PC units and the observed dispatch
+site. It must emit bounded, opt-in, non-blocking records with explicit losses,
+retain native host-call parentage, and remain allocation-free while inactive.
+It must not infer an instruction-index PC from a source offset, static switch
+case, host call, shared frame, request ID, URL or time proximity. The arbitrary
+JavaScript/Wasm runtime does not expose a universal guest PC; interpreter-specific
+semantics require a separately reviewed implementation, not enabling a flag.
+
+Acceptance requires pinned native patch replay and compilation, disabled,
+expired, full-queue and teardown regressions, and a rebuilt-browser run against
+an owned known interpreter with expected PC/opcode/invocation sequences and
+exact host-parent links. The fixture differential tests and a static component
+compile are necessary but cannot substitute for this browser-runtime evidence.
+Until that adapter and acceptance exist, missing live guest positions remain
+an open capability gap, not a successful empty trace.
+
 ## Owned producer and instruction units
 
 The explicit `reb-native-vm-fixture --emit-dispatch-events-v1` mode executes only

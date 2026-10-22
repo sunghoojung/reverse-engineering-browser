@@ -1239,8 +1239,13 @@ When the selected finding has a validated opcode workspace, VM Lab adds the
 handler mapping, runtime typed-array bytecode preview, characterized coverage,
 named omissions, and residual unknowns beneath the unchanged detection detail.
 Handler rows keep inferred candidates visible even when the runtime sampler is
-unavailable, and support Up, Down, Home, and End selection. Workspace failures
-retain the last valid workspace and never remove detection findings.
+unavailable, and support Up, Down, Home, and End selection. With no runtime
+samples, the Coverage diagnostic leads with the observed absence of retained
+samples and the missing automatic guest-interpreter sampler. A caller-fed writer
+is not that sampler; static dispatch, Canvas calls and snapshots still do not
+prove a guest PC.
+Workspace failures retain the last valid workspace and never remove detection
+findings.
 
 The VM header distinguishes an attached CDP debugger from an active native
 stealth capture. Native stealth copy states that Inspector domains are off and

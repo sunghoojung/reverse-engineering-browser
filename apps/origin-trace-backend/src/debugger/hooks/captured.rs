@@ -204,8 +204,17 @@ mod tests {
             let transport = dir.path().join("transport");
             let parser = dir.path().join("parser");
             std::fs::write(dir.path().join("source"), SOURCE).unwrap();
-            let python = r#"#!/usr/bin/python3
-import sys,json,struct,pathlib,time
+            // Match repository Python checks without relying on a system shim.
+            // Resolve before the parser worker clears its environment; do not
+            // warm up Python or alter the production transport's startup budget.
+            let interpreter =
+                std::env::split_paths(&std::env::var_os("PATH").expect("Python PATH"))
+                    .map(|directory| directory.join("python3"))
+                    .find(|path| worker::executable(path))
+                    .expect("Fixture requires python3 on PATH")
+                    .canonicalize()
+                    .unwrap();
+            let python = r#"import sys,json,struct,pathlib,time
 root=pathlib.Path(__file__).parent
 inp=sys.stdin.buffer; out=sys.stdout.buffer
 def emit(v):
@@ -229,9 +238,27 @@ while True:
  if m=='Debugger.removeBreakpoint' and (root/'fail_remove').exists():emit({'id':q['id'],'error':{'message':'fixture removal failure'}});continue
  emit({'id':q['id'],'result':r})
 "#;
-            std::fs::write(&transport, python).unwrap();
-            std::fs::write(&parser, format!("#!/usr/bin/python3\nimport sys,json,pathlib,time\nsys.stdin.read()\nr=pathlib.Path(__file__).parent\n(r/'parser_seen').touch()\nwhile (r/'parser_gate').exists():time.sleep(.005)\nprint(json.dumps({{\"schema\":\"reb-deobfuscator-worker-v1\",\"ok\":True,\"function_location\":{{\"kind\":\"function_declaration\",\"start\":0,\"end\":{},\"body_start\":13}}}}))\n", SOURCE.len())).unwrap();
-            for path in [&transport, &parser] {
+            let parser_source = format!(
+                "import sys,json,pathlib,time\nsys.stdin.read()\nr=pathlib.Path(__file__).parent\n(r/'parser_seen').touch()\nwhile (r/'parser_gate').exists():time.sleep(.005)\nprint(json.dumps({{\"schema\":\"reb-deobfuscator-worker-v1\",\"ok\":True,\"function_location\":{{\"kind\":\"function_declaration\",\"start\":0,\"end\":{},\"body_start\":13}}}}))\n",
+                SOURCE.len()
+            );
+            let quote = |path: &std::path::Path| {
+                format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
+            };
+            for (path, body) in [(&transport, python), (&parser, parser_source.as_str())] {
+                let source = path.with_extension("py");
+                std::fs::write(&source, body).unwrap();
+                // exec keeps the interpreter as the owned/reaped child, even
+                // when the worker's environment deliberately contains no PATH.
+                std::fs::write(
+                    path,
+                    format!(
+                        "#!/bin/sh\nexec {} {} \"$@\"\n",
+                        quote(&interpreter),
+                        quote(&source)
+                    ),
+                )
+                .unwrap();
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
             }
             let mut options = crate::config::Options::parse_from(["test"]);

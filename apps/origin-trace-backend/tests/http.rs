@@ -1830,7 +1830,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.2.0");
+        assert_eq!(document["producer"]["version"], "1.3.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -2464,7 +2464,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.2.0");
+    assert_eq!(document["producer"]["version"], "1.3.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 2);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -3481,7 +3481,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.2.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.3.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -3489,9 +3489,13 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         catalog["current_profile_digest"],
         document["profile_digest"]
     );
-    // Exact projection from the pre-catalog implementation: the extraction
-    // must not silently change existing generated profile identities.
     assert_eq!(
+        document["profile"]["javascript_likely_vm_requires_handlers"],
+        true
+    );
+    // The legacy profile remains identifiable, but must not name the new
+    // handler-recovery classification policy as equivalent evidence.
+    assert_ne!(
         document["profile_digest"],
         "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"
     );
@@ -3528,6 +3532,16 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         }
     }
     let mut historical_profile = document["profile"].clone();
+    historical_profile
+        .as_object_mut()
+        .unwrap()
+        .remove("javascript_likely_vm_requires_handlers");
+    assert_eq!(
+        hex::encode(Sha256::digest(
+            origin_trace_backend::vm::canonical(&historical_profile).unwrap()
+        )),
+        "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"
+    );
     historical_profile
         .as_object_mut()
         .unwrap()

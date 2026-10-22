@@ -79,7 +79,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.2.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.3.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -93,7 +93,7 @@ pub(crate) fn current_profile() -> Value {
             limits.insert(format!("max_{}", name.to_ascii_lowercase()), value.clone());
         }
     }
-    json!({"profile_id":PROFILE,"javascript_scoring_version":2,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
+    json!({"profile_id":PROFILE,"javascript_scoring_version":2,"javascript_likely_vm_requires_handlers":true,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
 }
 
 pub(crate) fn current_rule_definitions() -> Vec<Value> {
@@ -1075,4 +1075,37 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
     documents.opcode_workspace?;
     documents.host_links?;
     Ok(documents.analysis)
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
+        let current = current_profile();
+        assert_eq!(current_producer()["version"], "1.3.0");
+        assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
+        let mut historical = current.clone();
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("javascript_likely_vm_requires_handlers");
+        assert_eq!(
+            digest(&historical).unwrap(),
+            "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"
+        );
+        assert_ne!(digest(&current).unwrap(), digest(&historical).unwrap());
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json"))
+                .unwrap();
+        let validator = jsonschema::validator_for(&schema["$defs"]["profile"]).unwrap();
+        validator.validate(&current).unwrap();
+        validator.validate(&historical).unwrap();
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("javascript_scoring_version");
+        validator.validate(&historical).unwrap();
+    }
 }

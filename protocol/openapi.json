@@ -7473,6 +7473,10 @@
                     "maximum": 100
                   }
                 }
+              },
+              "javascript_likely_vm_requires_handlers": {
+                "const": true,
+                "description": "Present in producer 1.3.0 and later: JavaScript likely-vm requires recovered static handlers in addition to the structural score. Absent in historical profiles."
               }
             }
           },

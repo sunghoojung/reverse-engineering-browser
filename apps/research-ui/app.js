@@ -1340,7 +1340,7 @@
         );
         if (state.sessionMode === 'live') {
           state.requests = state.debuggerSession?.network?.capture_enabled
-            ? cdpRequests : state.nativeRequests;
+            ? trafficRowsForLiveCapture(cdpRequests, state.nativeRequests) : state.nativeRequests;
         } else {
           state.requests = state.nativeRequests;
         }
@@ -2292,9 +2292,15 @@
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
         const buttons = [{id: 'all', label: targetScope ? 'All targets' : 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
           const domains = [...new Set(group.requests.map(requestDomain))];
+          const title = group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean);
+          const domain = domains.find(value => value && value !== 'unknown');
+          const fallback = `${targetScope ? 'Target' : 'Tab'} ${index + 1}`;
+          const label = group.id === 'unattributed' ? 'Unattributed'
+            : title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
+            : domain || fallback;
           return {
             id: group.id,
-            label: group.id === 'unattributed' ? 'Unattributed' : `${targetScope ? 'Target' : 'Tab'} ${index + 1}`,
+            label,
             count: group.requests.length,
             domains
           };

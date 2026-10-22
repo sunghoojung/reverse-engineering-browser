@@ -672,7 +672,7 @@ let networkBodyDecodes = 0;
 const networkModels = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
   (await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8")) +
-  ";({requestsFromDebuggerNetwork,isDebuggerNetwork,trafficSearchRequests})",
+  ";({requestsFromDebuggerNetwork,trafficRowsForLiveCapture,isDebuggerNetwork,trafficSearchRequests})",
   {TextEncoder, TextDecoder, Uint8Array,
     URL: class extends URL {constructor(...args) {networkUrlCalls += 1; super(...args);}},
     atob(value) {networkBodyDecodes += 1; return atob(value);}},
@@ -715,6 +715,11 @@ const correlationRecords = [networkRecord("first"), networkRecord("second"), net
   networkRecord("post", {method: "POST"}), networkRecord("other", {url: "http://other.invalid/redirect"})];
 const nativeIds = (records, native) => Array.from(networkModels.requestsFromDebuggerNetwork(networkSnapshot(records), native), request => request.event?.id ?? null);
 assert.deepEqual(nativeIds(correlationRecords, correlationNative), ["tie-first", "tie-second", null, "post", "other-host"]);
+const correlatedProjection = networkModels.requestsFromDebuggerNetwork(networkSnapshot(correlationRecords), correlationNative);
+assert.deepEqual(correlatedProjection.map(request => request.correlatedNativeId), ["tie-first", "tie-second", null, "post", "other-host"]);
+const visibleWithMiss = networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative.concat([nativeRequest("missed-document", 100, "only-native.invalid")]));
+assert.deepEqual(visibleWithMiss.map(request => request.id), ["first", "second", "third", "post", "other", "missed-document"]);
+assert.equal(networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative).length, correlatedProjection.length);
 assert.deepEqual(nativeIds([networkRecord("limit", {started_monotonic_ms: 10_100}), networkRecord("past", {started_monotonic_ms: 10_100.001})],
   [nativeRequest("one", 100), nativeRequest("two", 100)]), ["one", null]);
 const variedNative = Array.from({length: 250}, (_, i) => nativeRequest(`native-${i}`, i * 7,

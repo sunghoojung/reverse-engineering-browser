@@ -605,8 +605,9 @@ popup throttling can affect `window.open` even when `waitForDebuggerOnStart` is
 false. Admission runs immediately on discovery events with at most four attach
 commands in flight; the target capacity still includes pending attachments. The
 periodic refresh retries known targets; incomplete catalogs are reconciled as
-described below. First requests remain
-best-effort, and this change does not establish lossless early navigation capture.
+described below. First full URLs remain best-effort, and this change does not
+establish lossless early navigation capture. Traffic keeps an unmatched native
+row as host-only metadata when the debugger never recorded that request.
 
 `catalog_incomplete` is true when the 512-target catalog omitted discovered
 candidates. Counts then cover known targets only, and coverage cannot report

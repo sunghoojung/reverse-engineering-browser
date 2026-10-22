@@ -1747,6 +1747,7 @@
             end: terminal ? 92 : 58,
             event: correlated?.event ?? null,
             events: correlated?.events ?? [],
+            correlatedNativeId: correlated?.id ?? null,
             failed: record.state === 'failed',
             rank: terminal ? 5 : 2,
             statusRank: terminal ? 5 : 2,
@@ -1776,6 +1777,20 @@
           retainedBodies.forEach((value, key) => bodyCache.set(key, value));
         }
         return requests;
+      }
+
+      // Content capture projects CDP rows only. A native request that lost the
+      // race with Network.enable still has host-level evidence; keep that row
+      // instead of hiding the navigation that created the target.
+      function trafficRowsForLiveCapture(cdpRequests, nativeRequests = []) {
+        const linked = new Set();
+        const seen = new Set();
+        for (const request of cdpRequests) {
+          seen.add(request.id);
+          if (request.correlatedNativeId != null) linked.add(request.correlatedNativeId);
+        }
+        const missed = nativeRequests.filter(native => native && !linked.has(native.id) && !seen.has(native.id));
+        return missed.length ? cdpRequests.concat(missed) : cdpRequests;
       }
 
       function decodeVmFinding(event) {

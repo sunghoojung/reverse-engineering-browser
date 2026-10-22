@@ -150,6 +150,21 @@ fn target(info: &Value) -> Option<Value> {
     }
     Some(json!({"id":id,"type":kind,"title":title,"url":url}))
 }
+fn fill_empty_target_titles(state: &mut Value, target_id: &str, title: &str) {
+    if target_id.is_empty() || title.is_empty() {
+        return;
+    }
+    let Some(rows) = state["network"]["requests"].as_array_mut() else {
+        return;
+    };
+    for row in rows {
+        if row["target_id"].as_str() == Some(target_id)
+            && row["target_title"].as_str().unwrap_or("").is_empty()
+        {
+            row["target_title"] = json!(title);
+        }
+    }
+}
 fn auto_attach() -> Value {
     json!({"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true,"filter":[{"type":"page"},{"type":"iframe"},{"type":"worker"},{"type":"shared_worker"},{"type":"service_worker"},{"exclude":true}]})
 }
@@ -206,7 +221,7 @@ impl Debugger {
             v["scope"] = json!("http-browser-targets");
             v["transport_mode"] = json!("browser-sessions");
             v["startup_mode"] = json!("passive");
-            v["message"]=json!("Passive browser target capture starts after attachment and Network.enable; first requests are not guaranteed. WebSockets remain selected-target scoped.");
+            v["message"]=json!("Passive browser target capture starts after attachment and Network.enable. A full URL from before that enable is not guaranteed; an unmatched native row stays in Traffic as host-only metadata. WebSockets remain selected-target scoped.");
             v["target_limit"] = json!(limit);
             v["attached_targets"] = json!(ids.len());
             v["eligible_targets"] = json!(count);
@@ -233,6 +248,34 @@ impl Debugger {
             });
             v["discovery_stale"] = json!(false);
         });
+    }
+    pub(crate) fn catalog_target_title(&self, id: &str) -> Option<Value> {
+        if id.is_empty() {
+            return None;
+        }
+        self.capture
+            .browser
+            .targets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .and_then(|recorded| recorded.get("title"))
+            .filter(|title| title.as_str().is_some_and(|text| !text.is_empty()))
+            .cloned()
+    }
+    fn fill_captured_request_titles(&self, info: &Value) {
+        let Some(recorded) = target(info) else {
+            return;
+        };
+        let Some(id) = recorded["id"].as_str() else {
+            return;
+        };
+        let Some(title) = recorded["title"].as_str().filter(|text| !text.is_empty()) else {
+            return;
+        };
+        let id = id.to_owned();
+        let title = title.to_owned();
+        self.update(|state| fill_empty_target_titles(state, &id, &title));
     }
     fn remember_capture_target(&self, info: &Value) {
         let Some(t) = target(info).filter(eligible) else {
@@ -871,6 +914,7 @@ impl Debugger {
         match m["method"].as_str().unwrap_or("") {
             "Target.targetCreated" | "Target.targetInfoChanged" => {
                 self.remember_capture_target(&p["targetInfo"]);
+                self.fill_captured_request_titles(&p["targetInfo"]);
                 self.schedule_capture_admission(c);
                 self.browser_status();
             }
@@ -1513,6 +1557,20 @@ mod tests {
             );
         }
         assert_eq!(auto_attach()["waitForDebuggerOnStart"], false);
+    }
+    #[test]
+    fn later_target_title_fills_rows_captured_before_the_document_title() {
+        let mut state = json!({"network":{"requests":[
+            {"target_id":"tab","target_title":"","url":"https://accounts.example/demo"},
+            {"target_id":"tab","target_title":"already named"},
+            {"target_id":"other","target_title":""}
+        ]}});
+        fill_empty_target_titles(&mut state, "tab", "Example demo");
+        assert_eq!(state["network"]["requests"][0]["target_title"], "Example demo");
+        assert_eq!(state["network"]["requests"][1]["target_title"], "already named");
+        assert_eq!(state["network"]["requests"][2]["target_title"], "");
+        fill_empty_target_titles(&mut state, "tab", "");
+        assert_eq!(state["network"]["requests"][0]["target_title"], "Example demo");
     }
     #[test]
     fn waiting_catalog_cannot_grow_past_target_bound() {

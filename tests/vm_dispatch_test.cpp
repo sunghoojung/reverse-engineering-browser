@@ -6,6 +6,7 @@
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_vm_dispatch.h"
+#include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
 #include "reb/vm_dispatch.hpp"
@@ -112,6 +113,44 @@ int main() {
   }
   event.header.payload_size = 127;
   if (!Check(!reb::DecodeVmDispatchSample(event, decoded), "short sample accepted")) {
+    return 1;
+  }
+
+  reb::NativeVmDispatchSamplePayload native{};
+  std::memcpy(&native, &sample, sizeof(native));
+  reb::NativeProbeEvent probe;
+  if (!Check(reb::PrepareVmDispatchProbeEvent(native, 0, 8, 9, 10, 11, 12, 13, probe) ==
+                 reb::NativeVmDispatchPrepareStatus::kReady,
+             "observed sample was not prepared") ||
+      !Check(probe.header.category == reb::NativeProbeCategory::kVm, "probe category") ||
+      !Check(probe.header.type == reb::NativeProbeType::kVmDispatchSample, "probe type") ||
+      !Check(probe.header.payload_size == sizeof(native), "probe payload size") ||
+      !Check(probe.header.artifact_id == native.interpreter_artifact_id, "probe artifact id") ||
+      !Check(probe.header.sequence_number == 8 && probe.header.frame_id == 13, "probe identity") ||
+      !Check(std::memcmp(probe.inline_payload.data(), &native, sizeof(native)) == 0,
+             "probe payload bytes")) {
+    return 1;
+  }
+  native.interpreter_artifact_id = 0;
+  if (!Check(!reb::IsEmittableVmDispatchSample(native), "missing interpreter artifact accepted") ||
+      !Check(reb::PrepareVmDispatchProbeEvent(native, 0, 1, 1, 1, 1, 1, 1, probe) ==
+                 reb::NativeVmDispatchPrepareStatus::kMalformed,
+             "missing interpreter artifact prepared")) {
+    return 1;
+  }
+  native.interpreter_artifact_id = sample.interpreter_artifact_id;
+  native.finding_id = 0;
+  if (!Check(reb::PrepareVmDispatchProbeEvent(native, 0, 1, 1, 1, 1, 1, 1, probe) ==
+                 reb::NativeVmDispatchPrepareStatus::kMalformed,
+             "missing finding id prepared")) {
+    return 1;
+  }
+  native.finding_id = sample.finding_id;
+  if (!Check(reb::PrepareVmDispatchProbeEvent(native, reb::kNativeVmDispatchSampleBudget, 1, 1, 1,
+                                              1, 1, 1, probe) ==
+                 reb::NativeVmDispatchPrepareStatus::kBudgetExhausted,
+             "sample past the budget was prepared") ||
+      !Check(reb::kNativeVmDispatchSampleBudget == 16, "dispatch budget drifted")) {
     return 1;
   }
   return 0;

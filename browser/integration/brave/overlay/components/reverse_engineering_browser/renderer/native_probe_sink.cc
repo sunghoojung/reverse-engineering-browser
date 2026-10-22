@@ -888,6 +888,7 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_canvas_images_.store(active && capture_canvas_images, std::memory_order_relaxed);
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
+  dispatch_sample_count_.store(0, std::memory_order_relaxed);
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
@@ -1390,6 +1391,51 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
     if (url_size != url.size()) {
       event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kPayloadTruncated);
     }
+  }
+  static_cast<void>(emitter(event, config_generation));
+}
+
+void NativeProbeSink::RecordVmDispatchSample(const NativeVmDispatchSamplePayload& sample) noexcept {
+  if (!IsEmittableVmDispatchSample(sample) || !emitter_.load(std::memory_order_acquire)) {
+    return;
+  }
+  const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
+  if ((config_generation & 1U) != 0) {
+    return;
+  }
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at_monotonic_ns =
+      expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
+      session_id == 0 || (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns) {
+    return;
+  }
+
+  std::uint32_t recorded = dispatch_sample_count_.load(std::memory_order_relaxed);
+  while (recorded < kNativeVmDispatchSampleBudget &&
+         !dispatch_sample_count_.compare_exchange_weak(recorded, recorded + 1,
+                                                       std::memory_order_relaxed)) {
+    // Another renderer thread claimed this slot. `recorded` now holds its count.
+  }
+  if (recorded >= kNativeVmDispatchSampleBudget) {
+    return;
+  }
+
+  const NativeProbeFrameIdProvider frame_id_provider =
+      frame_id_provider_.load(std::memory_order_relaxed);
+  NativeProbeEvent event;
+  if (PrepareVmDispatchProbeEvent(
+          sample, recorded, next_sequence_.fetch_add(1, std::memory_order_relaxed),
+          monotonic_time_ns, session_id, static_cast<std::uint32_t>(base::GetCurrentProcId()),
+          static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw()),
+          frame_id_provider ? frame_id_provider() : 0,
+          event) != NativeVmDispatchPrepareStatus::kReady) {
+    return;
   }
   static_cast<void>(emitter(event, config_generation));
 }

@@ -255,6 +255,12 @@ are cleanup diagnostics, not counts of missing requests. Only jobs belonging to
 the then-current browser connection may increment them; late replies from a
 replaced connection cannot alter the new connection's status. Counters retain
 history across ordinary connection replacement and are absent until observed.
+Cleanup proof accepts an exact session/parent detach, exact target destruction,
+or disappearance of an ancestor reached through the current connection's
+recorded capture-owner sessions. A target ID in a detach event is not enough to
+prove a session ended. Timeouts and transport failures remain failures even if
+a lifecycle event was observed; only a protocol rejection can use ended-session
+proof after the event barrier.
 
 When browser Target setup fails, compatibility fallback reports
 `scope: http-page-targets`, `transport_mode: page-fallback`: the previous eight

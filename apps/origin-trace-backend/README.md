@@ -65,8 +65,12 @@ buffers share a 128 MiB aggregate budget divided across the configured limit.
 The selected debugger remains separate, and the global ledger retains 1000 rows
 and eight body retrieval jobs. Exact owner/session-qualified bodies cannot cross
 focus switches, target replacement or reconnect. Retired owners leave retained
-history and explicit unfinished-evidence gaps. `network.capture_epoch` remains
-the focused debugger/selection identity, not the HTTP owner token.
+history and explicit unfinished-evidence gaps. A rejected duplicate-session cleanup
+can also be confirmed ended by exact recorded ancestor-session detachment or
+target destruction. That proof preserves unrelated owners instead of closing the
+shared transport; unknown cleanup failures still retire it with a visible gap.
+`network.capture_epoch` remains the focused debugger/selection identity, not the
+HTTP owner token.
 
 Passive capture does not pause startup or guarantee first navigation: requests
 before attachment/Network.enable and very short-lived targets can be absent.

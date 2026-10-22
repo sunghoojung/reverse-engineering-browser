@@ -1746,32 +1746,38 @@
       function renderVmBytecode(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
-        heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded snapshot preview'));
+        heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded evidence preview'));
         section.append(heading);
-        const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained bytecode snapshot');
-        workspace.snapshots.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.byte_count} bytes`; selector.append(option); });
-        const initial = Math.max(0, workspace.snapshots.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
-        selector.value = String(initial); selector.disabled = workspace.snapshots.length === 0;
-        const label = document.createElement('label'); label.append(document.createTextNode('Retained snapshot '), selector);
+        const previews = [...workspace.snapshots];
+        if (workspace.captured_module_preview) previews.push({...workspace.captured_module_preview, origin: 'captured-module'});
+        const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained byte evidence');
+        previews.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.origin === 'captured-module' ? `dispatch at byte ${snapshot.byte_offset} · ` : ''}${snapshot.byte_count} bytes`; selector.append(option); });
+        const initial = Math.max(0, previews.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
+        selector.value = String(initial); selector.disabled = previews.length === 0;
+        const label = document.createElement('label'); label.append(document.createTextNode('Retained evidence '), selector);
         const previewPanel = document.createElement('div'); section.append(label, previewPanel);
         const draw = () => {
-          const snapshot = workspace.snapshots[Number(selector.value)] ?? null;
+          const snapshot = previews[Number(selector.value)] ?? null;
           previewPanel.replaceChildren();
           const fields = document.createElement('div'); fields.className = 'vm-fields vm-bytecode-fields';
           fields.append(
             vmField('artifact', snapshot?.artifact_id ?? workspace.bytecode_artifact_id ?? 'not captured'),
             vmField('digest', snapshot?.sha256 ?? 'not recorded'),
             vmField('origin', snapshot?.origin ?? 'unavailable'),
-            vmField('snapshot bytes', snapshot?.byte_count ?? 0),
+            vmField(snapshot?.origin === 'captured-module' ? 'instruction bytes' : 'snapshot bytes', snapshot?.byte_count ?? 0),
             vmField('truncation', snapshot?.truncated === true ? 'preview truncated' : snapshot?.truncated === false ? 'complete preview' : 'not recorded'),
             vmField('unavailable reason', snapshot?.unavailable_reason ?? 'none')
           );
+          if (snapshot?.origin === 'captured-module') fields.append(vmField('module byte offset', snapshot.byte_offset));
           previewPanel.append(fields);
           const preview = formatVmHexPreview(snapshot?.preview_hex);
           if (preview) {
             const bytes = textElement('pre', 'vm-bytecode-preview', preview);
-            bytes.setAttribute('aria-label', 'Bytecode hex preview');
+            bytes.setAttribute('aria-label', snapshot?.origin === 'captured-module' ? 'Captured module instruction hex preview' : 'Bytecode hex preview');
             previewPanel.append(bytes);
+            if (snapshot?.origin === 'captured-module') {
+              previewPanel.append(textElement('p', 'vm-effect-detail', 'Dispatch instruction bytes from the captured module. This is not a runtime memory snapshot.'));
+            }
           } else {
             previewPanel.append(textElement('div', 'vm-workspace-empty', snapshot?.unavailable_reason || 'No bytecode preview was retained.'));
           }

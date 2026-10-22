@@ -2219,6 +2219,19 @@
             (isBoundedText(snapshot.unavailable_reason, 240) && snapshot.unavailable_reason.length > 0));
       }
 
+      function isVmCapturedModulePreview(preview, workspace) {
+        return workspace.runtime === 'webassembly' && vmWorkspaceExact(preview, [
+          'artifact_id', 'byte_offset', 'byte_count', 'preview_hex', 'truncated'
+        ]) && preview.artifact_id === workspace.interpreter_artifact_id &&
+          isSafeIntegerInRange(preview.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(preview.byte_count, 1, Number.MAX_SAFE_INTEGER) &&
+          Number.isSafeInteger(preview.byte_offset + preview.byte_count) &&
+          workspace.handlers.some(handler => handler.source.byte_offset === preview.byte_offset && handler.source.byte_size === preview.byte_count) &&
+          typeof preview.preview_hex === 'string' && /^(?:[0-9a-f]{2})+$/.test(preview.preview_hex) &&
+          preview.preview_hex.length <= 8192 && preview.preview_hex.length / 2 <= preview.byte_count &&
+          preview.truncated === (preview.preview_hex.length / 2 < preview.byte_count);
+      }
+
       function vmWorkspaceDigest(value) { return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value); }
       function vmWorkspaceMode(value) { return ['native-stealth', 'cdp-attached', 'unknown'].includes(value); }
       function vmSampleEvent(value) {
@@ -2247,7 +2260,7 @@
       function isVmOpcodeWorkspace(workspace) {
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
-          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal'
+          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
@@ -2255,7 +2268,9 @@
           !['javascript', 'webassembly'].includes(workspace.runtime) || !vmWorkspaceDigest(workspace.source_artifact_sha256) ||
           !vmWorkspaceMode(workspace.capture_mode) || !Array.isArray(workspace.handlers) || workspace.handlers.length > 1024 ||
           !workspace.handlers.every(isVmOpcodeHandler) || !Array.isArray(workspace.snapshots) || workspace.snapshots.length > 16 ||
-          !workspace.snapshots.every(isVmOpcodeSnapshot) || !Array.isArray(workspace.unknowns) || workspace.unknowns.length > 256 ||
+          !workspace.snapshots.every(isVmOpcodeSnapshot) ||
+          (workspace.captured_module_preview !== undefined && !isVmCapturedModulePreview(workspace.captured_module_preview, workspace)) ||
+          !Array.isArray(workspace.unknowns) || workspace.unknowns.length > 256 ||
           !workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0) ||
           new Set(workspace.unknowns).size !== workspace.unknowns.length ||
           !Array.isArray(workspace.samples) || workspace.samples.length > 4096 ||

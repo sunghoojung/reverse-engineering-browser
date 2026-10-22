@@ -2243,7 +2243,12 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   state.selectedArtifactId='1';await api.loadArtifactContent(artifacts[0]);assert.equal(artifacts[0].content,text);
   const binary=new Uint8Array(2097152);const wasm={...await ownedArtifact('99'),kind:'wasm',mime_type:'application/wasm',byte_size:binary.length,sha256:await ownershipHash(binary)};
   const hex=ownedContext({state:{artifacts:[wasm],selectedArtifactId:'99'},fetch:async()=>new Response(binary)});
-  await hex.api.loadArtifactContent(wasm); assert(wasm.content.split('\n').length<=20003);assert(wasm.content.length<2*1024*1024);assert(wasm.contentTruncated);
+  await hex.api.loadArtifactContent(wasm);
+  assert(wasm.contentTruncated);
+  assert(wasm.wasmHexBytes < binary.length && wasm.wasmHexBytes % 16 === 0);
+  assert(wasm.content.length <= 8 * 1024 * 1024);
+  assert(wasm.content.includes('Hex preview limited'));
+  assert(wasm.content.split('\n').length > 20003);
   sourceOwnershipReceipt.push({test:'preview_byte_budget_and_bounded_hex',status:'passed',retainedPreviews:loaded.length,retainedUTF16TextBytes:characters*2,hexRows:wasm.content.split('\n').length});
 }
 {

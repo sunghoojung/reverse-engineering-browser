@@ -81,10 +81,85 @@ export async function checkInvestigationCore(root) {
   assert.equal(model.investigationResolve(freshIdentity,freshRequests,model.investigationRequestIdentity).status,'ready');
   assert.equal(model.investigationResolve(freshIdentity,await fixtureRequests('13'),model.investigationRequestIdentity).status,'stale');
   console.log('PASS investigation fixture counterexample: stale selection can coexist with a retained replacement; fresh exact request comes from normal event admission (not rendered QA)');
+  await checkNativeRequestBacktrace(root);
   await checkAdvancedNavigation(root);
   await checkInvestigationReturns(root);
   await checkCollectionNavigation(root, source);
   console.log('PASS investigation exact identity, u64 boundaries, CDP correlation separation, stale/ambiguous resolution, bounded branching return history and packaged asset wiring (not rendered QA)');
+}
+
+// Content capture must not erase the native root merely because the CDP row
+// carries its events as a host/method/time candidate. Exercise the real chooser,
+// root selector and trace reader, with only DOM leaves and HTTP delivery faked.
+export async function checkNativeRequestBacktrace(root) {
+  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const models=await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8');
+  const navigation=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
+  const section=(a,b)=>app.slice(app.indexOf(a),app.indexOf(b));
+  const fixture=investigationFixture({handle:async()=>false,release(){}});
+  const initiated={...fixture.event,type:'request_initiated'};
+  const started={...fixture.event,process_id:23,sequence_number:'52',request_id:'200',
+    type:'request_started',initiator_process_id:17,initiator_request_id:91};
+  const emptyBody=()=>({state:'empty',mime:'',text:'',base64:'',truncated:false,reason:''});
+  const record={id:'cdp-native-candidate',protocol_request_id:'cdp-91',target_id:'target',target_title:'Fixture',
+    url:'http://fixture.invalid/path',method:'POST',resource_type:'Fetch',started_monotonic_ms:1,
+    state:'complete',status:200,mime_type:'text/plain',duration_ms:1,
+    request:{headers:[],body:emptyBody()},response:{headers:[],body:emptyBody()}};
+  const trace={...fixture.trace,request_id:'200',steps:[
+    {...fixture.trace.steps[0],event:{session_id:'11',process_id:23,sequence_number:'52'},request_id:'200'},
+    {...fixture.trace.steps[0],operation:'request_initiated',relation:'request_initiator'}
+  ],gaps:[{...fixture.trace.gaps[0],after_step:1}],
+    coverage:{linked_steps:1,observed_links:1,correlated_links:0,gap_count:1,percent:50}};
+  const node=()=>({dataset:{},children:[],replaceChildren(...children){this.children=children;},
+    querySelectorAll:()=>[],removeAttribute(name){delete this[name];}});
+  const elements=Object.fromEntries(['traceRequest','traceLoad','backtraceSubtitle','traceContent','traceEmpty',
+    'traceEvidence','traceFirstRequest','traceNotice','traceEmptyTitle','traceEmptyMessage','backtraceSteps',
+    'traceStepDetails','coverageValue'].map(name=>[name,node()]));
+  const state={requests:[],selectedRequestId:null,originTrace:null,originTraceKey:null,
+    originTraceStatus:'idle',originTraceGeneration:0};
+  const reads=[];
+  const context={state,elements,TextDecoder,TextEncoder,URL,URLSearchParams,atob,Uint8Array,
+    AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},
+    document:{activeElement:null,createElement:node},traceStepElement:node,traceStepDetails(){},renderEvidence(){},
+    sourceFactsReadBytes:async response=>new TextEncoder().encode(JSON.stringify(await response.json())),
+    fetch:async url=>{reads.push(new URL(url,'http://fixture.invalid'));return {ok:true,status:200,headers:{get:()=>null},json:async()=>trace};}};
+  const api=runInNewContext(models+'\n'+navigation+'\n'+
+    section('      function requestTraceRoot(', '      function requestSignalProfileSelection(')+
+    section('      function originTraceSelection(', '      function traceStepDetails(')+
+    section('      function renderBacktrace(', '      function requestInterception(')+
+    ';({isBrokerEvent,isOriginTraceResponse,requestsFromEvents,requestsFromDebuggerNetwork,trafficRowsForLiveCapture,requestTraceRoot,originTraceSelection,refreshOriginTrace,renderBacktrace})',context);
+  assert(api.isBrokerEvent(initiated));assert(api.isBrokerEvent(started));assert(api.isOriginTraceResponse(trace));
+  const native=api.requestsFromEvents([initiated,started]);
+  assert.equal(native.length,1,'Explicit initiator identifiers group the native observations');
+  const cdp=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[record]},native);
+  assert.equal(cdp[0].events.length,2,'Exercise a CDP row with heuristic native candidate events');
+  state.requests=api.trafficRowsForLiveCapture(cdp,native);
+  api.renderBacktrace();
+  assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),[native[0].id],
+    'The independent native row must remain a Backtraces choice during content capture');
+  assert.equal(elements.traceRequest.disabled,false);
+  assert.equal(elements.traceEmptyTitle.textContent,'Choose a captured request');
+  state.selectedRequestId=native[0].id;
+  api.renderBacktrace();
+  assert.equal(elements.traceLoad.disabled,false);
+  assert.equal(api.requestTraceRoot(native[0]),started,'Use the browser start, not the renderer or CDP id');
+  await api.refreshOriginTrace();
+  assert.equal(reads.length,1);assert.equal(reads[0].pathname,'/api/origin-trace');
+  assert.deepEqual(Object.fromEntries(reads[0].searchParams),{
+    request_id:'200',session_id:'11',root_process_id:'23',root_sequence_number:'52'});
+  assert.equal(state.originTraceStatus,'ready');
+  assert.equal(state.originTrace.steps[1].relation,'request_initiator');
+  assert.equal(elements.traceContent.hidden,false);
+  state.selectedRequestId=cdp[0].id;
+  api.renderBacktrace();
+  assert.equal(api.requestTraceRoot(cdp[0]),null);
+  assert.equal(api.originTraceSelection(),null);
+  assert.equal(elements.traceLoad.disabled,true,'Candidate events must not enable a CDP trace');
+  await api.refreshOriginTrace();
+  assert.equal(reads.length,1,'A CDP selection must not query the candidate native root');
+  assert.equal(elements.traceContent.hidden,true,'Do not show the previous native trace as CDP evidence');
+  assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),[cdp[0].id,native[0].id]);
+  console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; heuristic CDP root stays unavailable (production functions, not rendered QA)');
 }
 
 // Exercise the actual shared-shell switch, rather than a navigation stub. A

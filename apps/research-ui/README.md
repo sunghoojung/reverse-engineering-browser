@@ -1199,7 +1199,10 @@ source metadata and connection status; attached sessions show debugger controls
 by default. The toggle remains available at narrow window sizes.
 
 VM analysis is a secondary Traffic view, reached through Related VM candidates
-for a selected request. It has a Back to traffic control and no primary tab.
+for a selected request. A content-capture row has no native request id, so that
+button opens the session analysis instead of a request-scoped join. An exact
+native request id still opens request-scoped analysis. It has a Back to traffic
+control and no primary tab.
 When the selected finding has a validated opcode workspace, VM Lab adds the
 handler mapping, runtime typed-array bytecode preview, characterized coverage,
 named omissions, and residual unknowns beneath the unchanged detection detail.

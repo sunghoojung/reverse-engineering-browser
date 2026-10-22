@@ -2546,7 +2546,7 @@
             },
             {
               "id": "debugger-exclusive-owner",
-              "condition": "No interception request may be running and Object Lab must not be navigating/searching/mutating. Active Repeater permits only cancel_repeater_request. Runtime Hooks arming/armed/handling/stopping permits only disarm_runtime_hooks, including blocking compare_runtime_field_test."
+              "condition": "No interception request may be running and Object Lab must not be navigating/searching/mutating. Active Repeater permits only cancel_repeater_request. Runtime Hooks arming/armed/handling/stopping permits disarm_runtime_hooks and dispose_request_interception_experiment, because disposal disarms hooks as cleanup. compare_runtime_field_test stays blocked."
             },
             {
               "id": "debugger-automation-owner",
@@ -4323,7 +4323,7 @@
             },
             {
               "id": "exact-retained-traffic",
-              "condition": "All five original identity fields must match current retained Traffic. The public request ID must be unique across the retained window. Scope and sharing authorization are the researcher\u2019s responsibility."
+              "condition": "All five original identity fields must match current retained Traffic. The public request ID must be unique across the retained window. Scope and sharing authorization are the researcher’s responsibility."
             }
           ],
           "confirmations": [],
@@ -10220,7 +10220,16 @@
                 "type": "string",
                 "x-max-utf8-bytes": 8192
               },
-              "return_value": {}
+              "return_value": {},
+              "expected_session_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Required for captured Hooks; exact current Runtime Hooks session, including zero before first Add."
+              },
+              "captured_source": {
+                "$ref": "#/components/schemas/CapturedHookSource"
+              }
             },
             "required": [
               "action",
@@ -10233,7 +10242,7 @@
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
-            "description": "Original live JavaScript location with zero-based line/UTF-16 column. At least one phase must be enabled. function mode requires function_expression, entry_enabled=true and return_enabled=false, no return logic/override; source mode requires empty function_expression. json override requires return_value; expression override requires nonempty return_expression. Any override requires return_enabled. Nested JSON value has bounded validation. Returns ok,runtime_hooks,generation. Worker target is derived from script_id, not supplied separately.",
+            "description": "Original live JavaScript location with zero-based line/UTF-16 column. At least one phase must be enabled. function mode requires function_expression, entry_enabled=true and return_enabled=false, no return logic/override; source mode requires empty function_expression. json override requires return_value; expression override requires nonempty return_expression. Any override requires return_enabled. Nested JSON value has bounded validation. Returns ok,runtime_hooks,generation. Worker target is derived from script_id, not supplied separately. Captured source mode additionally requires captured_source (exact connection/document/script/context/hash) and expected_session_id; function mode is disposable-only.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
             "x-reb-execution": {
               "kind": "action",
@@ -10255,7 +10264,7 @@
               "prerequisites": [
                 {
                   "id": "hooks-editable",
-                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                  "condition": "Runtime Hooks requires its attached disposable page, or an already-attached captured document with a live JavaScript source, and must not be arming, armed, handling, or stopping (hooks_editable)."
                 },
                 {
                   "id": "live-hook-source",
@@ -10416,6 +10425,25 @@
               "confirmed": {
                 "const": true,
                 "type": "boolean"
+              },
+              "expected_session_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Required for captured Hooks; exact current Runtime Hooks session, including zero before first Add."
+              },
+              "captured_owner": {
+                "$ref": "#/components/schemas/CapturedHookOwner"
+              },
+              "expected_definition_ids": {
+                "type": "array",
+                "maxItems": 8,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
               }
             },
             "required": [
@@ -10426,14 +10454,13 @@
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
-            "description": "Requires an attached isolated page, at least one definition and active breakpoints. Returns ok,runtime_hooks,generation.",
+            "description": "Requires an attached captured document or disposable page, at least one definition, active breakpoints, and confirmed true. Returns ok,runtime_hooks,generation. Captured arming requires captured_owner, expected_session_id and exact expected_definition_ids. Confirmation authorizes page-frame mutation, not isolated-world execution.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
             "x-reb-execution": {
               "kind": "action",
               "effects": [
                 "local-state-write",
                 "browser-control",
-                "disposable-target-mutation",
                 "code-execution"
               ],
               "state_dependent_effects": [
@@ -10443,6 +10470,12 @@
                     "data-discard"
                   ],
                   "when": "Caller-supplied entry/return logic and replacement expressions can alter target execution and requests; bounded capture can evict old records."
+                },
+                {
+                  "effects": [
+                    "disposable-target-mutation"
+                  ],
+                  "when": "The hooks belong to an owned disposable Experiment page or worker; captured-page hooks instead mutate the explicitly selected live page."
                 }
               ],
               "uncertainties": [
@@ -10451,7 +10484,7 @@
               "prerequisites": [
                 {
                   "id": "hooks-editable",
-                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                  "condition": "Runtime Hooks requires its attached disposable page, or an already-attached captured document with a live JavaScript source, and must not be arming, armed, handling, or stopping (hooks_editable)."
                 },
                 {
                   "id": "hooks-ready",
@@ -10465,7 +10498,7 @@
                   "when": {}
                 }
               ],
-              "notes": "Installs browser breakpoints/network observation and enables selected hook logic and return overrides in the disposable page/workers.",
+              "notes": "Installs breakpoints and enables page-frame hook logic and return overrides. Captured hooks pin connection, document, execution context and exact source; arming rehashes source and checks the confirmed definition IDs. Page-frame code is not sandboxed and may mutate the live page, cookies, storage or requests. No isolated world is created. Disposable hooks remain limited to their owned Experiment context and workers.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
@@ -10896,7 +10929,7 @@
               "prerequisites": [
                 {
                   "id": "hooks-editable",
-                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                  "condition": "Runtime Hooks requires its attached disposable page, or an already-attached captured document with a live JavaScript source, and must not be arming, armed, handling, or stopping (hooks_editable)."
                 }
               ],
               "confirmations": [],
@@ -11684,6 +11717,17 @@
               "action": {
                 "const": "disarm_runtime_hooks",
                 "type": "string"
+              },
+              "erase": {
+                "type": "boolean",
+                "default": false,
+                "description": "Erase a captured-document hook session without disposing a browser context. Refused while a disposable experiment context exists."
+              },
+              "expected_session_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Required for captured Hooks; exact current Runtime Hooks session, including zero before first Add."
               }
             },
             "required": [
@@ -11692,7 +11736,7 @@
             "x-source": [
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
-            "description": "No action-specific request fields. Session/state prerequisites still apply.",
+            "description": "Optional erase clears a captured-document hook session and leaves the page open. Default disarm keeps definitions. Captured cleanup requires expected_session_id, remains available without a live target, and never disposes the page. Erase joins action serialization and rechecks the session; failed breakpoint removals remain retryable.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
             "x-reb-execution": {
               "kind": "action",
@@ -11714,11 +11758,11 @@
               "uncertainties": [],
               "prerequisites": [],
               "confirmations": [],
-              "notes": "Removes installed hook breakpoints and active point ownership; definitions and captured results remain.",
+              "notes": "Removes installed hook breakpoints and active point ownership. Definitions remain unless erase is true, which clears a captured-document session without closing the page or disposing a browser context. Erase is refused while a disposable experiment context exists.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
-                  "symbol": "Debugger::disarm_hooks"
+                  "symbol": "Debugger::disarm_hooks_from"
                 }
               ]
             }
@@ -11764,7 +11808,7 @@
               "prerequisites": [
                 {
                   "id": "experiment-present",
-                  "condition": "An owned disposable Experiment context must exist; common dispatcher ownership guards still apply before cleanup."
+                  "condition": "An owned disposable Experiment context must exist. Disposal is permitted while Runtime Hooks are armed because cleanup disarms them first."
                 }
               ],
               "confirmations": [],
@@ -12238,7 +12282,7 @@
               "prerequisites": [
                 {
                   "id": "hooks-editable",
-                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                  "condition": "Runtime Hooks requires its attached disposable page, or an already-attached captured document with a live JavaScript source, and must not be arming, armed, handling, or stopping (hooks_editable)."
                 },
                 {
                   "id": "known-hook",
@@ -14642,6 +14686,11 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "target_document_epoch": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "required": [
@@ -15674,6 +15723,16 @@
           "limits": {
             "type": "object",
             "additionalProperties": true
+          },
+          "captured_owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CapturedHookOwner"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -25805,6 +25864,68 @@
           }
         },
         "description": "Bounded HTTP capture coverage. Passive browser sessions cover supported page, worker and out-of-process iframe targets; page polling is a compatibility fallback. Ready never promises first-navigation or pre-attachment completeness. WebSocket v1 remains selected-target scoped."
+      },
+      "CapturedHookOwner": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "connection_epoch": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "document_epoch": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "instance_id",
+          "connection_epoch",
+          "document_epoch",
+          "target_id"
+        ]
+      },
+      "CapturedHookSource": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "$ref": "#/components/schemas/CapturedHookOwner"
+          },
+          "script_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "source_hash": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "execution_context_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "script_id",
+          "source_hash",
+          "execution_context_id"
+        ]
       }
     }
   },

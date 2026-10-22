@@ -50,6 +50,9 @@ impl Experiment {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    pub(super) fn next_session(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
 }
 impl Debugger {
     pub(super) fn group_response(&self, key: &str) -> Value {
@@ -1026,6 +1029,33 @@ fn preflight(request: &Value, rule: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_captured_cleanup_cannot_disarm_replacement_disposable_context() {
+        use clap::Parser;
+        let d = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        *d.experiment.context.lock().unwrap() = Some("replacement-context".into());
+        d.update(|s| {
+            s["runtime_hooks"]["session_id"] = json!(8);
+            s["runtime_hooks"]["state"] = json!("armed");
+            s["runtime_hooks"]["active_points"] = json!(1);
+        });
+        let before = d.snapshot();
+        for erase in [false, true] {
+            assert!(
+                d.action(
+                    &json!({"action":"disarm_runtime_hooks","erase":erase,"expected_session_id":7})
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(d.snapshot(), before);
+        }
+        assert_eq!(
+            d.experiment.context().as_deref(),
+            Some("replacement-context")
+        );
+    }
 
     #[test]
     fn new_experiment_erases_prior_interceptor_lifetime() {

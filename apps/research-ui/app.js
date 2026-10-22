@@ -4267,7 +4267,7 @@
         }));
       }
 
-      function renderRuntimeHookHits(hooks) {
+      function renderRuntimeHookHits(hooks, emptyMessage = 'Arm a hook, then exercise the isolated page.') {
         const hits = hooks?.hits ?? [];
         const requests = hooks?.requests ?? [];
         const total = hooks?.total_hits ?? 0;
@@ -4283,7 +4283,7 @@
         if (key === state.runtimeHookHitsKey) return;
         state.runtimeHookHitsKey = key;
         if (!hits.length && !requests.length) {
-          elements.hooksHits.replaceChildren(textElement('div', 'experiment-empty', 'Arm a hook, then exercise the isolated page.'));
+          elements.hooksHits.replaceChildren(textElement('div', 'experiment-empty', emptyMessage));
           return;
         }
         const events = [
@@ -4380,7 +4380,8 @@
           ? 'Disarm to test a value' : 'Test a request value';
         testField.addEventListener('click', async () => {
           if (['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state)) {
-            const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_runtime_hooks'}));
+            const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_runtime_hooks',
+          ...(!requestInterception()?.isolated ? {expected_session_id: runtimeHooksState()?.session_id} : {})}));
             if (!response) return;
           }
           elements.hooksFieldUrl.value = request.url;
@@ -4423,7 +4424,7 @@
         const hooks = runtimeHooksState();
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         const activeStates = ['arming', 'armed', 'handling', 'stopping'];
-        const active = activeStates.includes(hooks?.state);
+        const active = activeStates.includes(hooks?.state) || (hooks?.active_points ?? 0) > 0;
         const objectBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state);
         const requestBusy = ['running', 'cancelling'].includes(repeaterState()?.state);
         const automationBusy = automationRecipesState()?.auto_armed ||
@@ -4434,21 +4435,33 @@
           experiment.target_id === state.debuggerSession?.target?.id && hooks.target_id === state.debuggerSession?.target?.id &&
           ['ready', 'error'].includes(experiment.state) && !['attaching', 'disposing', 'disposed'].includes(hooks.state);
         const pageReady = contextReady && objectExperiment?.navigation_id > 0 && objectExperiment.url;
-        const canDispose = experiment?.isolated && experiment.pending_requests === 0 && !active && !contextWorking;
-        const editable = contextReady && !active && !contextWorking;
+        const disposableReady = contextReady;
+        const capturedTarget = state.debuggerSession?.target;
         const hookableScripts = (state.debuggerSession?.scripts ?? []).filter(script => {
           if (script.language !== 'JavaScript') return false;
           const url = script.url ?? '';
           return !url.startsWith('file:') && !url.startsWith('evaluate;') && !url.startsWith('pptr:') && !url.startsWith('reb-automation-');
         });
+        const capturedScripts = hookableScripts.filter(script => script.target_type !== 'worker' &&
+          (script.target_id ?? capturedTarget?.id) === capturedTarget?.id);
+        const capturedDocument = attached && !experiment?.isolated && Boolean(capturedTarget?.id) && capturedScripts.length > 0 &&
+          (!hooks?.isolated || (hooks.target_id === capturedTarget.id &&
+            capturedHookOwnerKey(hooks.captured_owner) === capturedHookOwnerKey(capturedHookDocument()))) &&
+          !['attaching', 'disposing'].includes(hooks?.state ?? '');
+        const disposableEditable = disposableReady && !active && !contextWorking;
+        const capturedEditable = capturedDocument && !active && !contextWorking;
+        const editable = disposableEditable || capturedEditable;
         const workerScripts = hookableScripts.filter(script => script.target_type === 'worker').slice(-128);
         const scripts = [
           ...workerScripts,
           ...hookableScripts.filter(script => script.target_type !== 'worker').slice(-(256 - workerScripts.length))
         ];
-        elements.hooksWorkspace.dataset.sourceReady = String(Boolean(pageReady && scripts.length));
+        const listedScripts = capturedDocument && !disposableReady ? capturedScripts.slice(-256) : scripts;
+        elements.hooksWorkspace.dataset.sourceReady = String(Boolean((pageReady || capturedDocument) && listedScripts.length));
         const selectedScript = elements.hooksScript.value;
-        const options = scripts.map(script => {
+        const selectedSource = capturedHookSource(listedScripts.find(script => script.script_id === selectedScript));
+        const sourceChanged = state.hooksSelectedSource && JSON.stringify(state.hooksSelectedSource) !== JSON.stringify(selectedSource);
+        const options = listedScripts.map(script => {
           const option = document.createElement('option'); option.value = script.script_id;
           option.textContent = `${script.target_type === 'worker' ? `Worker ${script.target_id.slice(0, 12)}` : 'Page'} · ${sourceName({...script, source_type: 'script'})} · lines ${script.start_line + 1}-${script.end_line + 1}`;
           return option;
@@ -4457,23 +4470,36 @@
           const option = document.createElement('option'); option.value = ''; option.textContent = 'No live JavaScript sources';
           options.push(option);
         }
+        if (!disposableReady && options[0]?.value) {
+          const choice = document.createElement('option'); choice.value = ''; choice.textContent = 'Choose a captured source';
+          options.unshift(choice);
+        }
         elements.hooksScript.replaceChildren(...options);
-        if (scripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
+        if (!sourceChanged && listedScripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
+        state.hooksSelectedSource = capturedHookSource(listedScripts.find(script => script.script_id === elements.hooksScript.value));
+        const consent = hookConfirmationKey();
+        if (state.hooksConfirmationOwner !== consent) elements.hooksConfirm.checked = false;
 
         elements.experimentTitle.textContent = 'Runtime Hooks';
-        elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page or its worker.';
+        elements.experimentSubtitle.textContent = capturedDocument
+          ? 'Observe function calls or test return values on the captured document. Arming stays explicit.'
+          : 'Observe function calls or test return values on a disposable page or its worker.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (state.experimentNeedsRefresh) setExperimentNotice('working', 'Waiting for a current debugger snapshot. Runtime Hooks controls are paused until reconciliation.');
         else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
         else if (hooks.last_failure) setExperimentNotice('error', hooks.last_failure);
-        else if (hooks.state === 'armed' || contextReady || hooks.state === 'disposed') setExperimentNotice('ready', hooks.message);
+        else if (hooks.state === 'armed' || contextReady || (capturedDocument && hooks.isolated) || hooks.state === 'disposed') setExperimentNotice('ready', hooks.message);
         else if (!attached) setExperimentNotice('idle', 'Connect a browser target to configure hooks.');
         else setExperimentNotice('idle', hooks.message);
 
-        elements.hooksContextBadge.dataset.kind = hooks?.state === 'error' ? 'error' : hooks?.isolated ? '' : 'offline';
+        const documentName = String(capturedTarget?.title || capturedTarget?.url || 'Captured document').slice(0, 80);
+        elements.hooksContextBadge.dataset.kind = hooks?.state === 'error' ? 'error' : (hooks?.isolated || capturedDocument) ? '' : 'offline';
         elements.hooksContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
-          : experiment?.state === 'disposing' ? 'Disposing' : hooks?.isolated ? 'Isolated'
+          : experiment?.state === 'disposing' ? 'Disposing'
+            : capturedDocument ? documentName
+            : hooks?.captured_owner ? 'Captured document unavailable'
+            : hooks?.isolated ? 'Disposable context'
             : hooks?.state === 'disposed' ? 'Disposed' : 'Not created';
         const workerCount = hooks?.workers?.length ?? 0;
         const workerOverflow = hooks?.worker_overflow ?? 0;
@@ -4481,22 +4507,31 @@
           ? `${workerCount} ${workerCount === 1 ? 'worker' : 'workers'} discovered${workerOverflow ? ` · ${workerOverflow} beyond the attachment limit` : ''}`
           : '';
         elements.hooksContextMessage.hidden = !(workerCount || workerOverflow);
-        elements.hooksStorageState.textContent = hooks?.isolated ? 'Ephemeral and isolated'
+        elements.hooksStorageState.textContent = capturedDocument && hooks?.isolated
+          ? 'Hook records only; page storage persists'
+          : hooks?.captured_owner ? 'Captured hooks retained for cleanup'
+          : hooks?.isolated ? 'Disposable context storage'
           : hooks?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
         elements.hooksPointUsage.textContent = `${hooks?.active_points ?? 0} / ${hooks?.limits?.active_points ?? 64}`;
-        elements.hooksPageBadge.dataset.kind = pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
-        elements.hooksPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening' : pageReady ? 'Loaded' : 'No page';
+        elements.hooksPageBadge.dataset.kind = capturedDocument ? '' : pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
+        elements.hooksPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening'
+          : capturedDocument ? 'Captured' : pageReady ? 'Loaded' : 'No page';
         const stateLabels = {arming: 'Arming', armed: 'Armed', handling: 'Handling', stopping: 'Stopping',
           disarmed: 'Disarmed', ready: 'Disarmed', error: 'Error'};
         elements.hooksStateBadge.textContent = stateLabels[hooks?.state] ?? 'Disarmed';
         elements.hooksStateBadge.dataset.kind = hooks?.last_failure ? 'error' : hooks?.state === 'armed' ? '' : 'offline';
 
-        elements.hooksCreate.disabled = !attached || Boolean(experiment?.isolated) || contextWorking || state.debuggerActionPending;
-        elements.hooksDispose.disabled = !canDispose || state.debuggerActionPending;
+        const disposableDispose = experiment?.isolated && experiment.pending_requests === 0 && !contextWorking;
+        const capturedDispose = !experiment?.isolated && Boolean(hooks?.captured_owner) && hooks.session_id > 0 &&
+          !state.experimentPending && !['attaching', 'disposing'].includes(hooks.state);
+        elements.hooksCreate.disabled = !attached || Boolean(experiment?.isolated) || Boolean(hooks?.captured_owner) || contextWorking || state.debuggerActionPending;
+        elements.hooksDispose.disabled = !(disposableDispose || capturedDispose) || state.debuggerActionPending;
         elements.hooksClear.disabled = !(hooks?.hits.length || hooks?.requests.length) || active || contextWorking || state.debuggerActionPending;
-        elements.hooksPageUrl.disabled = !editable;
-        elements.hooksNavigate.disabled = !editable || state.debuggerActionPending;
+        elements.hooksPageUrl.disabled = !disposableEditable;
+        elements.hooksNavigate.disabled = !disposableEditable || state.debuggerActionPending;
         elements.hooksDefinitionForm.querySelectorAll('input, select, textarea').forEach(field => { field.disabled = !editable; });
+        if (!disposableReady) elements.hooksEntryMode.value = 'source';
+        elements.hooksEntryMode.disabled = !disposableEditable;
         const functionMode = elements.hooksEntryMode.value === 'function';
         elements.hooksSourceLocationFields.hidden = functionMode;
         elements.hooksFunctionExpressionField.hidden = !functionMode;
@@ -4506,15 +4541,15 @@
         elements.hooksReturnValueField.hidden = functionMode || elements.hooksReturnMode.value === 'none';
         elements.hooksReturnValueField.firstChild.textContent = elements.hooksReturnMode.value === 'json'
           ? 'Replacement JSON' : 'Replacement frame expression';
-        elements.hooksAdd.disabled = !editable || !scripts.length || !elements.hooksLabel.value.trim() ||
+        elements.hooksAdd.disabled = !editable || !elements.hooksScript.value || !listedScripts.length || !elements.hooksLabel.value.trim() ||
           (!elements.hooksEntryEnabled.checked && !elements.hooksReturnEnabled.checked) ||
           (functionMode && !elements.hooksFunctionExpression.value.trim()) || state.debuggerActionPending;
-        elements.hooksConfirm.disabled = !contextReady || active || !hooks?.definitions.length || contextWorking;
+        elements.hooksConfirm.disabled = !editable || !hooks?.definitions.length || contextWorking;
         elements.hooksArm.disabled = !editable || !hooks?.definitions.length || !elements.hooksConfirm.checked || state.debuggerActionPending;
-        elements.hooksDisarm.disabled = !active || state.debuggerActionPending || state.experimentNeedsRefresh;
+        elements.hooksDisarm.disabled = !(active || hooks?.active_points > 0) || state.debuggerActionPending;
         renderRuntimeHookDefinitions(hooks, active);
-        renderRuntimeHookHits(hooks);
-        renderRuntimeFieldTest(hooks, editable, contextReady && !contextWorking &&
+        renderRuntimeHookHits(hooks, capturedDocument ? 'Arm a hook, then exercise the captured document.' : undefined);
+        renderRuntimeFieldTest(hooks, disposableEditable, contextReady && !contextWorking &&
           !['arming', 'handling', 'stopping'].includes(hooks?.state));
         elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
         elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentNeedsRefresh && !state.experimentError && !hooks.last_failure
@@ -4769,7 +4804,8 @@
         const hasPendingRequests = (experiment?.pending_requests ?? 0) > 0;
         const contextReady = attached && experiment?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state);
-        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !hookBusy && !automationBusy;
+        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !automationBusy;
+        const disposeBlocked = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) || automationBusy;
         elements.experimentSubtitle.textContent = request && state.selectedField
           ? `request-${request.id} · ${state.selectedField.label} ${state.selectedField.path} · isolated replay only`
           : attached
@@ -4805,7 +4841,7 @@
         elements.experimentPendingCount.textContent = `${experiment?.pending_requests ?? 0} / ${experiment?.limits?.pending_requests ?? 16}`;
 
         elements.experimentCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
-        elements.experimentDispose.disabled = !canDispose || working || state.debuggerActionPending;
+        elements.experimentDispose.disabled = !canDispose || disposeBlocked || state.debuggerActionPending;
         elements.experimentClear.disabled = !experiment || !['disposed', 'error'].includes(experiment.state) || experiment.isolated || working || state.debuggerActionPending;
         elements.experimentArmRule.disabled = !contextReady || hasPendingRequests || working || state.debuggerActionPending;
         elements.experimentRun.disabled = !contextReady || hasPendingRequests || working || state.debuggerActionPending;
@@ -4827,6 +4863,49 @@
           experiment?.isolated ?? false, experiment?.target_id ?? null,
           ...['repeater', 'object_experiment', 'runtime_hooks', 'automation_recipes'].flatMap(group =>
             [session?.[group]?.session_id ?? 0, session?.[group]?.target_id ?? null])]);
+      }
+
+      function capturedHookDocument(session = state.debuggerSession) {
+        return {instance_id: session?.network?.instance_id, connection_epoch: session?.network?.capture_epoch,
+          document_epoch: session?.target_document_epoch, target_id: session?.target?.id};
+      }
+
+      function capturedHookOwnerKey(owner) {
+        return JSON.stringify([owner?.instance_id, owner?.connection_epoch, owner?.document_epoch, owner?.target_id]);
+      }
+
+      function capturedHookSource(script, session = state.debuggerSession) {
+        return script ? {owner: capturedHookDocument(session), script_id: script.script_id,
+          source_hash: script.hash, execution_context_id: script.execution_context_id} : null;
+      }
+
+      function hookConfirmationKey() {
+        const session = state.debuggerSession;
+        return JSON.stringify([capturedHookDocument(session), session?.runtime_hooks?.session_id,
+          session?.runtime_hooks?.definitions, session?.scripts?.map(script =>
+            [script.script_id, script.hash, script.execution_context_id])]);
+      }
+
+      function expectedCapturedHookTransition(owner, current) {
+        if (owner.initialIsolated || current?.request_interception?.isolated ||
+            experimentLifetimeKey({...current, runtime_hooks: owner.initialHooks}) !== owner.initialLifetime) return false;
+        const hooks = current.runtime_hooks, request = owner.request;
+        if (request.action === 'add_runtime_hook' && request.captured_source &&
+            request.expected_session_id === owner.initialHooks?.session_id &&
+            hooks?.isolated && hooks.session_id > (owner.initialHooks?.session_id ?? 0) &&
+            capturedHookOwnerKey(hooks.captured_owner) === capturedHookOwnerKey(request.captured_source.owner) &&
+            capturedHookOwnerKey(capturedHookDocument(current)) === capturedHookOwnerKey(request.captured_source.owner) &&
+            hooks.target_id === request.captured_source.owner.target_id) {
+          owner.capturedSession ??= hooks.session_id;
+          return owner.capturedSession === hooks.session_id;
+        }
+        if (request.action !== 'disarm_runtime_hooks' || request.expected_session_id !== owner.initialHooks?.session_id ||
+            hooks?.session_id !== request.expected_session_id) return false;
+        if (hooks.isolated && owner.initialHooks?.captured_owner &&
+            hooks.target_id === owner.initialHooks.target_id &&
+            capturedHookOwnerKey(hooks.captured_owner) === capturedHookOwnerKey(owner.initialHooks.captured_owner)) return true;
+        return request.erase === true && hooks.state === 'disposed' && !hooks.isolated && hooks.target_id === null &&
+          hooks.captured_owner == null && hooks.definitions.length === 0 && hooks.active_points === 0;
       }
 
       function experimentContextKey() {
@@ -5023,7 +5102,7 @@
           const before = previous?.request_interception, after = current.request_interception;
           let expired = false;
           for (const owner of state.experimentActionOwners ?? []) {
-            let expected = false;
+            let expected = !restarted && expectedCapturedHookTransition(owner, current);
             if (!restarted && owner.action === 'create_request_interception_experiment' && !owner.initialIsolated) {
               const creation = JSON.stringify([after.experiment_id, after.created_at_ms]);
               if (after.experiment_id > 0 && after.created_at_ms > 0 && ['creating', 'ready', 'error'].includes(after.state)) {
@@ -5062,9 +5141,10 @@
         if (state.experimentPending && !parallelControl) return null;
         const session = state.debuggerSession;
         if (!session || !experimentActionGroups(request.action)) return null;
-        const owner = {action: request.action, initialIsolated: session.request_interception.isolated, expired: false,
+        const owner = {request, initialHooks: session.runtime_hooks, initialLifetime: experimentLifetimeKey(session),
+          action: request.action, initialIsolated: session.request_interception.isolated, expired: false,
           initialCreation: JSON.stringify([session.request_interception.experiment_id, session.request_interception.created_at_ms])};
-        if (state.experimentNeedsRefresh) {
+        if (state.experimentNeedsRefresh && request.action !== 'disarm_runtime_hooks') {
           state.experimentError = 'Waiting for a current debugger snapshot before another experiment action. No request was sent.';
           renderExperiment();
           return null;
@@ -5089,7 +5169,8 @@
           const next = {...current};
           const groups = experimentActionGroups(request.action).map(group => group === 'experiment' ? 'request_interception' : group);
           for (const group of experimentActionGroups(request.action)) next[group === 'experiment' ? 'request_interception' : group] = response[group];
-          const lifecycle = ['create_request_interception_experiment', 'dispose_request_interception_experiment'].includes(request.action);
+          const lifecycle = ['create_request_interception_experiment', 'dispose_request_interception_experiment'].includes(request.action) ||
+            expectedCapturedHookTransition(owner, next);
           const receiptCreation = JSON.stringify([response.experiment?.experiment_id, response.experiment?.created_at_ms]);
           if ((request.action === 'create_request_interception_experiment' && owner.creation && owner.creation !== receiptCreation) ||
               (request.action === 'dispose_request_interception_experiment' && owner.initialCreation !== receiptCreation) ||
@@ -5359,6 +5440,14 @@
             return_mode: returnMode
           };
           if (!request.label) throw new TypeError('Enter a short hook label.');
+          if (!requestInterception()?.isolated) {
+            const selected = capturedHookSource((state.debuggerSession?.scripts ?? []).find(script => script.script_id === request.script_id));
+            if (!selected || !state.hooksSelectedSource || JSON.stringify(selected) !== JSON.stringify(state.hooksSelectedSource)) {
+              throw new TypeError('The selected source changed. Select it again explicitly.');
+            }
+            request.captured_source = state.hooksSelectedSource;
+            request.expected_session_id = runtimeHooksState()?.session_id ?? 0;
+          }
           if (!request.script_id) throw new TypeError('Choose one live JavaScript source.');
           if (!request.entry_enabled && !request.return_enabled) throw new TypeError('Enable entry, synchronous return, or both.');
           if (request.entry_mode === 'function' && (!request.function_expression || !request.entry_enabled || request.return_enabled)) {
@@ -12356,7 +12445,12 @@
         action: 'create_request_interception_experiment'
       }));
       elements.hooksDispose.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
+        const hooks = runtimeHooksState();
+        const experiment = requestInterception();
+        const captured = Boolean(hooks?.captured_owner) && !experiment?.isolated;
+        const response = currentExperimentReceipt(await runExperimentAction(
+          captured ? {action: 'disarm_runtime_hooks', erase: true, expected_session_id: hooks.session_id} : {action: 'dispose_request_interception_experiment'}
+        ));
         if (response) {
           elements.hooksConfirm.checked = false;
           elements.hooksDefinitionForm.reset();
@@ -12376,11 +12470,14 @@
         addRuntimeHook();
       });
       elements.hooksScript.addEventListener('change', () => {
+        state.hooksSelectedSource = null;
+        elements.hooksConfirm.checked = false;
         const script = (state.debuggerSession?.scripts ?? []).find(candidate => candidate.script_id === elements.hooksScript.value);
         if (script) {
           elements.hooksLine.value = String(script.start_line + 1);
           elements.hooksColumn.value = String(script.start_column + 1);
         }
+        renderRuntimeHooks();
       });
       elements.hooksReturnMode.addEventListener('change', () => {
         state.experimentError = null;
@@ -12401,9 +12498,15 @@
         state.experimentError = null;
         renderRuntimeHooks();
       });
-      elements.hooksConfirm.addEventListener('change', renderRuntimeHooks);
+      elements.hooksConfirm.addEventListener('change', () => {
+        state.hooksConfirmationOwner = elements.hooksConfirm.checked ? hookConfirmationKey() : null;
+        renderRuntimeHooks();
+      });
       elements.hooksArm.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'arm_runtime_hooks', confirmed: elements.hooksConfirm.checked}));
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'arm_runtime_hooks',
+          confirmed: elements.hooksConfirm.checked && state.hooksConfirmationOwner === hookConfirmationKey(),
+          ...(!requestInterception()?.isolated ? {expected_session_id: runtimeHooksState()?.session_id,
+            captured_owner: capturedHookDocument(), expected_definition_ids: runtimeHooksState()?.definitions.map(hook => hook.id)} : {})}));
         if (response) elements.hooksConfirm.checked = false;
       });
       elements.hooksDisarm.addEventListener('click', async () => {

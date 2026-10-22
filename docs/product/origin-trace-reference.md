@@ -247,9 +247,10 @@ after types, redacted URL, byte count, and value digest. Disposal erases object
 references, previews, submitted values, and the audit with the BrowserContext.
 See [Live Object Experiment v1](./live-object-experiment-v1.md).
 
-Runtime Hook Studio shares that disposable Experiment BrowserContext and can
-instrument only its isolated page. Select a live JavaScript source and function
-location, add up to eight entry or synchronous-return hooks, then explicitly
+Runtime Hook Studio can instrument a document the debugger is already attached
+to, using a named isolated world in that same document, or the disposable
+Experiment BrowserContext's isolated page. Select a live JavaScript source and
+function location, add up to eight entry or synchronous-return hooks, then explicitly
 confirm page mutation before arming. A hook can inspect at most 32 own local
 data properties without invoking accessors, run a bounded condition and phase
 action, and replace a synchronous return with typed JSON or a frame expression.

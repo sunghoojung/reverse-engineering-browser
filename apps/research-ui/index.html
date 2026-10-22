@@ -866,7 +866,7 @@
             </div>
             <div id="hooks-home" hidden></div>
             <div id="hooks-workspace" class="experiment-workspace" aria-label="Runtime Hooks" hidden>
-              <div class="source-hooks-head"><strong>Runtime Hooks · isolated</strong><button id="source-hooks-experiments" class="source-tool" type="button">Experiments</button><button id="source-hooks-close" class="source-tool" type="button" aria-label="Close Runtime Hooks panel">Close</button></div>
+              <div class="source-hooks-head"><strong>Runtime Hooks · page execution</strong><button id="source-hooks-experiments" class="source-tool" type="button">Experiments</button><button id="source-hooks-close" class="source-tool" type="button" aria-label="Close Runtime Hooks panel">Close</button></div>
               <div id="source-hooks-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite" hidden></div>
               <section id="candidate-experiment-strip" class="candidate-experiment-strip" aria-label="Candidate experiment question" hidden>
                 <strong id="candidate-experiment-question"></strong>
@@ -961,7 +961,7 @@
                 <article class="experiment-card">
                   <header><div><h2>Hook controls · optional</h2></div><span id="hooks-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
                   <div class="experiment-body experiment-form">
-                    <label class="hook-confirm"><input id="hooks-confirm" type="checkbox" /> I confirm these hooks may mutate the isolated page</label>
+                    <label class="hook-confirm"><input id="hooks-confirm" type="checkbox" /> I confirm these hooks may mutate the selected page, its cookies and storage. Page-frame code is not sandboxed.</label>
                     <div class="hook-control-actions">
                       <button id="hooks-arm" class="trace-button" type="button" disabled>Arm all hooks</button>
                       <button id="hooks-disarm" class="secondary-button" type="button" disabled>Disarm</button>

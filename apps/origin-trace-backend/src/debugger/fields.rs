@@ -140,6 +140,7 @@ fn select_pairs(source: &str, selector: &str) -> Value {
 }
 impl Debugger {
     pub(super) async fn configure_field(&self, r: &Value) -> Result<Value> {
+        self.isolated_target("runtime_hooks", false)?;
         self.hooks_editable()?;
         let enabled = r["enabled"]
             .as_bool()
@@ -214,6 +215,7 @@ impl Debugger {
         Ok(self.group_response("runtime_hooks"))
     }
     pub(super) fn compare_field(&self, r: &Value) -> Result<Value> {
+        self.isolated_target("runtime_hooks", false)?;
         self.hooks_editable()?;
         let a = validation::integer(
             &r["baseline_id"],

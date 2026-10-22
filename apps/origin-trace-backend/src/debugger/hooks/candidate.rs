@@ -73,6 +73,9 @@ impl Debugger {
     }
 
     pub(super) fn check_candidate_definition(&self, definition: &Value) -> Result<()> {
+        if let Some(guard) = definition.get("captured_guard") {
+            self.check_captured_guard(guard)?;
+        }
         if let Some(guard) = definition.get("candidate_guard")
             && (self
                 .hooks

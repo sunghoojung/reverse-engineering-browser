@@ -335,10 +335,16 @@ impl Debugger {
         if let Some(connection) = self.connection.lock().await.take() {
             connection.close().await;
         }
-        let target = preferred
-            .as_ref()
+        let captured_target = self.snapshot()["runtime_hooks"]["captured_owner"]["target_id"]
+            .as_str()
+            .map(str::to_owned);
+        let selected = preferred.as_ref().or(captured_target.as_ref());
+        let target = selected
             .and_then(|id| targets.iter().find(|t| t["id"] == *id))
             .or_else(|| {
+                if captured_target.is_some() {
+                    return None;
+                }
                 targets.iter().find(|t| {
                     t["type"] == "page"
                         && !t["url"].as_str().unwrap_or("").starts_with("devtools://")
@@ -352,7 +358,14 @@ impl Debugger {
         // A main reconnect does not re-enable already attached worker debuggers.
         // Their cleared descriptors cannot be treated as a complete catalog.
         let retained_workers = self.workers.has_sessions();
+        let mut current_connection = self.connection.lock().await;
         self.update(|s| {
+            s["target_document_epoch"] = json!(
+                s["target_document_epoch"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            );
             let incomplete = retained_workers
                 || s["scripts"]
                     .as_array()
@@ -375,7 +388,8 @@ impl Debugger {
             s["network"]["target_id"] = target["id"].clone();
             s["network"]["websockets"] = websocket::empty();
         });
-        *self.connection.lock().await = Some(connection.clone());
+        *current_connection = Some(connection.clone());
+        drop(current_connection);
         let weak = Arc::downgrade(self);
         let event_connection = connection.clone();
         tokio::spawn(async move {
@@ -396,10 +410,19 @@ impl Debugger {
                     Event::Barrier(sender) => {
                         let _ = sender.send(());
                     }
-                    Event::Message(Ok(value), _permit) => debugger.event(value).await,
+                    Event::Message(Ok(value), _permit) => {
+                        debugger
+                            .event_from(
+                                value,
+                                Some(workers::Session {
+                                    connection: event_connection.clone(),
+                                    id: None,
+                                }),
+                            )
+                            .await
+                    }
                     Event::Message(Err(e), _permit) => {
-                        debugger.set_state("waiting", Some(&e.message));
-                        debugger.update(|s| s["paused"] = Value::Null);
+                        debugger.connection_failed(&event_connection, &e).await;
                         break;
                     }
                 }
@@ -716,7 +739,7 @@ impl Debugger {
             "add_runtime_hook" => return self.add_hook(request).await,
             "remove_runtime_hook" => return self.remove_hook(request),
             "arm_runtime_hooks" => return self.arm_hooks(request).await,
-            "disarm_runtime_hooks" => return self.disarm_hooks().await,
+            "disarm_runtime_hooks" => return self.disarm_hooks_from(request).await,
             "clear_runtime_hook_hits" => return self.clear_hook_hits(),
             "configure_runtime_field_test" => return self.configure_field(request).await,
             "compare_runtime_field_test" => return self.compare_field(request),
@@ -861,7 +884,36 @@ impl Debugger {
         }
         Ok(())
     }
+    async fn connection_failed(&self, owner: &Arc<Connection>, error: &Error) {
+        let current = self.connection.lock().await;
+        if current
+            .as_ref()
+            .is_some_and(|connection| Arc::ptr_eq(connection, owner))
+        {
+            self.set_state("waiting", Some(&error.message));
+            self.update(|s| s["paused"] = Value::Null);
+        }
+    }
+    #[cfg(test)]
     async fn event(self: &Arc<Self>, message: Value) {
+        self.event_from(message, None).await;
+    }
+    async fn event_from(self: &Arc<Self>, message: Value, owner: Option<workers::Session>) {
+        // The queue gate alone is not atomic with reconnect. Keep the connection
+        // lock through synchronous catalog/pause commits so an old event cannot
+        // be admitted before replacement and committed into the new target.
+        let mut ownership = if let Some(owner) = &owner {
+            let current = self.connection.lock().await;
+            if !current
+                .as_ref()
+                .is_some_and(|connection| Arc::ptr_eq(connection, &owner.connection))
+            {
+                return;
+            }
+            Some(current)
+        } else {
+            None
+        };
         let method = message["method"].as_str().unwrap_or("");
         let p = &message["params"];
         if [
@@ -881,12 +933,44 @@ impl Debugger {
                 );
             });
         }
+        if [
+            "Page.frameNavigated",
+            "Page.documentOpened",
+            "Page.navigatedWithinDocument",
+            "Runtime.executionContextsCleared",
+        ]
+        .contains(&method)
+        {
+            self.update(|s| {
+                s["target_document_epoch"] = json!(
+                    s["target_document_epoch"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .saturating_add(1)
+                );
+            });
+        }
+        if ![
+            "Debugger.scriptParsed",
+            "Runtime.executionContextDestroyed",
+            "Runtime.executionContextsCleared",
+            "Debugger.paused",
+            "Debugger.resumed",
+            "Page.frameNavigated",
+            "Page.navigatedWithinDocument",
+            "Page.documentOpened",
+            "Page.frameResized",
+        ]
+        .contains(&method)
+        {
+            drop(ownership.take());
+        }
         match method {
             "Debugger.scriptParsed"=>if let Some(script)=parse::script(p) {self.update(|s| {self.hooks.candidate_source_changed(s["target"]["id"].as_str().unwrap_or(""));let scripts=s["scripts"].as_array_mut().unwrap();scripts.retain(|v|v["script_id"]!=script["script_id"]);if scripts.len()>=5000 {self.hooks.candidate_catalog_incomplete.store(true,Ordering::Release);scripts.remove(0);}scripts.push(script);});}else{self.hooks.candidate_catalog_incomplete.store(true,Ordering::Release);self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);},
             "Runtime.executionContextDestroyed"|"Runtime.executionContextsCleared"=>{self.update(|s| {self.hooks.candidate_source_changed(s["target"]["id"].as_str().unwrap_or(""));let clear=method.ends_with("Cleared");s["scripts"].as_array_mut().unwrap().retain(|v|v["target_type"]=="worker" || (!clear && v["execution_context_id"]!=p["executionContextId"]));let ids=s["scripts"].as_array().unwrap().iter().map(|v|v["script_id"].clone()).collect::<Vec<_>>();for b in s["breakpoints"].as_array_mut().unwrap() {b["locations"].as_array_mut().unwrap().retain(|l|ids.contains(&l["script_id"]));}})},
             "Page.frameNavigated"=>{if !p["frame"]["parentId"].is_string() {self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);self.clear_object_search().await;self.hooks_navigated().await;}},
-            "Debugger.paused"=>{let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();if self.hook_pause(&target,p.clone()) {return;}let pause=parse::pause(p);self.update(|s| {s["state"]=json!("paused");s["error"]=Value::Null;s["paused"]=pause;});let generation=self.snapshot()["generation"].as_u64().unwrap();let weak=Arc::downgrade(self);tokio::spawn(async move {if let Some(debugger)=weak.upgrade() {if debugger.memory_active(debugger.snapshot()["memory_origin_trace"]["trace_id"].as_u64().unwrap()) {debugger.memory_pause(debugger.snapshot()["paused"].clone()).await;} else {debugger.enrich(generation).await;}}});},
-            "Debugger.resumed"=>self.update(|s| {if s["state"]!="crashed" {s["state"]=json!("running");s["paused"]=Value::Null;}}),
+            "Debugger.paused"=>{let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();if owner.clone().is_some_and(|session| self.hook_pause(&target,session,p.clone())) {return;}let pause=parse::pause(p);self.update(|s| {s["state"]=json!("paused");s["error"]=Value::Null;s["paused"]=pause;});let generation=self.snapshot()["generation"].as_u64().unwrap();let weak=Arc::downgrade(self);tokio::spawn(async move {if let Some(debugger)=weak.upgrade() {if debugger.memory_active(debugger.snapshot()["memory_origin_trace"]["trace_id"].as_u64().unwrap()) {debugger.memory_pause(debugger.snapshot()["paused"].clone()).await;} else {debugger.enrich(generation).await;}}});},
+            "Debugger.resumed"=>{if let Some(owner)=owner {self.hook_resumed(self.snapshot()["target"]["id"].as_str().unwrap_or(""),&owner);}self.update(|s| {if s["state"]!="crashed" {s["state"]=json!("running");s["paused"]=Value::Null;}})},
             "Debugger.breakpointResolved"=>if let Some(location)=parse::location(&p["location"]) {self.update(|s| {if let Some(b)=s["breakpoints"].as_array_mut().unwrap().iter_mut().find(|b|b["id"]==p["breakpointId"]) {let locations=b["locations"].as_array_mut().unwrap();if !locations.contains(&location) {if locations.len()<256 {locations.push(location);} else {b["locations_truncated"]=json!(true);}}}});},
             "Runtime.exceptionThrown" => {let d=&p["exceptionDetails"];let value=if d["exception"].is_object() {d["exception"].clone()} else {json!({"type":"string","value":d["text"].as_str().unwrap_or("Exception")})};self.append_console(&json!({"type":"error","timestamp":p["timestamp"],"args":[value],"stackTrace":d["stackTrace"]}));},
             "Log.entryAdded" => {let e=&p["entry"];self.append_console(&json!({"type":e["level"].as_str().unwrap_or("info"),"timestamp":e["timestamp"],"args":[{"type":"string","value":e["text"].as_str().unwrap_or("")}],"stackTrace":e["stackTrace"]}));},
@@ -1036,6 +1120,7 @@ fn check_action_owner(action: &str, s: &Value) -> Result<()> {
     if ["arming", "armed", "handling", "stopping"]
         .contains(&s["runtime_hooks"]["state"].as_str().unwrap_or(""))
         && action != "disarm_runtime_hooks"
+        && action != "dispose_request_interception_experiment"
     {
         return Err(Error::conflict(
             "Runtime Hooks controls the isolated target until it is disarmed",

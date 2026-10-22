@@ -1443,18 +1443,21 @@
       }
 
       function resetRequestSelection() {
-        state.originTraceController?.abort();
+        const keepNativeTrace = Boolean(state.selectedTraceChoiceId);
+        if (!keepNativeTrace) state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
         state.selectedRequestId = null;
         state.selectedCaptureIdentity = null;
         state.selectedField = null;
-        state.originTrace = null;
-        state.selectedTraceRow = null;
-        state.originTraceStatus = 'idle';
-        state.originTraceError = null;
-        state.originTraceKey = null;
-        state.originTraceEtag = null;
-        state.originTraceGeneration += 1;
+        if (!keepNativeTrace) {
+          state.originTrace = null;
+          state.selectedTraceRow = null;
+          state.originTraceStatus = 'idle';
+          state.originTraceError = null;
+          state.originTraceKey = null;
+          state.originTraceEtag = null;
+          state.originTraceGeneration += 1;
+        }
         state.signalProfile = null;
         state.signalProfileStatus = 'idle';
         state.signalProfileError = null;
@@ -2511,6 +2514,7 @@
         if (match?.side) state.inspectorTab = match.mode === 'headers' ? 'headers' : match.side === 'Request' ? 'payload' : 'response';
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
+        state.selectedTraceChoiceId = null;
         if (state.selectedRequestId !== id) state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.selectedRequestId = id;
         state.selectedCaptureIdentity = request.captureRecord ? apiCatalogRequestIdentity(request) : null;
@@ -2953,9 +2957,95 @@
         if (!document.querySelector('#screen-backtrace').hidden) renderBacktrace();
       }
 
+      function initiatorEdgeRequest(edge) {
+        // Session, from-process, and from-sequence identify the edge. Host,
+        // method, URL, and time are not an identity and cannot make a CDP row native.
+        if (!edge || edge.relation !== 'request_initiator') return null;
+        const sessionID = investigationId(edge.session_id);
+        const requestID = investigationId(edge.request_id);
+        const sequence = investigationId(edge.from_sequence_number);
+        const processText = investigationId(edge.from_process_id);
+        const processID = processText === null ? NaN : Number(processText);
+        if (!sessionID || sessionID === '0' || !requestID || requestID === '0' || !sequence || sequence === '0' ||
+            !Number.isSafeInteger(processID) || processID <= 0 || processID > 4294967295) return null;
+        return {
+          id: `native-edge:${sessionID}:${processID}:${sequence}:${requestID}`,
+          origin: 'live',
+          method: 'EVENT',
+          path: `native request ${requestID}`,
+          operation: 'request_started',
+          events: [{
+            type: 'request_started',
+            session_id: sessionID,
+            process_id: processID,
+            sequence_number: sequence,
+            request_id: requestID
+          }]
+        };
+      }
+
+      function exactNativeTraceChoices() {
+        const seen = new Set();
+        const choices = [];
+        const add = request => {
+          const root = requestTraceRoot(request);
+          if (!root) return;
+          const sessionID = investigationId(root.session_id);
+          const requestID = investigationId(root.request_id);
+          const sequence = investigationId(root.sequence_number);
+          const processID = root.process_id;
+          if (!sessionID || sessionID === '0' || !requestID || requestID === '0' || !sequence || sequence === '0' ||
+              !Number.isSafeInteger(processID) || processID < 0 || processID > 4294967295) return;
+          const key = `${sessionID}:${processID}:${sequence}:${requestID}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          choices.push(request);
+        };
+        for (const request of state.nativeRequests ?? []) add(request);
+        for (const request of state.requests ?? []) add(request);
+        for (const edge of state.originTraceEdges ?? []) add(initiatorEdgeRequest(edge));
+        return choices;
+      }
+
+      function traceSelectionRequest() {
+        const explicit = state.selectedTraceChoiceId;
+        if (explicit) {
+          const choices = exactNativeTraceChoices().filter(candidate => candidate.id === explicit);
+          return choices.length === 1 ? choices[0] : null;
+        }
+        const id = state.selectedRequestId;
+        if (!id) return null;
+        const traffic = (state.requests ?? []).filter(candidate => candidate.id === id);
+        if (traffic.length !== 1) return null;
+        const native = exactNativeTraceChoices().filter(candidate => candidate.id === id);
+        if (native.length > 1) return null;
+        return native[0] ?? traffic[0];
+      }
+
+      function selectTraceChoice(id) {
+        const native = exactNativeTraceChoices().find(candidate => candidate.id === id);
+        const traffic = state.requests.find(candidate => candidate.id === id);
+        if (native) {
+          if (traffic) selectRequest(traffic.id);
+          state.selectedTraceChoiceId = native.id;
+          if (!traffic) {
+            state.originTraceController?.abort();
+            state.originTrace = null;
+            state.selectedTraceRow = null;
+            state.originTraceStatus = 'idle';
+            state.originTraceError = null;
+            state.originTraceKey = null;
+            state.originTraceEtag = null;
+            state.originTraceGeneration += 1;
+          }
+          return;
+        }
+        state.selectedTraceChoiceId = null;
+        if (traffic) selectRequest(traffic.id);
+      }
+
       function originTraceSelection() {
-        const candidates = state.requests.filter(candidate => candidate.id === state.selectedRequestId);
-        const request = candidates.length === 1 ? candidates[0] : null;
+        const request = traceSelectionRequest();
         const root = requestTraceRoot(request);
         if (!request || !root) return null;
         const requestID = investigationId(root.request_id), sessionID = investigationId(root.session_id);
@@ -3122,24 +3212,25 @@
       function renderBacktrace() {
         const selection = originTraceSelection();
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        const captured = state.requests.filter(candidate => requestTraceRoot(candidate));
-        const choices = request && !requestTraceRoot(request) ? [request, ...captured] : captured;
+        const captured = exactNativeTraceChoices();
+        const choices = request && !requestTraceRoot(request) ? [request, ...captured.filter(candidate => candidate.id !== request.id)] : captured;
+        const traceSelectionId = state.selectedTraceChoiceId || state.selectedRequestId || '';
         const choiceKey = JSON.stringify(choices.map(candidate => [candidate.id, candidate.method, candidate.path]));
         if (elements.traceRequest.dataset.choices !== choiceKey) {
           elements.traceRequest.replaceChildren(...choices.map(candidate => {
           const option = document.createElement('option'); option.value = candidate.id;
           option.textContent = `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no predecessor evidence)' : candidate.origin === 'demo' ? ' (demo, no predecessor evidence)' : ' (no request identifier)'}`;
-          option.selected = candidate.id === state.selectedRequestId;
+          option.selected = candidate.id === traceSelectionId;
           return option;
           }));
           elements.traceRequest.dataset.choices = choiceKey;
         }
-        elements.traceRequest.value = state.selectedRequestId || '';
+        elements.traceRequest.value = choices.some(candidate => candidate.id === traceSelectionId) ? traceSelectionId : '';
         elements.traceRequest.disabled = !choices.length;
         elements.traceLoad.disabled = !selection || state.originTraceStatus === 'loading';
         elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
         elements.backtraceSubtitle.textContent = selection
-          ? `${request.method} ${request.path}` : 'Request events and their recorded predecessors';
+          ? `${selection.request.method} ${selection.request.path}` : 'Request events and their recorded predecessors';
         const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
         const hasSteps = Boolean(trace?.steps.length);
         elements.traceContent.hidden = !hasSteps;
@@ -11972,14 +12063,14 @@
       enableTabKeyboardNavigation('.field-tab');
       enableTabKeyboardNavigation('.source-side-tab:not(:disabled)');
       elements.traceRequest.addEventListener('change', async () => {
-        selectRequest(elements.traceRequest.value);
+        selectTraceChoice(elements.traceRequest.value);
         await refreshOriginTrace();
       });
       elements.traceLoad.addEventListener('click', refreshOriginTrace);
       elements.traceFirstRequest.addEventListener('click', async () => {
-        const first = state.requests.find(candidate => requestTraceRoot(candidate));
+        const first = exactNativeTraceChoices()[0];
         if (!first) return;
-        selectRequest(first.id);
+        selectTraceChoice(first.id);
         await refreshOriginTrace();
         elements.backtraceSteps.querySelector('.trace-row')?.focus();
       });

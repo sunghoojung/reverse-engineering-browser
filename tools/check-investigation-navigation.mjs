@@ -81,10 +81,133 @@ export async function checkInvestigationCore(root) {
   assert.equal(model.investigationResolve(freshIdentity,freshRequests,model.investigationRequestIdentity).status,'ready');
   assert.equal(model.investigationResolve(freshIdentity,await fixtureRequests('13'),model.investigationRequestIdentity).status,'stale');
   console.log('PASS investigation fixture counterexample: stale selection can coexist with a retained replacement; fresh exact request comes from normal event admission (not rendered QA)');
+  await checkNativeTraceOffer(root);
   await checkAdvancedNavigation(root);
   await checkInvestigationReturns(root);
   await checkCollectionNavigation(root, source);
   console.log('PASS investigation exact identity, u64 boundaries, CDP correlation separation, stale/ambiguous resolution, bounded branching return history and packaged asset wiring (not rendered QA)');
+}
+
+// Content capture may hide a native Traffic row after a host/method/time guess.
+// Backtraces still has to offer the exact native root, and a CDP row must not
+// become that root. This does not keep the hidden row in the Traffic projection.
+export async function checkNativeTraceOffer(root) {
+  const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
+  const models = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
+  const navigation = await readFile(join(root, 'apps/research-ui/investigation_navigation.js'), 'utf8');
+  const section = (start, end) => app.slice(app.indexOf(start), app.indexOf(end));
+  const fixture = investigationFixture({handle: async () => false, release() {}});
+  const text = 'GET https://example.com/script.js';
+  const payload = Buffer.from(text).toString('hex');
+  const initiated = {...fixture.event, type: 'request_initiated', payload, payload_size: Buffer.byteLength(text)};
+  const started = {...fixture.event, process_id: 23, sequence_number: '52', request_id: '200',
+    type: 'request_started', initiator_process_id: 17, initiator_request_id: 91, payload, payload_size: Buffer.byteLength(text)};
+  const emptyBody = () => ({state: 'empty', mime: '', text: '', base64: '', truncated: false, reason: ''});
+  const record = {id: 'cdp-example', protocol_request_id: 'cdp-91', target_id: 'target', target_title: 'Example',
+    url: 'https://example.com/script.js', method: 'GET', resource_type: 'Script', started_monotonic_ms: 1,
+    state: 'complete', status: 200, mime_type: 'text/plain', duration_ms: 1,
+    request: {headers: [], body: emptyBody()}, response: {headers: [], body: emptyBody()}};
+  const trace = {...fixture.trace, request_id: '200', steps: [
+    {...fixture.trace.steps[0], event: {session_id: '11', process_id: 23, sequence_number: '52'}, request_id: '200', operation: 'request_started', relation: 'trace_target', value: text},
+    {...fixture.trace.steps[0], event: {session_id: '11', process_id: 17, sequence_number: '41'}, request_id: '91', operation: 'request_initiated', relation: 'request_initiator', value: text}
+  ], gaps: [{...fixture.trace.gaps[0], after_step: 1}],
+    coverage: {linked_steps: 1, observed_links: 1, correlated_links: 0, gap_count: 1, percent: 50}};
+  const node = () => ({dataset: {}, children: [], hidden: false, replaceChildren(...children) { this.children = children; },
+    querySelectorAll: () => [], removeAttribute(name) { delete this[name]; }});
+  const elements = Object.fromEntries(['traceRequest', 'traceLoad', 'backtraceSubtitle', 'traceContent', 'traceEmpty',
+    'traceEvidence', 'traceFirstRequest', 'traceNotice', 'traceEmptyTitle', 'traceEmptyMessage', 'backtraceSteps',
+    'traceStepDetails', 'coverageValue'].map(name => [name, node()]));
+  const state = {requests: [], nativeRequests: [], originTraceEdges: [], selectedRequestId: null, selectedTraceChoiceId: null,
+    originTrace: null, originTraceKey: null, originTraceStatus: 'idle', originTraceGeneration: 0, originTraceEtag: null, selectedTraceRow: null};
+  const reads = [];
+  const context = {state, elements, TextDecoder, TextEncoder, URL, URLSearchParams, atob, Uint8Array, Buffer,
+    AbortController, setTimeout, clearTimeout, location: {protocol: 'http:'},
+    document: {activeElement: null, createElement: node}, traceStepElement: node, traceStepDetails() {}, renderEvidence() {},
+    selectRequest(id) {
+      state.selectedRequestId = id;
+      state.selectedTraceChoiceId = null;
+      state.originTrace = null;
+      state.originTraceKey = null;
+      state.originTraceStatus = 'idle';
+      state.originTraceGeneration += 1;
+    },
+    sourceFactsReadBytes: async response => new TextEncoder().encode(JSON.stringify(await response.json())),
+    fetch: async url => { reads.push(new URL(url, 'http://fixture.invalid')); return {ok: true, status: 200, headers: {get: () => null}, json: async () => trace}; }};
+  const api = runInNewContext(models + '\n' + navigation + '\n' +
+    section('      function requestTraceRoot(', '      function requestSignalProfileSelection(') +
+    section('      function initiatorEdgeRequest(', '      function traceStepDetails(') +
+    section('      function renderBacktrace(', '      function requestInterception(') +
+    ';({isBrokerEvent,isOriginTraceResponse,requestsFromEvents,requestsFromDebuggerNetwork,trafficRowsForLiveCapture,requestTraceRoot,exactNativeTraceChoices,selectTraceChoice,originTraceSelection,refreshOriginTrace,renderBacktrace})', context);
+  assert(api.isBrokerEvent(initiated));
+  assert(api.isBrokerEvent(started));
+  assert(api.isOriginTraceResponse(trace));
+  const native = api.requestsFromEvents([initiated, started]);
+  assert.equal(native.length, 1, 'Explicit initiator identifiers group the native observations');
+  const cdp = api.requestsFromDebuggerNetwork({capture_enabled: true, requests: [record]}, native);
+  assert.equal(cdp[0].events.length, 2, 'The CDP row still carries heuristic candidate events');
+  assert.equal(api.requestTraceRoot(cdp[0]), null, 'Copied events must not make the CDP row a native root');
+  state.nativeRequests = native;
+  state.requests = api.trafficRowsForLiveCapture(cdp, native);
+  assert.deepEqual(state.requests.map(row => row.id), [record.id], 'Content capture still hides the heuristically linked native row');
+  api.renderBacktrace();
+  assert.deepEqual(Array.from(elements.traceRequest.children, option => option.value), [native[0].id],
+    'The exact native root remains a Backtraces choice while Traffic shows only the CDP row');
+  assert.equal(elements.traceRequest.disabled, false);
+  assert.equal(elements.traceEmptyTitle.textContent, 'Choose a captured request');
+  api.selectTraceChoice(native[0].id);
+  assert.equal(state.selectedRequestId, null, 'A hidden native root must not be forced into the Traffic selection');
+  assert.equal(state.selectedTraceChoiceId, native[0].id);
+  api.renderBacktrace();
+  assert.equal(elements.traceLoad.disabled, false);
+  assert.equal(api.requestTraceRoot(native[0]), started, 'Use the browser start, not the renderer or CDP id');
+  await api.refreshOriginTrace();
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].pathname, '/api/origin-trace');
+  assert.deepEqual(Object.fromEntries(reads[0].searchParams), {
+    request_id: '200', session_id: '11', root_process_id: '23', root_sequence_number: '52'});
+  assert.equal(state.originTraceStatus, 'ready');
+  assert.equal(state.originTrace.steps[1].relation, 'request_initiator');
+  assert.equal(elements.traceContent.hidden, false);
+  const retired = {selectedRequestId: record.id, selectedTraceChoiceId: native[0].id, originTrace: state.originTrace,
+    originTraceStatus: 'ready', originTraceGeneration: state.originTraceGeneration, signalProfileGeneration: 0, trafficDetailOpen: true};
+  const resetSelection = section('      function resetRequestSelection(', '      function renderRequestCount(');
+  runInNewContext(resetSelection + ';resetRequestSelection()', {state: retired, evidencePackagePanel: {sync() {}}, passiveSecurityPanel: {sync() {}}});
+  assert.equal(retired.selectedRequestId, null);
+  assert.equal(retired.selectedTraceChoiceId, native[0].id);
+  assert.equal(retired.originTrace.steps[1].relation, 'request_initiator', 'Retiring a Traffic row must keep the explicit native trace');
+  api.selectTraceChoice(record.id);
+  api.renderBacktrace();
+  assert.equal(api.originTraceSelection(), null);
+  assert.equal(elements.traceLoad.disabled, true, 'Candidate events must not enable a CDP trace');
+  await api.refreshOriginTrace();
+  assert.equal(reads.length, 1, 'A CDP selection must not query the candidate native root');
+  assert.equal(elements.traceContent.hidden, true, 'Do not show the previous native trace as CDP evidence');
+  assert.deepEqual(Array.from(elements.traceRequest.children, option => option.value), [record.id, native[0].id]);
+  state.nativeRequests = [];
+  state.requests = [cdp[0]];
+  state.selectedRequestId = record.id;
+  state.selectedTraceChoiceId = null;
+  state.originTrace = null;
+  state.originTraceKey = null;
+  state.originTraceEdges = [{relation: 'request_initiator', host: 'example.com', method: 'GET', url: 'https://example.com/script.js', timestamp: 1}];
+  api.renderBacktrace();
+  assert.deepEqual(Array.from(elements.traceRequest.children, option => option.value), [record.id],
+    'Host, method, URL, and time are not a request_initiator identity');
+  state.originTraceEdges = [{relation: 'request_initiator', confidence: 'observed', session_id: '11', from_process_id: 23,
+    from_sequence_number: '52', to_process_id: 17, to_sequence_number: '41', request_id: '200',
+    host: 'not-example.invalid', method: 'POST', url: 'https://not-example.invalid/nope', timestamp: 999}];
+  api.renderBacktrace();
+  const edgeId = 'native-edge:11:23:52:200';
+  assert.deepEqual(Array.from(elements.traceRequest.children, option => option.value), [record.id, edgeId]);
+  api.selectTraceChoice(edgeId);
+  assert.notEqual(state.selectedRequestId, edgeId);
+  await api.refreshOriginTrace();
+  assert.equal(reads.length, 2);
+  assert.deepEqual(Object.fromEntries(reads[1].searchParams), {
+    request_id: '200', session_id: '11', root_process_id: '23', root_sequence_number: '52'});
+  assert.equal(state.originTrace.steps[1].relation, 'request_initiator');
+  assert.equal(reads[1].searchParams.get('host'), null);
+  console.log('PASS exact native Backtraces choice from hidden native evidence and a request_initiator edge; CDP and host/time guesses stay unloaded (production functions, not rendered QA)');
 }
 
 // Exercise the actual shared-shell switch, rather than a navigation stub. A
@@ -423,7 +546,7 @@ async function checkInvestigationReturns(root) {
   const selection=section('      function selectRequest(', '      function moveRequestSelection(');
   const artifactSelection=section('      function sourceArtifactIdentityMatches(', '      function selectScript(');
   const rootFunction=section('      function requestTraceRoot(', '      function requestSignalProfileSelection(');
-  const traceSelection=section('      function originTraceSelection(', '      async function refreshOriginTrace(');
+  const traceSelection=section('      function initiatorEdgeRequest(', '      async function refreshOriginTrace(');
   const traceReader=section('      async function refreshOriginTrace(', '      function traceStepDetails(');
   function setup() {
     let screen='sources', traceReads=0, cancelled=0;

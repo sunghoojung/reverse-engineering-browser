@@ -7,7 +7,7 @@ use super::{
 use crate::error::{Cause, Code, Error};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -96,6 +96,7 @@ pub(super) struct BrowserCapture {
     retry: Mutex<Option<Instant>>,
     failures: Mutex<BTreeMap<String, Instant>>,
     pending: Mutex<BTreeMap<String, Instant>>,
+    destroyed: Mutex<BTreeSet<String>>,
     admission: Arc<tokio::sync::Mutex<()>>,
     admission_epoch: AtomicU64,
     catalog_incomplete: AtomicBool,
@@ -114,6 +115,7 @@ impl BrowserCapture {
             retry: Mutex::new(None),
             failures: Mutex::new(BTreeMap::new()),
             pending: Mutex::new(BTreeMap::new()),
+            destroyed: Mutex::new(BTreeSet::new()),
             admission: Arc::new(tokio::sync::Mutex::new(())),
             admission_epoch: AtomicU64::new(0),
             catalog_incomplete: AtomicBool::new(false),
@@ -416,6 +418,86 @@ impl Debugger {
             waiting.push_back(id);
         }
     }
+    /// Queue http(s) pages that `/json/list` already published and the browser
+    /// catalog missed. Known catalog ids are left untouched: refreshing them
+    /// would bump the catalog epoch and discard an in-flight snapshot. A target
+    /// this browser connection already reported as destroyed is not queued again
+    /// from that list. Admission stays the explicit attach path. This does not
+    /// enable browser-root auto-attach and does not resume a target.
+    pub(super) async fn admit_discovered_http_pages(self: &Arc<Self>, discovered: &[Value]) {
+        let connection = self
+            .capture
+            .browser
+            .connection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .filter(|connection| !connection.is_closed());
+        let Some(connection) = connection else {
+            return;
+        };
+        let mut admitted = false;
+        for page in discovered {
+            if page["type"] != "page" {
+                continue;
+            }
+            let Some(url) = page["url"].as_str() else {
+                continue;
+            };
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                continue;
+            }
+            let Some(id) = page["id"]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 4096)
+            else {
+                continue;
+            };
+            let known = self
+                .capture
+                .browser
+                .targets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(id);
+            let destroyed = self
+                .capture
+                .browser
+                .destroyed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(id);
+            if known || destroyed {
+                continue;
+            }
+            let waiting = self
+                .capture
+                .browser
+                .waiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
+            self.remember_capture_target(&json!({
+                "targetId": id,
+                "type": "page",
+                "title": page["title"].as_str().unwrap_or(""),
+                "url": url,
+            }));
+            let queued = self
+                .capture
+                .browser
+                .waiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len()
+                > waiting;
+            admitted |= queued;
+        }
+        if admitted {
+            self.schedule_capture_admission(&connection);
+            self.browser_status();
+        }
+    }
     pub(super) async fn refresh_browser_capture(self: &Arc<Self>) -> bool {
         let existing = self
             .capture
@@ -601,6 +683,12 @@ impl Debugger {
         self.capture
             .browser
             .targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.capture
+            .browser
+            .destroyed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -1185,6 +1273,12 @@ impl Debugger {
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(id);
                     targets.remove(id);
+                    self.capture
+                        .browser
+                        .destroyed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(id.to_owned());
                     self.capture
                         .browser
                         .catalog_epoch

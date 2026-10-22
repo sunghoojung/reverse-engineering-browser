@@ -487,7 +487,9 @@ Short windows keep at least one request row visible when status warnings wrap.
 
 HTTP coverage reports its active target mode and attached/eligible counts. Passive
 browser target discovery supports page, worker and out-of-process iframe targets
-without requesting startup holds. Browser-root auto-attach is disabled to avoid
+without requesting startup holds. An http(s) page that stays open is attached from
+the same target list Sources and Console already use when its `targetCreated` event
+was missed, without another Traffic click. Browser-root auto-attach is disabled to avoid
 its popup-throttling side effect; captured owners retain recursive child attachment. Worker attachment can affect worker lifecycle and timeout
 behavior. It improves early discovery but cannot guarantee the first
 request: traffic preceding attachment and `Network.enable` remains unavailable.

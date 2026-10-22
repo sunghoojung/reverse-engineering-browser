@@ -57,7 +57,8 @@ Disposal stops owned pages, workers, recipes, requests, and retained objects.
 Worker cancellation terminates its process group, including descendants. Network
 capture is opt-in for standalone sessions and enabled by the packaged research
 profile. HTTP Traffic uses a single browser-level CDP transport with flattened
-sessions, passive Target events and recursive attachment for page, iframe and
+sessions, passive Target events, http(s) pages already published on the
+debugger target list, and recursive attachment for page, iframe and
 worker targets. `--capture-target-limit` defaults to 32 (range 1–128), covering
 initializing and ready targets with stable owners and oldest-waiting admission
 when slots free. The shared event budget is 64 MiB; requested browser Network

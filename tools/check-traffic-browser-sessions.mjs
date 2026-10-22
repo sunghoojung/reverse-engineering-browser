@@ -50,7 +50,7 @@ if(process.argv[2]==='--transport') {
         else reply({targetInfos:null});
       }
       else if(m.method==='Target.getTargets') {
-        const snapshot=targets().filter(t=>!options.snapshotRootsOnly||!t.parent);snapshots++;
+        const snapshot=targets().filter(t=>!t.listOnly&&(!options.snapshotRootsOnly||!t.parent));snapshots++;
         if(options.reconcileDestroy&&snapshots===2) {
           writeFileSync(join(directory,'targets'),JSON.stringify(snapshot.filter(t=>t.targetId!=='z509')));
           emit({method:'Target.targetDestroyed',params:{targetId:'z509'}});
@@ -178,7 +178,7 @@ if(process.argv[2]==='--transport') {
       backend=spawn(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',join(directory,'active'),'--debugger-transport',join(directory,'transport'),...(options.capture===false?[]:['--capture-network-content']),...(options.limit?['--capture-target-limit',String(options.limit)]:[])],{cwd:directory,env:{...process.env,REB_CAPTURE_FIXTURE:directory}});
       exited=new Promise(r=>{backend.once('exit',r);backend.once('error',e=>{diagnostics+=e.message;r();});});
       for(const stream of [backend.stdout,backend.stderr])stream.on('data',chunk=>diagnostics=(diagnostics+chunk).slice(-8192));
-      await run({send,state,until,commands,publishEndpoint:()=>writeFile(join(directory,'active'),`${server.address().port}\n/devtools/browser/fixture\n`),supportDiscovery:()=>writeFile(join(directory,'discovery-supported'),'1'),forget:id=>{targets=targets.filter(t=>t.targetId!==id);save();},add:t=>{targets.push(t);save();send({add:t.targetId});},destroy:id=>{targets=targets.filter(t=>t.targetId!==id);save();send({destroy:id});}});
+      await run({send,state,until,commands,publishEndpoint:()=>writeFile(join(directory,'active'),`${server.address().port}\n/devtools/browser/fixture\n`),supportDiscovery:()=>writeFile(join(directory,'discovery-supported'),'1'),forget:id=>{targets=targets.filter(t=>t.targetId!==id);save();},add:t=>{targets.push(t);save();send({add:t.targetId});},listOnly:t=>{targets.push({...t,listOnly:true});save();},destroy:id=>{targets=targets.filter(t=>t.targetId!==id);save();send({destroy:id});}});
     } finally {
       if(backend?.exitCode===null&&backend.signalCode===null){backend.kill('SIGTERM');await Promise.race([exited,delay(3000)]);if(backend.exitCode===null&&backend.signalCode===null){backend.kill('SIGKILL');await exited;}}
       await new Promise(r=>server.close(r));await rm(directory,{recursive:true,force:true});
@@ -644,6 +644,22 @@ if(process.argv[2]==='--transport') {
     assert(controls.some(c=>c.method==='Target.setAutoAttach'&&c.sessionId),'Per-owner recursive attachment remains enabled');
     assert(!controls.some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Explicit passive admission never resumes targets');
     console.log('PASS browser sessions: discovery events promptly admit a bounded burst without browser-root auto-attach or resume');
+  });
+  await fixture([info('a')],{},async({until,commands,listOnly,send,state})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a')&&s.target.id==='a','Initial page attached without changing focus');
+    listOnly({...info('example'),url:'https://example.com/stay-open',title:'Example Domain'});
+    const attached=await until(s=>s.network.capture_status.attached_target_ids.includes('example')&&commands().some(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':example')),'Open https page missed by targetCreated is admitted from the debugger list',10000);
+    assert.equal(attached.target.id,'a','Admitting the page must not require a debugger focus change');
+    const snapshots=commands().filter(c=>c.method==='Target.getTargets').length;
+    send({target:'example',method:'Network.requestWillBeSent',params:{requestId:'later-script',timestamp:1,wallTime:1,type:'Script',request:{url:'https://example.com/app.js',method:'GET',headers:{}}}});
+    finish(send,'example','later-script');
+    const recorded=await until(s=>s.network.requests.some(row=>row.protocol_request_id==='later-script'&&row.url==='https://example.com/app.js'&&row.target_id==='example'),'A later request on the page that stayed open is recorded');
+    assert.equal(recorded.target.id,'a');
+    assert.equal(commands().filter(c=>c.method==='Target.getTargets').length,snapshots,'List admission must not require another Target.getTargets snapshot');
+    assert(!commands().some(c=>c.method==='Target.setAutoAttach'&&!c.sessionId),'Passive browser root must never enable auto-attach');
+    assert(!commands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'List admission must not resume a target this session did not pause');
+    assert(recorded.network.requests.some(row=>row.protocol_request_id==='later-script'));
+    console.log('PASS browser sessions: an http(s) page visible to the debugger list is captured without targetCreated, browser-root auto-attach, or resume');
   });
   await fixture([info('a')],{slowAdmission:true},async({until,commands,add,send})=>{
     await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Initial owner before slow admission');

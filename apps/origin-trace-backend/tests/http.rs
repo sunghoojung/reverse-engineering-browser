@@ -188,8 +188,42 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
                     .map_or("7", |sessions| sessions[0].as_str().unwrap()),
                 "{name}"
             );
-            assert_eq!(root["request_id"], "9007199254740995", "{name}");
-            assert_eq!(root["value"], "synthetic request", "{name}");
+            assert_eq!(
+                root["request_id"],
+                case["root_request_id"]
+                    .as_str()
+                    .unwrap_or("9007199254740995"),
+                "{name}"
+            );
+            assert_eq!(
+                root["value"],
+                case["root_value"].as_str().unwrap_or("synthetic request"),
+                "{name}"
+            );
+        }
+        if let Some(relations) = case.get("step_relations") {
+            assert_eq!(
+                json!(
+                    steps
+                        .iter()
+                        .map(|step| &step["relation"])
+                        .collect::<Vec<_>>()
+                ),
+                *relations,
+                "{name}"
+            );
+        }
+        if let Some(request_ids) = case.get("step_request_ids") {
+            assert_eq!(
+                json!(
+                    steps
+                        .iter()
+                        .map(|step| &step["request_id"])
+                        .collect::<Vec<_>>()
+                ),
+                *request_ids,
+                "{name}"
+            );
         }
         if let Some(sessions) = case.get("step_sessions") {
             assert_eq!(

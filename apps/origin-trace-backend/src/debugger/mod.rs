@@ -292,7 +292,11 @@ impl Debugger {
                 return Err(error);
             }
         };
-        if !browser_capture {
+        if browser_capture {
+            // Sources and Console already see this list. A missed targetCreated
+            // must not leave an open http(s) page out of Traffic.
+            self.admit_discovered_http_pages(&targets).await;
+        } else {
             self.refresh_captures(&targets).await;
         }
         let public = targets

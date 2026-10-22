@@ -1333,7 +1333,26 @@ async fn assert_poll_response(server: &Server, path: &str, expected: Value) {
     assert!(unchanged.bytes().await.unwrap().is_empty());
 }
 fn event_response(events: &[Value]) -> Value {
-    json!({"count":events.len(),"events":events,"broker_connected":true,"capture_mode":"idle","capture_stopped":false,"capture_controls_available":false})
+    json!({
+        "count": events.len(),
+        "events": events,
+        "broker_connected": true,
+        "capture_mode": "idle",
+        "capture_stopped": false,
+        "capture_controls_available": false,
+        "sequence_gaps": "0",
+        "sequence_gaps_saturated": false,
+        "queue_drops": "0",
+        "queue_drops_saturated": false
+    })
+}
+fn window_event(sequence: u64, category: &str, kind: &str, payload: &str) -> Value {
+    let mut event = metadata_event(sequence);
+    event["category"] = json!(category);
+    event["type"] = json!(kind);
+    event["payload"] = json!(hex::encode(payload.as_bytes()));
+    event["payload_size"] = json!(payload.len());
+    event
 }
 #[tokio::test]
 async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
@@ -1414,6 +1433,73 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
         .unwrap();
         assert_eq!(server.get("/api/events").await.status(), 500);
     }
+}
+#[tokio::test]
+async fn capped_event_window_keeps_network_events_and_capture_totals() {
+    let server = Server::start().await;
+    let mut canvas_flood = Vec::new();
+    for (sequence, kind) in [
+        (1, "request_initiated"),
+        (2, "request_started"),
+        (3, "response_started"),
+        (4, "request_completed"),
+    ] {
+        canvas_flood.push(window_event(sequence, "network", kind, "GET fixture.local"));
+    }
+    canvas_flood.push(window_event(285, "webgl", "gap", "280"));
+    for sequence in 286..=5286 {
+        canvas_flood.push(window_event(sequence, "canvas", "api_call", "fillRect"));
+    }
+    assert!(canvas_flood.len() > 5000);
+    server.file("events.jsonl", &jsonl(&canvas_flood));
+    let response = server.get("/api/events?limit=5000").await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["count"], 5000);
+    assert_eq!(body["sequence_gaps"], "280");
+    assert_eq!(body["sequence_gaps_saturated"], false);
+    assert_eq!(body["queue_drops"], "280");
+    assert_eq!(body["queue_drops_saturated"], false);
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 5000);
+    assert_eq!(events[0]["type"], "request_initiated");
+    assert_eq!(events[0]["sequence_number"], "1");
+    assert_eq!(events[1]["type"], "request_started");
+    assert_eq!(events[2]["type"], "response_started");
+    assert_eq!(events[3]["type"], "request_completed");
+    assert_eq!(events[3]["sequence_number"], "4");
+    assert_eq!(events[4]["type"], "gap");
+    assert_eq!(events[4]["sequence_number"], "285");
+    assert_eq!(events[4]["payload"], hex::encode("280"));
+    assert_eq!(events[5]["sequence_number"], "292");
+    assert!(events.iter().all(|event| event["sequence_number"] != "286"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event["sequence_number"] == "5286")
+    );
+
+    // A capped window full of non-canvas rows still drops the early gap record.
+    // The capture-wide counters must not fall back to that truncated window.
+    let mut webgl_flood = vec![
+        window_event(1, "webgl", "api_call", "draw"),
+        window_event(282, "webgl", "gap", "280"),
+    ];
+    for sequence in 283..=5282 {
+        webgl_flood.push(window_event(sequence, "webgl", "api_call", "draw"));
+    }
+    server.file("events.jsonl", &jsonl(&webgl_flood));
+    let response = server.get("/api/events?limit=5000").await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["count"], 5000);
+    assert_eq!(body["sequence_gaps"], "280");
+    assert_eq!(body["queue_drops"], "280");
+    let events = body["events"].as_array().unwrap();
+    assert!(events.iter().all(|event| event["type"] != "gap"));
+    assert!(events.iter().all(|event| event["sequence_number"] != "1"));
+    assert_eq!(events[0]["sequence_number"], "283");
+    assert_eq!(events.last().unwrap()["sequence_number"], "5282");
 }
 #[tokio::test]
 async fn artifact_polling_preserves_public_fields_and_validation() {

@@ -8289,6 +8289,20 @@
           "capture_controls_available": {
             "type": "boolean"
           },
+          "sequence_gaps": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Capture-wide missing sequence IDs accumulated the way the event broker does. This is not recomputed from the returned window."
+          },
+          "sequence_gaps_saturated": {
+            "type": "boolean"
+          },
+          "queue_drops": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Capture-wide sum of gap-record drop counts. A capped event window does not zero this total."
+          },
+          "queue_drops_saturated": {
+            "type": "boolean"
+          },
           "canvas_render_captures": {
             "type": "array",
             "items": {
@@ -8303,7 +8317,11 @@
           "broker_connected",
           "capture_mode",
           "capture_stopped",
-          "capture_controls_available"
+          "capture_controls_available",
+          "sequence_gaps",
+          "sequence_gaps_saturated",
+          "queue_drops",
+          "queue_drops_saturated"
         ]
       },
       "Artifact": {

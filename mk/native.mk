@@ -23,9 +23,10 @@ NATIVE_WORKER_TRANSFER_GATE_OBJECT := $(BUILD_DIR)/browser/integration/brave/ove
 NATIVE_PROXY_POLICY_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/browser/native_proxy_policy.o
 NATIVE_PROXY_POLICY_TEST := $(BUILD_DIR)/check-native-proxy-policy
 EVENT_TEST_BINARY := $(BUILD_DIR)/tests/event-test
+EVENT_BROKER_TEST_BINARY := $(BUILD_DIR)/tests/event-broker-test
 VM_DISPATCH_TEST_BINARY := $(BUILD_DIR)/tests/vm-dispatch-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -52,6 +53,9 @@ $(PRODUCER_BINARY): $(BUILD_DIR)/apps/reb-event-producer/main.o \
 	$(BUILD_DIR)/src/transport/local_ipc.o \
 	$(BUILD_DIR)/src/capture/vm_finding.o
 $(EVENT_TEST_BINARY): $(BUILD_DIR)/tests/event_test.o \
+	$(BUILD_DIR)/src/capture/event.o
+$(EVENT_BROKER_TEST_BINARY): $(BUILD_DIR)/tests/event_broker_test.o \
+	$(BUILD_DIR)/src/evidence/event_broker.o \
 	$(BUILD_DIR)/src/capture/event.o
 $(ARTIFACT_TEST_BINARY): $(BUILD_DIR)/tests/artifact_test.o \
 	$(BUILD_DIR)/src/evidence/artifact.o

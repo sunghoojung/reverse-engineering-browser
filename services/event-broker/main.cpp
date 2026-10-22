@@ -460,6 +460,8 @@ void PrintStats(const reb::BrokerStats& stats) {
             << " category_rejected=" << stats.category_rejected << " expired=" << stats.expired
             << " sequence_gaps=" << stats.sequence_gaps
             << " sequence_gaps_saturated=" << stats.sequence_gaps_saturated
+            << " queue_drops=" << stats.queue_drops
+            << " queue_drops_saturated=" << stats.queue_drops_saturated
             << " sequence_tracking_evictions=" << stats.sequence_tracking_evictions
             << " evicted=" << stats.evicted << '\n';
 }

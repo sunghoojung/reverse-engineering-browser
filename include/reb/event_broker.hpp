@@ -47,6 +47,10 @@ struct BrokerStats final {
   std::uint64_t expired = 0;
   std::uint64_t sequence_gaps = 0;
   bool sequence_gaps_saturated = false;
+  // Sum of accepted gap-record payloads. This survives ring eviction, so a
+  // capped snapshot can still report drops whose records are no longer retained.
+  std::uint64_t queue_drops = 0;
+  bool queue_drops_saturated = false;
   std::uint64_t sequence_tracking_evictions = 0;
   std::uint64_t evicted = 0;
 };

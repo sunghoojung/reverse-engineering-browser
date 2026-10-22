@@ -168,6 +168,14 @@
         return drops;
       }
 
+      function isCaptureTotal(value) {
+        return typeof value === 'string' && /^(?:0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= uint64Max;
+      }
+
+      function captureWideTotal(value) {
+        return isCaptureTotal(value) ? BigInt(value) : null;
+      }
+
       function isBrokerEvent(event) {
         if (!isPlainObject(event) || !Number.isInteger(event.protocol_version)) return false;
         const payloadLimit = event.protocol_version === 1 ? 48
@@ -217,6 +225,10 @@
           (body.stealth_session === undefined || typeof body.stealth_session === 'boolean') &&
           (body.native_stealth === undefined || typeof body.native_stealth === 'boolean') &&
           (body.quiet_mode === undefined || typeof body.quiet_mode === 'boolean') &&
+          (body.sequence_gaps === undefined || isCaptureTotal(body.sequence_gaps)) &&
+          (body.queue_drops === undefined || isCaptureTotal(body.queue_drops)) &&
+          (body.sequence_gaps_saturated === undefined || typeof body.sequence_gaps_saturated === 'boolean') &&
+          (body.queue_drops_saturated === undefined || typeof body.queue_drops_saturated === 'boolean') &&
           (body.canvas_render_captures === undefined ||
             (body.capture_mode === 'demo' &&
               Array.isArray(body.canvas_render_captures) &&

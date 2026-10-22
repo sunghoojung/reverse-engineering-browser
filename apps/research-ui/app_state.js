@@ -161,6 +161,8 @@
         eventFailureKind: null,
         sessionMode: standalonePreview ? 'preview' : 'live',
         eventsLimited: false,
+        sequenceGaps: null,
+        queueDrops: null,
         lastUpdatedLabel: null,
         refreshing: false,
         eventEtag: null,

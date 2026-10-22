@@ -435,7 +435,7 @@ impl App {
                 etag = Some(evidence::resource_etag(
                     &self.options.store,
                     &format!(
-                        "{}-{}-{limit}-{}",
+                        "{}-{}-{limit}-{}-event-window-v2",
                         u8::from(connected),
                         self.options.capture_mode(),
                         u8::from(stopped)
@@ -445,19 +445,29 @@ impl App {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
                 let path = self.options.store.clone();
-                let events = self
+                let window = self
                     .blocking(move || {
-                        let events = evidence::recent(&path, limit, 4096, "event")?;
-                        for event in &events {
+                        let window = evidence::event_window(&path, limit, 4096, "event")?;
+                        for event in &window.events {
                             validate_event(event)?;
                         }
-                        Ok(events)
+                        Ok(window)
                     })
                     .await?;
-                let mut result = json!({"count":events.len(),"broker_connected":connected,"capture_mode":self.options.capture_mode(),"capture_stopped":stopped,"capture_controls_available":self.options.broker_pid.is_some()});
+                let mut result = json!({
+                    "count": window.events.len(),
+                    "broker_connected": connected,
+                    "capture_mode": self.options.capture_mode(),
+                    "capture_stopped": stopped,
+                    "capture_controls_available": self.options.broker_pid.is_some(),
+                    "sequence_gaps": window.sequence_gaps.to_string(),
+                    "sequence_gaps_saturated": window.sequence_gaps_saturated,
+                    "queue_drops": window.queue_drops.to_string(),
+                    "queue_drops_saturated": window.queue_drops_saturated
+                });
                 // json! serializes borrowed values; move the retained window instead
                 // of allocating a second complete evidence tree on every refresh.
-                result["events"] = Value::Array(events);
+                result["events"] = Value::Array(window.events);
                 if self.options.capture_mode() == "demo" {
                     result["canvas_render_captures"] =
                         serde_json::from_str(include_str!("../assets/demo-canvas.json"))

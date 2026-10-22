@@ -173,5 +173,19 @@ export async function checkSourceTreeModel(root) {
     assert(!nav.visible.some(node=>node.source?.artifact_id==='1'));
     assert(nav.visible.some(node=>node.source?.artifact_id==='2'));assert(nav.visible.some(node=>node.source?.artifact_id==='3'));
   }
+  {
+    const t=fixture();
+    t.state.artifacts=[{...artifact(5,'https://accounts.hcaptcha.com/hcaptcha.html'),kind:'wasm',mime_type:'application/wasm',capture_origin:'webassembly_instantiate'}];
+    t.api.renderSourceTree();
+    const wasmFile=[...t.api.sourceTreeState().model.nodes.values()].find(node=>node.kind==='file');
+    assert.equal(wasmFile.label,'wasm webassembly instantiate · artifact 5');
+    assert(!wasmFile.label.includes('hcaptcha.html'));
+    t.state.artifacts=[{...artifact(6,'https://cdn.invalid/path/Module.WASM'),kind:'wasm',capture_origin:'webassembly_instantiate'}];
+    t.api.renderSourceTree();
+    assert.equal([...t.api.sourceTreeState().model.nodes.values()].find(node=>node.kind==='file').label,'Module.WASM · artifact 6');
+    t.state.artifacts=[artifact(7,'https://accounts.hcaptcha.com/hcaptcha.html')];
+    t.api.renderSourceTree();
+    assert.equal([...t.api.sourceTreeState().model.nodes.values()].find(node=>node.kind==='file').label,'hcaptcha.html · artifact 7');
+  }
   console.log('PASS Sources navigator bounded model and inert DOM: exact scoped paths, hierarchy, keyed refresh/focus/scroll, collapse without source actions, arrows/native activation separation, empty/filtered/hostile/deep/large catalogs (not rendered QA)');
 }

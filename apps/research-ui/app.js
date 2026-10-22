@@ -8942,9 +8942,10 @@
           if (view.wasmRows) {
             const offset = view.wasmRows[index]?.byte_offset;
             gutter.textContent = offset == null ? '' : offset.toString(16).padStart(6, '0');
-            gutter.disabled = offset == null || offset >= 20000 * 16;
+            const hexLimit = source.wasmHexBytes ?? wasmHexByteLimit();
+            gutter.disabled = offset == null || offset >= hexLimit;
             gutter.setAttribute('aria-label', offset == null ? 'Inspection notice' : `Show original bytes at offset ${offset}`);
-            gutter.title = offset == null ? '' : offset >= 20000 * 16 ? `Byte offset ${offset} is beyond the first 20,000 hex rows shown in Sources` : `Original byte offset ${offset} (0x${offset.toString(16)})`;
+            gutter.title = offset == null ? '' : offset >= hexLimit ? `Byte offset ${offset} is beyond the ${hexLimit} hex bytes formatted in Sources` : `Original byte offset ${offset} (0x${offset.toString(16)})`;
             gutter.addEventListener('click', () => {
               if (offset == null) return;
               state.sourceWasm = false;
@@ -9644,10 +9645,11 @@
             try {new TextDecoder('utf-8', {fatal: true}).decode(buffer); artifact.contentLossy = false;}
             catch {artifact.contentLossy = true;}
           }
-          // Hex is only a view: do not expand 2 MiB to 131,072 rows while the
-          // editor can display only 20,000. The immutable blob is untouched.
+          // Hex is only a view. Format every byte whose rows fit in the editor
+          // index (about 1.6 MiB). The immutable blob is untouched.
+          const hexBytes = artifact.kind === 'wasm' ? Math.min(buffer.length, wasmHexByteLimit()) : buffer.length;
           const content = artifact.kind === 'wasm'
-            ? formatWasmHex(buffer.subarray(0, 20000 * 16))
+            ? formatWasmHex(buffer.subarray(0, hexBytes))
             : new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer);
           if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
             throw new Error('The retained bytes do not pass the bounded image data URL validator.');
@@ -9659,9 +9661,10 @@
           }
           artifact.sourceTextLength = content.length;
           artifact.content = content;
-          artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > 20000 * 16);
+          artifact.wasmHexBytes = artifact.kind === 'wasm' ? hexBytes : undefined;
+          artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > hexBytes);
           if (artifact.contentTruncated) artifact.content += artifact.kind === 'wasm'
-            ? '\n\n[Hex preview limited to the first 20,000 rows; original bytes are unchanged]'
+            ? `\n\n[Hex preview limited to the first ${hexBytes} bytes; original bytes are unchanged]`
             : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
           if (!canvasOwner) boundSourcePreviews();
         } catch (error) {

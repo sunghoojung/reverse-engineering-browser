@@ -125,6 +125,30 @@ function trafficWindow(requests, start, anchor = null) {
   return {start: offset, rows: requests.slice(offset, offset + TRAFFIC_ROW_LIMIT)};
 }
 
+// CDP Network.loadingFailed and the Failed row label are not queue drops.
+// Counting them must not write error_code or change dropped_connections.
+function trafficRequestFailed(request) {
+  if (!request || typeof request !== 'object') return false;
+  if (request.failed === true || request.status === 'failed') return true;
+  const record = request.captureRecord && typeof request.captureRecord === 'object'
+    ? request.captureRecord
+    : (typeof request.state === 'string' || (request.timing_evidence && typeof request.timing_evidence === 'object') ? request : null);
+  if (!record) return false;
+  return record.state === 'failed' || record.timing_evidence?.completion_source === 'loadingFailed';
+}
+
+function trafficFailedRequestCount(requests) {
+  if (!Array.isArray(requests)) return 0;
+  let count = 0;
+  for (const request of requests) if (trafficRequestFailed(request)) count += 1;
+  return count;
+}
+
+function trafficFailedRequestNotice(requests) {
+  const count = trafficFailedRequestCount(requests);
+  return count > 0 ? `Failed requests: ${count}.` : '';
+}
+
 function renderTrafficRows(container, requests, {selectedId, newIds, matches, onSelect, onKey}) {
   requests = requests.slice(0, TRAFFIC_ROW_LIMIT);
   const previousRows = new Map([...container.querySelectorAll('.request-row')].map(row => [row.dataset.requestId, row]));
@@ -1024,9 +1048,11 @@ function renderWebSocketInspector(root,network,stale=false) {
   }
   const selected=model.connections.find(item=>String(item.id)===ui.select.value);
   const orphaned=model.frames.filter(frame=>!model.connections.some(connection=>connection.id===frame.connection_id)).length;
+  const failedNotice=trafficFailedRequestNotice(network?.requests);
   ui.status.textContent=(stale?'Debugger refresh unavailable; last retained snapshot. ':'')+
     'Raw captured content can be sensitive. Monotonic seconds; CDP messages are not wire frames or reassembled streams. '+
     `Dropped: ${model.dropped_connections} connections, ${model.dropped_frames} messages. Unmatched events: ${model.orphan_events}; malformed: ${model.malformed_events}; messages whose connection was evicted: ${orphaned}.`+
+    (failedNotice?` ${failedNotice}`:'')+
     (selected?` Selected #${selected.id}: ${selected.state}; handshake status ${selected.handshake_status??'unknown'}; errors ${selected.error_count??0}.`:' No retained connections.');
   if(!root.open)return;
   const matching=model.frames.filter(frame=>selected&&frame.connection_id===selected.id&&frame.target_id===selected.target_id&&(ui.direction.value==='all'||frame.direction===ui.direction.value));

@@ -107,8 +107,11 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   const state = {sessionMode:'live',broker:'connected',events:[],requests:[],
     debuggerSession:{state:'waiting',network:{capture_enabled:true,capture_status:status,dropped:0}}};
   let notice;
-  const checks = runInNewContext(models + '\n' + app.slice(start,end) +
-    ';({isDebuggerNetworkCaptureStatus,isDebuggerNetwork,networkContentCaptureActive,renderNetworkNotice})',
+  const helperStart = source.indexOf('function trafficRequestFailed(');
+  const helperEnd = source.indexOf('function renderTrafficRows(', helperStart);
+  assert(helperStart >= 0 && helperEnd > helperStart, 'Failed-request notice helper must live with the Traffic row status');
+  const checks = runInNewContext(source.slice(helperStart, helperEnd) + '\n' + models + '\n' + app.slice(start,end) +
+    ';({isDebuggerNetworkCaptureStatus,isDebuggerNetwork,networkContentCaptureActive,renderNetworkNotice,trafficRequestFailed,trafficFailedRequestCount,trafficFailedRequestNotice})',
     {state, TextEncoder, countSequenceGaps:()=>0n, countReportedQueueDrops:()=>0n,
       elements:{networkNotice:{hidden:false}},setNetworkNotice:(kind,text)=>{notice={kind,text};}});
   assert.equal(checks.isDebuggerNetworkCaptureStatus(status),true);
@@ -186,6 +189,92 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   state.debuggerSession.state='running';assert.equal(checks.networkContentCaptureActive(),true);
   state.debuggerSession.network.capture_enabled=false;assert.equal(checks.networkContentCaptureActive(),false);
   console.log('PASS bounded HTTP coverage validation, independent owners, overflow/failure/gap notices, pre-attachment and WebSocket scope, old snapshots and disconnect handling (model; not rendered QA)');
+
+  // A Failed row is not a queue drop or a capture-transport drop. error_code stays untouched.
+  state.sessionMode='live';state.broker='connected';state.eventFailureKind=null;state.eventsLimited=false;state.debuggerRefreshFailed=false;
+  state.events=[{category:'network',type:'request_completed',error_code:0,session_id:'1',process_id:1,sequence_number:'1'}];
+  state.debuggerSession.state='running';
+  state.debuggerSession.target={id:'example-target'};
+  state.debuggerSession.network.capture_enabled=true;
+  state.debuggerSession.network.dropped=0;
+  state.debuggerSession.network.websockets={dropped_connections:0,dropped_frames:0};
+  state.debuggerSession.network.capture_status={scope:'http-page-targets',state:'ready',attached_targets:1,eligible_targets:1,
+    target_limit:8,target_overflow:0,failed_targets:0,gaps:0,last_error:null,message:'Synthetic coverage',attached_target_ids:['example-target']};
+  const loadingFailed={id:'cdp-failed',path:'https://example.com/logo.png',method:'GET',status:200,failed:true,
+    captureRecord:{state:'failed',status:200,url:'https://example.com/logo.png',timing_evidence:{completion_source:'loadingFailed'}}};
+  const nativeFailed={id:'row-failed',path:'https://example.com/asset',method:'GET',status:'failed',failed:true};
+  const ok={id:'ok',path:'https://example.com/ok',method:'GET',status:200,failed:false,
+    captureRecord:{state:'complete',status:200,url:'https://example.com/ok',timing_evidence:{completion_source:'loadingFinished'}}};
+  const httpError={id:'missing',path:'https://example.com/missing',method:'GET',status:404,failed:false,
+    captureRecord:{state:'complete',status:404,url:'https://example.com/missing',timing_evidence:{completion_source:'loadingFinished'}}};
+  const rawLoadingFailed={id:'raw-failed',url:'https://example.com/raw',method:'GET',status:200,state:'failed',timing_evidence:{completion_source:'loadingFailed'}};
+  assert.equal(checks.trafficRequestFailed(loadingFailed),true);
+  assert.equal(checks.trafficRequestFailed(nativeFailed),true);
+  assert.equal(checks.trafficRequestFailed(rawLoadingFailed),true);
+  assert.equal(checks.trafficRequestFailed(ok),false);
+  assert.equal(checks.trafficRequestFailed(httpError),false,'An HTTP error status is not the Failed row');
+  assert.equal(checks.trafficRequestFailed({error_code:0,status:200,failed:false,path:'https://example.com/quiet'}),false);
+  assert.equal(checks.trafficRequestFailed({type:'gap',dropped_connections:4}),false);
+  assert.equal(checks.trafficFailedRequestNotice([ok,httpError]),'');
+  assert.equal(checks.trafficFailedRequestNotice([ok,loadingFailed]),'Failed requests: 1.');
+  assert.equal(checks.trafficFailedRequestCount([loadingFailed,nativeFailed,ok,httpError]),2);
+  const eventsBefore=JSON.stringify(state.events);
+  state.requests=[ok,loadingFailed];
+  checks.renderNetworkNotice();
+  assert.equal(notice.kind,'active','A failed HTTP row does not become a capture gap');
+  assert.match(notice.text,/Failed requests: 1\./);
+  assert.doesNotMatch(notice.text,/queue reports|Dropped:/);
+  assert.equal(state.debuggerSession.network.dropped,0);
+  assert.equal(state.debuggerSession.network.websockets.dropped_connections,0);
+  assert.equal(state.debuggerSession.network.websockets.dropped_frames,0);
+  assert.equal(JSON.stringify(state.events),eventsBefore);
+  assert.equal(state.events[0].error_code,0);
+  state.requests=[ok,loadingFailed,nativeFailed];
+  checks.renderNetworkNotice();
+  assert.equal(notice.kind,'active');
+  assert.match(notice.text,/Failed requests: 2\./);
+  state.requests=[ok,httpError];
+  checks.renderNetworkNotice();
+  assert.doesNotMatch(notice.text,/Failed requests/);
+  assert.equal(state.debuggerSession.network.dropped,0);
+  console.log('PASS failed HTTP/CDP requests are counted in the network notice without changing queue drops, dropped_connections, or error_code (model; not rendered QA)');
+}
+
+// The WebSocket status keeps "Dropped: N connections" for capture-transport drops only.
+{
+  class Node {
+    constructor(tag) { this.tagName=tag;this.children=[];this.dataset={};this.events={};this.attributes={};this.text='';this.value='';this.hidden=false;this.open=false; }
+    set textContent(value) { this.text=String(value);this.children=[]; }
+    get textContent() { return this.text+this.children.map(child => child.textContent).join(''); }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children=children;this.text=''; }
+    setAttribute(key, value) { this.attributes[key]=String(value); }
+    addEventListener(name, handler) { this.events[name]=handler; }
+    focus() { document.activeElement=this; }
+    contains(node) { return node===this||this.children.some(child => child.contains?.(node)); }
+  }
+  const document = {activeElement:null, createElement:tag => new Node(tag)};
+  const ui = runInNewContext(source + ';({renderWebSocketInspector})', {document, URL, TextEncoder, TextDecoder});
+  const failed = {id:'raw-failed', url:'https://example.com/logo.png', method:'GET', status:200, state:'failed', timing_evidence:{completion_source:'loadingFailed'}};
+  const net = {capture_enabled:true, instance_id:'instance', capture_epoch:1, target_id:'owned', dropped:0, requests:[failed],
+    websockets:{format:'reb-websocket-capture-v1', dropped_connections:0, dropped_frames:0, orphan_events:0, malformed_events:0, frames:[],
+      connections:[{id:1, url:'ws://example.com/socket', target_id:'owned', protocol_request_id:'ws-1', state:'open', handshake_status:101, error_count:0}]}};
+  const root = new Node('details');
+  ui.renderWebSocketInspector(root, net);
+  const statusText = root._rebWebsocket.status.textContent;
+  assert.match(statusText, /Dropped: 0 connections, 0 messages/);
+  assert.match(statusText, /Failed requests: 1\./);
+  assert.equal(net.websockets.dropped_connections, 0);
+  assert.equal(net.dropped, 0);
+  assert.equal(failed.error_code, undefined);
+  assert.equal(failed.state, 'failed');
+  const clear = JSON.parse(JSON.stringify(net));
+  clear.requests = [{id:'ok', url:'https://example.com/ok', method:'GET', status:200, state:'complete', timing_evidence:{completion_source:'loadingFinished'}}];
+  ui.renderWebSocketInspector(root, clear);
+  assert.match(root._rebWebsocket.status.textContent, /Dropped: 0 connections, 0 messages/);
+  assert.doesNotMatch(root._rebWebsocket.status.textContent, /Failed requests/);
+  assert.equal(clear.websockets.dropped_connections, 0);
+  console.log('PASS WebSocket dropped-connection text stays a transport counter while Failed requests are counted separately (DOM model; not native runtime)');
 }
 
 // The same scope buttons represent workers/OOPIFs in browser-session mode.

@@ -6,6 +6,27 @@ ignored by the parent repository. Project-wide authorization and capture policy
 is in [SAFETY.md](../../../SAFETY.md); this guide describes the
 browser integration's enforcement details.
 
+## Research build without bundled consumer services
+
+Patch 0014 disables Brave Talk, Wallet, News, Rewards, Leo AI and both VPN
+architectures at build time using the pinned upstream's existing feature flags.
+The related VPN panels/helpers and Leo agent/tab-management features follow their
+parent flags. These are build defaults, not profile preferences or runtime UI
+hiding. Deliberate downstream GN overrides can opt a service back in.
+
+This does not remove all Brave/Chromium network traffic or provide an
+Ungoogled-Chromium privacy guarantee. Shields, browser security updates, Safe
+Browsing, ordinary browsing and the REB observation controls are unchanged.
+Existing installed browsers are unchanged until rebuilt. No profile data,
+wallet, subscription or account is deleted or modified.
+
+`python3 tools/check-brave-services.py` checks the tracked patch contract. After
+synchronizing the pinned Brave checkout, run
+`python3 tools/check-brave-services.py --brave browser/worktree/src/brave --gn /path/to/gn`
+to evaluate the actual patched GN files across desktop/mobile and
+production/development and branding combinations. This uses minimal platform/branding stubs;
+it does not replace a full Chromium build or the native runtime acceptance gate.
+
 ## Early native network capture
 
 The source candidate now activates the existing opt-in transport before profile

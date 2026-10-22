@@ -888,7 +888,6 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_canvas_images_.store(active && capture_canvas_images, std::memory_order_relaxed);
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
-  dispatch_sample_count_.store(0, std::memory_order_relaxed);
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
@@ -1416,12 +1415,7 @@ void NativeProbeSink::RecordVmDispatchSample(const NativeVmDispatchSamplePayload
     return;
   }
 
-  std::uint32_t recorded = dispatch_sample_count_.load(std::memory_order_relaxed);
-  while (recorded < kNativeVmDispatchSampleBudget &&
-         !dispatch_sample_count_.compare_exchange_weak(recorded, recorded + 1,
-                                                       std::memory_order_relaxed)) {
-    // Another renderer thread claimed this slot. `recorded` now holds its count.
-  }
+  const std::uint32_t recorded = dispatch_sample_budget_.TryReserve(config_generation);
   if (recorded >= kNativeVmDispatchSampleBudget) {
     return;
   }

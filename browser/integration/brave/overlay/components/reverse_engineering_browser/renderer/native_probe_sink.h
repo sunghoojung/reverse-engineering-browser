@@ -145,7 +145,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
   std::atomic<std::size_t> runtime_typed_array_count_{0};
-  std::atomic<std::uint32_t> dispatch_sample_count_{0};
+  NativeVmDispatchBudget dispatch_sample_budget_;
 };
 
 }  // namespace reb

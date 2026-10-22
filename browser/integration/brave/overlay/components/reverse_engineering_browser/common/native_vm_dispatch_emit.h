@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_VM_DISPATCH_EMIT_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_VM_DISPATCH_EMIT_H_
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -19,6 +21,34 @@ namespace reb {
 // Matches the owned fixture budget. Further observations are dropped here
 // rather than filling the probe queue.
 inline constexpr std::uint32_t kNativeVmDispatchSampleBudget = 16;
+
+// Each slot records its owning configuration generation. Never reset these
+// claims: a delayed old reader must not consume a replacement configuration's
+// budget. Generations are even, strictly increasing, and never wrap in the sink.
+class NativeVmDispatchBudget {
+ public:
+  [[nodiscard]] std::uint32_t TryReserve(const std::uint64_t generation) noexcept {
+    if (generation == 0 || (generation & 1U) != 0) {
+      return kNativeVmDispatchSampleBudget;
+    }
+    for (std::uint32_t slot = 0; slot < kNativeVmDispatchSampleBudget; ++slot) {
+      auto claimed = generations_[slot].load(std::memory_order_relaxed);
+      // One strong CAS per slot bounds probe work, including under contention.
+      // A newer generation can reclaim an old claim, never the reverse.
+      // Contention may conservatively reject this observation; later calls
+      // can reclaim old slots. This is not an exhaustive sampling guarantee.
+      if (claimed < generation && generations_[slot].compare_exchange_strong(
+                                      claimed, generation, std::memory_order_relaxed)) {
+        return slot;
+      }
+    }
+    return kNativeVmDispatchSampleBudget;
+  }
+
+ private:
+  static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+  std::array<std::atomic<std::uint64_t>, kNativeVmDispatchSampleBudget> generations_{};
+};
 
 enum class NativeVmDispatchPrepareStatus : std::uint8_t {
   kReady = 0,

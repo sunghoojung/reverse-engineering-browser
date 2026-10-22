@@ -316,6 +316,8 @@
           else if (state.sessionMode === 'demo') messages.push('Developer evidence loaded. It does not represent a live capture.');
           else if (state.sessionMode === 'idle') messages.push('No evidence is bundled. Start a live capture to populate the workspace.');
         }
+        const failedNotice = trafficFailedRequestNotice(state.requests);
+        if (failedNotice) messages.push(failedNotice);
         if (messages.length) setNetworkNotice(kind, messages.join(' '));
         else elements.networkNotice.hidden = true;
       }

@@ -39,20 +39,25 @@ produces `sampler-unavailable`, preserving static handler candidates.
 
 ## Native browser capability boundary
 
-The tracked Brave overlay currently declares the `vm_finding` and
-`vm_dispatch_sample` ABIs but has no producer of guest invocation markers or
-guest dispatch samples. Its runtime source and typed-array checkpoint capture
-are not a guest instruction trace. Canvas observations, a detected dispatch
-loop, a high static score, a Wasm dispatch instruction and a retained buffer
+The `vm_finding` and `vm_dispatch_sample` ABIs, a caller-fed bounded writer,
+and an automatic guest-interpreter sampler are separate capabilities. No
+production sampler supplies guest invocation markers and dispatch observations
+from captured JavaScript or Wasm interpreters. A writer can transport observations
+provided by a caller; it cannot derive guest PCs or supply the missing interpreter
+semantics. Runtime source and typed-array checkpoint capture are not a guest
+instruction trace. Canvas observations, a detected dispatch loop, a high static
+score, a Wasm dispatch instruction and a retained buffer
 cannot establish which guest opcode ran or its program counter. More of those
 records cannot fill the missing runtime channel.
 
 A workspace with no admitted samples retains static handlers and the explicit
-`sampler-unavailable` omission with this distinction. The host-links report
-keeps `guest_position` null and `dispatch-samples-unavailable`. The owned fixture
+`sampler-unavailable` omission, leading with the observed absence of retained
+samples and the automatic sampler limitation, not a claim that every dispatch
+writer is absent. The host-links report keeps `guest_position` null and
+`dispatch-samples-unavailable`. The owned fixture
 below demonstrates the transport/consumer contract only, not support for a
-captured JavaScript or Wasm interpreter. Merely rebuilding the existing overlay
-will not add the missing emitter.
+captured JavaScript or Wasm interpreter. Rebuilding an overlay with a caller-fed
+writer alone will not add the missing sampler.
 
 A future native adapter must first establish exact captured interpreter and
 bytecode identities, invocation boundaries, PC units and the observed dispatch

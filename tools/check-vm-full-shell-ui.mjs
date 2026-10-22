@@ -65,7 +65,9 @@ const opcodeSource = await readFile(join(root, 'apps/origin-trace-backend/src/vm
 const samplerDetail = opcodeSource.match(/"reason":"sampler-unavailable", "detail":\s*("[^"\n]+")/);
 assert(samplerDetail, 'The no-samples producer diagnostic must be available to the UI regression');
 const samplerOmission = {reason: 'sampler-unavailable', detail: JSON.parse(samplerDetail[1])};
-assert(samplerOmission.detail.startsWith('Brave has no guest dispatch emitter.'), 'The native capability limitation must lead, not follow secondary caveats');
+assert(samplerOmission.detail.startsWith('No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented.'), 'Observed missing samples and the automatic sampler limitation must lead, not follow secondary caveats');
+assert(samplerOmission.detail.includes('A caller-fed writer still needs a runtime producer.'), 'A writer must remain distinct from a guest-interpreter sampler');
+assert(!samplerOmission.detail.includes('no guest dispatch emitter'), 'Missing samples must not deny caller-fed writer capability');
 const analysis = {
   contract_version: 1, document_kind: 'vm-analysis', document_digest: fixture.analysis_digest,
   profile_digest: fixture.profile_digest, profile: {profile_id: 'anti-bot-vm-detection-v1'},
@@ -664,7 +666,7 @@ if (process.argv.includes('--fixture-only')) {
     assert.deepEqual(errors, []);
     assert.equal(requests.some(request => request.method !== 'GET' && !(request.method === 'POST' && request.path === '/api/analysis/vm/packs/compare')), false, 'Only exact authored comparison may POST');
     await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440,1280,900,390],
-      scope: 'Actual index.html and shipped scripts. Authored retained Findings, imported fixed-program Execution trace, actual local Static/Contextual analysis, declared versus supplied jump linkage, real File imports, current-mode menu routing, and authored pack/ledger results at every viewport. No-sampler Coverage exposes the complete producer diagnostic with the native capability limitation first at wide and narrow widths. Live is a read-only presentation of checked-in independent golden transitions; no native command or command completion was fabricated. No live capture, native-helper execution or imported-code execution.',
+      scope: 'Actual index.html and shipped scripts. Authored retained Findings, imported fixed-program Execution trace, actual local Static/Contextual analysis, declared versus supplied jump linkage, real File imports, current-mode menu routing, and authored pack/ledger results at every viewport. No-sampler Coverage exposes the complete producer diagnostic with the observed missing samples and automatic sampler limitation first at wide and narrow widths. Live is a read-only presentation of checked-in independent golden transitions; no native command or command completion was fabricated. No live capture, native-helper execution or imported-code execution.',
       populated_modes: ['findings','execution','static','contextual','packs','ledger','owned'],
       fixture_counts: {execution_steps: executionTrace.steps.length, static_instructions: staticReport.coverage.instruction_count, contextual_contexts: contextualReport.analysis.instructions.length, contextual_observed_edges: contextualReport.observed_edges.length, live_golden_records: liveRecords.length}, requests}, null, 2));
     console.log(`PASS full VM product shell: ${output}`);

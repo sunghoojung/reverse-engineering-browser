@@ -109,12 +109,11 @@ interpreter, guest program, invocation, host binding, hypothesis, and coverage
 findings distinct. Guest bytes remain in the artifact channel and are linked by
 artifact ID instead of being copied through the renderer queue.
 `NativeVmDispatchSamplePayload` adds a fixed 128-byte dispatch-sample ABI.
-These are transport declarations, not an active browser guest-instruction
-emitter. The current overlay emits neither guest invocation markers nor guest
-dispatch samples; static classifications and buffer snapshots cannot supply a
-runtime guest PC. See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
-The
-VM category also permits 32-byte through 16-MiB snapshots of runtime-created
+The ABI and a caller-fed dispatch writer are separate from an automatic browser
+guest-interpreter sampler. No production sampler supplies observations from
+captured JavaScript or Wasm interpreters; static classifications and buffer
+snapshots cannot supply a runtime guest PC. See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
+The VM category also permits 32-byte through 16-MiB snapshots of runtime-created
 `ArrayBuffer`, `Uint8Array`, `Uint16Array`, and `Uint32Array` data. The V8 hook
 uses an embedder callback and never wraps JavaScript constructors. At most 16
 snapshots are submitted per renderer and per browser session, then all bytes

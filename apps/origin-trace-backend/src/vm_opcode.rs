@@ -871,7 +871,7 @@ pub(crate) fn workspace(
     }
     if sample_count == 0 {
         omissions.push(json!({"reason":"sampler-unavailable", "detail":
-            "Brave has no guest dispatch emitter. No runtime dispatch samples were retained. Static dispatch, Canvas calls and buffer snapshots do not prove a guest PC. Owned native fixtures are separate producers."}));
+            "No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented. A caller-fed writer still needs a runtime producer. Static dispatch, Canvas calls and snapshots do not prove a guest PC."}));
     } else if sample_count > retained_samples.len() as u64 {
         omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
     }
@@ -1726,9 +1726,12 @@ mod tests {
             omission["detail"]
                 .as_str()
                 .unwrap()
-                .starts_with("Brave has no guest dispatch emitter.")
+                .starts_with("No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented.")
         );
-        assert!(omission["detail"].as_str().unwrap().len() <= 240);
+        let detail = omission["detail"].as_str().unwrap();
+        assert!(detail.contains("A caller-fed writer still needs a runtime producer."));
+        assert!(!detail.contains("no guest dispatch emitter"));
+        assert!(detail.len() <= 240);
         assert_schema(&document);
         // Exercise the shipped strict consumer on the actual emitted document,
         // not a hand-written fixture that could miss a backend/frontend bound.

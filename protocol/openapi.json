@@ -7581,6 +7581,10 @@
                 "type": "string",
                 "minLength": 1
               },
+              "detail": {
+                "type": "string",
+                "minLength": 1
+              },
               "line": {
                 "type": "integer",
                 "minimum": 0

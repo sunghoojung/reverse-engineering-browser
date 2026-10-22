@@ -600,6 +600,36 @@ fn runtime_rule(event: &Value) -> Option<&'static str> {
 fn runtime_weights() -> Value {
     json!({"antibot.runtime-canvas-webgl":25,"antibot.runtime-navigator-device":25,"antibot.runtime-web-audio":25})
 }
+// Pattern rank can mark JavaScript likely-vm before static handler recovery.
+// Keep the workspace, but do not leave an empty handler table at that tier.
+fn retain_handlerless_javascript_as_candidate(result: &mut Value, workspace: &Value) {
+    let empty_handlers = workspace["handlers"]
+        .as_array()
+        .is_some_and(|handlers| handlers.is_empty());
+    if result["runtime"] != "javascript" || result["tier"] != "likely-vm" || !empty_handlers {
+        return;
+    }
+    result["tier"] = json!("candidate");
+    let already_recorded = result["coverage"]["omissions"]
+        .as_array()
+        .is_some_and(|omissions| {
+            omissions
+                .iter()
+                .any(|omission| omission["reason"] == "handler-unavailable")
+        });
+    if already_recorded {
+        return;
+    }
+    result["coverage"]["omissions"]
+        .as_array_mut()
+        .expect("analysis coverage omissions")
+        .push(json!({
+            "reason": "handler-unavailable",
+            "detail": "The dispatch pattern did not yield a static handler table, so this artifact stays a candidate."
+        }));
+    result["status"] = json!("partial");
+    result["coverage"]["complete"] = json!(false);
+}
 fn graph_entry(
     nodes: &mut Vec<Value>,
     edges: &mut Vec<Value>,
@@ -992,6 +1022,7 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
             )
         {
             workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));
+            retain_handlerless_javascript_as_candidate(&mut result, &workspace);
             opcode_workspaces.push(workspace);
         }
         results.push(result);

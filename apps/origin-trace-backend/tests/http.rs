@@ -2390,8 +2390,17 @@ async fn vm_lexical_scoring_preserves_positive_evidence_and_utf8_coordinates() {
     let results = document["results"].as_array().unwrap();
     assert_eq!(results.len(), sources.len());
     let baseline = &results[0];
-    assert_eq!(baseline["tier"], "likely-vm");
+    assert_eq!(baseline["tier"], "candidate");
     assert_eq!(baseline["vm_score"], 75);
+    assert_eq!(baseline["status"], "partial");
+    assert_eq!(baseline["coverage"]["complete"], false);
+    assert_eq!(
+        baseline["coverage"]["omissions"],
+        json!([{
+            "reason": "handler-unavailable",
+            "detail": "The dispatch pattern did not yield a static handler table, so this artifact stays a candidate."
+        }])
+    );
     assert_eq!(
         baseline["evidence_families"],
         json!(["bytecode", "dispatch", "instruction-pointer", "state"])
@@ -2517,9 +2526,46 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .zip(&artifacts)
         .zip(&sources)
     {
-        assert_eq!(result["status"], "complete");
-        assert_eq!(result["tier"], "likely-vm");
+        let recovered_handler_table = source.contains("case 0:");
+        assert_eq!(
+            result["status"],
+            if recovered_handler_table {
+                "complete"
+            } else {
+                "partial"
+            },
+            "{source}"
+        );
+        assert_eq!(
+            result["tier"],
+            if recovered_handler_table {
+                "likely-vm"
+            } else {
+                "candidate"
+            },
+            "{source}"
+        );
         assert_eq!(result["vm_score"], 95);
+        if recovered_handler_table {
+            assert!(
+                !result["coverage"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|omission| omission["reason"] == "handler-unavailable"),
+                "{source}"
+            );
+        } else {
+            assert_eq!(result["coverage"]["complete"], false, "{source}");
+            assert_eq!(
+                result["coverage"]["omissions"],
+                json!([{
+                    "reason": "handler-unavailable",
+                    "detail": "The dispatch pattern did not yield a static handler table, so this artifact stays a candidate."
+                }]),
+                "{source}"
+            );
+        }
         assert_eq!(
             result["evidence_families"],
             json!([

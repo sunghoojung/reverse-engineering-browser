@@ -46,7 +46,8 @@ separately and never invalidate retained signals. A `capture-gap` omission count
 markers only, not lost events; overlapping queue/sequence losses are not summed.
 The 1,024-edge graph
 bound includes the artifact-to-finding edge. Scoring representatives are retained
-first; excluded graph records produce an explicit `runtime-graph-edge-limit`
+first, then correlated request edges, then individual browser-signal events.
+Excluded graph records produce an explicit `runtime-graph-edge-limit`
 omission and partial coverage. Request roots also keep composite event identity,
 while `related_request_ids` remains a legacy ID-only summary.
 
@@ -386,3 +387,13 @@ Version 1 is complete only when:
 
 If a required platform or Brave toolchain is unavailable, the exact gap is
 reported and the corresponding acceptance gate remains unclaimed.
+
+### Handler recovery classification revision
+
+Detector producer `1.3.0` adds the profile flag
+`javascript_likely_vm_requires_handlers: true`. JavaScript structural scoring
+still uses scoring version 2, but a likely-ranked pattern without a recovered
+static handler table remains a partial candidate. The flag changes the profile
+digest so catalogs do not describe historical results as using this policy.
+Wasm classification is unchanged. Historical v1 profiles without the flag remain
+schema-valid; missing metadata does not imply that handler recovery was required.

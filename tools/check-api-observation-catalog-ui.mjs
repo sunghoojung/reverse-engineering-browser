@@ -77,7 +77,7 @@ const traffic = await readFile(join(root, 'apps/research-ui/traffic_view.js'), '
 const catalogSource = await readFile(join(root, 'apps/research-ui/api_catalog.js'), 'utf8');
 const navigation = await readFile(join(root, 'apps/research-ui/investigation_navigation.js'), 'utf8');
 const models = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
-const api = runInNewContext(`${models}\n${traffic}\n${catalogSource}\n${navigation}\n;({isApiObservationCatalog,apiCatalogIdentity,apiCatalogRequestIdentity,apiCatalogResolveSource,apiCatalogShapePath,apiCatalogSearchText,apiCatalogFilter,apiCatalogCompareBodies,requestsFromDebuggerNetwork,investigationRequestIdentity,investigationSame,isDebuggerResponse})`,
+const api = runInNewContext(`${models}\n${traffic}\n${catalogSource}\n${navigation}\n;({isApiObservationCatalog,apiCatalogIdentity,apiCatalogRequestIdentity,apiCatalogResolveSource,apiCatalogShapePath,apiCatalogSearchText,apiCatalogFilter,apiCatalogCompareBodies,requestsFromDebuggerNetwork,trafficRowsForLiveCapture,investigationRequestIdentity,investigationSame,isDebuggerResponse})`,
   {TextEncoder, TextDecoder, Uint8Array, URL, atob});
 const copy = value => JSON.parse(JSON.stringify(value));
 export async function catalogFixture() {

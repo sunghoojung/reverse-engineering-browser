@@ -672,7 +672,7 @@ let networkBodyDecodes = 0;
 const networkModels = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
   (await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8")) +
-  ";({requestsFromDebuggerNetwork,isDebuggerNetwork,trafficSearchRequests})",
+  ";({requestsFromDebuggerNetwork,trafficRowsForLiveCapture,isDebuggerNetwork,trafficSearchRequests})",
   {TextEncoder, TextDecoder, Uint8Array,
     URL: class extends URL {constructor(...args) {networkUrlCalls += 1; super(...args);}},
     atob(value) {networkBodyDecodes += 1; return atob(value);}},
@@ -715,6 +715,11 @@ const correlationRecords = [networkRecord("first"), networkRecord("second"), net
   networkRecord("post", {method: "POST"}), networkRecord("other", {url: "http://other.invalid/redirect"})];
 const nativeIds = (records, native) => Array.from(networkModels.requestsFromDebuggerNetwork(networkSnapshot(records), native), request => request.event?.id ?? null);
 assert.deepEqual(nativeIds(correlationRecords, correlationNative), ["tie-first", "tie-second", null, "post", "other-host"]);
+const correlatedProjection = networkModels.requestsFromDebuggerNetwork(networkSnapshot(correlationRecords), correlationNative);
+assert.deepEqual(correlatedProjection.map(request => request.correlatedNativeId), ["tie-first", "tie-second", null, "post", "other-host"]);
+const visibleWithMiss = networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative.concat([nativeRequest("missed-document", 100, "only-native.invalid")]));
+assert.deepEqual(visibleWithMiss.map(request => request.id), ["first", "second", "third", "post", "other", "missed-document"]);
+assert.equal(networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative).length, correlatedProjection.length);
 assert.deepEqual(nativeIds([networkRecord("limit", {started_monotonic_ms: 10_100}), networkRecord("past", {started_monotonic_ms: 10_100.001})],
   [nativeRequest("one", 100), nativeRequest("two", 100)]), ["one", null]);
 const variedNative = Array.from({length: 250}, (_, i) => nativeRequest(`native-${i}`, i * 7,
@@ -783,6 +788,21 @@ assert.equal(networkModels.requestsFromDebuggerNetwork({...binaryNetwork, captur
 assert.equal(bodyCache.size, 0);
 const truncatedMethodNetwork=networkSnapshot([networkRecord('method-truncated',{method_truncated:true})]);
 assert.equal(networkModels.requestsFromDebuggerNetwork(truncatedMethodNetwork)[0].methodTruncated,true);
+const pendingExtra = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
+  networkRecord('worker', {state: 'pending', status: 200, duration_ms: null, resource_type: 'Script'})
+]))[0];
+assert.equal(pendingExtra.status, 'pending');
+assert.equal(pendingExtra.provisionalStatus, 200);
+assert.equal(pendingExtra.time, 'pending');
+assert.equal(pendingExtra.operation, 'cdp_pending');
+const finishedStatus = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
+  networkRecord('done', {state: 'complete', status: 200})
+]))[0];
+assert.equal(finishedStatus.status, 200);
+assert.equal(finishedStatus.provisionalStatus, null);
+assert.equal(networkModels.requestsFromDebuggerNetwork(networkSnapshot([
+  networkRecord('aborted', {state: 'failed', status: 200})
+]))[0].status, 'failed');
 console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
 
 // Public row IDs own selection, search and body-cache entries. Raw CDP IDs may
@@ -1340,10 +1360,33 @@ console.log('PASS request signal profile late headers/bodies/errors, exact owner
     state, elements, refreshVmAnalysis:async id => queried.push(id), showScreen:(...args) => navigated.push(args),
     investigationNotice:(...args) => notices.push(args)
   });
-  await click(); assert.equal(queried.length,0); assert.equal(navigated.length,0); assert.match(notices[0][0],/no exact native-event link/);
-  delete state.requests[0].protocolRequestId; await click(); assert.equal(queried.length,0); assert.equal(navigated.length,0);
+  await click(); assert.deepEqual(queried,[null]); assert.equal(navigated.length,1); assert.equal(navigated[0][0],'vm');
+  assert.match(notices[0][0],/no native request id/); assert.match(notices[0][0],/session analysis/); assert.equal(notices[0][1],'unavailable');
+  delete state.requests[0].protocolRequestId; await click();
+  assert.deepEqual(queried,[null,null],'A cdp_ operation still cannot query the correlated native id');
+  assert.equal(navigated.length,2);
   state.requests[0] = {id:'native', event:{request_id:'7'}}; state.selectedRequestId='native';
-  await click(); assert.deepEqual(queried,['7']); assert.equal(navigated.length,1,'Native request pivot remains available');
+  await click(); assert.deepEqual(queried,[null,null,'7']); assert.equal(navigated.length,3,'Native request pivot remains available');
+}
+// Related VM entry navigates synchronously; a late fetch cannot reopen the pane.
+for (const request of [
+  {id:'cdp',protocolRequestId:'raw',operation:'cdp_pending'},
+  {id:'cdp-marker',operation:'cdp_complete'},
+  {id:'native',event:{request_id:'7'}}
+]) {
+  let click, finish, screen='traffic'; const queries=[];
+  const pending = new Promise(resolve=>{finish=resolve;});
+  const state={selectedRequestId:request.id,requests:[request]};
+  const elements={requestVmCandidates:{addEventListener(_name,handler){click=handler;}}};
+  runInNewContext(appSection("      elements.requestVmCandidates.addEventListener(", "      elements.sourceWindowPrevious.addEventListener("), {
+    state,elements,refreshVmAnalysis:id=>{queries.push(id);return pending;},
+    showScreen:name=>{screen=name;},investigationNotice(){}
+  });
+  const reading=click();
+  assert.equal(screen,'vm','Related VM entry must not wait for a slow analysis');
+  assert.deepEqual(queries,[request.id==='native'?'7':null]);
+  screen='sources';finish();await reading;
+  assert.equal(screen,'sources','Late VM analysis cannot override newer navigation');
 }
 console.log('PASS cross-tab heuristic candidates cannot become exact Signal/VM queries; native pivot and raw metadata preserved');
 
@@ -1474,6 +1517,7 @@ const signalPivots = runInNewContext(appSection("      function renderSignalRequ
   matchingSignalProfileFamily: () => pivotProfile.signals[0], signalEventKey: () => "event", integerText: () => "1",
   showScreen: screen => {pivotScreen = screen;}, renderInspector: () => {pivotInspectorOpen = pivotState.trafficDetailOpen;},
   refreshRequestSignalProfile() {}, requestAnimationFrame: callback => callback(),
+  fingerprintEventsFromEvents: events => (events ?? []).filter(event => event.category === 'canvas'),
 });
 for (const render of [() => signalPivots.renderSignalRequestProfile(), () => signalPivots.renderFingerprintDetail({category: "canvas", type: "api_call", thread_id: 1})]) {
   pivotState.trafficDetailOpen = false; pivotInspectorOpen = false; render();
@@ -1485,10 +1529,20 @@ for (const render of [() => signalPivots.renderSignalRequestProfile(), () => sig
   assert.equal(pivotState.signalProfile, pivotProfile, "Pivots retain the already loaded signal profile");
 }
 pivotState.requests[0].protocolRequestId = 'raw-cdp';
+pivotState.events = [{category:'canvas'},{category:'canvas'},{category:'network'}];
 signalPivots.renderSignalRequestProfile();
-assert.match(pivotElements.signalRequestProfile.textContent, /no exact native-event link/);
-assert.equal(pivotElements.signalRequestProfile.querySelector('button'), null, 'Stale native profile cannot render a CDP request pivot');
-console.log("PASS Fingerprinting native request-profile/event-detail pivots and explicit CDP correlation-only state");
+assert.match(pivotElements.signalRequestProfile.textContent, /no native request id/);
+assert.match(pivotElements.signalRequestProfile.textContent, /2 fingerprint events on 1 tab scope/);
+assert.equal(pivotElements.signalRequestProfile.textContent.includes('SELECTED REQUEST'), false, 'Stale native profile cannot label a CDP request');
+assert.equal(pivotElements.signalRequestProfile.querySelector('.signal-request-family'), null);
+const openFingerprint = pivotElements.signalRequestProfile.querySelector('button');
+assert.equal(openFingerprint.textContent, 'Open Fingerprinting');
+pivotScreen = null;
+openFingerprint.click();
+assert.equal(pivotScreen, 'signals');
+assert.equal(pivotState.signalTabId, 'all');
+assert.equal(pivotState.inspectorTab, 'signals', 'Opening Fingerprinting must not retarget the Traffic inspector');
+console.log("PASS Fingerprinting native request-profile/event-detail pivots and session-scoped CDP fingerprint access");
 
 const sourceState = {liveScriptContent: new Map(), staleScriptIds: new Set(), openScriptIds: [], openArtifactIds: [],
   debuggerRefreshing: false, debuggerEtag: null, debuggerSession: null, selectedScriptId: null,
@@ -2243,7 +2297,12 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   state.selectedArtifactId='1';await api.loadArtifactContent(artifacts[0]);assert.equal(artifacts[0].content,text);
   const binary=new Uint8Array(2097152);const wasm={...await ownedArtifact('99'),kind:'wasm',mime_type:'application/wasm',byte_size:binary.length,sha256:await ownershipHash(binary)};
   const hex=ownedContext({state:{artifacts:[wasm],selectedArtifactId:'99'},fetch:async()=>new Response(binary)});
-  await hex.api.loadArtifactContent(wasm); assert(wasm.content.split('\n').length<=20003);assert(wasm.content.length<2*1024*1024);assert(wasm.contentTruncated);
+  await hex.api.loadArtifactContent(wasm);
+  assert(wasm.contentTruncated);
+  assert(wasm.wasmHexBytes < binary.length && wasm.wasmHexBytes % 16 === 0);
+  assert(wasm.content.length <= 8 * 1024 * 1024);
+  assert(wasm.content.includes('Hex preview limited'));
+  assert(wasm.content.split('\n').length > 20003);
   sourceOwnershipReceipt.push({test:'preview_byte_budget_and_bounded_hex',status:'passed',retainedPreviews:loaded.length,retainedUTF16TextBytes:characters*2,hexRows:wasm.content.split('\n').length});
 }
 {

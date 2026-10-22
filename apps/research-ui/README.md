@@ -1199,7 +1199,10 @@ source metadata and connection status; attached sessions show debugger controls
 by default. The toggle remains available at narrow window sizes.
 
 VM analysis is a secondary Traffic view, reached through Related VM candidates
-for a selected request. It has a Back to traffic control and no primary tab.
+for a selected request. A content-capture row has no native request id, so that
+button opens the session analysis instead of a request-scoped join. An exact
+native request id still opens request-scoped analysis. It has a Back to traffic
+control and no primary tab.
 When the selected finding has a validated opcode workspace, VM Lab adds the
 handler mapping, runtime typed-array bytecode preview, characterized coverage,
 named omissions, and residual unknowns beneath the unchanged detection detail.
@@ -1642,8 +1645,9 @@ Tab, navigator, Quick Open and retry handlers retain descriptors only; obsolete
 empty/retry controls are removed when the editor becomes ready. Hidden UI
 closures cannot keep evicted preview or analysis payloads alive. This never
 deletes captured evidence. Canvas thumbnails and the existing bounded
-Facts/WASM inspectors retain their separate ownership contracts. WASM Hex expands
-only the first 20,000 display rows, rather than formatting the whole 2 MiB input.
+Facts/WASM inspectors retain their separate ownership contracts. WASM Hex formats
+every retained byte whose text fits in the 8 MiB editor index, about 1.6 MiB of
+module bytes. A longer module keeps a labeled prefix, and Find covers that prefix.
 
 Deob retains at most eight documents, 16 MiB of original/derived UTF-16 text and
 250,000 map segments and 32 MiB of serialized response data in total. Formatting retains at most two documents, 12 MiB

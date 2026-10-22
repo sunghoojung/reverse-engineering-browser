@@ -68,8 +68,11 @@ focus switches, target replacement or reconnect. Retired owners leave retained
 history and explicit unfinished-evidence gaps. `network.capture_epoch` remains
 the focused debugger/selection identity, not the HTTP owner token.
 
-Passive capture does not pause startup or guarantee first navigation: requests
-before attachment/Network.enable and very short-lived targets can be absent.
+Passive capture does not pause startup or guarantee the first full URL:
+requests before attachment/Network.enable and very short-lived targets can
+lack a debugger row. Unmatched native rows stay in the Traffic ledger as
+host-only metadata.
+
 Worker attachment can affect lifecycle/timeouts. No baseline startup-hold mode
 is enabled. WebSocket v1 remains selected-target scoped. The coverage notice
 identifies attached/missing target IDs, failures, overflow and gaps. Browser Target

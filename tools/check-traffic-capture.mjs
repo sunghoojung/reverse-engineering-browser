@@ -209,11 +209,16 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
     requestTabGroups:()=>[{id:'worker-a',requests:state.requests}],requestDomain:request=>request.path});
   render();
   assert.equal(elements.requestTabScopes.children[0].children[0].textContent,'All targets');
-  assert.equal(elements.requestTabScopes.children[1].children[0].textContent,'Target 1');
+  assert.equal(elements.requestTabScopes.children[1].children[0].textContent,'fixture.test');
   assert.match(elements.requestTabScopes.children[1].title,/target id worker-a/);
+  for (const missing of [undefined, 'unknown']) {
+    state.requests=[{tabId:'worker-a',path:missing}];
+    render();
+    assert.equal(elements.requestTabScopes.children[1].children[0].textContent,'Target 1', String(missing));
+  }
   state.debuggerSession.network.capture_status.scope='http-page-targets';render();
   assert.equal(elements.requestTabScopes.children[0].children[0].textContent,'All tabs');
   assert.equal(elements.requestTabScopes.children[1].children[0].textContent,'Tab 1');
   assert.match(elements.requestTabScopes.children[1].title,/tab id worker-a/);
-  console.log('PASS Traffic target-scope labels distinguish browser-session workers from page-only tabs (production function; not rendered QA)');
+  console.log('PASS Traffic target-scope labels use a known domain, else Target/Tab fallbacks (production function; not rendered QA)');
 }

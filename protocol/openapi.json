@@ -6420,8 +6420,27 @@
               },
               "traversal": {
                 "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/traversal"
+              },
+              "captured_module_preview": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/modulePreview"
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "required": [
+                    "captured_module_preview"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "runtime": {
+                      "const": "webassembly"
+                    }
+                  }
+                }
+              }
+            ]
           },
           "effectSpan": {
             "type": "object",
@@ -7084,6 +7103,39 @@
                 }
               }
             ]
+          },
+          "modulePreview": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifact_id",
+              "byte_offset",
+              "byte_count",
+              "preview_hex",
+              "truncated"
+            ],
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/uint64"
+              },
+              "byte_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byte_count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "preview_hex": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 8192,
+                "pattern": "^(?:[0-9a-f]{2})+$"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
           }
         },
         "x-source": "protocol/vm-opcode-workspace-v2.schema.json"
@@ -7473,6 +7525,10 @@
                     "maximum": 100
                   }
                 }
+              },
+              "javascript_likely_vm_requires_handlers": {
+                "const": true,
+                "description": "Present in producer 1.3.0 and later: JavaScript likely-vm requires recovered static handlers in addition to the structural score. Absent in historical profiles."
               }
             }
           },
@@ -7578,6 +7634,10 @@
             ],
             "properties": {
               "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "detail": {
                 "type": "string",
                 "minLength": 1
               },
@@ -8629,8 +8689,7 @@
               },
               "secret": {
                 "type": "string",
-                "x-max-utf8-bytes": 4096,
-                "minLength": 1
+                "x-max-utf8-bytes": 4096
               }
             },
             "required": [

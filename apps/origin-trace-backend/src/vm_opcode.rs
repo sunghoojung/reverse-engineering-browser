@@ -14,7 +14,7 @@ use std::{
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.0.0";
+const PRODUCER_VERSION: &str = "2.1.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -761,6 +761,45 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
     (snapshots, omissions)
 }
 
+/// Bytes of the dispatch instruction shared by the most handlers.
+/// Preserve its module-relative offset separately from runtime bytecode snapshots.
+fn captured_module_preview(artifact: &Value, bytes: &[u8], handlers: &[Value]) -> Option<Value> {
+    let mut counts = BTreeMap::<(u64, u64), usize>::new();
+    for handler in handlers {
+        let Some(offset) = handler["source"]["byte_offset"].as_u64() else {
+            continue;
+        };
+        let Some(size) = handler["source"]["byte_size"].as_u64() else {
+            continue;
+        };
+        if size == 0 {
+            continue;
+        }
+        *counts.entry((offset, size)).or_default() += 1;
+    }
+    // Most handlers, then the lowest offset.
+    let ((offset, size), _) = counts.iter().max_by_key(|((offset, size), count)| {
+        (*count, std::cmp::Reverse(*offset), std::cmp::Reverse(*size))
+    })?;
+    let start = usize::try_from(*offset).ok()?;
+    let full = usize::try_from(*size).ok()?;
+    let end = start.checked_add(full)?;
+    let slice = bytes.get(start..end)?;
+    let truncated = slice.len() > SNAPSHOT_PREVIEW_BYTES;
+    let preview = if truncated {
+        &slice[..SNAPSHOT_PREVIEW_BYTES]
+    } else {
+        slice
+    };
+    Some(json!({
+        "artifact_id": artifact["artifact_id"],
+        "byte_offset": offset,
+        "byte_count": slice.len(),
+        "preview_hex": hex::encode(preview),
+        "truncated": truncated,
+    }))
+}
+
 pub(crate) fn workspace(
     root: &Path,
     artifact: &Value,
@@ -857,14 +896,27 @@ pub(crate) fn workspace(
     }
     let (snapshots, snapshot_omissions) = snapshots(root, artifact, snapshot_artifacts);
     omissions.extend(snapshot_omissions);
+    // Source instruction bytes are display evidence, not a zero-based guest image.
+    // They must never supply snapshot identity, traversal, or coverage bytes.
+    let module_preview = (runtime == "webassembly")
+        .then(|| captured_module_preview(artifact, bytes, &handlers))
+        .flatten();
     if snapshots.is_empty() {
+        let module = runtime == "webassembly";
         if let Some(snapshot) = result.get("bytecode_snapshot")
             && snapshot["snapshot_hex"].is_string()
         {
             omissions.push(json!({
                 "reason": "static-initializer-only",
-                "detail": "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot names this allocating script in the same session, navigation, and frame."
+                "detail": if module {
+                    "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot was retained for this captured module. The handler list comes from the module bytes."
+                } else {
+                    "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot names this allocating script in the same session, navigation, and frame."
+                }
             }));
+        } else if module {
+            omissions.push(json!({"reason":"runtime-snapshot-unavailable", "detail":
+                "No runtime snapshot was retained for this captured module. The handler list comes from the module bytes, not an allocating script."}));
         } else {
             omissions.push(json!({"reason":"runtime-snapshot-unavailable", "detail":
                 "No runtime snapshot names this captured allocating script in the same session, navigation, and frame. The allocating script may not have been captured."}));
@@ -922,6 +974,9 @@ pub(crate) fn workspace(
         "unknowns": unknowns,
         "traversal": traversal,
     });
+    if let Some(preview) = module_preview {
+        workspace["captured_module_preview"] = preview;
+    }
     if let Some(snapshot) = workspace["snapshots"]
         .as_array()
         .and_then(|items| items.first())
@@ -1163,14 +1218,99 @@ mod tests {
                 assert_eq!(handlers[0]["opcode"], 0);
                 assert_eq!(handlers[1]["opcode"], 1);
                 assert_eq!(handlers[0]["state"], "inferred");
+                let snapshot = &workspace["captured_module_preview"];
+                assert!(snapshot.get("origin").is_none());
+                assert!(snapshot.get("sha256").is_none());
+                assert_eq!(
+                    snapshot["artifact_id"],
+                    workspace["interpreter_artifact_id"]
+                );
+                assert!(
+                    handlers
+                        .iter()
+                        .all(|handler| handler["source"] == handlers[0]["source"])
+                );
+                let offset = handlers[0]["source"]["byte_offset"].as_u64().unwrap() as usize;
+                let size = handlers[0]["source"]["byte_size"].as_u64().unwrap() as usize;
+                let instruction = &bytes[offset..offset + size];
+                assert_eq!(instruction[0], 0x0e);
+                assert_eq!(snapshot["byte_offset"], offset);
+                assert!(offset > 0);
+                assert_eq!(snapshot["preview_hex"], hex::encode(instruction));
+                assert_eq!(snapshot["truncated"], false);
+                assert_eq!(snapshot["byte_count"], instruction.len());
             }
+            assert_eq!(workspace["snapshots"], json!([]));
+            assert!(workspace.get("bytecode_artifact_id").is_none());
+            assert_eq!(workspace["coverage"]["retained_snapshot_bytes"], 0);
+            assert_eq!(workspace["coverage"]["characterized_bytes"], 0);
+            assert_eq!(workspace["traversal"]["entry_offsets"], json!([]));
+            assert_eq!(workspace["traversal"]["instructions"], json!([]));
+            assert_eq!(
+                workspace["traversal"]["frontier"],
+                json!([{
+                    "artifact_id": null, "byte_offset": null, "reason": "snapshot-unavailable"
+                }])
+            );
+            assert_eq!(document["summary"]["snapshot_count"], 0);
             assert_eq!(workspace["coverage"]["complete"], false);
+            let module_bytes = workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|omission| omission["reason"] == "runtime-snapshot-unavailable")
+                .collect::<Vec<_>>();
+            assert_eq!(module_bytes.len(), 1);
+            assert_eq!(
+                module_bytes[0]["detail"],
+                "No runtime snapshot was retained for this captured module. The handler list comes from the module bytes, not an allocating script."
+            );
             assert_schema(&document);
         }
         let (_, analysis, document) = analyze_artifact(&wasm_fixture("non_vm"), "wasm", &[]);
         assert_eq!(analysis["summary"]["likely_vm_count"], 0);
         assert_eq!(document["summary"]["workspace_count"], 0);
         assert_schema(&document);
+    }
+
+    #[test]
+    fn captured_module_preview_coexists_without_retargeting_runtime_snapshot() {
+        let bytes = wasm_fixture("br_table");
+        let (_, _, document) =
+            analyze_artifact_with_snapshot(&bytes, "wasm", &[], Some(&[0xaa, 0xbb]));
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["captured_module_preview"]["artifact_id"], "1");
+        assert_eq!(workspace["snapshots"].as_array().unwrap().len(), 1);
+        assert_eq!(workspace["snapshots"][0]["artifact_id"], "2");
+        assert_eq!(workspace["snapshots"][0]["origin"], "runtime-typed-array");
+        assert_eq!(workspace["snapshots"][0]["preview_hex"], "aabb");
+        assert_eq!(workspace["bytecode_artifact_id"], "2");
+        assert_eq!(workspace["coverage"]["retained_snapshot_bytes"], 2);
+        assert_eq!(document["summary"]["snapshot_count"], 1);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn captured_module_preview_preserves_offsets_and_bounds_without_runtime_identity() {
+        let artifact = json!({"artifact_id":"5"});
+        let bytes = (0..5000)
+            .map(|index| (index % 256) as u8)
+            .collect::<Vec<_>>();
+        let handler = |offset, size| json!({"source":{"byte_offset":offset,"byte_size":size}});
+        let handlers = [handler(20, 3), handler(10, 3)];
+        let preview = captured_module_preview(&artifact, &bytes, &handlers).unwrap();
+        assert_eq!(preview["byte_offset"], 10);
+        assert_eq!(preview["byte_count"], 3);
+        assert_eq!(preview["preview_hex"], hex::encode(&bytes[10..13]));
+        assert_eq!(preview["truncated"], false);
+        let preview = captured_module_preview(&artifact, &bytes, &[handler(20, 4500)]).unwrap();
+        assert_eq!(preview["byte_offset"], 20);
+        assert_eq!(preview["byte_count"], 4500);
+        assert_eq!(preview["preview_hex"], hex::encode(&bytes[20..4116]));
+        assert_eq!(preview["truncated"], true);
+        assert!(captured_module_preview(&artifact, &bytes, &[handler(5000, 1)]).is_none());
+        assert!(captured_module_preview(&artifact, &bytes, &[handler(0, 0)]).is_none());
+        assert!(captured_module_preview(&artifact, &bytes, &[]).is_none());
     }
 
     #[test]
@@ -1504,6 +1644,49 @@ mod tests {
             invalid[field] = json!(value);
             assert!(validate_snapshot_artifact(&invalid).is_err(), "{field}");
         }
+    }
+
+    #[test]
+    fn javascript_dispatch_without_a_handler_table_stays_a_candidate() {
+        let source = "function run(code, pc, stack, table) {\nwhile (pc < code.length) { const opcode = code[pc++]; table[opcode](stack); stack.push(1); }\n}";
+        let (_, analysis, workspace) = analyze(source, &[]);
+        let result = &analysis["results"][0];
+        assert_eq!(result["runtime"], "javascript");
+        assert_eq!(result["tier"], "candidate");
+        assert_eq!(result["vm_score"], 75);
+        assert_eq!(result["status"], "partial");
+        assert_eq!(result["coverage"]["complete"], false);
+        assert_eq!(
+            result["coverage"]["omissions"],
+            json!([{
+                "reason": "handler-unavailable",
+                "detail": "The dispatch pattern did not yield a static handler table, so this artifact stays a candidate."
+            }])
+        );
+        assert_eq!(analysis["summary"]["candidate_count"], 1);
+        assert_eq!(analysis["summary"]["likely_vm_count"], 0);
+        assert_eq!(workspace["summary"]["workspace_count"], 1);
+        assert!(
+            workspace["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            workspace["workspaces"][0]["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "handler-unavailable")
+        );
+        assert_schema(&workspace);
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json"))
+                .unwrap();
+        jsonschema::validator_for(&schema)
+            .unwrap()
+            .validate(&analysis)
+            .expect("handler-less JavaScript analysis");
     }
 
     #[test]

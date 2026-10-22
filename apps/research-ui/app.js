@@ -936,8 +936,23 @@
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
         if (selectedRequest?.protocolRequestId || String(selectedRequest?.operation).startsWith('cdp_')) {
-          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty',
-            'This CDP request has no exact native-event link. Host, method and timing matches cannot establish request-specific signal relationships.'));
+          const events = fingerprintEventsFromEvents(state.events ?? []);
+          const tabs = new Set(events.map(signalTabKey));
+          const summary = document.createElement('article');
+          summary.className = 'signal-request-card';
+          summary.append(
+            textElement('h3', '', 'No exact native request link'),
+            textElement('p', '', 'This debugger row has no native request id, so Origin Trace will not build a request signal profile from host, method, or timing. Those matches can belong to another request.'),
+            textElement('p', '', `${events.length} fingerprint ${events.length === 1 ? 'event' : 'events'}${tabs.size ? ` on ${tabs.size} tab ${tabs.size === 1 ? 'scope' : 'scopes'}` : ''}.`)
+          );
+          const open = textElement('button', 'secondary-button', 'Open Fingerprinting');
+          open.type = 'button';
+          open.addEventListener('click', () => {
+            state.signalTabId = 'all';
+            showScreen('signals', open);
+          });
+          summary.append(open);
+          elements.signalRequestProfile.replaceChildren(summary);
           return;
         }
         if (state.signalProfileStatus === 'loading') {
@@ -1174,7 +1189,7 @@
         }
         state.signalSelectedKeysByTab.set(state.signalTabId, state.selectedSignalEventKey);
 
-        const newCount = signalEvents.filter(event => state.signalNewKeys.has(signalEventKey(event))).length;
+        const newCount = orderedEvents.filter(event => state.signalNewKeys.has(signalEventKey(event))).length;
         elements.signalFeedStatus.textContent = newCount > 0
           ? `${newCount} new ${newCount === 1 ? 'operation' : 'operations'} at the top`
           : 'Newest first · all caught up';
@@ -1340,7 +1355,7 @@
         );
         if (state.sessionMode === 'live') {
           state.requests = state.debuggerSession?.network?.capture_enabled
-            ? cdpRequests : state.nativeRequests;
+            ? trafficRowsForLiveCapture(cdpRequests, state.nativeRequests) : state.nativeRequests;
         } else {
           state.requests = state.nativeRequests;
         }
@@ -1539,13 +1554,15 @@
 
       function renderVmHandlers(workspace, onSelection = null) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
-        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
-        heading.append(
-          textElement('h4', '', 'Handler listing'),
-          textElement('span', '', workspace.runtime === 'webassembly' ? `${workspace.handlers.length} dispatch-arm candidates` : `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`)
-        );
-        section.append(heading);
         const rows = vmOpcodeRows(workspace);
+        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
+        const listingCount = workspace.runtime !== 'webassembly'
+          ? `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`
+          : rows.length === workspace.handlers.length
+            ? `${workspace.handlers.length} dispatch-arm candidates`
+            : `${rows.length} dispatch sites · ${workspace.handlers.length} selectors`;
+        heading.append(textElement('h4', '', 'Handler listing'), textElement('span', '', listingCount));
+        section.append(heading);
         if (!rows.some(row => row.key === state.selectedVmHandlerKey)) {
           state.selectedVmHandlerKey = rows[0]?.key ?? null;
         }
@@ -1729,32 +1746,38 @@
       function renderVmBytecode(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
-        heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded snapshot preview'));
+        heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded evidence preview'));
         section.append(heading);
-        const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained bytecode snapshot');
-        workspace.snapshots.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.byte_count} bytes`; selector.append(option); });
-        const initial = Math.max(0, workspace.snapshots.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
-        selector.value = String(initial); selector.disabled = workspace.snapshots.length === 0;
-        const label = document.createElement('label'); label.append(document.createTextNode('Retained snapshot '), selector);
+        const previews = [...workspace.snapshots];
+        if (workspace.captured_module_preview) previews.push({...workspace.captured_module_preview, origin: 'captured-module'});
+        const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained byte evidence');
+        previews.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.origin === 'captured-module' ? `dispatch at byte ${snapshot.byte_offset} · ` : ''}${snapshot.byte_count} bytes`; selector.append(option); });
+        const initial = Math.max(0, previews.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
+        selector.value = String(initial); selector.disabled = previews.length === 0;
+        const label = document.createElement('label'); label.append(document.createTextNode('Retained evidence '), selector);
         const previewPanel = document.createElement('div'); section.append(label, previewPanel);
         const draw = () => {
-          const snapshot = workspace.snapshots[Number(selector.value)] ?? null;
+          const snapshot = previews[Number(selector.value)] ?? null;
           previewPanel.replaceChildren();
           const fields = document.createElement('div'); fields.className = 'vm-fields vm-bytecode-fields';
           fields.append(
             vmField('artifact', snapshot?.artifact_id ?? workspace.bytecode_artifact_id ?? 'not captured'),
             vmField('digest', snapshot?.sha256 ?? 'not recorded'),
             vmField('origin', snapshot?.origin ?? 'unavailable'),
-            vmField('snapshot bytes', snapshot?.byte_count ?? 0),
+            vmField(snapshot?.origin === 'captured-module' ? 'instruction bytes' : 'snapshot bytes', snapshot?.byte_count ?? 0),
             vmField('truncation', snapshot?.truncated === true ? 'preview truncated' : snapshot?.truncated === false ? 'complete preview' : 'not recorded'),
             vmField('unavailable reason', snapshot?.unavailable_reason ?? 'none')
           );
+          if (snapshot?.origin === 'captured-module') fields.append(vmField('module byte offset', snapshot.byte_offset));
           previewPanel.append(fields);
           const preview = formatVmHexPreview(snapshot?.preview_hex);
           if (preview) {
             const bytes = textElement('pre', 'vm-bytecode-preview', preview);
-            bytes.setAttribute('aria-label', 'Bytecode hex preview');
+            bytes.setAttribute('aria-label', snapshot?.origin === 'captured-module' ? 'Captured module instruction hex preview' : 'Bytecode hex preview');
             previewPanel.append(bytes);
+            if (snapshot?.origin === 'captured-module') {
+              previewPanel.append(textElement('p', 'vm-effect-detail', 'Dispatch instruction bytes from the captured module. This is not a runtime memory snapshot.'));
+            }
           } else {
             previewPanel.append(textElement('div', 'vm-workspace-empty', snapshot?.unavailable_reason || 'No bytecode preview was retained.'));
           }
@@ -2292,9 +2315,15 @@
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
         const buttons = [{id: 'all', label: targetScope ? 'All targets' : 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
           const domains = [...new Set(group.requests.map(requestDomain))];
+          const title = group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean);
+          const domain = domains.find(value => value && value !== 'unknown');
+          const fallback = `${targetScope ? 'Target' : 'Tab'} ${index + 1}`;
+          const label = group.id === 'unattributed' ? 'Unattributed'
+            : title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
+            : domain || fallback;
           return {
             id: group.id,
-            label: group.id === 'unattributed' ? 'Unattributed' : `${targetScope ? 'Target' : 'Tab'} ${index + 1}`,
+            label,
             count: group.requests.length,
             domains
           };
@@ -2663,7 +2692,7 @@
           const empty = document.createElement('div');
           empty.className = 'field-empty';
           empty.textContent = request?.origin === 'live'
-            ? request.protocolRequestId ? 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only.' : 'Structured fields were not captured. Request-level origin evidence is still available.'
+            ? request.protocolRequestId ? 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only. Related VM candidates opens session analysis, and Fingerprinting lists the session surfaces.' : 'Structured fields were not captured. Request-level origin evidence is still available.'
             : request?.origin === 'demo'
               ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
               : request
@@ -2785,7 +2814,23 @@
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
           if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
-            renderInspectorMessage('This CDP request has no exact native-event link. Host, method and timing matches cannot establish request-specific signal relationships. Raw fingerprint events remain available in Fingerprinting.');
+            const events = fingerprintEventsFromEvents(state.events ?? []);
+            const tabs = new Set(events.map(signalTabKey));
+            elements.prompt.textContent = 'Session fingerprint activity, not a request profile';
+            renderInspectorDetails([
+              {key: 'link', value: 'This debugger row has no native request id. Host, method, and timing matches are not a request profile.', type: 'unavailable'},
+              {key: 'session fingerprint events', value: String(events.length), type: 'count'},
+              {key: 'tab scopes', value: String(tabs.size), type: 'count'}
+            ]);
+            const open = document.createElement('button');
+            open.type = 'button';
+            open.className = 'secondary-button';
+            open.textContent = 'Open Fingerprinting';
+            open.addEventListener('click', () => {
+              state.signalTabId = 'all';
+              showScreen('signals', open);
+            });
+            elements.fieldTree.append(open);
             return;
           }
           if (state.signalProfileStatus === 'loading') {
@@ -7652,6 +7697,9 @@
           state.jwtPending = true;
           setToolsNotice('running', action === 'jwt_verify' ? 'Verifying the HMAC signature locally…' : 'Decoding the JWT locally…');
           renderTools();
+          if (action === 'jwt_verify' && toolsElements.jwtSecret.value.length === 0) {
+            throw new TypeError('HMAC verification needs a secret. The previous inspection is unchanged.');
+          }
           const request = action === 'jwt_verify'
             ? {protocol_version: 1, action, token, secret: toolsElements.jwtSecret.value}
             : {protocol_version: 1, action, token};
@@ -7665,7 +7713,6 @@
             ? (action === 'jwt_verify' ? 'JWT signature check completed locally.' : 'JWT decoded without checking its signature.')
             : (body.error || 'JWT inspection failed.'));
         } catch (error) {
-          state.jwtResult = null;
           setToolsNotice('error', error.message);
         } finally {
           toolsElements.jwtSecret.value = '';
@@ -8804,7 +8851,8 @@
       function renderSourceContent(source, view = null, target = {}) {
         const identity = sourceIdentity(source);
         const resetEditor = () => {state.sourceEditorView = null; elements.sourceCode.replaceChildren(); renderSourceWindowControls(null);
-          if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = 'Source text unavailable; nothing searched.';};
+          if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = 'Source text unavailable; nothing searched.';
+          if (elements.sourcePosition) elements.sourcePosition.textContent = '';};
         if (!source) {
           resetEditor();
           elements.sourceLanguage.textContent = 'Plain text';
@@ -8852,6 +8900,7 @@
           retry.type = 'button';
           retry.addEventListener('click', retrySourcePreview.bind(null, sourceReference(source)));
           elements.sourceCodeEmpty.replaceChildren(document.createTextNode(source.loadError || 'This preview was released to keep Sources memory bounded. Reopen its immutable bytes.'), retry);
+          if (source.loadError) elements.sourcePosition.textContent = 'Preview unavailable. The previous caret does not apply to this file.';
           return;
         }
         view ??= sourceDisplayView(source);
@@ -8942,9 +8991,10 @@
           if (view.wasmRows) {
             const offset = view.wasmRows[index]?.byte_offset;
             gutter.textContent = offset == null ? '' : offset.toString(16).padStart(6, '0');
-            gutter.disabled = offset == null || offset >= 20000 * 16;
+            const hexLimit = source.wasmHexBytes ?? wasmHexByteLimit();
+            gutter.disabled = offset == null || offset >= hexLimit;
             gutter.setAttribute('aria-label', offset == null ? 'Inspection notice' : `Show original bytes at offset ${offset}`);
-            gutter.title = offset == null ? '' : offset >= 20000 * 16 ? `Byte offset ${offset} is beyond the first 20,000 hex rows shown in Sources` : `Original byte offset ${offset} (0x${offset.toString(16)})`;
+            gutter.title = offset == null ? '' : offset >= hexLimit ? `Byte offset ${offset} is beyond the ${hexLimit} hex bytes formatted in Sources` : `Original byte offset ${offset} (0x${offset.toString(16)})`;
             gutter.addEventListener('click', () => {
               if (offset == null) return;
               state.sourceWasm = false;
@@ -9053,6 +9103,8 @@
       }
 
       function sourceViewLabel(source, view = null) {
+        if (source && source.content === undefined && source.loadError) return 'Preview unavailable';
+        if (source && source.content === undefined && source.loading) return 'Preview loading';
         if (state.sourceWasm && source?.kind === 'wasm' && source.source_type === 'artifact') {
           const report = state.wasmCache.get(wasmKey(source));
           const request = state.wasmRequests.get(wasmKey(source));
@@ -9644,10 +9696,11 @@
             try {new TextDecoder('utf-8', {fatal: true}).decode(buffer); artifact.contentLossy = false;}
             catch {artifact.contentLossy = true;}
           }
-          // Hex is only a view: do not expand 2 MiB to 131,072 rows while the
-          // editor can display only 20,000. The immutable blob is untouched.
+          // Hex is only a view. Format every byte whose rows fit in the editor
+          // index (about 1.6 MiB). The immutable blob is untouched.
+          const hexBytes = artifact.kind === 'wasm' ? Math.min(buffer.length, wasmHexByteLimit()) : buffer.length;
           const content = artifact.kind === 'wasm'
-            ? formatWasmHex(buffer.subarray(0, 20000 * 16))
+            ? formatWasmHex(buffer.subarray(0, hexBytes))
             : new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer);
           if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
             throw new Error('The retained bytes do not pass the bounded image data URL validator.');
@@ -9659,9 +9712,10 @@
           }
           artifact.sourceTextLength = content.length;
           artifact.content = content;
-          artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > 20000 * 16);
+          artifact.wasmHexBytes = artifact.kind === 'wasm' ? hexBytes : undefined;
+          artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > hexBytes);
           if (artifact.contentTruncated) artifact.content += artifact.kind === 'wasm'
-            ? '\n\n[Hex preview limited to the first 20,000 rows; original bytes are unchanged]'
+            ? `\n\n[Hex preview limited to the first ${hexBytes} bytes; original bytes are unchanged]`
             : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
           if (!canvasOwner) boundSourcePreviews();
         } catch (error) {
@@ -12037,12 +12091,16 @@
       elements.requestVmCandidates.addEventListener('click', async () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
-          investigationNotice('This CDP request has no exact native-event link. Host, method and timing matches cannot identify request-specific VM candidates.', 'unavailable');
+          investigationNotice('This debugger row has no native request id, so Related VM candidates opens session analysis. Findings without a related request id stay visible. This is not a join to the selected request.', 'unavailable');
+          const refresh = refreshVmAnalysis(null);
+          showScreen('vm', elements.requestVmCandidates);
+          await refresh;
           return;
         }
         const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;
-        if (requestId) await refreshVmAnalysis(requestId);
+        const refresh = requestId ? refreshVmAnalysis(requestId) : null;
         showScreen('vm', elements.requestVmCandidates);
+        await refresh;
       });
       elements.sourceWindowPrevious.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;

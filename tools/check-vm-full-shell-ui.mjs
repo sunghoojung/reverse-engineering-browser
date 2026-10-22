@@ -390,10 +390,10 @@ if (process.argv.includes('--fixture-only')) {
         await click(selector + ' > summary');
       }
       await click('[data-vm-panel="bytecode"]');
-      await click('[aria-label="Retained bytecode snapshot"]');
+      await click('[aria-label="Retained byte evidence"]');
       await key('Escape', 'Escape', 27);
-      assert.deepEqual(await evaluate("[...document.querySelector('[aria-label=\"Retained bytecode snapshot\"]').options].map(option=>option.textContent)"), workspace.snapshots.map(snapshot => `Artifact ${snapshot.artifact_id} · ${snapshot.byte_count} bytes`));
-      await assertReachable('[aria-label="Retained bytecode snapshot"]', 'Bytecode snapshot control ' + width);
+      assert.deepEqual(await evaluate("[...document.querySelector('[aria-label=\"Retained byte evidence\"]').options].map(option=>option.textContent)"), workspace.snapshots.map(snapshot => `Artifact ${snapshot.artifact_id} · ${snapshot.byte_count} bytes`));
+      await assertReachable('[aria-label="Retained byte evidence"]', 'Retained byte evidence control ' + width);
       await screenshot(`vm-findings-bytes-${width}`);
       await click('[data-vm-panel="reachability"]');
       assert.equal(await evaluate("[...document.querySelectorAll('[aria-label=\"reachable instructions pages\"] button')].every(button=>button.disabled)"), true, 'Empty reachability cannot imply more retained rows');

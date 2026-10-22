@@ -79,7 +79,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.2.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.3.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -93,7 +93,7 @@ pub(crate) fn current_profile() -> Value {
             limits.insert(format!("max_{}", name.to_ascii_lowercase()), value.clone());
         }
     }
-    json!({"profile_id":PROFILE,"javascript_scoring_version":2,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
+    json!({"profile_id":PROFILE,"javascript_scoring_version":2,"javascript_likely_vm_requires_handlers":true,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
 }
 
 pub(crate) fn current_rule_definitions() -> Vec<Value> {
@@ -223,7 +223,10 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         }
     }
     if !openings.is_empty() {
-        return Err(Error::bad("unterminated JavaScript function body"));
+        omissions.push(json!({
+            "reason": "javascript-unterminated-function",
+            "observed_records": openings.len()
+        }));
     }
     regions.sort_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
     let mut children = BTreeMap::<(usize, usize), Vec<(usize, usize)>>::new();
@@ -600,6 +603,36 @@ fn runtime_rule(event: &Value) -> Option<&'static str> {
 fn runtime_weights() -> Value {
     json!({"antibot.runtime-canvas-webgl":25,"antibot.runtime-navigator-device":25,"antibot.runtime-web-audio":25})
 }
+// Pattern rank can mark JavaScript likely-vm before static handler recovery.
+// Keep the workspace, but do not leave an empty handler table at that tier.
+fn retain_handlerless_javascript_as_candidate(result: &mut Value, workspace: &Value) {
+    let empty_handlers = workspace["handlers"]
+        .as_array()
+        .is_some_and(|handlers| handlers.is_empty());
+    if result["runtime"] != "javascript" || result["tier"] != "likely-vm" || !empty_handlers {
+        return;
+    }
+    result["tier"] = json!("candidate");
+    let already_recorded = result["coverage"]["omissions"]
+        .as_array()
+        .is_some_and(|omissions| {
+            omissions
+                .iter()
+                .any(|omission| omission["reason"] == "handler-unavailable")
+        });
+    if already_recorded {
+        return;
+    }
+    result["coverage"]["omissions"]
+        .as_array_mut()
+        .expect("analysis coverage omissions")
+        .push(json!({
+            "reason": "handler-unavailable",
+            "detail": "The dispatch pattern did not yield a static handler table, so this artifact stays a candidate."
+        }));
+    result["status"] = json!("partial");
+    result["coverage"]["complete"] = json!(false);
+}
 fn graph_entry(
     nodes: &mut Vec<Value>,
     edges: &mut Vec<Value>,
@@ -733,9 +766,11 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
     }
     let mut graph_ids = BTreeSet::new();
     let mut graph_omitted = 0usize;
-    // Keep the scoring representatives first, so every retained relevance
+    // Scoring representatives stay first, so every retained relevance
     // explanation has a graph node even when later context exceeds the cap.
-    for (event, observed) in representatives.values().copied().chain(runtime_events) {
+    // Request edges follow, before individual signal events. A browser-signal
+    // flood must not consume the cap and drop every correlated request.
+    for (event, observed) in representatives.values().copied() {
         let node = event_node("event", event);
         if !graph_entry(
             &mut nodes,
@@ -761,6 +796,18 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
                 requests.push(request.into());
             }
         } else {
+            graph_omitted += 1;
+        }
+    }
+    for (event, observed) in runtime_events {
+        let node = event_node("event", event);
+        if !graph_entry(
+            &mut nodes,
+            &mut edges,
+            &mut graph_ids,
+            json!({"id":node,"kind":"browser-signal","label":format!("{} {}",event["category"].as_str().unwrap(),event["type"].as_str().unwrap()),"event":event_value(event),"event_sequence":event["sequence_number"]}),
+            json!({"from":node,"to":finding_node,"state":if observed {"observed"} else {"correlated"},"reason":if observed {"Captured nonzero artifact attribution; no value flow is claimed."} else {"Matching session, navigation metadata, and nonzero frame; script attribution and causality remain unknown."}}),
+        ) {
             graph_omitted += 1;
         }
     }
@@ -992,6 +1039,7 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
             )
         {
             workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));
+            retain_handlerless_javascript_as_candidate(&mut result, &workspace);
             opcode_workspaces.push(workspace);
         }
         results.push(result);
@@ -1044,4 +1092,37 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
     documents.opcode_workspace?;
     documents.host_links?;
     Ok(documents.analysis)
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
+        let current = current_profile();
+        assert_eq!(current_producer()["version"], "1.3.0");
+        assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
+        let mut historical = current.clone();
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("javascript_likely_vm_requires_handlers");
+        assert_eq!(
+            digest(&historical).unwrap(),
+            "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"
+        );
+        assert_ne!(digest(&current).unwrap(), digest(&historical).unwrap());
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json"))
+                .unwrap();
+        let validator = jsonschema::validator_for(&schema["$defs"]["profile"]).unwrap();
+        validator.validate(&current).unwrap();
+        validator.validate(&historical).unwrap();
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("javascript_scoring_version");
+        validator.validate(&historical).unwrap();
+    }
 }

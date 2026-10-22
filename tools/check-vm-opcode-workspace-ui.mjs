@@ -53,7 +53,7 @@ class TestElement {
   click() { if (!this.disabled) this.events.click?.(); }
 }
 const testDocument = {createElement: tag => new TestElement(tag), createTextNode: text => { const node = new TestElement('#text'); node.textContent = text; return node; }, querySelector: () => null};
-const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmWorkspaceCoverage,appendVmPagedRows,vmOpcodeRows})`, {document: testDocument, state: {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'}, TextEncoder});
+const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,vmOpcodeRows})`, {document: testDocument, state: {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'}, TextEncoder});
 const descendants = element => [element, ...element.children.flatMap(descendants)];
 const findButton = (root, label) => descendants(root).find(node => node.tagName === 'button' && node.textContent === label);
 const many = structuredClone(hostSource);
@@ -73,10 +73,134 @@ const bytesView=renderApi.renderVmBytecode(many),selector=descendants(bytesView)
 assert.equal(selector.children.length,2);assert(bytesView.textContent.includes('01'));
 selector.value='1';selector.events.change();assert(bytesView.textContent.includes('aa bb'));assert(bytesView.textContent.includes('authored partial'));
 const noBytes=renderApi.renderVmBytecode({...many,snapshots:[]});assert(descendants(noBytes).find(node=>node.tagName==='select').disabled);assert(noBytes.textContent.includes('No bytecode preview'));
+const modulePreview = {artifact_id: workspace.interpreter_artifact_id, byte_offset: 45, byte_count: 5, preview_hex: '0e01020304', truncated: false};
+const moduleDocument = structuredClone(fixture);
+moduleDocument.workspaces[0].captured_module_preview = modulePreview;
+const validateModule = value => runInNewContext(`${model}\nisVmOpcodeWorkspaceDocument(value)`, {value, TextEncoder});
+assert(validateModule(moduleDocument));
+assert.equal(moduleDocument.summary.snapshot_count, fixture.summary.snapshot_count);
+for (const changes of [
+  {artifact_id: '999'}, {byte_offset: 46}, {byte_offset: -1}, {byte_offset: Number.MAX_SAFE_INTEGER},
+  {byte_count: 1}, {preview_hex: ''}, {preview_hex: 'zz'}, {truncated: true}, {origin: 'captured-module'}
+]) {
+  const malformed = structuredClone(moduleDocument);
+  Object.assign(malformed.workspaces[0].captured_module_preview, changes);
+  assert(!validateModule(malformed), JSON.stringify(changes));
+}
+const wrongRuntime = structuredClone(hostWorkspace);
+wrongRuntime.workspaces[0].captured_module_preview = modulePreview;
+assert(!validateModule(wrongRuntime));
+const sourceAsSnapshot = structuredClone(fixture);
+sourceAsSnapshot.workspaces[0].snapshots[0].origin = 'captured-module';
+assert(!validateModule(sourceAsSnapshot), 'Source instructions cannot masquerade as runtime snapshots');
+const capturedModule=renderApi.renderVmBytecode({snapshots:[],captured_module_preview:modulePreview});
+assert(capturedModule.textContent.includes('0e 01'));
+assert(capturedModule.textContent.includes('Dispatch instruction bytes from the captured module. This is not a runtime memory snapshot.'));
+assert(capturedModule.textContent.includes('dispatch at byte 45'));
+assert(capturedModule.textContent.includes('module byte offset45'));
+const capturedAlongsideRuntime=renderApi.renderVmBytecode({...many,captured_module_preview:modulePreview});
+const evidenceSelector=descendants(capturedAlongsideRuntime).find(node=>node.tagName==='select');
+assert.equal(evidenceSelector.children.length,3);
+assert(!capturedAlongsideRuntime.textContent.includes('This is not a runtime memory snapshot.'));
+evidenceSelector.value='2';evidenceSelector.events.change();
+assert(capturedAlongsideRuntime.textContent.includes('0e 01'));
+assert(capturedAlongsideRuntime.textContent.includes('module byte offset45'));
+assert.equal(many.snapshots.length,2,'Rendering must not mutate runtime snapshots');
 const originalLinks=hostLinks.workspaces[0].links;hostLinks.workspaces[0].links=Array.from({length:65},(_,index)=>({...originalLinks[0],host_event:{...originalLinks[0].host_event,sequence_number:String(50+index)}}));
 const hostView=renderApi.renderVmHostLinks(hostSource);findButton(hostView,'Next host links').click();findButton(hostView,'Next host links').click();assert(hostView.textContent.includes('event 1:1:114'));assert(findButton(hostView,'Next host links').disabled);hostLinks.workspaces[0].links=originalLinks;
 const sampleWorkspace={...hostSource,samples:Array.from({length:65},(_,index)=>({...sample,sample_index:index})),handlers:[{...hostSource.handlers.find(handler=>handler.opcode===sample.opcode),sample_count:65}]};
 const sampleRow=renderApi.vmOpcodeRows(sampleWorkspace)[0];assert.equal(sampleRow.positions.length,4);assert.equal(sampleRow.retainedSamples.length,65);assert.equal(sampleRow.operandWidth,sampleWorkspace.handlers[0].operand_width);
+const authoredSpans = workspace.handlers.map(handler => `${handler.source.byte_offset}:${handler.source.byte_size}`);
+assert.equal(new Set(authoredSpans).size, workspace.handlers.length, 'authored WASM arms use distinct source spans');
+const authoredRows = renderApi.vmOpcodeRows(workspace);
+assert.deepEqual(Array.from(authoredRows, row => row.key), ['0::45', 'null::50', '0::70']);
+assert.deepEqual(Array.from(authoredRows, row => row.label), ['br_table selector 0', 'call_indirect target', 'br_table selector 0']);
+const authoredListing = renderApi.renderVmHandlers(workspace);
+assert(authoredListing.textContent.includes('3 dispatch-arm candidates'));
+assert(!authoredListing.textContent.includes('dispatch sites'));
+assert.equal(descendants(authoredListing).filter(node => node.className === 'vm-handler-row').length, 3);
+const handler = (opcode, state, offset, size, label, samples, notes, operandWidth = 0) =>
+  ({opcode, state, source: {byte_offset: offset, byte_size: size}, label, operand_width: operandWidth, sample_count: samples, effects: [], notes});
+const sharedHandlers = [
+  handler(0, 'inferred', 20465, 117, 'br_table selector 0', 1, 'The source range cites the dispatch instruction.'),
+  handler(1, 'inferred', 20465, 117, 'br_table selector 1', 2, 'Second selector.'),
+  handler(2, 'unknown', 20465, 117, 'br_table selector 2', 0, 'Third selector.'),
+  handler(4, 'inferred', 90, 6, 'br_table selector 4', 1, 'Alone.', 1),
+  handler(null, 'unknown', 400, 8, 'call_indirect target', 0, 'First indirect.'),
+  handler(7, 'inferred', 400, 8, 'br_table selector 7', 5, 'Not every label is br_table.', 2)
+];
+sharedHandlers[3].handler_index = 4;
+const sharedWorkspace = {runtime: 'webassembly', handlers: sharedHandlers, samples: [
+  {opcode: 0, instruction_pointer: 1, instruction_pointer_units: 'instruction-index', handler_index: 0, bytecode_artifact_id: '401'},
+  {opcode: 1, instruction_pointer: 2, instruction_pointer_units: 'instruction-index', handler_index: 1, bytecode_artifact_id: '401'},
+  {opcode: 99, instruction_pointer: 9, instruction_pointer_units: 'instruction-index', handler_index: 9, bytecode_artifact_id: '401'}
+]};
+const handlersBefore = structuredClone(sharedHandlers);
+const sharedRows = renderApi.vmOpcodeRows(sharedWorkspace);
+assert.deepEqual(sharedWorkspace.handlers, handlersBefore);
+assert.equal(sharedWorkspace.handlers.length, 6);
+assert.deepEqual(Array.from(sharedRows, row => row.key), ['span:20465:117', '4:4:90', 'span:400:8']);
+assert.equal(sharedRows[0].opcode, 'shared');
+assert.equal(sharedRows[0].label, 'br_table · 3 selectors');
+assert.equal(sharedRows[0].state, 'unknown');
+assert.equal(sharedRows[0].samples, 3);
+assert.equal(sharedRows[0].operandWidth, 0);
+assert.equal(sharedRows[0].source, '20465 + 117 bytes');
+assert.equal(sharedRows[0].notes, 'The source range cites the dispatch instruction. 3 selectors share this instruction and are not separate handler bodies.');
+assert.equal(sharedRows[0].retainedSamples.length, 2);
+assert.equal(sharedRows[0].retainedPositions, 2);
+assert.equal(sharedRows[1].label, 'br_table selector 4');
+assert.equal(sharedRows[1].opcode, '0x04');
+assert.equal(sharedRows[1].state, 'inferred');
+assert.equal(sharedRows[1].samples, 1);
+assert.equal(sharedRows[1].operandWidth, 1);
+assert.equal(sharedRows[1].notes, 'Alone.');
+assert.equal(sharedRows[2].label, 'Shared dispatch · 2 selectors');
+assert.equal(sharedRows[2].state, 'unknown');
+assert.equal(sharedRows[2].samples, 5);
+assert.equal(sharedRows[2].operandWidth, 0);
+assert.equal(sharedRows[2].notes, 'First indirect. 2 selectors share this instruction and are not separate handler bodies.');
+const inferredHandlers = [
+  handler(0, 'inferred', 11, 4, 'call_indirect target', 4, 'Mixed labels.', 2),
+  handler(1, 'inferred', 11, 4, 'br_table selector 1', 1, 'Still inferred.', 2)
+];
+const inferredRows = renderApi.vmOpcodeRows({runtime: 'webassembly', handlers: inferredHandlers, samples: []});
+assert.equal(inferredRows.length, 1);
+assert.equal(inferredRows[0].label, 'Shared dispatch · 2 selectors');
+assert.equal(inferredRows[0].state, 'inferred');
+assert.equal(inferredRows[0].opcode, 'shared');
+assert.equal(inferredRows[0].operandWidth, 2);
+assert.equal(inferredRows[0].samples, 5);
+const duplicateOpcode = {runtime: 'webassembly', samples: [
+  {opcode: 0, instruction_pointer: 8, instruction_pointer_units: 'byte', handler_index: 0, bytecode_artifact_id: '9'}
+], handlers: [
+  handler(0, 'inferred', 1, 2, 'br_table selector 0', 1, 'A'),
+  handler(0, 'inferred', 1, 2, 'br_table selector 0', 1, 'B')
+]};
+const duplicateRows = renderApi.vmOpcodeRows(duplicateOpcode);
+assert.equal(duplicateRows[0].retainedSamples.length, 1);
+assert.equal(duplicateRows[0].samples, 2);
+assert.equal(duplicateRows[0].state, 'inferred');
+const sharedListing = renderApi.renderVmHandlers(sharedWorkspace);
+assert(sharedListing.textContent.includes('3 dispatch sites · 6 selectors'));
+assert(!sharedListing.textContent.includes('dispatch-arm candidates'));
+const sharedButtons = descendants(sharedListing).filter(node => node.className === 'vm-handler-row');
+assert.equal(sharedButtons.length, 3);
+assert.equal(sharedButtons[0].dataset.handlerKey, 'span:20465:117');
+assert.equal(descendants(sharedButtons[0]).find(node => node.className === 'vm-handler-opcode').textContent, 'shared');
+assert.equal(descendants(sharedButtons[0]).find(node => node.className === 'vm-handler-state').dataset.state, 'unknown');
+const javascript = structuredClone(hostSource);
+const sharedSource = {byte_offset: 10, byte_size: 4};
+javascript.handlers = javascript.handlers.slice(0, 2).map(item => ({...item, source: sharedSource}));
+const javascriptRows = renderApi.vmOpcodeRows(javascript);
+assert.equal(javascriptRows.length, 2);
+assert.deepEqual(Array.from(javascriptRows, row => row.key), ['1:0:10', '7:1:10']);
+assert(renderApi.renderVmHandlers(javascript).textContent.includes('2 candidate handlers'));
+const symbolTree = app.slice(app.indexOf('      function renderVmOpcodeWorkspaceInPlace('), app.indexOf('      function renderVmDetail('));
+assert(symbolTree.includes('const rows = workspace ? vmOpcodeRows(workspace) : [];'));
+assert(symbolTree.includes('row.label'));
+assert(!symbolTree.includes('workspace.handlers'));
+console.log('PASS shared Wasm dispatch spans group in the handler listing; distinct spans and JavaScript rows stay separate');
 const samplePanel = new TestElement('section');
 renderApi.appendVmPagedRows(samplePanel, sampleRow.retainedSamples, 'retained samples', record => { const row = new TestElement('p'); row.textContent = `Sample ${record.sample_index}`; return row; });
 assert.equal(descendants(samplePanel).find(node=>node.dataset.vmPagedRows==='retained samples').children.length,32);
@@ -89,6 +213,7 @@ assert(coveragePanel.textContent.includes('bytes [64, 65)'));assert(findButton(c
 console.log('PASS complete bounded Findings paging: 257 effects/instructions, 65 host links/samples, multi-snapshot selection, empty inputs and keyboard focus');
 
 if (process.argv.includes('--browser')) {
+  fixture.workspaces[0].captured_module_preview = modulePreview;
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
   const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
 const hostWorkspace=${JSON.stringify(hostWorkspace)},hostLinks=${JSON.stringify(hostLinks)};
@@ -151,6 +276,7 @@ render();`;
     });
     await send('Runtime.enable'); await send('Page.enable');
     await send('Page.navigate', {url: `http://127.0.0.1:${server.address().port}/`});
+    // These three authored arms use distinct source spans, so each stays its own row.
     await until(() => evaluate("document.querySelectorAll('.vm-handler-row').length === 3"), 'WASM handler rows');
     const text = await evaluate('document.body.textContent');
     assert(text.includes('WebAssembly')); assert(text.includes('3 dispatch-arm candidates')); assert(text.includes('unknown'));
@@ -171,6 +297,14 @@ render();`;
         assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
         assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
       }
+      await evaluate("document.querySelector('[data-vm-panel=bytecode]').click();document.querySelector('.vm-snapshot-selector').focus()");
+      for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'End', code: 'End', windowsVirtualKeyCode: 35});
+      assert.equal(await evaluate("document.querySelector('.vm-snapshot-selector').value"), '1');
+      const moduleText = await evaluate("document.querySelector('[data-vm-panel-content=bytecode]').textContent");
+      assert(moduleText.includes('module byte offset45')); assert(moduleText.includes('0e 01'));
+      assert(moduleText.includes('This is not a runtime memory snapshot.'));
+      assert.equal(await evaluate('fixture.workspaces[0].snapshots.length'), 1);
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
       await evaluate('scrollTo(0,0)');
       const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
       await writeFile(join(output, `wasm-${width}.png`), Buffer.from(data, 'base64'));

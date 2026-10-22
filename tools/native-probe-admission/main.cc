@@ -71,6 +71,36 @@ NativeProbeEvent One(NativeProbeQueue& queue) {
   return event;
 }
 
+void QueueMappingAndCanvasBurst() {
+  NativeProbeQueue queue;
+  constexpr std::size_t kOldQueueBytes = 393536;
+  static_assert(sizeof(NativeProbeQueue) == 3146048);
+  static_assert(reb::kNativeProbeQueueCapacity == 8192);
+  assert(queue.IsValid());
+  for (const std::size_t bytes : {kOldQueueBytes, sizeof(queue) - 1, sizeof(queue) + 64}) {
+    transport.Configure(42, reb::kAllNativeProbeCategoryMask, kForever, false, {&queue, bytes});
+    sink.RecordApiCall(reb::NativeProbeCategory::kCanvas, "canvas.getImageData");
+    assert(Drain(queue) == 0 && queue.DroppedCount() == 0);
+  }
+  Configure(queue);
+  constexpr std::size_t kSyntheticBurst = 4096;
+  for (std::size_t index = 0; index < kSyntheticBurst; ++index) {
+    sink.RecordApiCall(reb::NativeProbeCategory::kCanvas, "canvas.getImageData");
+  }
+  assert(queue.DroppedCount() == 0);
+  NativeProbeEvent event;
+  std::size_t accepted = 0;
+  while (queue.TryPop(event)) {
+    assert(event.header.category == reb::NativeProbeCategory::kCanvas);
+    assert(event.header.type == reb::NativeProbeType::kApiCall);
+    ++accepted;
+  }
+  assert(accepted == kSyntheticBurst);  // Canvas counts are not coalesced.
+  transport.Disable();
+  std::cout << "PASS exact queue mapping rejects legacy/wrong size; 4096 synthetic canvas calls "
+               "retained\n";
+}
+
 void RecoveryAndSaturation() {
   NativeProbeQueue queue;
   Configure(queue);
@@ -590,6 +620,7 @@ void DisabledExpiredAndMalformed() {
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
+  QueueMappingAndCanvasBurst();
   RecoveryAndSaturation();
   ConcurrentSameSite();
   ConfigurationRaces();

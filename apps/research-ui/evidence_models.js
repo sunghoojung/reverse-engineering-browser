@@ -1734,7 +1734,8 @@
             id: record.id,
             path: record.url,
             method: record.method,
-            status: record.state === 'failed' ? 'failed' : record.status ?? 'pending',
+            status: record.state === 'failed' ? 'failed' : record.state === 'pending' ? 'pending' : record.status ?? 'pending',
+            provisionalStatus: record.state === 'pending' && Number.isInteger(record.status) ? record.status : null,
             time: terminal && record.duration_ms !== null ? record.duration_ms : 'pending',
             // Response MIME identifies Wasm even when CDP calls its loader Fetch/XHR.
             type: record.mime_type.split(';', 1)[0].trim().toLowerCase() === 'application/wasm'
@@ -1747,6 +1748,7 @@
             end: terminal ? 92 : 58,
             event: correlated?.event ?? null,
             events: correlated?.events ?? [],
+            correlatedNativeId: correlated?.id ?? null,
             failed: record.state === 'failed',
             rank: terminal ? 5 : 2,
             statusRank: terminal ? 5 : 2,
@@ -1776,6 +1778,20 @@
           retainedBodies.forEach((value, key) => bodyCache.set(key, value));
         }
         return requests;
+      }
+
+      // Content capture projects CDP rows only. A native request that lost the
+      // race with Network.enable still has host-level evidence; keep that row
+      // instead of hiding the navigation that created the target.
+      function trafficRowsForLiveCapture(cdpRequests, nativeRequests = []) {
+        const linked = new Set();
+        const seen = new Set();
+        for (const request of cdpRequests) {
+          seen.add(request.id);
+          if (request.correlatedNativeId != null) linked.add(request.correlatedNativeId);
+        }
+        const missed = nativeRequests.filter(native => native && !linked.has(native.id) && !seen.has(native.id));
+        return missed.length ? cdpRequests.concat(missed) : cdpRequests;
       }
 
       function decodeVmFinding(event) {
@@ -2203,6 +2219,19 @@
             (isBoundedText(snapshot.unavailable_reason, 240) && snapshot.unavailable_reason.length > 0));
       }
 
+      function isVmCapturedModulePreview(preview, workspace) {
+        return workspace.runtime === 'webassembly' && vmWorkspaceExact(preview, [
+          'artifact_id', 'byte_offset', 'byte_count', 'preview_hex', 'truncated'
+        ]) && preview.artifact_id === workspace.interpreter_artifact_id &&
+          isSafeIntegerInRange(preview.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(preview.byte_count, 1, Number.MAX_SAFE_INTEGER) &&
+          Number.isSafeInteger(preview.byte_offset + preview.byte_count) &&
+          workspace.handlers.some(handler => handler.source.byte_offset === preview.byte_offset && handler.source.byte_size === preview.byte_count) &&
+          typeof preview.preview_hex === 'string' && /^(?:[0-9a-f]{2})+$/.test(preview.preview_hex) &&
+          preview.preview_hex.length <= 8192 && preview.preview_hex.length / 2 <= preview.byte_count &&
+          preview.truncated === (preview.preview_hex.length / 2 < preview.byte_count);
+      }
+
       function vmWorkspaceDigest(value) { return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value); }
       function vmWorkspaceMode(value) { return ['native-stealth', 'cdp-attached', 'unknown'].includes(value); }
       function vmSampleEvent(value) {
@@ -2231,7 +2260,7 @@
       function isVmOpcodeWorkspace(workspace) {
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
-          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal'
+          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
@@ -2239,7 +2268,9 @@
           !['javascript', 'webassembly'].includes(workspace.runtime) || !vmWorkspaceDigest(workspace.source_artifact_sha256) ||
           !vmWorkspaceMode(workspace.capture_mode) || !Array.isArray(workspace.handlers) || workspace.handlers.length > 1024 ||
           !workspace.handlers.every(isVmOpcodeHandler) || !Array.isArray(workspace.snapshots) || workspace.snapshots.length > 16 ||
-          !workspace.snapshots.every(isVmOpcodeSnapshot) || !Array.isArray(workspace.unknowns) || workspace.unknowns.length > 256 ||
+          !workspace.snapshots.every(isVmOpcodeSnapshot) ||
+          (workspace.captured_module_preview !== undefined && !isVmCapturedModulePreview(workspace.captured_module_preview, workspace)) ||
+          !Array.isArray(workspace.unknowns) || workspace.unknowns.length > 256 ||
           !workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0) ||
           new Set(workspace.unknowns).size !== workspace.unknowns.length ||
           !Array.isArray(workspace.samples) || workspace.samples.length > 4096 ||
@@ -2310,21 +2341,65 @@
         return matches.length === 1 ? matches[0] : null;
       }
 
-      function vmOpcodeRows(workspace) {
-        return workspace.handlers.map(handler => ({
+      function vmOpcodeSamplePositions(samples) {
+        return samples.slice(0, 4).map(sample =>
+          `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`);
+      }
+
+      function vmOpcodeHandlerRow(workspace, handler) {
+        const retainedSamples = workspace.samples.filter(sample => sample.opcode === handler.opcode);
+        return {
           key: `${handler.opcode}:${handler.handler_index ?? ''}:${handler.source.byte_offset}`,
           opcode: handler.opcode === null ? 'unknown' : `0x${handler.opcode.toString(16).padStart(2, '0')}`,
           label: handler.label || (handler.opcode === null ? 'Unbound dispatch arm' : `handler ${handler.handler_index ?? handler.opcode}`),
           state: handler.state,
           samples: handler.sample_count,
           operandWidth: handler.operand_width,
-          retainedSamples: workspace.samples.filter(sample => sample.opcode === handler.opcode),
-          positions: workspace.samples.filter(sample => sample.opcode === handler.opcode).slice(0, 4).map(sample =>
-            `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`),
-          retainedPositions: workspace.samples.filter(sample => sample.opcode === handler.opcode).length,
+          retainedSamples,
+          positions: vmOpcodeSamplePositions(retainedSamples),
+          retainedPositions: retainedSamples.length,
           notes: handler.notes || 'No handler notes recorded.',
           source: `${handler.source.byte_offset} + ${handler.source.byte_size} bytes`
-        }));
+        };
+      }
+
+      // Several WASM selectors can cite one dispatch instruction. The workspace
+      // still keeps every selector; only the visible row collapses.
+      function vmSharedDispatchRow(workspace, handlers) {
+        const first = handlers[0];
+        const offset = first.source.byte_offset;
+        const size = first.source.byte_size;
+        const opcodes = new Set(handlers.map(handler => handler.opcode));
+        const retainedSamples = workspace.samples.filter(sample => opcodes.has(sample.opcode));
+        const notes = first.notes || 'No handler notes recorded.';
+        const sameWidth = handlers.every(handler => handler.operand_width === first.operand_width);
+        const brTable = handlers.every(handler => typeof handler.label === 'string' && handler.label.startsWith('br_table'));
+        return {
+          key: `span:${offset}:${size}`,
+          opcode: 'shared',
+          label: `${brTable ? 'br_table' : 'Shared dispatch'} · ${handlers.length} selectors`,
+          state: handlers.every(handler => handler.state === 'inferred') ? 'inferred' : 'unknown',
+          samples: handlers.reduce((total, handler) => total + handler.sample_count, 0),
+          operandWidth: sameWidth ? first.operand_width : 0,
+          retainedSamples,
+          positions: vmOpcodeSamplePositions(retainedSamples),
+          retainedPositions: retainedSamples.length,
+          notes: `${notes} ${handlers.length} selectors share this instruction and are not separate handler bodies.`,
+          source: `${offset} + ${size} bytes`
+        };
+      }
+
+      function vmOpcodeRows(workspace) {
+        if (workspace.runtime !== 'webassembly') return workspace.handlers.map(handler => vmOpcodeHandlerRow(workspace, handler));
+        const groups = new Map();
+        for (const handler of workspace.handlers) {
+          const span = `${handler.source.byte_offset}:${handler.source.byte_size}`;
+          const group = groups.get(span);
+          if (group) group.push(handler);
+          else groups.set(span, [handler]);
+        }
+        return [...groups.values()].map(handlers =>
+          handlers.length > 1 ? vmSharedDispatchRow(workspace, handlers) : vmOpcodeHandlerRow(workspace, handlers[0]));
       }
 
       function retainVmOpcodeWorkspaceOnFailure(targetState, status, errorMessage) {

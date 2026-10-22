@@ -1830,7 +1830,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.2.0");
+        assert_eq!(document["producer"]["version"], "1.3.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -2409,8 +2409,17 @@ async fn vm_lexical_scoring_preserves_positive_evidence_and_utf8_coordinates() {
     let results = document["results"].as_array().unwrap();
     assert_eq!(results.len(), sources.len());
     let baseline = &results[0];
-    assert_eq!(baseline["tier"], "likely-vm");
+    assert_eq!(baseline["tier"], "candidate");
     assert_eq!(baseline["vm_score"], 75);
+    assert_eq!(baseline["status"], "partial");
+    assert_eq!(baseline["coverage"]["complete"], false);
+    assert_eq!(
+        baseline["coverage"]["omissions"],
+        json!([{
+            "reason": "handler-unavailable",
+            "detail": "The dispatch pattern did not yield a static handler table, so this artifact stays a candidate."
+        }])
+    );
     assert_eq!(
         baseline["evidence_families"],
         json!(["bytecode", "dispatch", "instruction-pointer", "state"])
@@ -2474,7 +2483,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.2.0");
+    assert_eq!(document["producer"]["version"], "1.3.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 2);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -2536,9 +2545,46 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .zip(&artifacts)
         .zip(&sources)
     {
-        assert_eq!(result["status"], "complete");
-        assert_eq!(result["tier"], "likely-vm");
+        let recovered_handler_table = source.contains("case 0:");
+        assert_eq!(
+            result["status"],
+            if recovered_handler_table {
+                "complete"
+            } else {
+                "partial"
+            },
+            "{source}"
+        );
+        assert_eq!(
+            result["tier"],
+            if recovered_handler_table {
+                "likely-vm"
+            } else {
+                "candidate"
+            },
+            "{source}"
+        );
         assert_eq!(result["vm_score"], 95);
+        if recovered_handler_table {
+            assert!(
+                !result["coverage"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|omission| omission["reason"] == "handler-unavailable"),
+                "{source}"
+            );
+        } else {
+            assert_eq!(result["coverage"]["complete"], false, "{source}");
+            assert_eq!(
+                result["coverage"]["omissions"],
+                json!([{
+                    "reason": "handler-unavailable",
+                    "detail": "The dispatch pattern did not yield a static handler table, so this artifact stays a candidate."
+                }]),
+                "{source}"
+            );
+        }
         assert_eq!(
             result["evidence_families"],
             json!([
@@ -3469,7 +3515,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.2.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.3.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -3477,9 +3523,13 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         catalog["current_profile_digest"],
         document["profile_digest"]
     );
-    // Exact projection from the pre-catalog implementation: the extraction
-    // must not silently change existing generated profile identities.
     assert_eq!(
+        document["profile"]["javascript_likely_vm_requires_handlers"],
+        true
+    );
+    // The legacy profile remains identifiable, but must not name the new
+    // handler-recovery classification policy as equivalent evidence.
+    assert_ne!(
         document["profile_digest"],
         "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"
     );
@@ -3516,6 +3566,16 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         }
     }
     let mut historical_profile = document["profile"].clone();
+    historical_profile
+        .as_object_mut()
+        .unwrap()
+        .remove("javascript_likely_vm_requires_handlers");
+    assert_eq!(
+        hex::encode(Sha256::digest(
+            origin_trace_backend::vm::canonical(&historical_profile).unwrap()
+        )),
+        "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"
+    );
     historical_profile
         .as_object_mut()
         .unwrap()

@@ -1529,6 +1529,49 @@ mod tests {
     }
 
     #[test]
+    fn javascript_dispatch_without_a_handler_table_stays_a_candidate() {
+        let source = "function run(code, pc, stack, table) {\nwhile (pc < code.length) { const opcode = code[pc++]; table[opcode](stack); stack.push(1); }\n}";
+        let (_, analysis, workspace) = analyze(source, &[]);
+        let result = &analysis["results"][0];
+        assert_eq!(result["runtime"], "javascript");
+        assert_eq!(result["tier"], "candidate");
+        assert_eq!(result["vm_score"], 75);
+        assert_eq!(result["status"], "partial");
+        assert_eq!(result["coverage"]["complete"], false);
+        assert_eq!(
+            result["coverage"]["omissions"],
+            json!([{
+                "reason": "handler-unavailable",
+                "detail": "The dispatch pattern did not yield a static handler table, so this artifact stays a candidate."
+            }])
+        );
+        assert_eq!(analysis["summary"]["candidate_count"], 1);
+        assert_eq!(analysis["summary"]["likely_vm_count"], 0);
+        assert_eq!(workspace["summary"]["workspace_count"], 1);
+        assert!(
+            workspace["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            workspace["workspaces"][0]["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "handler-unavailable")
+        );
+        assert_schema(&workspace);
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json"))
+                .unwrap();
+        jsonschema::validator_for(&schema)
+            .unwrap()
+            .validate(&analysis)
+            .expect("handler-less JavaScript analysis");
+    }
+
+    #[test]
     fn packed_long_switch_does_not_create_a_workspace() {
         let (_, analysis, workspace) = analyze(&fixture("packed-non-vm.js"), &[]);
         assert_eq!(analysis["summary"]["likely_vm_count"], 0);

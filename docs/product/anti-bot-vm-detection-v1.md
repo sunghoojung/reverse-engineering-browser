@@ -387,3 +387,13 @@ Version 1 is complete only when:
 
 If a required platform or Brave toolchain is unavailable, the exact gap is
 reported and the corresponding acceptance gate remains unclaimed.
+
+### Handler recovery classification revision
+
+Detector producer `1.3.0` adds the profile flag
+`javascript_likely_vm_requires_handlers: true`. JavaScript structural scoring
+still uses scoring version 2, but a likely-ranked pattern without a recovered
+static handler table remains a partial candidate. The flag changes the profile
+digest so catalogs do not describe historical results as using this policy.
+Wasm classification is unchanged. Historical v1 profiles without the flag remain
+schema-valid; missing metadata does not imply that handler recovery was required.

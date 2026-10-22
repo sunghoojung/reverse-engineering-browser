@@ -165,7 +165,9 @@ function renderTrafficRows(container, requests, {selectedId, newIds, matches, on
         : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? 'Failed' : request.status === 'pending' ? 'Pending' : String(request.status));
       status.title = request.failed ? 'Request failed. Inspect the retained response state for details.'
         : request.interrupted ? 'Native proxy observation ended; final network outcome is unavailable.'
-        : request.status === 'pending' ? 'No terminal lifecycle event has been captured.' : `HTTP status ${request.status}`;
+        : request.status === 'pending' ? (Number.isInteger(request.provisionalStatus)
+          ? `Still pending. Response extra info reported HTTP ${request.provisionalStatus}; that is not a finished response.`
+          : 'No terminal lifecycle event has been captured.') : `HTTP status ${request.status}`;
       const type = trafficNode('span', 'request-type', trafficTableTypeLabel(request.type));
       type.title = trafficTypeLabel(request.type);
       row.replaceChildren(name, status, type,
@@ -627,7 +629,9 @@ function renderTrafficDetails(container, request, tab, onDecode, onTrace, find =
   container.querySelectorAll('.exchange-pane').forEach(pane => pane.updateRecord(exchange[pane.dataset.side], request));
   if (tab === 'headers') {
     const values = [request.hostOnly ? `${request.path} (host only; path and query not captured)` : request.path,
-      request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.status, trafficOriginLabel(request), request.id,
+      request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.status === 'pending'
+        ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
+        : request.status, trafficOriginLabel(request), request.id,
       request.tabId && request.tabId !== '0' ? request.tabId : 'Unattributed',
       `Retained evidence only. Missing headers and bodies are not fetched.${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
     container.querySelectorAll('.traffic-general-value').forEach((node, index) => {

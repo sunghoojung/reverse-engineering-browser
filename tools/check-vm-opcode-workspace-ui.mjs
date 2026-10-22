@@ -73,12 +73,39 @@ const bytesView=renderApi.renderVmBytecode(many),selector=descendants(bytesView)
 assert.equal(selector.children.length,2);assert(bytesView.textContent.includes('01'));
 selector.value='1';selector.events.change();assert(bytesView.textContent.includes('aa bb'));assert(bytesView.textContent.includes('authored partial'));
 const noBytes=renderApi.renderVmBytecode({...many,snapshots:[]});assert(descendants(noBytes).find(node=>node.tagName==='select').disabled);assert(noBytes.textContent.includes('No bytecode preview'));
-const capturedModule=renderApi.renderVmBytecode({snapshots:[{artifact_id:'5',origin:'captured-module',byte_count:2,preview_hex:'0e01',truncated:false,unavailable_reason:null}],bytecode_artifact_id:'5'});
+const modulePreview = {artifact_id: workspace.interpreter_artifact_id, byte_offset: 45, byte_count: 5, preview_hex: '0e01020304', truncated: false};
+const moduleDocument = structuredClone(fixture);
+moduleDocument.workspaces[0].captured_module_preview = modulePreview;
+const validateModule = value => runInNewContext(`${model}\nisVmOpcodeWorkspaceDocument(value)`, {value, TextEncoder});
+assert(validateModule(moduleDocument));
+assert.equal(moduleDocument.summary.snapshot_count, fixture.summary.snapshot_count);
+for (const changes of [
+  {artifact_id: '999'}, {byte_offset: 46}, {byte_offset: -1}, {byte_offset: Number.MAX_SAFE_INTEGER},
+  {byte_count: 1}, {preview_hex: ''}, {preview_hex: 'zz'}, {truncated: true}, {origin: 'captured-module'}
+]) {
+  const malformed = structuredClone(moduleDocument);
+  Object.assign(malformed.workspaces[0].captured_module_preview, changes);
+  assert(!validateModule(malformed), JSON.stringify(changes));
+}
+const wrongRuntime = structuredClone(hostWorkspace);
+wrongRuntime.workspaces[0].captured_module_preview = modulePreview;
+assert(!validateModule(wrongRuntime));
+const sourceAsSnapshot = structuredClone(fixture);
+sourceAsSnapshot.workspaces[0].snapshots[0].origin = 'captured-module';
+assert(!validateModule(sourceAsSnapshot), 'Source instructions cannot masquerade as runtime snapshots');
+const capturedModule=renderApi.renderVmBytecode({snapshots:[],captured_module_preview:modulePreview});
 assert(capturedModule.textContent.includes('0e 01'));
 assert(capturedModule.textContent.includes('Dispatch instruction bytes from the captured module. This is not a runtime memory snapshot.'));
-const capturedWithoutPreview=renderApi.renderVmBytecode({snapshots:[{artifact_id:'5',origin:'captured-module',byte_count:0,preview_hex:null,truncated:false,unavailable_reason:null}]});
-assert(capturedWithoutPreview.textContent.includes('No bytecode preview was retained.'));
-assert(!capturedWithoutPreview.textContent.includes('Dispatch instruction bytes'));
+assert(capturedModule.textContent.includes('dispatch at byte 45'));
+assert(capturedModule.textContent.includes('module byte offset45'));
+const capturedAlongsideRuntime=renderApi.renderVmBytecode({...many,captured_module_preview:modulePreview});
+const evidenceSelector=descendants(capturedAlongsideRuntime).find(node=>node.tagName==='select');
+assert.equal(evidenceSelector.children.length,3);
+assert(!capturedAlongsideRuntime.textContent.includes('This is not a runtime memory snapshot.'));
+evidenceSelector.value='2';evidenceSelector.events.change();
+assert(capturedAlongsideRuntime.textContent.includes('0e 01'));
+assert(capturedAlongsideRuntime.textContent.includes('module byte offset45'));
+assert.equal(many.snapshots.length,2,'Rendering must not mutate runtime snapshots');
 const originalLinks=hostLinks.workspaces[0].links;hostLinks.workspaces[0].links=Array.from({length:65},(_,index)=>({...originalLinks[0],host_event:{...originalLinks[0].host_event,sequence_number:String(50+index)}}));
 const hostView=renderApi.renderVmHostLinks(hostSource);findButton(hostView,'Next host links').click();findButton(hostView,'Next host links').click();assert(hostView.textContent.includes('event 1:1:114'));assert(findButton(hostView,'Next host links').disabled);hostLinks.workspaces[0].links=originalLinks;
 const sampleWorkspace={...hostSource,samples:Array.from({length:65},(_,index)=>({...sample,sample_index:index})),handlers:[{...hostSource.handlers.find(handler=>handler.opcode===sample.opcode),sample_count:65}]};
@@ -95,6 +122,7 @@ assert(coveragePanel.textContent.includes('bytes [64, 65)'));assert(findButton(c
 console.log('PASS complete bounded Findings paging: 257 effects/instructions, 65 host links/samples, multi-snapshot selection, empty inputs and keyboard focus');
 
 if (process.argv.includes('--browser')) {
+  fixture.workspaces[0].captured_module_preview = modulePreview;
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
   const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
 const hostWorkspace=${JSON.stringify(hostWorkspace)},hostLinks=${JSON.stringify(hostLinks)};
@@ -177,6 +205,14 @@ render();`;
         assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
         assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
       }
+      await evaluate("document.querySelector('[data-vm-panel=bytecode]').click();document.querySelector('.vm-snapshot-selector').focus()");
+      for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'End', code: 'End', windowsVirtualKeyCode: 35});
+      assert.equal(await evaluate("document.querySelector('.vm-snapshot-selector').value"), '1');
+      const moduleText = await evaluate("document.querySelector('[data-vm-panel-content=bytecode]').textContent");
+      assert(moduleText.includes('module byte offset45')); assert(moduleText.includes('0e 01'));
+      assert(moduleText.includes('This is not a runtime memory snapshot.'));
+      assert.equal(await evaluate('fixture.workspaces[0].snapshots.length'), 1);
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
       await evaluate('scrollTo(0,0)');
       const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
       await writeFile(join(output, `wasm-${width}.png`), Buffer.from(data, 'base64'));

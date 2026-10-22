@@ -223,7 +223,10 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         }
     }
     if !openings.is_empty() {
-        return Err(Error::bad("unterminated JavaScript function body"));
+        omissions.push(json!({
+            "reason": "javascript-unterminated-function",
+            "observed_records": openings.len()
+        }));
     }
     regions.sort_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
     let mut children = BTreeMap::<(usize, usize), Vec<(usize, usize)>>::new();

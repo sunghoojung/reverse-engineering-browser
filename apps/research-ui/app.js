@@ -1174,7 +1174,7 @@
         }
         state.signalSelectedKeysByTab.set(state.signalTabId, state.selectedSignalEventKey);
 
-        const newCount = signalEvents.filter(event => state.signalNewKeys.has(signalEventKey(event))).length;
+        const newCount = orderedEvents.filter(event => state.signalNewKeys.has(signalEventKey(event))).length;
         elements.signalFeedStatus.textContent = newCount > 0
           ? `${newCount} new ${newCount === 1 ? 'operation' : 'operations'} at the top`
           : 'Newest first · all caught up';
@@ -1729,31 +1729,34 @@
       function renderVmBytecode(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
-        heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded snapshot preview'));
+        heading.append(textElement('h4', '', 'Bytecode'), textElement('span', '', 'bounded evidence preview'));
         section.append(heading);
-        const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained bytecode snapshot');
-        workspace.snapshots.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.byte_count} bytes`; selector.append(option); });
-        const initial = Math.max(0, workspace.snapshots.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
-        selector.value = String(initial); selector.disabled = workspace.snapshots.length === 0;
-        const label = document.createElement('label'); label.append(document.createTextNode('Retained snapshot '), selector);
+        const previews = [...workspace.snapshots];
+        if (workspace.captured_module_preview) previews.push({...workspace.captured_module_preview, origin: 'captured-module'});
+        const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained byte evidence');
+        previews.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.origin === 'captured-module' ? `dispatch at byte ${snapshot.byte_offset} · ` : ''}${snapshot.byte_count} bytes`; selector.append(option); });
+        const initial = Math.max(0, previews.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
+        selector.value = String(initial); selector.disabled = previews.length === 0;
+        const label = document.createElement('label'); label.append(document.createTextNode('Retained evidence '), selector);
         const previewPanel = document.createElement('div'); section.append(label, previewPanel);
         const draw = () => {
-          const snapshot = workspace.snapshots[Number(selector.value)] ?? null;
+          const snapshot = previews[Number(selector.value)] ?? null;
           previewPanel.replaceChildren();
           const fields = document.createElement('div'); fields.className = 'vm-fields vm-bytecode-fields';
           fields.append(
             vmField('artifact', snapshot?.artifact_id ?? workspace.bytecode_artifact_id ?? 'not captured'),
             vmField('digest', snapshot?.sha256 ?? 'not recorded'),
             vmField('origin', snapshot?.origin ?? 'unavailable'),
-            vmField('snapshot bytes', snapshot?.byte_count ?? 0),
+            vmField(snapshot?.origin === 'captured-module' ? 'instruction bytes' : 'snapshot bytes', snapshot?.byte_count ?? 0),
             vmField('truncation', snapshot?.truncated === true ? 'preview truncated' : snapshot?.truncated === false ? 'complete preview' : 'not recorded'),
             vmField('unavailable reason', snapshot?.unavailable_reason ?? 'none')
           );
+          if (snapshot?.origin === 'captured-module') fields.append(vmField('module byte offset', snapshot.byte_offset));
           previewPanel.append(fields);
           const preview = formatVmHexPreview(snapshot?.preview_hex);
           if (preview) {
             const bytes = textElement('pre', 'vm-bytecode-preview', preview);
-            bytes.setAttribute('aria-label', 'Bytecode hex preview');
+            bytes.setAttribute('aria-label', snapshot?.origin === 'captured-module' ? 'Captured module instruction hex preview' : 'Bytecode hex preview');
             previewPanel.append(bytes);
             if (snapshot?.origin === 'captured-module') {
               previewPanel.append(textElement('p', 'vm-effect-detail', 'Dispatch instruction bytes from the captured module. This is not a runtime memory snapshot.'));
@@ -7655,6 +7658,9 @@
           state.jwtPending = true;
           setToolsNotice('running', action === 'jwt_verify' ? 'Verifying the HMAC signature locally…' : 'Decoding the JWT locally…');
           renderTools();
+          if (action === 'jwt_verify' && toolsElements.jwtSecret.value.length === 0) {
+            throw new TypeError('HMAC verification needs a secret. The previous inspection is unchanged.');
+          }
           const request = action === 'jwt_verify'
             ? {protocol_version: 1, action, token, secret: toolsElements.jwtSecret.value}
             : {protocol_version: 1, action, token};
@@ -7668,7 +7674,6 @@
             ? (action === 'jwt_verify' ? 'JWT signature check completed locally.' : 'JWT decoded without checking its signature.')
             : (body.error || 'JWT inspection failed.'));
         } catch (error) {
-          state.jwtResult = null;
           setToolsNotice('error', error.message);
         } finally {
           toolsElements.jwtSecret.value = '';
@@ -8807,7 +8812,8 @@
       function renderSourceContent(source, view = null, target = {}) {
         const identity = sourceIdentity(source);
         const resetEditor = () => {state.sourceEditorView = null; elements.sourceCode.replaceChildren(); renderSourceWindowControls(null);
-          if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = 'Source text unavailable; nothing searched.';};
+          if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = 'Source text unavailable; nothing searched.';
+          if (elements.sourcePosition) elements.sourcePosition.textContent = '';};
         if (!source) {
           resetEditor();
           elements.sourceLanguage.textContent = 'Plain text';
@@ -8855,6 +8861,7 @@
           retry.type = 'button';
           retry.addEventListener('click', retrySourcePreview.bind(null, sourceReference(source)));
           elements.sourceCodeEmpty.replaceChildren(document.createTextNode(source.loadError || 'This preview was released to keep Sources memory bounded. Reopen its immutable bytes.'), retry);
+          if (source.loadError) elements.sourcePosition.textContent = 'Preview unavailable. The previous caret does not apply to this file.';
           return;
         }
         view ??= sourceDisplayView(source);
@@ -9056,6 +9063,8 @@
       }
 
       function sourceViewLabel(source, view = null) {
+        if (source && source.content === undefined && source.loadError) return 'Preview unavailable';
+        if (source && source.content === undefined && source.loading) return 'Preview loading';
         if (state.sourceWasm && source?.kind === 'wasm' && source.source_type === 'artifact') {
           const report = state.wasmCache.get(wasmKey(source));
           const request = state.wasmRequests.get(wasmKey(source));

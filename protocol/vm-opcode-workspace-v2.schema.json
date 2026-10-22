@@ -270,10 +270,7 @@
           "$ref": "#/$defs/uint64"
         },
         "origin": {
-          "enum": [
-            "runtime-typed-array",
-            "captured-module"
-          ]
+          "const": "runtime-typed-array"
         },
         "sha256": {
           "$ref": "#/$defs/digest"
@@ -473,8 +470,27 @@
         },
         "traversal": {
           "$ref": "#/$defs/traversal"
+        },
+        "captured_module_preview": {
+          "$ref": "#/$defs/modulePreview"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "captured_module_preview"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime": {
+                "const": "webassembly"
+              }
+            }
+          }
+        }
+      ]
     },
     "effectSpan": {
       "type": "object",
@@ -1137,6 +1153,39 @@
           }
         }
       ]
+    },
+    "modulePreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "byte_offset",
+        "byte_count",
+        "preview_hex",
+        "truncated"
+      ],
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/uint64"
+        },
+        "byte_offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byte_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "preview_hex": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 8192,
+          "pattern": "^(?:[0-9a-f]{2})+$"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
     }
   }
 }

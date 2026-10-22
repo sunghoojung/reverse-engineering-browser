@@ -14,7 +14,7 @@ use std::{
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.0.0";
+const PRODUCER_VERSION: &str = "2.1.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -762,9 +762,8 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
 }
 
 /// Bytes of the dispatch instruction shared by the most handlers.
-/// This slice is the captured module, not a runtime memory snapshot, so it
-/// carries no artifact digest.
-fn captured_module_snapshot(artifact: &Value, bytes: &[u8], handlers: &[Value]) -> Option<Value> {
+/// Preserve its module-relative offset separately from runtime bytecode snapshots.
+fn captured_module_preview(artifact: &Value, bytes: &[u8], handlers: &[Value]) -> Option<Value> {
     let mut counts = BTreeMap::<(u64, u64), usize>::new();
     for handler in handlers {
         let Some(offset) = handler["source"]["byte_offset"].as_u64() else {
@@ -794,11 +793,10 @@ fn captured_module_snapshot(artifact: &Value, bytes: &[u8], handlers: &[Value]) 
     };
     Some(json!({
         "artifact_id": artifact["artifact_id"],
-        "origin": "captured-module",
-        "byte_count": if truncated { slice.len() } else { preview.len() },
+        "byte_offset": offset,
+        "byte_count": slice.len(),
         "preview_hex": hex::encode(preview),
         "truncated": truncated,
-        "unavailable_reason": null,
     }))
 }
 
@@ -895,37 +893,33 @@ pub(crate) fn workspace(
             ));
         }
     }
-    let (mut snapshots, snapshot_omissions) = snapshots(root, artifact, snapshot_artifacts);
+    let (snapshots, snapshot_omissions) = snapshots(root, artifact, snapshot_artifacts);
     omissions.extend(snapshot_omissions);
-    if runtime == "webassembly" && snapshots.is_empty() {
-        if let Some(preview) = captured_module_snapshot(artifact, bytes, &handlers) {
-            snapshots.push(preview);
-        }
-    }
-    let module_bytes_only = runtime == "webassembly"
-        && !snapshots.is_empty()
-        && snapshots
-            .iter()
-            .all(|row| row["origin"] == "captured-module");
+    // Source instruction bytes are display evidence, not a zero-based guest image.
+    // They must never supply snapshot identity, traversal, or coverage bytes.
+    let module_preview = (runtime == "webassembly")
+        .then(|| captured_module_preview(artifact, bytes, &handlers))
+        .flatten();
     if snapshots.is_empty() {
+        let module = runtime == "webassembly";
         if let Some(snapshot) = result.get("bytecode_snapshot")
             && snapshot["snapshot_hex"].is_string()
         {
             omissions.push(json!({
                 "reason": "static-initializer-only",
-                "detail": "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot names this allocating script in the same session, navigation, and frame."
+                "detail": if module {
+                    "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot was retained for this captured module. The handler list comes from the module bytes."
+                } else {
+                    "A bounded static initializer exists in vm-analysis-v1, but no runtime snapshot names this allocating script in the same session, navigation, and frame."
+                }
             }));
-        } else if runtime == "webassembly" {
+        } else if module {
             omissions.push(json!({"reason":"runtime-snapshot-unavailable", "detail":
                 "No runtime snapshot was retained for this captured module. The handler list comes from the module bytes, not an allocating script."}));
         } else {
             omissions.push(json!({"reason":"runtime-snapshot-unavailable", "detail":
                 "No runtime snapshot names this captured allocating script in the same session, navigation, and frame. The allocating script may not have been captured."}));
         }
-    } else if module_bytes_only {
-        // coverage() names this reason only when snapshots is empty.
-        omissions.push(json!({"reason":"runtime-snapshot-unavailable", "detail":
-            "No runtime snapshot was retained for this captured module. The handler list comes from the module bytes, not an allocating script."}));
     }
     unknowns.sort();
     unknowns.dedup();
@@ -979,6 +973,9 @@ pub(crate) fn workspace(
         "unknowns": unknowns,
         "traversal": traversal,
     });
+    if let Some(preview) = module_preview {
+        workspace["captured_module_preview"] = preview;
+    }
     if let Some(snapshot) = workspace["snapshots"]
         .as_array()
         .and_then(|items| items.first())
@@ -1220,12 +1217,9 @@ mod tests {
                 assert_eq!(handlers[0]["opcode"], 0);
                 assert_eq!(handlers[1]["opcode"], 1);
                 assert_eq!(handlers[0]["state"], "inferred");
-                let snapshots = workspace["snapshots"].as_array().unwrap();
-                assert_eq!(snapshots.len(), 1);
-                let snapshot = &snapshots[0];
-                assert_eq!(snapshot["origin"], "captured-module");
+                let snapshot = &workspace["captured_module_preview"];
+                assert!(snapshot.get("origin").is_none());
                 assert!(snapshot.get("sha256").is_none());
-                assert!(snapshot["unavailable_reason"].is_null());
                 assert_eq!(
                     snapshot["artifact_id"],
                     workspace["interpreter_artifact_id"]
@@ -1239,10 +1233,25 @@ mod tests {
                 let size = handlers[0]["source"]["byte_size"].as_u64().unwrap() as usize;
                 let instruction = &bytes[offset..offset + size];
                 assert_eq!(instruction[0], 0x0e);
+                assert_eq!(snapshot["byte_offset"], offset);
+                assert!(offset > 0);
                 assert_eq!(snapshot["preview_hex"], hex::encode(instruction));
                 assert_eq!(snapshot["truncated"], false);
                 assert_eq!(snapshot["byte_count"], instruction.len());
             }
+            assert_eq!(workspace["snapshots"], json!([]));
+            assert!(workspace.get("bytecode_artifact_id").is_none());
+            assert_eq!(workspace["coverage"]["retained_snapshot_bytes"], 0);
+            assert_eq!(workspace["coverage"]["characterized_bytes"], 0);
+            assert_eq!(workspace["traversal"]["entry_offsets"], json!([]));
+            assert_eq!(workspace["traversal"]["instructions"], json!([]));
+            assert_eq!(
+                workspace["traversal"]["frontier"],
+                json!([{
+                    "artifact_id": null, "byte_offset": null, "reason": "snapshot-unavailable"
+                }])
+            );
+            assert_eq!(document["summary"]["snapshot_count"], 0);
             assert_eq!(workspace["coverage"]["complete"], false);
             let module_bytes = workspace["coverage"]["omissions"]
                 .as_array()
@@ -1261,6 +1270,46 @@ mod tests {
         assert_eq!(analysis["summary"]["likely_vm_count"], 0);
         assert_eq!(document["summary"]["workspace_count"], 0);
         assert_schema(&document);
+    }
+
+    #[test]
+    fn captured_module_preview_coexists_without_retargeting_runtime_snapshot() {
+        let bytes = wasm_fixture("br_table");
+        let (_, _, document) =
+            analyze_artifact_with_snapshot(&bytes, "wasm", &[], Some(&[0xaa, 0xbb]));
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["captured_module_preview"]["artifact_id"], "1");
+        assert_eq!(workspace["snapshots"].as_array().unwrap().len(), 1);
+        assert_eq!(workspace["snapshots"][0]["artifact_id"], "2");
+        assert_eq!(workspace["snapshots"][0]["origin"], "runtime-typed-array");
+        assert_eq!(workspace["snapshots"][0]["preview_hex"], "aabb");
+        assert_eq!(workspace["bytecode_artifact_id"], "2");
+        assert_eq!(workspace["coverage"]["retained_snapshot_bytes"], 2);
+        assert_eq!(document["summary"]["snapshot_count"], 1);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn captured_module_preview_preserves_offsets_and_bounds_without_runtime_identity() {
+        let artifact = json!({"artifact_id":"5"});
+        let bytes = (0..5000)
+            .map(|index| (index % 256) as u8)
+            .collect::<Vec<_>>();
+        let handler = |offset, size| json!({"source":{"byte_offset":offset,"byte_size":size}});
+        let handlers = [handler(20, 3), handler(10, 3)];
+        let preview = captured_module_preview(&artifact, &bytes, &handlers).unwrap();
+        assert_eq!(preview["byte_offset"], 10);
+        assert_eq!(preview["byte_count"], 3);
+        assert_eq!(preview["preview_hex"], hex::encode(&bytes[10..13]));
+        assert_eq!(preview["truncated"], false);
+        let preview = captured_module_preview(&artifact, &bytes, &[handler(20, 4500)]).unwrap();
+        assert_eq!(preview["byte_offset"], 20);
+        assert_eq!(preview["byte_count"], 4500);
+        assert_eq!(preview["preview_hex"], hex::encode(&bytes[20..4116]));
+        assert_eq!(preview["truncated"], true);
+        assert!(captured_module_preview(&artifact, &bytes, &[handler(5000, 1)]).is_none());
+        assert!(captured_module_preview(&artifact, &bytes, &[handler(0, 0)]).is_none());
+        assert!(captured_module_preview(&artifact, &bytes, &[]).is_none());
     }
 
     #[test]

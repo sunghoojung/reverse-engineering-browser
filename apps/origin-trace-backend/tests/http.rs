@@ -2578,8 +2578,16 @@ async fn vm_lexical_scoring_preserves_region_failures_and_limits() {
     let document: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
     let results = document["results"].as_array().unwrap();
     assert_eq!(results.len(), sources.len());
-    assert_eq!(results[0]["status"], "failed");
-    assert_eq!(results[0]["error"]["code"], "malformed-artifact");
+    assert_eq!(results[0]["status"], "partial");
+    assert_eq!(results[0]["tier"], "candidate");
+    assert!(results[0].get("error").is_none());
+    assert!(
+        results[0]["coverage"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|omission| omission["reason"] == "javascript-unterminated-function")
+    );
     assert_eq!(results[1]["status"], "partial");
     assert_eq!(results[1]["tier"], "none");
     assert_eq!(results[1]["coverage"]["complete"], false);
@@ -2828,6 +2836,13 @@ async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
             503,
             "dependency_unavailable",
             "The native decoder executable is unavailable",
+        ),
+        (
+            "/api/decoder/actions",
+            json!({"action":"jwt_verify","protocol_version":1,"token":"synthetic_private_token","secret":""}),
+            400,
+            "invalid_request",
+            "JWT HMAC secret is empty, oversized, or contains controls",
         ),
         (
             "/api/native-console/actions",

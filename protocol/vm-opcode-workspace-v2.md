@@ -116,6 +116,20 @@ truncated payloads, unknown opcodes, scoped marker mismatch, retention bounds,
 all-sample counts, content digest/schema validity and v1 rejection. UI contract
 tests cover sample projection, strict v2 validation and preserved failure state.
 
+## Captured module instruction preview
+
+A WebAssembly workspace may expose `captured_module_preview`, a bounded slice
+of the dispatch instruction shared by the most selectors (then lowest offset).
+Its `artifact_id` is the interpreter module, `byte_offset` is the original module
+offset, and `byte_count` is the complete instruction size. `preview_hex` retains
+at most 4096 bytes and `truncated` names any omitted suffix. The workspace source
+digest identifies the full captured module, not a digest of this slice.
+
+This is source evidence, not a runtime memory or guest-bytecode snapshot. It does
+not populate `snapshots`, `bytecode_artifact_id`, snapshot counts, byte coverage,
+or traversal inputs. Missing runtime bytes retain their explicit omission even
+when the module instruction preview is visible.
+
 ## Retained guest-byte coverage
 
 `coverage.handler_count` remains a separate table count. The progress fraction is

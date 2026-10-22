@@ -86,7 +86,8 @@ Disposal stops owned pages, workers, recipes, requests, and retained objects.
 Worker cancellation terminates its process group, including descendants. Network
 capture is opt-in for standalone sessions and enabled by the packaged research
 profile. HTTP Traffic uses a single browser-level CDP transport with flattened
-sessions, passive Target events and recursive attachment for page, iframe and
+sessions, passive Target events, http(s) pages already published on the
+debugger target list, and recursive attachment for page, iframe and
 worker targets. `--capture-target-limit` defaults to 32 (range 1–128), covering
 initializing and ready targets with stable owners and oldest-waiting admission
 when slots free. The shared event budget is 64 MiB; requested browser Network
@@ -100,6 +101,13 @@ target destruction. That proof preserves unrelated owners instead of closing the
 shared transport; unknown cleanup failures still retire it with a visible gap.
 `network.capture_epoch` remains the focused debugger/selection identity, not the
 HTTP owner token.
+
+Supplementary HTTP target-list discovery validates the browser connection and
+catalog epoch from before the list read, then admits under the catalog lock.
+It retains at most 4,096 retired target IDs per connection. At that limit, list-only
+recovery fails closed and coverage is visibly partial until capture reconnects;
+normal browser Target events continue. No first-navigation or short-lived-page
+capture guarantee is added.
 
 Passive capture does not pause startup or guarantee the first full URL:
 requests before attachment/Network.enable and very short-lived targets can

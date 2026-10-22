@@ -498,7 +498,9 @@ Short windows keep at least one request row visible when status warnings wrap.
 
 HTTP coverage reports its active target mode and attached/eligible counts. Passive
 browser target discovery supports page, worker and out-of-process iframe targets
-without requesting startup holds. Browser-root auto-attach is disabled to avoid
+without requesting startup holds. An http(s) page that stays open can be queued from
+the debugger target list Sources already uses when its `targetCreated` event
+was missed, without another Traffic click, once the catalog is stable. Browser-root auto-attach is disabled to avoid
 its popup-throttling side effect; captured owners retain recursive child attachment. Worker attachment can affect worker lifecycle and timeout
 behavior. It improves early discovery but cannot guarantee the first
 request: traffic preceding attachment and `Network.enable` remains unavailable.
@@ -506,6 +508,13 @@ If browser target discovery is unavailable, the notice identifies page-target po
 fallback and its missing worker/iframe coverage. Overflow and unattached targets
 remain explicit in either mode; native-only requests are not merged into this CDP
 list, and WebSockets retain their selected-debugger-target scope.
+
+Supplementary HTTP target-list discovery validates the browser connection and
+catalog epoch from before the list read, then admits under the catalog lock.
+It retains at most 4,096 retired target IDs per connection. At that limit, list-only
+recovery fails closed and coverage is visibly partial until capture reconnects;
+normal browser Target events continue. No first-navigation or short-lived-page
+capture guarantee is added.
 
 `make traffic-capture-check` includes a live Chromium → native transport →
 backend → actual Traffic UI regression using authored loopback origins. A separate

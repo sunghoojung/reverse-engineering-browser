@@ -229,10 +229,21 @@ selection. A single browser CDP connection uses flattened, owner-qualified
 sessions for supported page, dedicated/shared/service worker and out-of-process
 iframe targets. Browser Target events trigger bounded explicit root attachment;
 recursive attachment on captured owners discovers nested contexts. This avoids
-one-per-second admission while leaving earliest requests best-effort. No startup pause, reload,
+one-per-second admission while leaving earliest requests best-effort. An http(s)
+page that `/json/list` already shows, but whose `targetCreated` event was missed,
+can be queued on the next stable refresh through that same explicit attach. Known catalog
+entries are not reattached on that pass. A target this browser connection
+already reported as destroyed is not queued from that list. No startup pause, reload,
 navigation or Runtime evaluation is requested. Passive attachment can still
 change worker lifecycle/timeouts, and requests before attachment or
 `Network.enable`, including short-lived popups, remain unavailable.
+
+Supplementary HTTP target-list discovery validates the browser connection and
+catalog epoch from before the list read, then admits under the catalog lock.
+It retains at most 4,096 retired target IDs per connection. At that limit, list-only
+recovery fails closed and coverage is visibly partial until capture reconnects;
+normal browser Target events continue. No first-navigation or short-lived-page
+capture guarantee is added.
 
 `network.capture_status` reports `scope: http-browser-targets`,
 `transport_mode: browser-sessions`, and `startup_mode: passive`. Standalone

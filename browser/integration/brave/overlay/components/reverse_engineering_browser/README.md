@@ -62,9 +62,11 @@ and the browser session checks them again before socket delivery. The
 browser-side session starts only after its Unix-socket client authenticates to
 the local event broker. It uses another bounded queue and a dedicated writer
 thread, so network and renderer capture paths never wait for the socket.
-Both event queues reuse 1,024 slots (393,536 bytes per queue); that capacity is
+Both event queues reuse 8,192 slots (3,146,048 bytes per queue); that capacity is
 an in-flight bound, not a lifetime limit on captured events. A full queue drops
-without blocking and preserves visible, saturating drop accounting. Coalesced
+without blocking and preserves visible, saturating drop accounting. The larger
+bound holds one public-demo canvas burst. A producer that stays ahead of the
+consumer can still drop. Coalesced
 wake-ups use an acquire/release exchange on every announcement and clear: a
 producer racing with the consumer's empty check either becomes visible to that
 check or owns a new wake-up. A load-only already-pending shortcut can strand an

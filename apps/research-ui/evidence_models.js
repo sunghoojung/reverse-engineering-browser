@@ -144,7 +144,6 @@
         let gaps = 0n;
         const highWaterMarks = new Map();
         for (const event of events) {
-          if (event.type === 'gap') continue;
           const streamId = `${integerText(event, 'session_id')}:${event.process_id}`;
           const sequence = integerValue(event, 'sequence_number');
           const previous = highWaterMarks.get(streamId);
@@ -162,10 +161,70 @@
         for (const event of events) {
           if (event.type !== 'gap') continue;
           const payload = decodePayload(event);
-          const count = /^[1-9][0-9]{0,19}$/.test(payload) ? BigInt(payload) : 1n;
+          const count = isCaptureTotal(payload) && payload !== '0' ? BigInt(payload) : 1n;
           drops += count <= 18446744073709551615n ? count : 1n;
         }
         return drops;
+      }
+
+      function isCaptureTotal(value) {
+        return typeof value === 'string' && !/[^0-9]/.test(value) && /^(?:0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= uint64Max;
+      }
+
+      function captureWideTotal(value) {
+        return isCaptureTotal(value) ? BigInt(value) : null;
+      }
+
+      function shownSequenceGaps() {
+        return typeof state.sequenceGaps === 'bigint' ? state.sequenceGaps : countSequenceGaps(state.events);
+      }
+
+      function shownQueueDrops() {
+        return typeof state.queueDrops === 'bigint' ? state.queueDrops : countReportedQueueDrops(state.events);
+      }
+
+      function eventCountScopeLabel() {
+        return state.eventCountScope === 'bounded_tail' ? 'the scanned tail'
+          : state.eventCountScope === 'store' ? 'the stored capture' : 'the visible event window';
+      }
+
+      function acceptEventWindow(body) {
+        // Missing optional summaries are unknown, not stale totals from a prior poll.
+        state.sequenceGaps = captureWideTotal(body.sequence_gaps);
+        state.queueDrops = captureWideTotal(body.queue_drops);
+        state.sequenceGapsSaturated = body.sequence_gaps_saturated === true;
+        state.queueDropsSaturated = body.queue_drops_saturated === true;
+        state.eventCountScope = body.event_window?.scope ??
+          (state.sequenceGaps !== null && state.queueDrops !== null ? 'store' : 'rendered_window');
+        state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
+        state.networkEventsAvailable = Array.isArray(body.network_events);
+        state.networkEventsLimited = body.event_window?.network_events_limited === true;
+      }
+
+      function eventGapLabel(gapCount, reportedDrops) {
+        const gaps = `${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount}`;
+        const drops = `${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops}`;
+        return `${gaps} sequence-gap IDs (${eventCountScopeLabel()})` +
+          (reportedDrops > 0n ? ` · ${drops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '');
+      }
+
+      function fingerprintCoverageNotice(eventsLimited, displayLimited, displayLimit, gapCount, reportedDrops, scope = 'the stored capture') {
+        const limits = [];
+        if (eventsLimited) limits.push('the event window is capped');
+        if (displayLimited) limits.push(`only the newest ${displayLimit} matching events are rendered`);
+        if (scope === 'the scanned tail') limits.push('only the newest 64 MiB is scanned');
+        if (gapCount > 0n) limits.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${scope}`);
+        if (reportedDrops > 0n) limits.push(`${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} queue drops were reported in ${scope} (may overlap sequence gaps)`);
+        return `Fingerprint activity is visible with partial coverage: ${limits.join('; ')}.`;
+      }
+
+      function isEventWindow(value) {
+        return isPlainObject(value) && ['store', 'bounded_tail'].includes(value.scope) &&
+          isCaptureTotal(value.scan_start) && isCaptureTotal(value.scan_end) &&
+          BigInt(value.scan_start) <= BigInt(value.scan_end) && value.scan_limit === 64 * 1024 * 1024 &&
+          BigInt(value.scan_end) - BigInt(value.scan_start) <= BigInt(value.scan_limit) &&
+          (value.scope === 'store') === (value.scan_start === '0') &&
+          typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean';
       }
 
       function isBrokerEvent(event) {
@@ -217,11 +276,18 @@
           (body.stealth_session === undefined || typeof body.stealth_session === 'boolean') &&
           (body.native_stealth === undefined || typeof body.native_stealth === 'boolean') &&
           (body.quiet_mode === undefined || typeof body.quiet_mode === 'boolean') &&
+          (body.sequence_gaps === undefined || isCaptureTotal(body.sequence_gaps)) &&
+          (body.queue_drops === undefined || isCaptureTotal(body.queue_drops)) &&
+          (body.sequence_gaps_saturated === undefined || typeof body.sequence_gaps_saturated === 'boolean') &&
+          (body.queue_drops_saturated === undefined || typeof body.queue_drops_saturated === 'boolean') &&
           (body.canvas_render_captures === undefined ||
             (body.capture_mode === 'demo' &&
               Array.isArray(body.canvas_render_captures) &&
               body.canvas_render_captures.length <= 16 &&
               body.canvas_render_captures.every(isCanvasRenderCapture))) &&
+          (body.event_window === undefined || isEventWindow(body.event_window)) &&
+          (body.network_events === undefined || (Array.isArray(body.network_events) && body.network_events.length <= 5000 &&
+            body.network_events.every(event => isBrokerEvent(event) && event.category === 'network' && networkLifecycleTypes.has(event.type)))) &&
           body.events.every(isBrokerEvent);
       }
 

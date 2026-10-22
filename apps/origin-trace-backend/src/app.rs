@@ -6,7 +6,7 @@ use crate::{
     decoder::Decoder,
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
-    evidence, evidence_comparison, evidence_package, float32,
+    event_window, evidence, evidence_comparison, evidence_package, float32,
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
@@ -101,6 +101,7 @@ pub struct App {
     io: Arc<Semaphore>,
     package_io: Arc<Semaphore>,
     analysis: Mutex<Option<VmDocumentsCache>>,
+    events: Arc<Mutex<event_window::EventWindowCache>>,
 }
 impl App {
     pub async fn stop(&self) {
@@ -151,6 +152,7 @@ impl App {
             io: Arc::new(Semaphore::new(4)),
             package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
+            events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
         });
         app.native_console.arm_live_bridge().await;
         app.debugger.start().await;
@@ -158,6 +160,14 @@ impl App {
     }
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new().fallback(handle).with_state(self.clone())
+    }
+    async fn read_event_window(&self, limit: usize) -> Result<event_window::EventWindow> {
+        // Serialize cache owners before acquiring shared reader slots. Waiting
+        // event polls cannot consume all four slots needed by other readers.
+        let mut cache = self.events.clone().lock_owned().await;
+        let path = self.options.store.clone();
+        self.blocking(move || cache.read(&path, limit, validate_event))
+            .await
     }
     async fn blocking<T: Send + 'static>(
         &self,
@@ -435,7 +445,7 @@ impl App {
                 let limit = q.limit(500, 5000)?;
                 let connected = self.broker_connected().await;
                 let stopped = self.capture_stopped.load(Ordering::Acquire);
-                etag = Some(evidence::resource_etag(
+                etag = Some(event_window::etag(
                     &self.options.store,
                     &format!(
                         "{}-{}-{limit}-{}",
@@ -447,20 +457,23 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                let path = self.options.store.clone();
-                let events = self
-                    .blocking(move || {
-                        let events = evidence::recent(&path, limit, 4096, "event")?;
-                        for event in &events {
-                            validate_event(event)?;
-                        }
-                        Ok(events)
-                    })
-                    .await?;
-                let mut result = json!({"count":events.len(),"broker_connected":connected,"capture_mode":self.options.capture_mode(),"capture_stopped":stopped,"capture_controls_available":self.options.broker_pid.is_some()});
+                let window = self.read_event_window(limit).await?;
+                let mut result = json!({
+                    "count": window.events.len(),
+                    "broker_connected": connected,
+                    "capture_mode": self.options.capture_mode(),
+                    "capture_stopped": stopped,
+                    "capture_controls_available": self.options.broker_pid.is_some(),
+                    "sequence_gaps": window.sequence_gaps.to_string(),
+                    "sequence_gaps_saturated": window.sequence_gaps_saturated,
+                    "queue_drops": window.queue_drops.to_string(),
+                    "queue_drops_saturated": window.queue_drops_saturated,
+                    "event_window": window.coverage
+                });
                 // json! serializes borrowed values; move the retained window instead
                 // of allocating a second complete evidence tree on every refresh.
-                result["events"] = Value::Array(events);
+                result["events"] = Value::Array(window.events);
+                result["network_events"] = Value::Array(window.network_events);
                 if self.options.capture_mode() == "demo" {
                     result["canvas_render_captures"] =
                         serde_json::from_str(include_str!("../assets/demo-canvas.json"))
@@ -1100,7 +1113,7 @@ async fn socket_connected(path: Option<&Path>) -> bool {
         false
     }
 }
-fn validate_event(value: &Value) -> Result<()> {
+pub(crate) fn validate_event(value: &Value) -> Result<()> {
     for key in [
         "session_id",
         "sequence_number",
@@ -1143,6 +1156,44 @@ fn validate_event(value: &Value) -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[tokio::test]
+    async fn event_cache_waiters_do_not_occupy_shared_reader_permits() {
+        let root = tempfile::tempdir().unwrap();
+        let mut options = Options::parse_from(["origin-trace-backend"]);
+        options.store = root.path().join("events.jsonl");
+        options.trace_store = root.path().join("trace.jsonl");
+        options.signal_store = root.path().join("signals.jsonl");
+        options.artifacts = root.path().join("artifacts");
+        options.api_collection = root.path().join("collection.json");
+        options.local_analyst = root.path().join("analyst.json");
+        options.analyst_runner = Some(std::env::current_exe().unwrap());
+        let app = App::new(options, 0).await;
+        let held = app.events.lock().await;
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let app = app.clone();
+            tasks.push(tokio::spawn(
+                async move { app.read_event_window(5000).await },
+            ));
+        }
+        // All polls can wait on the cache while unrelated artifact work retains
+        // all four shared blocking-reader slots.
+        tokio::task::yield_now().await;
+        assert_eq!(app.io.available_permits(), 4);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), app.blocking(|| Ok(7)))
+                .await
+                .unwrap()
+                .unwrap(),
+            7
+        );
+        drop(held);
+        for task in tasks {
+            assert!(task.await.unwrap().unwrap().events.is_empty());
+        }
+        app.stop().await;
+    }
 
     #[tokio::test]
     async fn package_admission_reasons_preserve_limits_and_release_waiting_permits() {

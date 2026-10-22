@@ -241,11 +241,12 @@
       }
 
       // Both refresh paths project the same status so neither can erase the other's gaps.
+      // Summaries describe the scanned store/tail, independently of either rendered window.
       function renderNetworkNotice() {
         const contentCapture = networkContentCaptureEnabled();
         const active = networkContentCaptureActive();
-        const gapCount = countSequenceGaps(state.events);
-        const reportedDrops = countReportedQueueDrops(state.events);
+        const gapCount = shownSequenceGaps();
+        const reportedDrops = shownQueueDrops();
         const messages = [];
         let kind = 'empty';
         if (state.eventFailureKind === 'malformed') {
@@ -259,13 +260,19 @@
           if (kind === 'empty') kind = 'gap';
           messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
         }
+        if (state.networkEventsAvailable) messages.push('Traffic uses a separate newest-network window, independent of canvas and other activity.');
+        if (state.networkEventsLimited) messages.push('The network event window is also capped; older request lifecycle evidence may be incomplete.');
+        if (state.eventCountScope === 'bounded_tail') {
+          if (kind === 'empty') kind = 'gap';
+          messages.push('Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
+        }
         if (gapCount > 0n) {
           if (kind === 'empty') kind = 'gap';
-          messages.push(`${gapCount} captured event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing. Native evidence may be incomplete.`);
+          messages.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${eventCountScopeLabel()}; late arrivals may overlap. Native evidence may be incomplete.`);
         }
         if (reportedDrops > 0n) {
           if (kind === 'empty') kind = 'gap';
-          messages.push(`The queue reports ${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : '; no sequence jump is visible in this window'}.`);
+          messages.push(`The queue reports ${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : `; no sequence jump is visible in ${eventCountScopeLabel()}`}.`);
         }
         if (contentCapture) {
           if (active) {
@@ -1232,8 +1239,8 @@
           panel.hidden = panel.id !== `signal-panel-${state.signalView}`;
         });
 
-        const gapCount = countSequenceGaps(state.events);
-        const reportedDrops = countReportedQueueDrops(state.events);
+        const gapCount = shownSequenceGaps();
+        const reportedDrops = shownQueueDrops();
         if (state.eventFailureKind === 'malformed') {
           setSignalNotice('error', signalEvents.length
             ? 'The broker returned malformed event data. The last understandable fingerprint evidence remains visible.'
@@ -1252,22 +1259,10 @@
           setSignalNotice('empty', state.sessionMode === 'demo'
             ? 'Deterministic fingerprint evidence is not available in this build.'
             : 'No fingerprint-relevant browser activity has been captured yet.');
-        } else if (state.eventsLimited || displayLimited || gapCount > 0n || reportedDrops > 0n) {
-          const limits = [];
-          if (state.eventsLimited) limits.push('the event window is capped');
-          if (displayLimited) {
-            limits.push(`only the newest ${signalEventDisplayLimit} matching events are rendered`);
-          }
-          if (gapCount > 0n) {
-            limits.push(`${gapCount} capture-wide event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing`);
-          }
-          if (reportedDrops > 0n) {
-            limits.push(`${reportedDrops} queue ${reportedDrops === 1n ? 'drop was' : 'drops were'} reported (may overlap missing IDs)`);
-          }
-          setSignalNotice(
-            'partial',
-            `Fingerprint activity is visible with partial coverage: ${limits.join('; ')}.`
-          );
+        } else if (state.eventsLimited || state.eventCountScope === 'bounded_tail' || displayLimited || gapCount > 0n || reportedDrops > 0n) {
+          setSignalNotice('partial', fingerprintCoverageNotice(
+            state.eventsLimited, displayLimited, signalEventDisplayLimit, gapCount, reportedDrops, eventCountScopeLabel()
+          ));
         } else if (state.sessionMode === 'demo') {
           setSignalNotice('demo', 'Demo mode: both Canvas images are reconstructed locally from the visible calls. They are not native-captured pixels.');
         } else {
@@ -2204,7 +2199,7 @@
           state.selectedVmFindingId = state.vmFindings[0]?.findingId ?? null;
         }
         renderVmSessionStatus();
-        const gapCount = countSequenceGaps(state.events);
+        const gapCount = shownSequenceGaps();
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
         } else if (state.vmAnalysisStatus === 'malformed') {
@@ -2218,7 +2213,7 @@
         } else if (state.vmFindings.length === 0) {
           setVmNotice('empty', 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.');
         } else if (gapCount > 0n) {
-          setVmNotice('gap', `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete.`);
+          setVmNotice('gap', `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).`);
         } else {
           elements.vmNotice.hidden = true;
         }
@@ -11829,13 +11824,13 @@
           for (const key of state.signalNewKeys) {
             if (!currentSignalKeys.has(key)) state.signalNewKeys.delete(key);
           }
-          state.eventsLimited = body.count >= 5000;
+          acceptEventWindow(body);
           const vmModel = vmFindingsFromEvents(state.events);
           state.eventVmFindings = vmModel.findings;
           state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
           state.malformedVmFindings = vmModel.malformedCount;
           const eventOrigin = state.sessionMode === 'demo' ? 'demo' : 'live';
-          state.nativeRequests = requestsFromEvents(state.events, eventOrigin);
+          state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
           rebuildTrafficRequests();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
@@ -11848,10 +11843,7 @@
               : state.sessionMode === 'demo' ? 'deterministic developer evidence loaded' : 'start a live capture'
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
-          const gapCount = countSequenceGaps(state.events);
-          const reportedDrops = countReportedQueueDrops(state.events);
-          elements.gaps.textContent = `${gapCount} missing event ${gapCount === 1n ? 'ID' : 'IDs'}` +
-            (reportedDrops > 0n ? ` · ${reportedDrops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '');
+          elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops());
           renderNetworkNotice();
           renderRequests();
           renderInspector();
@@ -11887,6 +11879,13 @@
         state.events = [];
         state.canvasRenderCaptures = [];
         state.eventsLimited = false;
+        state.sequenceGaps = 0n;
+        state.queueDrops = 0n;
+        state.eventCountScope = 'rendered_window';
+        state.networkEventsAvailable = false;
+        state.networkEventsLimited = false;
+        state.sequenceGapsSaturated = false;
+        state.queueDropsSaturated = false;
         state.requests = [];
         state.artifacts = [];
         state.openArtifactIds = [];
@@ -11900,7 +11899,7 @@
         state.selectedField = null;
         state.lastUpdatedLabel = 'start a live capture';
         renderShellStatus();
-        elements.gaps.textContent = '0 missing event IDs';
+        elements.gaps.textContent = eventGapLabel(0n, 0n);
         setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
         renderRequests();
         renderEvidence();

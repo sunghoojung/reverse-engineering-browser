@@ -8,6 +8,7 @@ mod deobfuscation;
 mod durable;
 mod endpoint;
 mod error;
+mod event_window;
 mod evidence;
 pub mod evidence_comparison;
 pub mod evidence_package;

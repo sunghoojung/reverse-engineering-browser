@@ -15,6 +15,41 @@ std::uint64_t MonotonicTimeNs() noexcept {
                                         .count());
 }
 
+void SaturateAdd(std::uint64_t& total, bool& saturated, const std::uint64_t amount) noexcept {
+  if (amount > std::numeric_limits<std::uint64_t>::max() - total) {
+    total = std::numeric_limits<std::uint64_t>::max();
+    saturated = true;
+    return;
+  }
+  total += amount;
+}
+
+// A gap payload is a decimal drop count. Anything else weighs one event, matching
+// the research UI and the native probe queue.
+std::uint64_t ReportedQueueDrops(const EventRecord& event) noexcept {
+  const std::span<const std::byte> payload = InlinePayload(event);
+  if (payload.empty() || payload.size() > 20) {
+    return 1;
+  }
+  const auto first = std::to_integer<unsigned char>(payload.front());
+  if (first < static_cast<unsigned char>('1') || first > static_cast<unsigned char>('9')) {
+    return 1;
+  }
+  std::uint64_t count = 0;
+  for (const std::byte byte : payload) {
+    const auto digit = std::to_integer<unsigned char>(byte);
+    if (digit < static_cast<unsigned char>('0') || digit > static_cast<unsigned char>('9')) {
+      return 1;
+    }
+    const auto value = static_cast<std::uint64_t>(digit - static_cast<unsigned char>('0'));
+    if (count > (std::numeric_limits<std::uint64_t>::max() - value) / 10) {
+      return 1;
+    }
+    count = count * 10 + value;
+  }
+  return count;
+}
+
 }  // namespace
 
 bool SessionPolicy::IsValid() const noexcept {
@@ -75,17 +110,16 @@ IngestStatus EventBroker::IngestAt(const EventRecord& event, const std::uint64_t
     if (event.header.sequence_number > high_water->second &&
         event.header.sequence_number - high_water->second > 1) {
       const std::uint64_t missing = event.header.sequence_number - high_water->second - 1;
-      if (missing > std::numeric_limits<std::uint64_t>::max() - stats_.sequence_gaps) {
-        stats_.sequence_gaps = std::numeric_limits<std::uint64_t>::max();
-        stats_.sequence_gaps_saturated = true;
-      } else {
-        stats_.sequence_gaps += missing;
-      }
+      SaturateAdd(stats_.sequence_gaps, stats_.sequence_gaps_saturated, missing);
     }
     high_water->second = std::max(high_water->second, event.header.sequence_number);
   } else {
     stream_high_water_marks_.emplace(stream, event.header.sequence_number);
     stream_insertion_order_.push_back(stream);
+  }
+
+  if (event.header.type == EventType::kGap) {
+    SaturateAdd(stats_.queue_drops, stats_.queue_drops_saturated, ReportedQueueDrops(event));
   }
 
   if (events_.size() == capacity_) {
@@ -109,7 +143,9 @@ std::vector<EventRecord> EventBroker::Snapshot(const std::size_t limit) const {
   if (count == 0) {
     return snapshot;
   }
-  // The newest suffix spans at most two contiguous ranges, even after wrap.
+  // This low-level ring retains the newest arrivals in chronological order. The
+  // disk-backed API owns independent general/network windows; a snapshot must
+  // not imply that evicted records remain in this ring.
   const std::size_t start =
       next_event_ >= count ? next_event_ - count : events_.size() - (count - next_event_);
   const std::size_t first_count = std::min(count, events_.size() - start);

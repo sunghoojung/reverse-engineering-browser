@@ -105,6 +105,7 @@ pub fn recent(path: &Path, limit: usize, maximum: usize, label: &str) -> Result<
     lines.reverse();
     Ok(lines)
 }
+
 pub fn canonical(value: &Value, bits: u32, nonzero: bool) -> bool {
     validation::canonical(value, bits, nonzero, "Identifier").is_ok()
 }

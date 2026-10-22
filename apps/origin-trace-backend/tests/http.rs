@@ -1333,25 +1333,46 @@ async fn assert_poll_response(server: &Server, path: &str, expected: Value) {
     assert_eq!(unchanged.status(), 304);
     assert!(unchanged.bytes().await.unwrap().is_empty());
 }
-fn event_response(events: &[Value]) -> Value {
-    json!({"count":events.len(),"events":events,"broker_connected":true,"capture_mode":"idle","capture_stopped":false,"capture_controls_available":false})
+fn event_response(events: &[Value], scan_end: usize, limited: bool) -> Value {
+    json!({
+        "count": events.len(),
+        "events": events,
+        "network_events": events,
+        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited},
+        "broker_connected": true,
+        "capture_mode": "idle",
+        "capture_stopped": false,
+        "capture_controls_available": false,
+        "sequence_gaps": "0",
+        "sequence_gaps_saturated": false,
+        "queue_drops": "0",
+        "queue_drops_saturated": false
+    })
+}
+fn window_event(sequence: u64, category: &str, kind: &str, payload: &str) -> Value {
+    let mut event = metadata_event(sequence);
+    event["category"] = json!(category);
+    event["type"] = json!(kind);
+    event["payload"] = json!(hex::encode(payload.as_bytes()));
+    event["payload_size"] = json!(payload.len());
+    event
 }
 #[tokio::test]
 async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     let server = Server::start().await;
-    assert_poll_response(&server, "/api/events", event_response(&[])).await;
+    assert_poll_response(&server, "/api/events", event_response(&[], 0, false)).await;
     let mut events: Vec<_> = (1..=5001).map(metadata_event).collect();
     server.file("events.jsonl", &jsonl(&events));
     assert_poll_response(
         &server,
         "/api/events?limit=2",
-        event_response(&events[4999..]),
+        event_response(&events[4999..], jsonl(&events).len(), true),
     )
     .await;
     assert_poll_response(
         &server,
         "/api/events?limit=9999",
-        event_response(&events[1..]),
+        event_response(&events[1..], jsonl(&events).len(), true),
     )
     .await;
     let response = server.get("/api/events?limit=2").await;
@@ -1379,7 +1400,12 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     assert_eq!(response.status(), 200);
     assert_eq!(
         response.bytes().await.unwrap().as_ref(),
-        serde_json::to_vec(&event_response(&events[5000..])).unwrap()
+        serde_json::to_vec(&event_response(
+            &events[5000..],
+            jsonl(&events).len() - 1,
+            true
+        ))
+        .unwrap()
     );
     server.file("rotated.jsonl", &jsonl(&[metadata_event(9000)]));
     std::fs::rename(
@@ -1390,11 +1416,15 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     assert_poll_response(
         &server,
         "/api/events",
-        event_response(&[metadata_event(9000)]),
+        event_response(
+            &[metadata_event(9000)],
+            jsonl(&[metadata_event(9000)]).len(),
+            false,
+        ),
     )
     .await;
     server.file("events.jsonl", b"");
-    assert_poll_response(&server, "/api/events", event_response(&[])).await;
+    assert_poll_response(&server, "/api/events", event_response(&[], 0, false)).await;
     for bad in [b"not-json\n".to_vec(), b"[]\n".to_vec(), vec![b'x'; 4097]] {
         server.file("events.jsonl", &bad);
         assert_eq!(server.get("/api/events").await.status(), 500);
@@ -1404,7 +1434,16 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     server.file("events.jsonl", &jsonl(&[invalid]));
     assert_eq!(server.get("/api/events").await.status(), 500);
     server.file("events.jsonl", &jsonl(&[metadata_event(2)]));
-    assert_poll_response(&server, "/api/events", event_response(&[metadata_event(2)])).await;
+    assert_poll_response(
+        &server,
+        "/api/events",
+        event_response(
+            &[metadata_event(2)],
+            jsonl(&[metadata_event(2)]).len(),
+            false,
+        ),
+    )
+    .await;
     #[cfg(unix)]
     {
         std::fs::remove_file(server.root.path().join("events.jsonl")).unwrap();
@@ -1415,6 +1454,67 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
         .unwrap();
         assert_eq!(server.get("/api/events").await.status(), 500);
     }
+}
+#[tokio::test]
+async fn capped_event_window_keeps_network_events_and_capture_totals() {
+    let server = Server::start().await;
+    let mut canvas_flood = Vec::new();
+    for (sequence, kind) in [
+        (1, "request_initiated"),
+        (2, "request_started"),
+        (3, "response_started"),
+        (4, "request_completed"),
+    ] {
+        canvas_flood.push(window_event(sequence, "network", kind, "GET fixture.local"));
+    }
+    canvas_flood.push(window_event(285, "webgl", "gap", "280"));
+    for sequence in 286..=5286 {
+        canvas_flood.push(window_event(sequence, "canvas", "api_call", "fillRect"));
+    }
+    assert!(canvas_flood.len() > 5000);
+    server.file("events.jsonl", &jsonl(&canvas_flood));
+    let response = server.get("/api/events?limit=5000").await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["count"], 5000);
+    assert_eq!(body["sequence_gaps"], "280");
+    assert_eq!(body["sequence_gaps_saturated"], false);
+    assert_eq!(body["queue_drops"], "280");
+    assert_eq!(body["queue_drops_saturated"], false);
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 5000);
+    assert_eq!(events[0]["sequence_number"], "287");
+    assert_eq!(events.last().unwrap()["sequence_number"], "5286");
+    assert!(events.iter().all(|event| event["category"] == "canvas"));
+    let network = body["network_events"].as_array().unwrap();
+    assert_eq!(network.len(), 4);
+    assert_eq!(network[0]["type"], "request_initiated");
+    assert_eq!(network[3]["type"], "request_completed");
+    assert_eq!(body["event_window"]["scope"], "store");
+    assert_eq!(body["event_window"]["events_limited"], true);
+    assert_eq!(body["event_window"]["network_events_limited"], false);
+
+    // A capped window full of non-canvas rows still drops the early gap record.
+    // The capture-wide counters must not fall back to that truncated window.
+    let mut webgl_flood = vec![
+        window_event(1, "webgl", "api_call", "draw"),
+        window_event(282, "webgl", "gap", "280"),
+    ];
+    for sequence in 283..=5282 {
+        webgl_flood.push(window_event(sequence, "webgl", "api_call", "draw"));
+    }
+    server.file("events.jsonl", &jsonl(&webgl_flood));
+    let response = server.get("/api/events?limit=5000").await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["count"], 5000);
+    assert_eq!(body["sequence_gaps"], "280");
+    assert_eq!(body["queue_drops"], "280");
+    let events = body["events"].as_array().unwrap();
+    assert!(events.iter().all(|event| event["type"] != "gap"));
+    assert!(events.iter().all(|event| event["sequence_number"] != "1"));
+    assert_eq!(events[0]["sequence_number"], "283");
+    assert_eq!(events.last().unwrap()["sequence_number"], "5282");
 }
 #[tokio::test]
 async fn artifact_polling_preserves_public_fields_and_validation() {
@@ -6933,4 +7033,74 @@ fn owned_opcode_experiment_cli_read_only_rejects_before_dispatch() {
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+#[tokio::test]
+async fn event_window_retains_all_network_outcomes_independently() {
+    let server = Server::start().await;
+    let kinds = [
+        "request_initiated",
+        "request_started",
+        "request_redirected",
+        "response_started",
+        "response_completed",
+        "request_completed",
+        "request_failed",
+    ];
+    let mut records: Vec<_> = kinds
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| window_event(index as u64 + 1, "network", kind, "GET fixture.local"))
+        .collect();
+    for sequence in 8..=5010 {
+        records.push(window_event(sequence, "canvas", "api_call", "draw"));
+    }
+    server.file("events.jsonl", &jsonl(&records));
+    let response = server.get("/api/events?limit=5000").await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["events"].as_array().unwrap().len(), 5000);
+    let network = body["network_events"]
+        .as_array()
+        .expect("Traffic needs its independent lifecycle window");
+    assert_eq!(network.len(), kinds.len());
+    for (event, kind) in network.iter().zip(kinds) {
+        assert_eq!(event["type"], kind);
+    }
+}
+
+#[tokio::test]
+async fn event_window_large_store_counts_only_the_declared_tail() {
+    use std::io::Write;
+    let server = Server::start().await;
+    let path = server.root.path().join("events.jsonl");
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(&jsonl(&[window_event(1, "canvas", "gap", "280")]))
+        .unwrap();
+    // Blank, bounded JSONL lines are valid separators. The old marker is over
+    // 64 MiB behind the newest lifecycle outcome and must not affect totals.
+    let mut block = vec![b' '; 4096];
+    block[4095] = b'\n';
+    for _ in 0..16_384 {
+        file.write_all(&block).unwrap();
+    }
+    file.write_all(&jsonl(&[window_event(
+        300,
+        "network",
+        "request_failed",
+        "fixture.local",
+    )]))
+    .unwrap();
+    drop(file);
+    let response = server.get("/api/events?limit=1").await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["event_window"]["scope"], "bounded_tail");
+    assert_ne!(body["event_window"]["scan_start"], "0");
+    assert_eq!(body["event_window"]["events_limited"], false);
+    assert_eq!(body["event_window"]["network_events_limited"], false);
+    assert_eq!(body["events"][0]["sequence_number"], "300");
+    assert_eq!(body["network_events"][0]["type"], "request_failed");
+    assert_eq!(body["queue_drops"], "0");
+    assert_eq!(body["sequence_gaps"], "0");
 }

@@ -32,9 +32,13 @@ index 5104ff1..a9dc1b6 100644
  #include "brave/components/request_otr/common/buildflags/buildflags.h"
  #include "brave/components/skus/common/features.h"
  #include "brave/components/skus/common/skus_internals.mojom.h"
-@@ -573,8 +572,6 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
+@@ -573,12 +572,10 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
    if (reb::IsNativeConsoleEnabled()) {
-     reb::StartNativeConsoleSession(base::BindOnce(&chrome::ExitIgnoreUnloadHandlers));
+     auto retired = reb::NativeConsoleRetireCallback();
+     if (!retired) {
+       retired = base::BindOnce(&chrome::ExitIgnoreUnloadHandlers);
+     }
+     reb::StartNativeConsoleSession(std::move(retired));
    }
 -  static_cast<void>(
 -      reb::NativeProbeSocketClient::Get().StartFromCommandLine());

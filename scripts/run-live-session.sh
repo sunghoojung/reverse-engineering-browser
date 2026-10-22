@@ -37,6 +37,7 @@ readonly signal_store_path="${session_directory}/request-signals.jsonl"
 readonly artifact_store_path="${session_directory}/artifacts"
 readonly token_path="${session_directory}/broker.token"
 readonly profile_path="${REB_BRAVE_PROFILE:-${session_directory}/brave-profile}"
+readonly native_console_directory="${session_directory}/native-console"
 readonly brave_cache_root="${REB_BRAVE_CACHE_ROOT:-}"
 readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-4095}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
@@ -84,8 +85,8 @@ if [[ "${native_quiet_mode}" == 1 && "${cdp_network_capture}" == 1 ]]; then
   fail_live_session 2 "REB_CDP_NETWORK_CAPTURE requires the live debugger."
 fi
 
-mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}"
-chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}"
+mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}" "${native_console_directory}"
+chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}" "${native_console_directory}"
 if [[ -n "${brave_cache_root}" ]]; then
   readonly brave_cache_profile="${brave_cache_root}/${session_id}/brave-profile"
   mkdir -p "${brave_cache_profile}"
@@ -326,6 +327,7 @@ if [[ "${native_quiet_mode}" == 0 ]]; then
     ui_arguments+=(--capture-network-content)
   fi
 fi
+ui_arguments+=(--native-console-live-directory "${native_console_directory}")
 "${research_ui_server}" \
   "${ui_arguments[@]}" \
   >"${ui_log}" 2>&1 &
@@ -347,6 +349,26 @@ fi
 ui_endpoint="$(tr -d '\r\n' < "${ui_endpoint_path}")"
 readonly ui_endpoint
 readonly live_ui_url="${ui_endpoint}/?native=1&canvas_images=${capture_canvas_images}"
+
+# The backend writes this after the console socket is listening. Absence is not
+# fatal: capture still starts, and no second browser profile is launched.
+native_console_session_id=""
+native_console_socket=""
+native_console_token=""
+native_console_binding="${native_console_directory}/binding"
+for _ in {1..400}; do
+  if [[ -f "${native_console_binding}" || -f "${native_console_directory}/binding.absent" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ -f "${native_console_binding}" ]]; then
+  {
+    IFS= read -r native_console_session_id || true
+    IFS= read -r native_console_socket || true
+    IFS= read -r native_console_token || true
+  } < "${native_console_binding}"
+fi
 
 brave_arguments=(
   --user-data-dir="${profile_path}" \
@@ -381,6 +403,16 @@ if [[ "${localhost_only}" == 1 ]]; then
     --proxy-server=http://127.0.0.1:9
     '--proxy-bypass-list=localhost;127.0.0.1;[::1]'
     '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1]'
+  )
+fi
+
+if [[ "${native_console_session_id}" =~ ^[1-9][0-9]{0,19}$ && -S "${native_console_socket}" && -f "${native_console_token}" ]]; then
+  brave_arguments+=(
+    --reb-native-console
+    --reb-native-console-live-binding
+    "--reb-native-console-socket=${native_console_socket}"
+    "--reb-native-console-token-file=${native_console_token}"
+    "--reb-native-console-session-id=${native_console_session_id}"
   )
 fi
 

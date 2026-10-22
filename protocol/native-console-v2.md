@@ -1,12 +1,19 @@
 # Native Console v2
 
-Origin Trace executes explicit console commands in a separately launched custom
-Brave process with a disposable profile. The UI never evaluates against baseline
-tabs. This replaces the [v1 transport](native-console-v1.md); helpers, backend,
+Origin Trace executes explicit console commands through the native console
+protocol. Without a live capture, that is a separately launched custom Brave
+process with a disposable profile. When a live capture already has HTTP(S)
+documents, the console lists those documents and Connect evaluates in the
+selected document. That path does not launch a second Brave profile, does not
+use browser-root `Target.setAutoAttach`, does not use CDP `Runtime.evaluate`,
+and does not resume a target the session did not pause. The console still
+cannot set breakpoints, step, or inspect paused frames. Remote-debugging flags
+reject only the disposable profile. Loss of the control channel exits only that
+disposable browser; a live-capture binding leaves the capture browser running.
+This replaces the [v1 transport](native-console-v1.md); helpers, backend,
 packaged assets and browser must be rebuilt together. Old wire versions fail
-closed. There is no Inspector session or remote debugging endpoint. Native V8
-REPL evaluation uses the pinned engine's debug evaluation API. This does not
-promise undetectability or zero active cost.
+closed. Native V8 REPL evaluation uses the pinned engine's debug evaluation
+API. This does not promise undetectability or zero active cost.
 
 ## User operation
 
@@ -78,8 +85,10 @@ The path is panel -> loopback Rust broker/API -> private C++ pipe bridge ->
 authenticated Unix socket -> browser UI dispatch -> associated renderer Mojo.
 Renderer code opens no sockets or files. Exact weak-document references and
 renderer tokens reject navigation/replacement. IDs are monotonic, canonical u64
-strings. Targets describe HTTP(S) top/child frames in the disposable profile;
-worker and paused-call-frame evaluation are not provided by this transport.
+strings. Targets describe HTTP(S) top/child frames in the disposable profile,
+or in the live capture profile when that binding is active. Worker and
+paused-call-frame evaluation are not provided by this transport. The console
+cannot set breakpoints, step, or inspect paused frames.
 
 Everything remains bounded and ephemeral; values can contain sensitive content.
 Nothing is automatically exported or persisted as evidence. Clipboard copying
@@ -111,7 +120,8 @@ Retained objects can keep reachable page data alive. Key and event-type enumerat
 engine arrays; active work is covered by the synchronous watchdog. Scheduled
 async work is page work and can outlive an evaluation. A transport failure can
 occur after side effects. Requests are serialized and never automatically
-retried. Loss of the control channel exits the disposable browser.
+retried. Loss of the control channel exits the disposable browser. A
+live-capture binding does not exit the capture browser.
 
 ## Wire and API
 

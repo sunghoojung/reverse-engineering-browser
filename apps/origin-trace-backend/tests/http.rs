@@ -827,8 +827,9 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             action_count += 1;
         }
     }
-    // Includes explicit element document inspection and confirmed screenshot capture.
-    assert_eq!(action_count, 84);
+    // Includes explicit element document inspection, confirmed screenshot capture,
+    // and live-capture native console connect.
+    assert_eq!(action_count, 85);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {

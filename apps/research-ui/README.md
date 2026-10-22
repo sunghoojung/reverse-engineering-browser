@@ -270,10 +270,13 @@ for bounds, identity semantics and validation coverage.
 
 ## Native console
 
-The **Console** bottom dock starts a separate disposable custom Brave session for
-explicit main-world JavaScript commands. Set `REB_BRAVE_BINARY` to a rebuilt
-custom browser and use the live backend. Open the connection menu to connect a
-disposable browser, then select a document before entering commands.
+The **Console** bottom dock runs explicit main-world JavaScript commands. When
+the live capture already has HTTP(S) documents, the selector lists those
+documents and Connect evaluates in the selected page. It does not open a second
+browser profile, and it cannot set breakpoints, step, or inspect paused frames.
+Otherwise it starts a separate disposable custom Brave session. Set
+`REB_BRAVE_BINARY` to a rebuilt custom browser and use the live backend. Open
+the connection menu to connect, then select a document before entering commands.
 Workspace tabs sit across the top, with VM between Sources and Console. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
 for their value types. Coloring uses inert text spans and a bounded tokenizer.

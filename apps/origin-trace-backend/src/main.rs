@@ -5,9 +5,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let options = Options::parse().resolve()?;
     let listener = tokio::net::TcpListener::bind(options.address()?).await?;
     let address = listener.local_addr()?;
-    let endpoint = PublishedEndpoint::new(options.endpoint_file.as_deref(), address)?;
-    println!("Research UI: {}", endpoint.url());
+    // Arm the live console bridge before publishing the endpoint. The capture
+    // launcher waits for that file, then starts Brave, and the bridge must
+    // already be listening.
+    let endpoint_file = options.endpoint_file.clone();
     let app = App::new(options, address.port()).await;
+    let endpoint = PublishedEndpoint::new(endpoint_file.as_deref(), address)?;
+    println!("Research UI: {}", endpoint.url());
     let shutdown = app.clone();
     axum::serve(listener, app.router())
         .with_graceful_shutdown(async move {

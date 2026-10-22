@@ -477,14 +477,30 @@ class Session final {
 
 bool IsNativeConsoleEnabled() {
   const auto& command = *base::CommandLine::ForCurrentProcess();
-  if (!command.HasSwitch(kNativeConsoleSwitch) || command.HasSwitch("remote-debugging-port") ||
-      command.HasSwitch("remote-debugging-pipe"))
+  if (!command.HasSwitch(kNativeConsoleSwitch))
     return false;
   const auto socket = command.GetSwitchValuePath("reb-native-console-socket");
-  return socket.IsAbsolute() &&
-         !command.GetSwitchValuePath("reb-native-console-token-file").empty() &&
-         command.HasSwitch("reb-native-console-session-id") &&
-         command.GetSwitchValuePath("user-data-dir") == socket.DirName().AppendASCII("profile");
+  const bool credentials =
+      socket.IsAbsolute() && !command.GetSwitchValuePath("reb-native-console-token-file").empty() &&
+      command.HasSwitch("reb-native-console-session-id");
+  if (!credentials)
+    return false;
+  if (command.HasSwitch(kNativeConsoleLiveBindingSwitch)) {
+    // The capture browser already has its profile and may publish a debugger
+    // port. Do not require the disposable socket/profile sibling layout.
+    return command.GetSwitchValuePath("user-data-dir").IsAbsolute();
+  }
+  if (command.HasSwitch("remote-debugging-port") || command.HasSwitch("remote-debugging-pipe"))
+    return false;
+  return command.GetSwitchValuePath("user-data-dir") == socket.DirName().AppendASCII("profile");
+}
+
+base::OnceClosure NativeConsoleRetireCallback() {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(kNativeConsoleLiveBindingSwitch))
+    return base::BindOnce([] {});
+  // Null tells the Chrome browser client to exit a disposable profile.
+  // This component does not depend on chrome/browser.
+  return base::OnceClosure();
 }
 
 void StartNativeConsoleSession(base::OnceClosure retired) {

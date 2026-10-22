@@ -16217,6 +16217,57 @@
           },
           "message": {
             "type": "string"
+          },
+          "document_source": {
+            "type": "string",
+            "enum": [
+              "live_capture"
+            ],
+            "description": "Present when targets are documents the live capture is already recording. Omitted for an idle disposable console."
+          },
+          "targets": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$",
+                  "description": "Canonical nonzero uint64 decimal identifier."
+                },
+                "origin": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "label": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 128
+                },
+                "url": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 512
+                },
+                "main_frame": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "origin",
+                "truncated",
+                "label",
+                "url",
+                "main_frame"
+              ]
+            }
+          },
+          "truncated": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -16331,6 +16382,13 @@
           },
           "truncated": {
             "type": "boolean"
+          },
+          "document_source": {
+            "type": "string",
+            "enum": [
+              "live_capture"
+            ],
+            "description": "Present when the listed documents come from the live capture. Console ids are stable selector ids, translated to the native document at evaluation."
           }
         },
         "required": [
@@ -16508,6 +16566,64 @@
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
                   "symbol": "NativeConsole::launch"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "connect_live",
+                "type": "string"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Stable selector id of an HTTP(S) document the live capture is already recording."
+              }
+            },
+            "required": [
+              "action",
+              "target_id"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "process-stop"
+                  ],
+                  "when": "A failed live binding exchange stops only the console bridge. The capture browser is not killed and a second profile is not launched."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "native-live-document",
+                  "condition": "target_id must be one of the HTTP(S) documents already listed from the live capture, and that capture must already have a native console binding."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Binds the console to a document the live capture is already recording. It does not launch a second browser profile. Evaluation uses the native console protocol in that document. This console cannot set breakpoints, step, or inspect paused frames.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "bind_live"
                 }
               ]
             }

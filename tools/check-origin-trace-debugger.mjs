@@ -12,6 +12,7 @@ import {checkTrafficComparisonController,checkCapturedComparisonInteractions} fr
 import {checkTrafficComparisonModel} from './check-traffic-comparison.mjs';
 import {canvasBrowserFixture,checkCanvasFixture,checkCanvasInteractions} from './check-canvas-ui.mjs';
 import {checkConsoleDOM, createConsoleFixture, checkConsoleInteractions} from './check-console-workspace.mjs';
+import {checkNativeConsoleLiveDocuments} from './check-native-console-live-documents.mjs';
 import {checkFloat32Model,float32BrowserFixture,checkFloat32Fixture,checkFloat32Interactions} from './check-float32-ui.mjs';
 import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
@@ -61,6 +62,7 @@ await checkSourceTreeModel(root);
 await checkTrafficComparisonModel(root);
 await checkTrafficComparisonController(root);
 await checkConsoleDOM(root);
+await checkNativeConsoleLiveDocuments(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
 await checkNotebookCore(root);

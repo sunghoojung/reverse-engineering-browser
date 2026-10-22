@@ -74,13 +74,17 @@ it.
 - Experiments do not read or modify baseline tabs, production cookies, storage,
   or credentials. Never execute extracted code automatically.
 
-- The native Console panel visibly opts into arbitrary JavaScript in a separate
-  disposable browser profile. Expressions and primitive results may contain
-  sensitive values; they stay in bounded, ephemeral panel memory and are not
-  automatically captured, redacted, logged, exported, or added to evidence.
-  Clear output before sharing the interface. Commands require an explicit
-  document selection and are never automatically retried. See
-  [Native Console v2](protocol/native-console-v2.md) for these limits.
+- The native Console panel visibly opts into arbitrary JavaScript. Without a
+  live capture, that runs in a separate disposable browser profile. When the
+  live capture already has HTTP(S) documents, Connect evaluates in the selected
+  captured document through the native console protocol and does not open a
+  second profile. That evaluation can change the captured page. The console
+  cannot set breakpoints, step, or inspect paused frames. Expressions and
+  primitive results may contain sensitive values; they stay in bounded,
+  ephemeral panel memory and are not automatically captured, redacted, logged,
+  exported, or added to evidence. Clear output before sharing the interface.
+  Commands require an explicit document selection and are never automatically
+  retried. See [Native Console v2](protocol/native-console-v2.md) for these limits.
 
 - Element screenshot markup requires an explicit selected disposable document and
   raw-local-capture confirmation. Observed form/editable/private-marked content,

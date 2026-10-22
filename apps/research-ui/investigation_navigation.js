@@ -421,24 +421,25 @@ function decodeInvestigationRange() {
   const bytes = new TextEncoder().encode(original).subarray(saved.start, saved.end);
   investigationDecode(bytes, {route:{kind:'artifact', identity:saved.identity, range:{start:saved.start,end:saved.end}, relation:`Original source bytes [${saved.start}, ${saved.end}) · UTF-8 byte offsets, SHA-256 verified.`}, description:`Captured source · session ${saved.identity.session} · artifact ${saved.identity.artifact} · original bytes [${saved.start}, ${saved.end}) · SHA-256 ${saved.identity.sha256}.`});
 }
-function investigationSourceSearch({url}) {
+function investigationSourceSearch({url, live}) {
   if (typeof url !== 'string' || url.length > 8192) return false;
   const matches = capturedSources().filter(source => source.url === url).slice(0,20);
   const panel = document.querySelector('#investigation-source-search');
   panel.replaceChildren(); panel.hidden = false;
   const description = document.createElement('p');
-  description.textContent = `Console source search: ${matches.length ? `${matches.length} retained URL match${matches.length === 1 ? '' : 'es'} (at most 20 shown). Choose a candidate.` : 'No retained captured source has this URL.'} Console uses a separate disposable browser. URL matches do not verify shared identity, line offsets or causality. Nothing was fetched.`;
+  const context = live ? 'These documents come from the live capture. This console cannot set breakpoints, step, or inspect paused frames.' : 'Console uses a separate disposable browser.';
+  description.textContent = `Console source search: ${matches.length ? `${matches.length} retained URL match${matches.length === 1 ? '' : 'es'} (at most 20 shown). Choose a candidate.` : 'No retained captured source has this URL.'} ${context} URL matches do not verify shared identity, line offsets or causality. Nothing was fetched.`;
   panel.append(description);
   for (const source of matches) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary-button';
     button.textContent = `Inspect candidate · session ${source.session_id} · artifact ${source.artifact_id}`;
     const identity = investigationArtifactIdentity(source); button.disabled = !identity;
-    button.addEventListener('click', () => {if (openInvestigation({kind:'artifact', identity, relation:'User-selected URL search candidate. Its relation to the separate Console browser is unverified; Console line offsets were not applied.'})) panel.hidden = true;});
+    button.addEventListener('click', () => {if (openInvestigation({kind:'artifact', identity, relation: live ? 'User-selected URL search candidate from a live capture document. Console line offsets were not applied. This console cannot set breakpoints, step, or inspect paused frames.' : 'User-selected URL search candidate. Its relation to the separate Console browser is unverified; Console line offsets were not applied.'})) panel.hidden = true;});
     panel.append(button);
   }
   const close = document.createElement('button'); close.type = 'button'; close.className = 'secondary-button'; close.textContent = 'Close search';
   close.addEventListener('click', () => {panel.hidden = true; document.querySelector('#native-console-toggle').focus();}); panel.append(close);
-  investigationNotice('Source search only. The Console browser has no captured-artifact identity.', 'unverified');
+  investigationNotice(live ? 'Source search only. A URL match does not set breakpoints or prove a paused frame.' : 'Source search only. The Console browser has no captured-artifact identity.', 'unverified');
   return true;
 }
 function initializeInvestigationNavigation() {

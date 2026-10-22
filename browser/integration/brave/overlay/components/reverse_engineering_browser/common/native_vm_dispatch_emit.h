@@ -6,11 +6,12 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_VM_DISPATCH_EMIT_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_VM_DISPATCH_EMIT_H_
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 #include "native_probe_event.h"
 #include "native_vm_dispatch.h"
@@ -69,15 +70,13 @@ enum class NativeVmDispatchPrepareStatus : std::uint8_t {
       sample.interpreter_artifact_id == 0) {
     return false;
   }
-  const auto* const reserved = reinterpret_cast<const unsigned char*>(sample.reserved.data());
-  const auto* const tail = reinterpret_cast<const unsigned char*>(sample.reserved_tail.data());
-  for (std::size_t index = 0; index < sample.reserved.size(); ++index) {
-    if (reserved[index] != 0) {
+  for (const std::byte value : sample.reserved) {
+    if (value != std::byte{}) {
       return false;
     }
   }
-  for (std::size_t index = 0; index < sample.reserved_tail.size(); ++index) {
-    if (tail[index] != 0) {
+  for (const std::byte value : sample.reserved_tail) {
+    if (value != std::byte{}) {
       return false;
     }
   }
@@ -116,7 +115,8 @@ enum class NativeVmDispatchPrepareStatus : std::uint8_t {
   event.header.frame_id = frame_id;
   event.header.artifact_id = sample.interpreter_artifact_id;
   static_assert(sizeof(sample) <= kNativeProbeInlinePayloadSize);
-  std::memcpy(event.inline_payload.data(), &sample, sizeof(sample));
+  const auto sample_bytes = std::bit_cast<std::array<std::byte, sizeof(sample)>>(sample);
+  std::ranges::copy(sample_bytes, event.inline_payload.begin());
   return NativeVmDispatchPrepareStatus::kReady;
 }
 

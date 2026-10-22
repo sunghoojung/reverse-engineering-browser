@@ -20,6 +20,9 @@ pub(super) struct Session {
     pub id: Option<String>,
 }
 impl Session {
+    pub(super) fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.connection, &other.connection) && self.id == other.id
+    }
     pub async fn command(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
         self.connection
             .command_session(method, params, timeout, self.id.as_deref())
@@ -49,11 +52,9 @@ impl Workers {
 }
 impl Debugger {
     pub(super) async fn hook_session(&self, target: &str) -> Result<Session> {
+        let connection = self.connection.lock().await;
         if self.snapshot()["target"]["id"] == target {
-            let c = self
-                .connection
-                .lock()
-                .await
+            let c = connection
                 .clone()
                 .filter(|c| !c.is_closed())
                 .ok_or_else(|| Error::conflict("Isolated page debugger is unavailable"))?;
@@ -62,6 +63,7 @@ impl Debugger {
                 id: None,
             });
         }
+        drop(connection);
         self.workers
             .sessions
             .lock()
@@ -422,16 +424,11 @@ impl Debugger {
         let p = &message["params"];
         match method {
             "Debugger.paused" => {
-                if !self.hook_pause(target, p.clone())
-                    && let Ok(s) = self.hook_session(target).await
-                {
-                    tokio::spawn(async move {
-                        let _ = s
-                            .command("Debugger.resume", json!({}), Duration::from_secs(3))
-                            .await;
-                    });
+                if !self.hook_pause(target, owner.clone(), p.clone()) {
+                    self.update(|s| s["runtime_hooks"]["last_failure"] = json!("Worker pause has unrelated ownership; Hooks did not execute or resume it."));
                 }
             }
+            "Debugger.resumed" => self.hook_resumed(target, owner),
             "Network.requestWillBeSent"
             | "Network.requestWillBeSentExtraInfo"
             | "Network.responseReceived" => {

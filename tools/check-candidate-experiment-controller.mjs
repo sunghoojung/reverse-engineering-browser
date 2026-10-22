@@ -11,6 +11,7 @@ function deferred(){let resolve;const promise=new Promise(r=>{resolve=r;});retur
 export async function checkCandidateExperimentController(root) {
   await checkRuntimeHooksSnapshotReadiness(root);
   await checkCapturedDocumentHookControls(root);
+  await checkCapturedHookActionLifecycle(root);
   const source=await readFile(join(root,'apps/research-ui/field_provenance.js'),'utf8');
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const closeHooks=app.slice(app.indexOf('      function closeSourceHooks('),app.indexOf('      function pivotSourceToRuntimeHooks('));
@@ -248,7 +249,7 @@ async function checkRuntimeHooksSnapshotReadiness(root) {
   assert.equal(elements.hooksPageUrl.value,'http://127.0.0.1/owned-page','Refusal preserves the URL draft');
   state.experimentError=null;
   state.debuggerSession.runtime_hooks.state='armed';api.render();
-  assert.equal(elements.hooksDisarm.disabled,true);
+  assert.equal(elements.hooksDisarm.disabled,false,'Cleanup remains available while a poll is stale');
   assert.match(elements.sourceHooksNotice.textContent,/Waiting for a current debugger snapshot/,'Armed status must not conceal the refusal reason');
   const hooks=state.debuggerSession.runtime_hooks;
   hooks.state='ready';hooks.definitions=[{id:1,label:'Owned',function_kind:'ordinary',entry_mode:'function',function_expression:'owned',target_id:'owned-page',target_type:'page',return_mode:'none',url:'http://127.0.0.1/owned.js'}];
@@ -258,13 +259,13 @@ async function checkRuntimeHooksSnapshotReadiness(root) {
   assert.equal(elements.hooksDefinitions.children[0].children[1].disabled,false);
   assert.equal(calls.length,0,'Fresh reconciliation never retries a refused navigation');
   await api.navigate();assert.equal(calls.length,1);assert.equal(calls[0].action,'navigate_object_experiment');
-  console.log('PASS Runtime Hooks stale-GET admission: all mutations disabled, visible reason, retained draft, fail-closed event and explicit recovery (DOM model)');
+  console.log('PASS Runtime Hooks stale-GET admission: new mutations disabled and cleanup retained, visible reason, retained draft, fail-closed event and explicit recovery (DOM model)');
 }
 
 async function checkCapturedDocumentHookControls(root) {
   const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
   const section = (start, end) => app.slice(app.indexOf(start), app.indexOf(end, app.indexOf(start)));
-  const hooksCode = section('      function renderRuntimeHooks(', '      function parseAutomationVariables(');
+  const hooksCode = section('      function experimentLifetimeKey(', '      function experimentContextKey(') + section('      function renderRuntimeHooks(', '      function parseAutomationVariables(');
   const node = () => ({dataset: {}, value: '', checked: false, firstChild: {}, children: [], hidden: false, disabled: false,
     querySelectorAll: () => [], replaceChildren(...children) { this.children = children; }, append(...children) { this.children.push(...children); },
     setAttribute() {}, addEventListener() {}, focus() {}});
@@ -279,8 +280,10 @@ async function checkCapturedDocumentHookControls(root) {
     objectExperimentState: () => state.debuggerSession.object_experiment, runtimeHooksState: () => state.debuggerSession.runtime_hooks,
     repeaterState: () => null, automationRecipesState: () => null, sourceName: item => item.url, textElement: () => node(),
     renderRuntimeHookDefinitions() {}, renderRuntimeHookHits() {}, renderRuntimeFieldTest() {}, setExperimentNotice() {}};
-  const api = runInNewContext(hooksCode + '\n;({render:renderRuntimeHooks})', context);
+  const api = runInNewContext(hooksCode + '\n;({render:renderRuntimeHooks,consent:hookConfirmationKey})', context);
+  elements.hooksScript.replaceChildren = function(...children) { this.children = children; this.value = children[0]?.value ?? ''; };
   elements.hooksLabel.value = 'Captured';
+  elements.hooksScript.value = script.script_id;
   elements.hooksEntryEnabled.checked = true;
   elements.hooksConfirm.checked = false;
   api.render();
@@ -294,18 +297,42 @@ async function checkCapturedDocumentHookControls(root) {
   assert.equal(elements.hooksPageUrl.disabled, true);
   assert.equal(elements.hooksContextBadge.textContent, 'Captured demo');
   const hooks = state.debuggerSession.runtime_hooks;
-  Object.assign(hooks, {isolated: true, target_id: 'captured-page', session_id: 4, state: 'armed', definitions: [{id: 1}], total_hits: 0});
+  Object.assign(hooks, {captured_owner: {target_id:'captured-page'}, isolated: true, target_id: 'captured-page', session_id: 4, state: 'armed', definitions: [{id: 1}], total_hits: 0});
   api.render();
   assert.equal(elements.hooksContextBadge.textContent, 'Captured demo');
   assert.equal(elements.hooksDisarm.disabled, false);
   assert.equal(elements.hooksDispose.disabled, false);
   assert.equal(elements.hooksArm.disabled, true);
   assert.equal(elements.hooksConfirm.checked, false);
-  assert.equal(elements.hooksStorageState.textContent, 'Ephemeral on the captured document');
-  state.debuggerSession.request_interception = {isolated: true, target_id: 'captured-page', state: 'ready', pending_requests: 0};
+  assert.equal(elements.hooksStorageState.textContent, 'Hook records only; page storage persists');
+  hooks.state = 'disarmed';
+  state.hooksConfirmationOwner = api.consent(); elements.hooksConfirm.checked = true;
+  api.render(); assert.equal(elements.hooksConfirm.checked, true);
+  script.hash = 'replacement'; api.render();
+  assert.equal(elements.hooksConfirm.checked, false, 'Source replacement invalidates explicit consent');
+  assert.equal(elements.hooksScript.value, '', 'Reused script ID must not silently select replacement source');
+  assert.equal(elements.hooksAdd.disabled, true);
+  state.hooksSelectedSource = null; elements.hooksScript.value = script.script_id;
+  api.render(); assert.equal(elements.hooksAdd.disabled, false, 'Explicit reselection recovers');
   hooks.state = 'armed';
+  state.debuggerSession.state = 'waiting'; state.debuggerSession.scripts = [];
+  state.debuggerSession.target = {id: 'other-page'};
   api.render();
-  assert.equal(elements.hooksContextBadge.textContent, 'Isolated');
+  assert.equal(elements.hooksDispose.disabled, false, 'Closed or replaced captured target still permits erase');
+  assert.equal(elements.hooksDisarm.disabled, false);
+  assert.equal(elements.hooksArm.disabled, true);
+  assert.equal(elements.hooksAdd.disabled, true);
+  Object.assign(hooks, {isolated:false, target_id:null, captured_owner:null, state:'disposed', definitions:[]});
+  state.debuggerSession.state = 'running'; state.debuggerSession.scripts = [script];
+  state.debuggerSession.target = {id:'captured-page',title:'Captured demo'};
+  state.hooksSelectedSource = null; elements.hooksScript.value = script.script_id;
+  api.render();
+  assert.equal(elements.hooksAdd.disabled, false, 'Erase does not strand the still-open page');
+  hooks.isolated = true; hooks.target_id = 'captured-page';
+  state.debuggerSession.request_interception = {isolated: true, target_id: 'captured-page', state: 'ready', pending_requests: 0};
+  hooks.state = 'armed'; hooks.captured_owner = null;
+  api.render();
+  assert.equal(elements.hooksContextBadge.textContent, 'Disposable context');
   assert.equal(elements.hooksDispose.disabled, false, 'Disposable dispose stays available while hooks are armed');
   assert.equal(elements.hooksDisarm.disabled, false);
   const experimentCode = section('      function renderExperiment(', '      function experimentLifetimeKey(');
@@ -323,4 +350,74 @@ async function checkCapturedDocumentHookControls(root) {
   assert.equal(experimentElements.experimentDispose.disabled, false, 'Dispose context stays available while the hooks badge is armed');
   assert.equal(experimentElements.experimentRun.disabled, true, 'Other interceptor controls stay locked while hooks are armed');
   console.log('PASS captured-document Runtime Hooks controls: live source list, explicit arm, disarm and dispose (DOM model)');
+}
+
+// Exercise the actual POST controller, receipt validators and GET reconciler.
+// Only the bridge transport and non-rendering DOM are modeled.
+async function checkCapturedHookActionLifecycle(root) {
+  const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
+  const models = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
+  const empty = JSON.parse(await readFile(join(root, 'apps/origin-trace-backend/assets/debugger-empty.json'), 'utf8'));
+  const section = (start, end) => app.slice(app.indexOf(start), app.indexOf(end, app.indexOf(start)));
+  const code = models + section('      function experimentLifetimeKey(', '      function currentExperimentReceipt(') +
+    section('      function experimentActionGroups(', '      function clearExperimentLifetime(') +
+    section('      function syncExperimentSession(', '      async function configureExperimentRule(');
+  const owner = {instance_id:'fixture-instance',connection_epoch:1,document_epoch:2,target_id:'captured-A'};
+  const definition = {id:1,label:'Owned',script_id:'7',cdp_script_id:'7',target_id:owner.target_id,target_type:'page',entry_mode:'source',function_expression:'',url:'https://example.test/a.js',line:0,column:13,
+    function_kind:'function_declaration',function_start:{line:0,column:0},function_end:{line:0,column:23},target_line:0,target_column:13,
+    entry_enabled:true,return_enabled:false,condition:'',entry_logic:'',return_logic:'',return_mode:'none',return_expression:'',return_value:null,return_value_bytes:0,resolved:null};
+  function fixture(initialHooks = null) {
+    const session=structuredClone(empty);
+    Object.assign(session,{generation:10,state:'running',target:{id:owner.target_id},target_document_epoch:2});
+    Object.assign(session.network,{instance_id:owner.instance_id,capture_epoch:1});
+    if(initialHooks)session.runtime_hooks=structuredClone(initialHooks);
+    const state={debuggerSession:session,experimentPending:false,experimentNeedsRefresh:false};
+    const transport=deferred(),calls=[];
+    const api=runInNewContext(code+';({run:runExperimentAction,sync:syncExperimentSession,consent:hookConfirmationKey})',{
+      state,TextEncoder,URL,renderExperiment(){},clearExperimentLifetime(){},
+      debuggerAction:request=>{calls.push(request);return transport.promise;}
+    });
+    return {state,api,calls,transport};
+  }
+  const adopted={...structuredClone(empty.runtime_hooks),session_id:4,target_id:owner.target_id,captured_owner:owner,isolated:true,state:'ready',definitions:[definition]};
+  const add={action:'add_runtime_hook',expected_session_id:0,captured_source:{owner,script_id:'7',source_hash:'hash',execution_context_id:3}};
+  for(const order of ['POST-first','GET-first']) {
+    const f=fixture();const pending=f.api.run(add);
+    if(order==='GET-first')f.state.debuggerSession=f.api.sync(f.state.debuggerSession,{...f.state.debuggerSession,generation:11,runtime_hooks:structuredClone(adopted)});
+    f.transport.resolve({ok:true,generation:11,runtime_hooks:structuredClone(adopted)});
+    assert(await pending,order+' first Add must accept its exact captured session');
+    assert.equal(f.state.experimentError,null);assert.equal(f.state.debuggerSession.runtime_hooks.session_id,4);
+    assert.equal(f.calls.length,1,'No duplicate bridge request');
+    const e=fixture(adopted);const erase={action:'disarm_runtime_hooks',erase:true,expected_session_id:4};
+    const disposed={...structuredClone(empty.runtime_hooks),session_id:4,state:'disposed'};
+    const removal=e.api.run(erase);
+    if(order==='GET-first') {
+      e.state.debuggerSession=e.api.sync(e.state.debuggerSession,{...e.state.debuggerSession,generation:10,target:{id:'replacement-tab'}});
+      e.state.debuggerSession=e.api.sync(e.state.debuggerSession,{...e.state.debuggerSession,generation:11,runtime_hooks:disposed});
+    }
+    e.transport.resolve({ok:true,generation:11,runtime_hooks:disposed});
+    assert(await removal,order+' erase must accept its exact session tombstone');assert.equal(e.state.experimentError,null);
+    const reuse=fixture(disposed);const reused={...adopted,session_id:5};
+    const adding=reuse.api.run({...add,expected_session_id:4});reuse.transport.resolve({ok:true,generation:11,runtime_hooks:reused});
+    assert(await adding,'Add after erase accepts a fresh captured session');
+  }
+  for(const mutation of ['target','document','session','unrelated-group']) {
+    const f=fixture();const pending=f.api.run(add);
+    const foreign=structuredClone(adopted);const next={...f.state.debuggerSession,generation:11,runtime_hooks:foreign};
+    if(mutation==='target')foreign.target_id='captured-B';
+    if(mutation==='document')foreign.captured_owner.document_epoch=99;
+    if(mutation==='session') {
+      f.state.debuggerSession=f.api.sync(f.state.debuggerSession,{...next,runtime_hooks:structuredClone(adopted)});
+      foreign.session_id=5;
+    }
+    if(mutation==='unrelated-group')next.object_experiment={...next.object_experiment,session_id:77};
+    f.state.debuggerSession=f.api.sync(f.state.debuggerSession,next);
+    f.transport.resolve({ok:true,generation:11,runtime_hooks:foreign});
+    assert.equal(await pending,null,mutation+' must expire instead of blanket lifecycle acceptance');
+    assert.equal(f.calls.length,1);
+  }
+  const consent=fixture(adopted),before=consent.api.consent();
+  consent.state.debuggerSession.target_document_epoch++;
+  assert.notEqual(consent.api.consent(),before,'Document replacement invalidates confirmation');
+  console.log('PASS captured Hooks production controller: POST-first/GET-first Add, erase, reuse, exact receipt ownership and stale consent (DOM/bridge model)');
 }

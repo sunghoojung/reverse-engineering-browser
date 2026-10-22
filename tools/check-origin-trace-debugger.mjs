@@ -1825,7 +1825,7 @@ async function experimentReceiptFixture() {
   for (const name of ['renderDebugger','renderExperiment','renderRepeaterVariableStatus','scheduleDebuggerRefresh','rebuildTrafficRequests',
     'renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance',
     'syncMemorySession','applyMemoryOriginTrace','renderMemory']) sandbox[name]=()=>{};
-  const names = ['experimentLifetimeKey','experimentContextKey','currentExperimentReceipt','experimentEditorKey','repeaterSubmissionKey','experimentActionGroups','experimentReceiptBounded','experimentRecordMatches','isExperimentReceipt',
+  const names = ['capturedHookDocument','capturedHookOwnerKey','expectedCapturedHookTransition','experimentLifetimeKey','experimentContextKey','currentExperimentReceipt','experimentEditorKey','repeaterSubmissionKey','experimentActionGroups','experimentReceiptBounded','experimentRecordMatches','isExperimentReceipt',
     'clearExperimentLifetime','syncExperimentSession','runExperimentAction','debuggerAction','debuggerScriptCatalogSignature','refreshDebugger',
     'prefillRepeaterRequest','markRepeaterDraftChanged','parseRepeaterVariables','applyRepeaterVariables','repeaterState','runRepeaterRequest','parseExperimentHeaders','saveAutomationRecipe'];
   const controller = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+
@@ -6856,6 +6856,8 @@ try {
     {
       const captured = await until((s) => s.state === "running" && s.scripts.some((script) => script.url === fixtureUrl + "/page" && script.language === "JavaScript"));
       const capturedTarget = captured.target.id;
+      const capturedOwner = {instance_id: captured.network.instance_id, connection_epoch: captured.network.capture_epoch,
+        document_epoch: captured.target_document_epoch, target_id: capturedTarget};
       const capturedScript = captured.scripts.find((script) => script.url === fixtureUrl + "/page" && script.language === "JavaScript");
       const devtools = Number((await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0]);
       const listTargets = async () => (await fetch(`http://127.0.0.1:${devtools}/json/list`)).json();
@@ -6867,7 +6869,9 @@ try {
         const response = await fetch(url + "/api/debugger/actions", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
         return {status: response.status, body: await response.json()};
       };
-      const outside = await post({action: "add_runtime_hook", label: "Outside function", script_id: capturedScript.script_id, line: capturedScript.start_line, column: capturedScript.start_column, entry_enabled: true, return_enabled: false});
+      const capturedSource = {owner: capturedOwner, script_id: capturedScript.script_id,
+        source_hash: capturedScript.hash, execution_context_id: capturedScript.execution_context_id};
+      const outside = await post({expected_session_id: 0, captured_source: capturedSource, action: "add_runtime_hook", label: "Outside function", script_id: capturedScript.script_id, line: capturedScript.start_line, column: capturedScript.start_column, entry_enabled: true, return_enabled: false});
       assert.equal(outside.status, 400);
       assert.match(outside.body.error, /No enclosing JavaScript function was found/);
       let rejected = await get();
@@ -6885,7 +6889,7 @@ try {
       const source = await sourceResponse.json();
       const index = source.source.split("\n").findIndex((line) => line.includes('const out=input+"-observed"'));
       assert(index >= 0);
-      await action("add_runtime_hook", {label: "Captured document", script_id: capturedScript.script_id, line: capturedScript.start_line + index, column: 0, entry_enabled: true, return_enabled: true, return_mode: "none"});
+      await action("add_runtime_hook", {expected_session_id: 0, captured_source: capturedSource, label: "Captured document", script_id: capturedScript.script_id, line: capturedScript.start_line + index, column: 0, entry_enabled: true, return_enabled: true, return_mode: "none"});
       let adopted = await get();
       assert.equal(adopted.runtime_hooks.isolated, true);
       assert.equal(adopted.runtime_hooks.target_id, capturedTarget);
@@ -6893,7 +6897,7 @@ try {
       assert.equal(adopted.request_interception.target_id, null);
       const pageAfterAdd = (await listTargets()).find((target) => target.id === capturedTarget);
       assert.equal(pageAfterAdd.browserContextId, pageBefore.browserContextId);
-      await action("arm_runtime_hooks", {confirmed: true});
+      await action("arm_runtime_hooks", {confirmed: true, expected_session_id: adopted.runtime_hooks.session_id, captured_owner: capturedOwner, expected_definition_ids: adopted.runtime_hooks.definitions.map(hook => hook.id)});
       const pageForClick = (await listTargets()).find((target) => target.id === capturedTarget);
       const socket = new WebSocket(pageForClick.webSocketDebuggerUrl);
       await new Promise((resolve, reject) => {
@@ -6922,7 +6926,7 @@ try {
       assert.deepEqual(await pageIds(), pagesBefore);
       const pageAfterHit = (await listTargets()).find((target) => target.id === capturedTarget);
       assert.equal(pageAfterHit.browserContextId, pageBefore.browserContextId);
-      await action("disarm_runtime_hooks", {erase: true});
+      await action("disarm_runtime_hooks", {erase: true, expected_session_id: adopted.runtime_hooks.session_id});
       const erased = await get();
       assert.equal(erased.runtime_hooks.state, "disposed");
       assert.equal(erased.runtime_hooks.isolated, false);
@@ -7488,6 +7492,18 @@ try {
     await action("clear_repeater_history");
     s = await get();
     assert.equal(s.repeater.history.length, 0);
+    // Dispose directly from a genuinely armed page, not after a prior disarm.
+    await action("navigate_object_experiment", {url: fixtureUrl + "/page"});
+    s = await until(state => state.scripts.some(script => script.url === fixtureUrl + "/page" && script.target_type !== "worker"));
+    const disposalScript = s.scripts.find(script => script.url === fixtureUrl + "/page" && script.target_type !== "worker");
+    const disposalSource = await (await fetch(url + "/api/debugger/source?script_id=" + encodeURIComponent(disposalScript.script_id))).json();
+    const disposalLine = disposalSource.source.split("\n").findIndex(line => line.includes('const out=input+"-observed"'));
+    assert(disposalLine >= 0);
+    await action("add_runtime_hook", {label:"Armed disposal",script_id:disposalScript.script_id,line:disposalScript.start_line + disposalLine,column:0,entry_enabled:true,return_enabled:false});
+    await action("arm_runtime_hooks", {confirmed:true});
+    s = await get();
+    assert.equal(s.runtime_hooks.state, "armed");
+    assert(s.runtime_hooks.active_points > 0);
     await action("dispose_request_interception_experiment");
     s = await get();
     assert.equal(s.request_interception.state, "disposed");

@@ -1,4 +1,5 @@
 mod candidate;
+mod captured;
 use super::{Debugger, parse, requests, workers::Session};
 use crate::{
     error::{Error, Result},
@@ -26,12 +27,15 @@ pub(super) struct Hooks {
     queue: mpsc::Sender<Pause>,
     receiver: Mutex<Option<mpsc::Receiver<Pause>>>,
     execution: tokio::sync::Mutex<()>,
-    /// Target id and `Page.createIsolatedWorld` context for a captured document.
-    /// Not part of the public hook snapshot. Breakpoints stay on the page world.
-    pub(super) isolated_world: Mutex<Option<(String, u64)>>,
+    owners: Mutex<BTreeMap<String, Session>>,
+    pauses: Mutex<BTreeMap<String, (Session, u64)>>,
+    pause_sequence: AtomicU64,
 }
 struct Pause {
     target: String,
+    session: Session,
+    serial: u64,
+    executable: bool,
     params: Value,
     matches: Vec<Value>,
     epoch: u64,
@@ -95,7 +99,9 @@ impl Hooks {
             queue,
             receiver: Mutex::new(Some(receiver)),
             execution: tokio::sync::Mutex::new(()),
-            isolated_world: Mutex::new(None),
+            owners: Mutex::new(BTreeMap::new()),
+            pauses: Mutex::new(BTreeMap::new()),
+            pause_sequence: AtomicU64::new(1),
         }
     }
 }
@@ -149,11 +155,16 @@ impl Debugger {
             }
             self.captured_hook_target()?;
         }
-        if ["arming", "armed", "handling", "stopping"].contains(
-            &self.snapshot()["runtime_hooks"]["state"]
-                .as_str()
-                .unwrap_or(""),
-        ) {
+        if self.snapshot()["runtime_hooks"]["active_points"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+            || ["arming", "armed", "handling", "stopping"].contains(
+                &self.snapshot()["runtime_hooks"]["state"]
+                    .as_str()
+                    .unwrap_or(""),
+            )
+        {
             return Err(Error::conflict(
                 "Disarm Runtime Hooks before changing definitions",
             ));
@@ -184,147 +195,7 @@ impl Debugger {
             "Runtime Hooks are not on the captured document",
         ))
     }
-    async fn prepare_hook_target(&self) -> Result<()> {
-        match self.isolated_target("runtime_hooks", false) {
-            Ok(_) => Ok(()),
-            Err(error) if self.experiment.context().is_some() => Err(error),
-            Err(_) => self.ensure_captured_document().await,
-        }
-    }
-    async fn ensure_captured_document(&self) -> Result<()> {
-        if self.experiment.context().is_some() {
-            return Err(Error::conflict(
-                "This tool requires its attached disposable Experiment page",
-            ));
-        }
-        let snapshot = self.snapshot();
-        let target_id = snapshot["target"]["id"].as_str().unwrap_or("").to_owned();
-        if !["running", "paused"].contains(&snapshot["state"].as_str().unwrap_or(""))
-            || target_id.is_empty()
-        {
-            return Err(Error::conflict(
-                "Attach a browser target before using Runtime Hooks",
-            ));
-        }
-        let hooks_target = snapshot["runtime_hooks"]["target_id"]
-            .as_str()
-            .unwrap_or("")
-            .to_owned();
-        if snapshot["runtime_hooks"]["isolated"] == true && hooks_target != target_id {
-            return Err(Error::conflict(
-                "Runtime Hooks are bound to a different target",
-            ));
-        }
-        let has_script = snapshot["scripts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|script| {
-                script["language"] == "JavaScript"
-                    && script["target_type"] != "worker"
-                    && script
-                        .get("target_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&target_id)
-                        == target_id
-            });
-        if !has_script {
-            return Err(Error::conflict(
-                "Runtime Hooks requires a live JavaScript source on the captured document",
-            ));
-        }
-        let stored = self
-            .hooks
-            .isolated_world
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let context_id = match stored {
-            Some((stored_target, id)) if stored_target == target_id => id,
-            _ => self.create_captured_isolated_world().await?,
-        };
-        if snapshot["runtime_hooks"]["isolated"] == true && hooks_target == target_id {
-            *self
-                .hooks
-                .isolated_world
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some((target_id, context_id));
-            return Ok(());
-        }
-        let session = snapshot["runtime_hooks"]["session_id"]
-            .as_u64()
-            .filter(|id| *id > 0)
-            .unwrap_or_else(|| self.experiment.next_session());
-        let label = validation::truncate(
-            snapshot["target"]["title"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .or(snapshot["target"]["url"]
-                    .as_str()
-                    .filter(|value| !value.is_empty()))
-                .unwrap_or("captured document"),
-            160,
-        );
-        let message = validation::truncate(
-            &format!(
-                "Hook session is on the captured document {label}. Confirm before arming. No separate browser profile was opened."
-            ),
-            512,
-        );
-        let mut applied = false;
-        let bound_target = target_id.clone();
-        self.update(|s| {
-            if s["target"]["id"].as_str() != Some(bound_target.as_str()) {
-                return;
-            }
-            applied = true;
-            let hooks = &mut s["runtime_hooks"];
-            hooks["isolated"] = json!(true);
-            hooks["target_id"] = json!(bound_target);
-            hooks["session_id"] = json!(session);
-            if ["idle", "disposed", "disarmed"].contains(&hooks["state"].as_str().unwrap_or("")) {
-                hooks["state"] = json!("ready");
-            }
-            hooks["message"] = json!(message);
-        });
-        if !applied {
-            return Err(Error::conflict(
-                "The captured document changed before the hook session was adopted",
-            ));
-        }
-        *self
-            .hooks
-            .isolated_world
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some((target_id, context_id));
-        Ok(())
-    }
-    async fn create_captured_isolated_world(&self) -> Result<u64> {
-        let tree = self.command("Page.getFrameTree", json!({})).await?;
-        let frame_id = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("");
-        if validation::text(&json!(frame_id), "Main frame ID", 4096, false, false).is_err() {
-            return Err(Error::protocol("Captured document has no main frame"));
-        }
-        let created = self
-            .command(
-                "Page.createIsolatedWorld",
-                json!({
-                    "frameId": frame_id,
-                    "worldName": "Origin Trace Runtime Hooks",
-                    "grantUniveralAccess": false
-                }),
-            )
-            .await?;
-        created["executionContextId"].as_u64().ok_or_else(|| {
-            Error::protocol("Isolated world was not created in the captured document")
-        })
-    }
     fn restore_runtime_hooks(&self, session_id: u64, state: &str, message: &str) {
-        *self
-            .hooks
-            .isolated_world
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
         let empty: Value = serde_json::from_str(include_str!("../../assets/debugger-empty.json"))
             .expect("Debugger initial state");
         self.update(|s| {
@@ -461,7 +332,7 @@ impl Debugger {
         result
     }
     async fn add_hook_with_candidate(&self, r: &Value, candidate: Option<&Value>) -> Result<Value> {
-        self.prepare_hook_target().await?;
+        let captured = self.prepare_hook_target(r)?;
         self.hooks_editable()?;
         let snapshot = self.snapshot();
         if snapshot["runtime_hooks"]["definitions"]
@@ -577,6 +448,12 @@ impl Debugger {
                 .ok_or_else(|| Error::conflict("Hook target is unavailable"))?,
         )
         .await?;
+        if captured.is_some() && mode == "function" {
+            return Err(Error::bad(
+                "Captured document hooks require an exact source location; live-function expressions are disposable-only",
+            ));
+        }
+        let mut captured_guard = None;
         let function = if mode == "function" {
             json!({"kind":"live_function_object","start":{"line":line,"column":column},"end":{"line":line,"column":column},"body_start":{"line":line,"column":column}})
         } else {
@@ -585,6 +462,10 @@ impl Debugger {
                 return Err(Error::bad("Runtime Hooks cannot target a truncated script"));
             }
             let text = source["source"].as_str().unwrap();
+            if let Some(owner) = &captured {
+                let guard = self.make_captured_guard(owner, script, text)?;
+                captured_guard = Some(guard);
+            }
             if let Some(guard) = candidate {
                 self.candidate_guard_current(guard, script, text)?;
             }
@@ -600,11 +481,21 @@ impl Debugger {
         if let Some(guard) = candidate {
             definition["candidate_guard"] = guard.clone();
         }
+        if let Some(guard) = captured_guard {
+            self.check_captured_guard(&guard)?;
+            definition["captured_guard"] = guard;
+        }
         let mut accepted = false;
         let captured_document = self.experiment.context().is_none();
         self.update(|s| {
             if let Some(guard) = candidate
                 && !Self::candidate_commit_current(s, guard, &self.hooks)
+            {
+                return;
+            }
+            if definition
+                .get("captured_guard")
+                .is_some_and(|guard| !Self::captured_guard_current(s, guard))
             {
                 return;
             }
@@ -659,7 +550,7 @@ impl Debugger {
         }
         if r["confirmed"] != true {
             return Err(Error::bad(
-                "Runtime Hooks requires explicit isolated-page mutation confirmation",
+                "Runtime Hooks requires explicit confirmation of mutation on the selected page",
             ));
         }
         let ready = self.snapshot();
@@ -673,7 +564,7 @@ impl Debugger {
                 "Add a hook and activate debugger breakpoints before arming",
             ));
         }
-        self.prepare_hook_target().await?;
+        self.check_captured_action(r, false)?;
         self.hooks_editable()?;
         let s = self.snapshot();
         let epoch = self.hooks.epoch.fetch_add(1, Ordering::AcqRel) + 1;
@@ -686,7 +577,7 @@ impl Debugger {
             .unwrap()
             .clone();
         let mut installed: BTreeMap<(String, String), Value> = BTreeMap::new();
-        let result=async {self.command("Network.enable",json!({"maxPostDataSize":if self.options.capture_network_content {131072} else {0}})).await?;for d in &mut definitions {self.verify_candidate_arm(d).await?;let target=d["target_id"].as_str().unwrap().to_owned();let session=self.hook_session(&target).await?;self.check_candidate_definition(d)?;let mut specs=Vec::new();
+        let result=async {for d in &mut definitions {self.verify_captured_arm(d).await?;self.verify_candidate_arm(d).await?;let target=d["target_id"].as_str().unwrap().to_owned();let session=self.hook_session(&target).await?;self.hooks.owners.lock().unwrap_or_else(|e|e.into_inner()).insert(target.clone(),session.clone());self.check_candidate_definition(d)?;session.command("Network.enable",json!({"maxPostDataSize":if self.options.capture_network_content {131072} else {0}}),Duration::from_secs(3)).await?;self.check_candidate_definition(d)?;let mut specs=Vec::new();
             if d["entry_mode"]=="function" {let group=format!("reb-hook-function-{}-{}",s["runtime_hooks"]["session_id"],d["id"]);let evaluated=session.command("Runtime.evaluate",json!({"expression":d["function_expression"],"objectGroup":group,"silent":true,"returnByValue":false,"throwOnSideEffect":true,"awaitPromise":false,"timeout":100}),Duration::from_secs(3)).await;let installed_function=async {let v=evaluated?;if v["exceptionDetails"].is_object()||v["result"]["type"]!="function" {return Err(Error::bad("Live-function expression did not resolve without side effects to a function"));}let id=validation::text(&v["result"]["objectId"],"Function object ID",4096,false,false).map_err(|e|Error::protocol(e.message))?;session.command("Debugger.setBreakpointOnFunctionCall",json!({"objectId":id}),Duration::from_secs(3)).await}.await;let _=session.command("Runtime.releaseObjectGroup",json!({"objectGroup":group}),Duration::from_secs(3)).await;let point=installed_function?;let id=validation::text(&point["breakpointId"],"Hook breakpoint ID",4096,false,false).map_err(|e|Error::protocol(e.message))?;installed.insert((target.clone(),id.into()),json!({"hook_id":d["id"],"target_id":target,"phases":["entry"]}));d["resolved"]=json!({"entry_points":1,"return_points":0});}
             else {let locations=session.command("Debugger.getPossibleBreakpoints",json!({"start":{"scriptId":d["cdp_script_id"],"lineNumber":d["target_line"],"columnNumber":d["target_column"]},"restrictToFunction":true}),Duration::from_secs(3)).await?;self.check_candidate_definition(d)?;let locations=locations["locations"].as_array().filter(|a|a.len()<=100000).ok_or_else(||Error::protocol("Malformed or oversized hook locations"))?;let mut points=BTreeMap::new();let first=locations.iter().find_map(parse::location).ok_or_else(||Error::bad("No breakable function was found for the hook"))?;if first["script_id"]!=d["cdp_script_id"] {return Err(Error::protocol("Hook location refers to another script"));}
 if d["entry_enabled"]==true {points.insert((first["line"].as_u64().unwrap(),first["column"].as_u64().unwrap()),(first.clone(),vec!["entry"]));}let mut returns=0;for raw in locations {if raw["type"]!="return"||d["return_enabled"]!=true {continue;}let Some(loc)=parse::location(raw).filter(|l|l["script_id"]==d["cdp_script_id"]) else {continue;};let key=(loc["line"].as_u64().unwrap(),loc["column"].as_u64().unwrap());let point=points.entry(key).or_insert((loc,vec![]));if !point.1.contains(&"return") {point.1.push("return");returns+=1;}
@@ -696,19 +587,15 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
             if self.hooks.epoch.load(Ordering::Acquire)!=epoch {return Err(Error::conflict("Runtime Hooks arming was cancelled"));}}
             Ok::<_,Error>(())}.await;
         if let Err(e) = result {
-            for ((target, id), _) in installed {
-                if let Ok(s) = self.hook_session(&target).await {
-                    let _ = s
-                        .command(
-                            "Debugger.removeBreakpoint",
-                            json!({"breakpointId":id}),
-                            Duration::from_secs(3),
-                        )
-                        .await;
-                }
-            }
+            self.hooks
+                .points
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(installed);
+            let cleanup = self.disarm_hooks().await;
             self.update(|s| {
-                s["runtime_hooks"]["state"] = json!("disarmed");
+                s["runtime_hooks"]["state"] =
+                    json!(if cleanup.is_ok() { "disarmed" } else { "error" });
                 s["runtime_hooks"]["last_failure"] = json!(e.message);
                 s["runtime_hooks"]["message"] =
                     json!("Hook arming failed. Review the definition before retrying.");
@@ -722,8 +609,11 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
         self.update(|s| {
             if self.hooks.epoch.load(Ordering::Acquire) != epoch
                 || definitions.iter().any(|d| {
-                    d.get("candidate_guard")
-                        .is_some_and(|guard| !Self::candidate_commit_current(s, guard, &self.hooks))
+                    d.get("captured_guard")
+                        .is_some_and(|guard| !Self::captured_guard_current(s, guard))
+                        || d.get("candidate_guard").is_some_and(|guard| {
+                            !Self::candidate_commit_current(s, guard, &self.hooks)
+                        })
                 })
             {
                 return;
@@ -757,8 +647,10 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
             std::mem::take(&mut *self.hooks.points.lock().unwrap_or_else(|e| e.into_inner()));
         self.update(|s| s["runtime_hooks"]["state"] = json!("stopping"));
         let mut errors = Vec::new();
-        for ((target, id), _) in points {
-            if let Ok(session) = self.hook_session(&target).await
+        let mut retained = BTreeMap::new();
+        for ((target, id), point) in points {
+            if let Some(session) = self.hook_point_owner(&target)
+                && !session.connection.is_closed()
                 && let Err(e) = session
                     .command(
                         "Debugger.removeBreakpoint",
@@ -768,10 +660,20 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                     .await
             {
                 errors.push(e.message);
+                retained.insert((target, id), point);
             }
         }
+        let remaining = retained.len();
+        *self.hooks.points.lock().unwrap_or_else(|e| e.into_inner()) = retained;
+        if remaining == 0 {
+            self.hooks
+                .owners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
         self.update(|s| {
-            s["runtime_hooks"]["active_points"] = json!(0);
+            s["runtime_hooks"]["active_points"] = json!(remaining);
             s["runtime_hooks"]["state"] = json!(if errors.is_empty() {
                 "disarmed"
             } else {
@@ -794,6 +696,13 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
             Some(Value::Bool(value)) => *value,
             _ => return Err(Error::bad("Hook erase flag must be boolean")),
         };
+        // Reject a known stale request before cancelling, then cancel any
+        // in-flight arm before joining action serialization. Recheck after the
+        // wait: neither disarm nor erase may clean up a replacement session.
+        self.check_captured_action(request, true)?;
+        self.cancel_hook_action_for_session(request)?;
+        let _actions = self.actions.lock().await;
+        self.check_captured_action(request, true)?;
         if erase {
             if self.experiment.context().is_some() {
                 return Err(Error::conflict(
@@ -839,44 +748,116 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
         });
         Ok(self.group_response("runtime_hooks"))
     }
-    pub(super) fn hook_pause(self: &Arc<Self>, target: &str, params: Value) -> bool {
-        let matches = {
-            let points = self.hooks.points.lock().unwrap_or_else(|e| e.into_inner());
-            params["hitBreakpoints"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .take(1000)
-                .filter_map(|id| points.get(&(target.into(), id.as_str()?.into())).cloned())
-                .collect::<Vec<_>>()
-        };
-        if matches.is_empty() {
+    fn hook_point_owner(&self, target: &str) -> Option<Session> {
+        self.hooks
+            .owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(target)
+            .cloned()
+    }
+    pub(super) fn hook_resumed(&self, target: &str, session: &Session) {
+        let mut pauses = self.hooks.pauses.lock().unwrap_or_else(|e| e.into_inner());
+        if pauses
+            .get(target)
+            .is_some_and(|(owner, _)| owner.same_owner(session))
+        {
+            pauses.remove(target);
+        }
+    }
+    fn hook_pause_current(&self, pause: &Pause) -> bool {
+        !pause.session.connection.is_closed()
+            && self
+                .hooks
+                .pauses
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&pause.target)
+                .is_some_and(|(owner, serial)| {
+                    *serial == pause.serial && owner.same_owner(&pause.session)
+                })
+    }
+    async fn finish_hook_pause(&self, pause: &Pause) {
+        if !self.hook_pause_current(pause) {
+            return;
+        }
+        let _ = pause
+            .session
+            .command(
+                "Runtime.releaseObjectGroup",
+                json!({"objectGroup":"reb-runtime-hook"}),
+                Duration::from_secs(3),
+            )
+            .await;
+        if self.hook_pause_current(pause) {
+            let _ = pause
+                .session
+                .command("Debugger.resume", json!({}), Duration::from_secs(3))
+                .await;
+        }
+    }
+    pub(super) fn hook_pause(
+        self: &Arc<Self>,
+        target: &str,
+        session: Session,
+        params: Value,
+    ) -> bool {
+        let serial = self.hooks.pause_sequence.fetch_add(1, Ordering::AcqRel);
+        self.hooks
+            .pauses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(target.into(), (session.clone(), serial));
+        if !self
+            .hook_point_owner(target)
+            .is_some_and(|owner| owner.same_owner(&session))
+        {
             return false;
         }
-        if self
-            .hooks
-            .queue
-            .try_send(Pause {
-                target: target.into(),
-                params,
-                matches,
-                epoch: self.hooks.epoch.load(Ordering::Acquire),
-            })
-            .is_err()
-        {
+        let matches = {
+            let points = self.hooks.points.lock().unwrap_or_else(|e| e.into_inner());
+            // A mixed pause is the user's pause. Never swallow or auto-resume it.
+            let Some(ids) = params["hitBreakpoints"]
+                .as_array()
+                .filter(|ids| !ids.is_empty() && ids.len() <= 64)
+            else {
+                return false;
+            };
+            let Some(matches) = ids
+                .iter()
+                .map(|id| points.get(&(target.into(), id.as_str()?.into())).cloned())
+                .collect::<Option<Vec<_>>>()
+            else {
+                return false;
+            };
+            if !["other", "breakpoint"].contains(&params["reason"].as_str().unwrap_or("")) {
+                return false;
+            }
+            matches
+        };
+        let pause = Pause {
+            target: target.into(),
+            session,
+            serial,
+            executable: ["armed", "handling"].contains(
+                &self.snapshot()["runtime_hooks"]["state"]
+                    .as_str()
+                    .unwrap_or(""),
+            ),
+            params,
+            matches,
+            epoch: self.hooks.epoch.load(Ordering::Acquire),
+        };
+        if let Err(error) = self.hooks.queue.try_send(pause) {
             self.update(|s| {
                 s["runtime_hooks"]["last_failure"] =
                     json!("Runtime Hook pause queue capacity exceeded. Hooks require disarming.");
                 s["runtime_hooks"]["state"] = json!("stopping");
             });
             let d = Arc::clone(self);
-            let target = target.to_owned();
+            let pause = error.into_inner();
             tokio::spawn(async move {
-                if let Ok(session) = d.hook_session(&target).await {
-                    let _ = session
-                        .command("Debugger.resume", json!({}), Duration::from_secs(3))
-                        .await;
-                }
+                d.finish_hook_pause(&pause).await;
                 let _ = d.disarm_hooks().await;
             });
         }
@@ -905,18 +886,7 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                             json!(validation::truncate(&e.message, 512));
                     });
                 }
-                if let Ok(session) = d.hook_session(&pause.target).await {
-                    let _ = session
-                        .command(
-                            "Runtime.releaseObjectGroup",
-                            json!({"objectGroup":"reb-runtime-hook"}),
-                            Duration::from_secs(3),
-                        )
-                        .await;
-                    let _ = session
-                        .command("Debugger.resume", json!({}), Duration::from_secs(3))
-                        .await;
-                }
+                d.finish_hook_pause(&pause).await;
                 if d.snapshot()["runtime_hooks"]["total_hits"]
                     .as_u64()
                     .unwrap()
@@ -925,7 +895,7 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                     || result.is_err()
                 {
                     let _ = d.disarm_hooks().await;
-                } else if d.hooks.epoch.load(Ordering::Acquire) == pause.epoch {
+                } else if pause.executable && d.hooks.epoch.load(Ordering::Acquire) == pause.epoch {
                     d.update(|s| s["runtime_hooks"]["state"] = json!("armed"));
                 }
             }
@@ -933,10 +903,13 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
     }
     async fn process_hook_pause(&self, p: &Pause) -> Result<()> {
         let _execution = self.hooks.execution.lock().await;
-        if self.hooks.epoch.load(Ordering::Acquire) != p.epoch {
+        if !p.executable
+            || self.hooks.epoch.load(Ordering::Acquire) != p.epoch
+            || !self.hook_pause_current(p)
+        {
             return Ok(());
         }
-        let session = self.hook_session(&p.target).await?;
+        let session = p.session.clone();
         let frame = p.params["callFrames"]
             .as_array()
             .and_then(|a| a.first())
@@ -955,6 +928,13 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                 continue;
             };
             self.check_candidate_definition(&hook)?;
+            if hook.get("captured_guard").is_some()
+                && frame["location"]["scriptId"] != hook["cdp_script_id"]
+            {
+                return Err(Error::conflict(
+                    "Captured hook pause belongs to another source",
+                ));
+            }
             for phase in point["phases"].as_array().unwrap() {
                 if self.hooks.epoch.load(Ordering::Acquire) != p.epoch
                     || self.snapshot()["runtime_hooks"]["total_hits"]
@@ -977,10 +957,12 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                 let mut operation = "observed";
                 let executed=async {if hook["condition"]!="" {let result=evaluate(&session,frame_id,&format!("Boolean(({}))",hook["condition"].as_str().unwrap()),true,true).await?;if result["value"]!=true {operation="skipped";return Ok::<_,Error>(());}}
                 if let Some(scope)=frame["scopeChain"].as_array().into_iter().flatten().take(12).find(|s|s["type"]=="local")&& let Some(id)=scope["object"]["objectId"].as_str().filter(|s|s.len()<=4096) {let properties=session.command("Runtime.getProperties",json!({"objectId":id,"ownProperties":true,"accessorPropertiesOnly":false,"generatePreview":true}),Duration::from_secs(1)).await?;let a=properties["result"].as_array().ok_or_else(||Error::protocol("Malformed hook bindings"))?;truncated=a.len()>32;for property in a.iter().take(32) {let Some(name)=property["name"].as_str() else {continue;};let accessor=property["get"].is_object()||property["set"].is_object();let value=if property["value"].is_object() {preview(&property["value"], capture)} else {json!({"type":if accessor {"accessor"} else {"unavailable"},"subtype":null,"class_name":null,"description":if accessor {"Accessor not invoked"} else {"Not initialized or unavailable"},"value":null,"unserializable_value":null,"value_truncated":false})};bindings.push(json!({"name":validation::truncate(name,256),"value":value,"accessor":accessor}));}}
-                if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch {return Ok(());}let logic=&hook[if phase=="entry" {"entry_logic"} else {"return_logic"}];if logic!="" {let result=evaluate(&session,frame_id,&format!("(()=>{{\n{}\n}})()",logic.as_str().unwrap()),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("Injected logic returned a Promise; only synchronous logic is supported"));}operation="logic_run";}
-                if phase=="return"&&hook["return_mode"]!="none" {if frame["returnValue"]["subtype"]=="promise" {return Err(Error::bad("Promise return values cannot be synchronously replaced"));}let argument=if hook["return_mode"]=="json" {let value=&hook["return_value"];let kind=match value {Value::Null=>"null",Value::Bool(_)=>"bool",Value::Number(n) if n.is_i64()||n.is_u64()=>"int",Value::Number(_)=>"float",Value::String(_)=>"str",Value::Array(_)=>"list",Value::Object(_)=>"dict"};replacement=json!({"string_sha256":if capture {provenance::project(&json!({"operation":"string_digest","value":value})).unwrap_or(Value::Null)} else {Value::Null},"type":kind,"subtype":null,"class_name":null,"description":validation::truncate(&value.to_string(),512),"value":if value.is_array()||value.is_object() {Value::Null} else {value.clone()},"unserializable_value":null,"value_truncated":hook["return_value_bytes"].as_u64().unwrap()>512});json!({"value":value})} else {let result=evaluate(&session,frame_id,hook["return_expression"].as_str().unwrap(),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("A Promise cannot be a synchronous return replacement"));}replacement=preview(&result, capture);if let Some(value)=result.get("value") {json!({"value":value})}else if let Some(value)=result.get("unserializableValue") {json!({"unserializableValue":value})}else if let Some(id)=result.get("objectId") {json!({"objectId":id})}else {return Err(Error::bad("Hook expression result cannot be returned"));}};if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch {return Ok(());}session.command("Debugger.setReturnValue",json!({"newValue":argument}),Duration::from_secs(3)).await?;operation="return_overridden";}Ok(())}.await;
+                if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch || !self.hook_pause_current(p) {return Ok(());}self.check_candidate_definition(&hook)?;let logic=&hook[if phase=="entry" {"entry_logic"} else {"return_logic"}];if logic!="" {let result=evaluate(&session,frame_id,&format!("(()=>{{\n{}\n}})()",logic.as_str().unwrap()),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("Injected logic returned a Promise; only synchronous logic is supported"));}operation="logic_run";}
+                if phase=="return"&&hook["return_mode"]!="none" {if !self.hook_pause_current(p) {return Ok(());}self.check_candidate_definition(&hook)?;if frame["returnValue"]["subtype"]=="promise" {return Err(Error::bad("Promise return values cannot be synchronously replaced"));}let argument=if hook["return_mode"]=="json" {let value=&hook["return_value"];let kind=match value {Value::Null=>"null",Value::Bool(_)=>"bool",Value::Number(n) if n.is_i64()||n.is_u64()=>"int",Value::Number(_)=>"float",Value::String(_)=>"str",Value::Array(_)=>"list",Value::Object(_)=>"dict"};replacement=json!({"string_sha256":if capture {provenance::project(&json!({"operation":"string_digest","value":value})).unwrap_or(Value::Null)} else {Value::Null},"type":kind,"subtype":null,"class_name":null,"description":validation::truncate(&value.to_string(),512),"value":if value.is_array()||value.is_object() {Value::Null} else {value.clone()},"unserializable_value":null,"value_truncated":hook["return_value_bytes"].as_u64().unwrap()>512});json!({"value":value})} else {let result=evaluate(&session,frame_id,hook["return_expression"].as_str().unwrap(),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("A Promise cannot be a synchronous return replacement"));}replacement=preview(&result, capture);if let Some(value)=result.get("value") {json!({"value":value})}else if let Some(value)=result.get("unserializableValue") {json!({"unserializableValue":value})}else if let Some(id)=result.get("objectId") {json!({"objectId":id})}else {return Err(Error::bad("Hook expression result cannot be returned"));}};if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch || !self.hook_pause_current(p) {return Ok(());}self.check_candidate_definition(&hook)?;session.command("Debugger.setReturnValue",json!({"newValue":argument}),Duration::from_secs(3)).await?;operation="return_overridden";}Ok(())}.await;
                 self.check_candidate_definition(&hook)?;
-                if self.hooks.epoch.load(Ordering::Acquire) != p.epoch {
+                if self.hooks.epoch.load(Ordering::Acquire) != p.epoch
+                    || !self.hook_pause_current(p)
+                {
                     return Ok(());
                 }
                 let error = executed.err().map(|e| e.message);
@@ -1060,24 +1042,21 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
         Ok(())
     }
     pub(super) async fn hooks_navigated(&self) {
-        *self
-            .hooks
-            .isolated_world
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
         self.hooks.candidate_epoch.fetch_add(1, Ordering::AcqRel);
         if !self.snapshot()["runtime_hooks"]["definitions"]
             .as_array()
             .unwrap()
             .is_empty()
         {
-            let _ = self.disarm_hooks().await;
+            let cleanup = self.disarm_hooks().await;
             self.update(|s| {
                 s["runtime_hooks"]["definitions"] = json!([]);
-                s["runtime_hooks"]["state"] = json!("ready");
-                s["runtime_hooks"]["last_failure"] = json!(
+                s["runtime_hooks"]["state"] = json!(if cleanup.is_ok() { "ready" } else { "error" });
+                s["runtime_hooks"]["last_failure"] = json!(if cleanup.is_ok() {
                     "The page navigated. Script identifiers changed, so all hooks were cleared."
-                );
+                } else {
+                    "The page navigated. Breakpoint removal is incomplete; disarm or erase to retry cleanup."
+                });
             });
         }
     }

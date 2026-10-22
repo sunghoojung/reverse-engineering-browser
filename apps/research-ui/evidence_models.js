@@ -862,6 +862,13 @@
           ['intervention-associated', 'inconclusive'].includes(comparison.interpretation));
       }
 
+      function isCapturedHookOwner(owner) {
+        return isPlainObject(owner) && isBoundedText(owner.instance_id, 256) && Boolean(owner.instance_id) &&
+          isSafeIntegerInRange(owner.connection_epoch, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(owner.document_epoch, 0, Number.MAX_SAFE_INTEGER) &&
+          isBoundedText(owner.target_id, 4096) && Boolean(owner.target_id);
+      }
+
       function isRuntimeHooks(hooks) {
         const states = ['idle', 'attaching', 'ready', 'arming', 'armed', 'handling', 'stopping',
           'disarmed', 'disposing', 'disposed', 'error'];
@@ -882,6 +889,8 @@
             !isRuntimeFieldTest(hooks.field_test) ||
             (hooks.last_failure !== null && !isBoundedText(hooks.last_failure, 512)) ||
             !isBoundedText(hooks.message, 512) || !isPlainObject(hooks.limits)) return false;
+        if (hooks.captured_owner != null && (!isCapturedHookOwner(hooks.captured_owner) ||
+            !hooks.isolated || hooks.session_id === 0 || hooks.target_id !== hooks.captured_owner.target_id)) return false;
         const limits = {definitions: 8, workers: 8, active_points: 64, return_points_per_definition: 32,
           total_hits: 512, retained_hits: 128, retained_requests: 128, bindings_per_hit: 32, binding_preview_bytes: 512,
           condition_bytes: 1024, function_expression_bytes: 1024, logic_bytes: 8 * 1024, return_bytes: 8 * 1024,

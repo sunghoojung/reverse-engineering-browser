@@ -2,12 +2,11 @@
 
 Runtime Hooks provides bounded function-entry and synchronous-return
 instrumentation. On a document the live debugger is already attached to, hooks
-use a named isolated world in that same document. The disposable Experiment
+execute on that exact live page. Page-frame evaluation is not sandboxed. The disposable Experiment
 BrowserContext remains available for a separate page and its dedicated workers.
 Neither path opens a different browser profile, and arming stays explicit.
 
-The Chrome DevTools Protocol primitives include `Page.createIsolatedWorld` for
-an already-attached document, `Target.attachToTarget` with a flattened worker
+The Chrome DevTools Protocol primitives include `Target.attachToTarget` with a flattened worker
 session on the disposable context, `Debugger.getPossibleBreakpoints`,
 `Debugger.setBreakpoint`, `Debugger.setBreakpointOnFunctionCall`,
 `Debugger.evaluateOnCallFrame`, and the experimental `Debugger.setReturnValue`.
@@ -20,13 +19,25 @@ Project-wide authorization and capture policy is defined in
 [`SAFETY.md`](../../SAFETY.md). This section describes Runtime Hooks' specific
 isolation and retention limits.
 
-- Hooks may be armed on a document the debugger is already attached to. That
-  path creates a named isolated world in the document (`Page.createIsolatedWorld`,
-  world name "Origin Trace Runtime Hooks", without universal access) and does
-  not open another browser context or profile. Hooks may also be armed on the
-  page or dedicated workers owned by the disposable Experiment BrowserContext.
-  Browser target metadata must confirm the worker's `browserContextId` before a
-  CDP session is opened.
+- Captured Hooks pin the selected target, debugger connection, document epoch,
+  script id, execution context, CDP hash and full-source SHA-256. Add and Arm reject
+  stale ownership rather than choosing another live tab or disposable context.
+  Captured hooks use exact source locations; live-function expressions remain
+  disposable-only. Refreshing, reconnecting or replacing source requires an
+  explicit new selection. Arming re-fetches source before installing points.
+- Entry/return logic executes in the paused page frame, not an isolated world.
+  It may mutate page objects, cookies, storage or trigger requests. The UI binds
+  confirmation to the selected document and definitions, and clears it when
+  ownership/source/definitions change. There is no automatic arm or retry.
+- Disposable workers still require a matching owned `browserContextId`. Cleanup
+  uses the original CDP connection/session, not a newly resolved tab. Mixed
+  breakpoint pauses are not claimed or resumed. Only a still-current observed
+  hook-owned pause may be resumed; independent external debugger races cannot
+  be made atomic by CDP.
+- Disarm and erase remain available after a captured target disappears. Erase
+  removes hook state, never the captured page or its storage. A new Add creates
+  a fresh session. Only disposal of an owned Experiment BrowserContext destroys
+  its disposable page/workers/storage; disposal first disarms Hooks.
 - The user must confirm that entry logic, return logic, and return replacement
   may mutate that isolated page before each arm operation.
 - Arming is atomic. If any breakpoint cannot be installed, every breakpoint

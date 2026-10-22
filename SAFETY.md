@@ -69,10 +69,17 @@ it.
   experiment and an explicit researcher action are required for browser
   mutation.
 - Run mutable tools such as interception, automation, runtime hooks, replay, and
-  object changes only in a disposable experiment context and within its bounded
-  pages or exact selected page.
-- Experiments do not read or modify baseline tabs, production cookies, storage,
-  or credentials. Never execute extracted code automatically.
+  object changes in a disposable experiment context by default. Only the explicit
+  captured-document Runtime Hooks mode may operate on a specifically selected
+  captured document after the researcher confirms mutation for that document and
+  requested hook action. Navigation or replacement invalidates that confirmation.
+  A named isolated world is not a sandbox for paused-frame hook logic. Pin the
+  exact target, document lifetime, and selected source; reject replacement or
+  stale ownership rather than retargeting. This exception does not authorize other
+  mutable tools, unrelated baseline tabs, production credentials, or automatic
+  execution of extracted code.
+- Other experiments do not read or modify baseline tabs, production cookies,
+  storage, or credentials. Never execute extracted code automatically.
 
 - The native Console panel visibly opts into arbitrary JavaScript in a separate
   disposable browser profile. Expressions and primitive results may contain

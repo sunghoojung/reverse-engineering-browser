@@ -216,11 +216,15 @@ impl Debugger {
                     });
                     return;
                 };
+                let catalog_title =
+                    self.catalog_target_title(owner.target["id"].as_str().unwrap_or(""));
                 self.update(|s| {
                     if owner.retired.load(Ordering::Acquire) {return;}
                     if p["redirectResponse"].is_object() {response(s,owner,&json!({"requestId":id,"response":p["redirectResponse"]}),true);finish(s,owner,&json!({"requestId":id,"timestamp":timestamp,"encodedDataLength":p["redirectResponse"]["encodedDataLength"]}),false,true);}
                     let target = owner.target["id"].as_str().unwrap_or("unknown").to_owned();
-                    let title = owner.target["title"].clone();
+                    // Attach often races the document title. The catalog is
+                    // updated by targetInfoChanged; the owner snapshot is not.
+                    let title = catalog_title.clone().unwrap_or_else(|| owner.target["title"].clone());
                     // No frame can resolve a script when the stack is absent or empty.
                     let scripts = if p["initiator"]["stack"]["callFrames"]
                         .as_array()

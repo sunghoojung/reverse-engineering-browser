@@ -74,13 +74,20 @@ it.
 - Experiments do not read or modify baseline tabs, production cookies, storage,
   or credentials. Never execute extracted code automatically.
 
-- The native Console panel visibly opts into arbitrary JavaScript in a separate
-  disposable browser profile. Expressions and primitive results may contain
-  sensitive values; they stay in bounded, ephemeral panel memory and are not
-  automatically captured, redacted, logged, exported, or added to evidence.
-  Clear output before sharing the interface. Commands require an explicit
-  document selection and are never automatically retried. See
-  [Native Console v2](protocol/native-console-v2.md) for these limits.
+- The native Console defaults to a separate disposable browser profile. Explicit
+  Live capture mode additionally requires a specifically selected native document
+  and confirmation that commands can mutate that live document before the first
+  mutable command. Commands are pinned to its native document generation and
+  capture binding. Navigation, replacement, or lost ownership clears authorization
+  and requires explicit reselection or reconnection. Never select an execution
+  target by URL, remap automatically, retry a command, or fall back to a disposable
+  browser without an explicit mode change. The console
+  cannot set breakpoints, step, or inspect paused frames. Expressions and
+  primitive results may contain sensitive values; they stay in bounded,
+  ephemeral panel memory and are not automatically captured, redacted, logged,
+  exported, or added to evidence. Clear output before sharing the interface.
+  Commands require an explicit document selection and are never automatically
+  retried. See [Native Console v2](protocol/native-console-v2.md) for these limits.
 
 - Element screenshot markup requires an explicit selected disposable document and
   raw-local-capture confirmation. Observed form/editable/private-marked content,

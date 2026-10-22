@@ -18,17 +18,21 @@ index 4e0f62e..0d614e4 100644
  #include "chrome/browser/profiles/profile.h"
  #include "chrome/browser/profiles/profile_io_data.h"
  #include "chrome/browser/search_engines/template_url_service_factory.h"
-@@ -568,6 +570,9 @@ void BraveContentBrowserClient::BrowserURLHandlerCreated(
+@@ -568,6 +570,13 @@ void BraveContentBrowserClient::BrowserURLHandlerCreated(
  
  void BraveContentBrowserClient::RenderProcessWillLaunch(
      content::RenderProcessHost* host) {
 +  if (reb::IsNativeConsoleEnabled()) {
-+    reb::StartNativeConsoleSession(base::BindOnce(&chrome::ExitIgnoreUnloadHandlers));
++    auto retired = reb::NativeConsoleRetireCallback();
++    if (!retired) {
++      retired = base::BindOnce(&chrome::ExitIgnoreUnloadHandlers);
++    }
++    reb::StartNativeConsoleSession(std::move(retired));
 +  }
    static_cast<void>(
        reb::NativeProbeSocketClient::Get().StartFromCommandLine());
    Profile* profile = Profile::FromBrowserContext(host->GetBrowserContext());
-@@ -1125,6 +1130,9 @@ void BraveContentBrowserClient::AppendExtraCommandLineSwitches(
+@@ -1125,6 +1134,9 @@ void BraveContentBrowserClient::AppendExtraCommandLineSwitches(
    std::string process_type =
        command_line->GetSwitchValueASCII(switches::kProcessType);
    if (process_type == switches::kRendererProcess) {

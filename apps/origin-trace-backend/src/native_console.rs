@@ -5,9 +5,11 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
+    ffi::CString,
     io::{Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, Instant},
 };
@@ -50,8 +52,10 @@ impl OwnedProcess {
         Ok(Self { child, group })
     }
     async fn stop(&mut self) {
-        unsafe {
-            libc::kill(-self.group, libc::SIGKILL);
+        if self.group > 0 {
+            unsafe {
+                libc::kill(-self.group, libc::SIGKILL);
+            }
         }
         let _ = self.child.start_kill();
         let _ = self.child.wait().await;
@@ -68,21 +72,82 @@ impl Drop for OwnedProcess {
     }
 }
 
+enum ConsoleDir {
+    Disposable(TempDir),
+    // The capture owns this directory. Dropping the console must not delete it.
+    Live(PathBuf),
+}
+
 struct Session {
     id: String,
+    // Public nonsecret generation, separate from the private authentication token.
+    binding_id: String,
     bridge: OwnedProcess,
-    browser: OwnedProcess,
+    // None when this bridge is bound to the capture browser. Stop must not kill it.
+    browser: Option<OwnedProcess>,
     input: ChildStdin,
     output: ChildStdout,
-    _directory: TempDir,
+    directory: ConsoleDir,
     next_request: u64,
     poisoned: bool,
     started: Instant,
+    live: bool,
+    live_target: Option<u64>,
+    native_targets: BTreeSet<u64>,
+    accessed_targets: BTreeSet<u64>,
 }
 impl Session {
     async fn stop(mut self) {
+        match &self.directory {
+            ConsoleDir::Disposable(directory) => {
+                let _ = directory.path();
+            }
+            ConsoleDir::Live(directory) => {
+                let _ = directory.as_os_str();
+            }
+        }
         self.bridge.stop().await;
-        self.browser.stop().await;
+        if let Some(browser) = self.browser.as_mut() {
+            browser.stop().await;
+        }
+    }
+    async fn list_live(&mut self) -> Result<Value> {
+        // The authenticated capture browser is the only document authority.
+        // URLs, titles and debugger target IDs are never execution identities.
+        let mut listing = self.exchange(1, 0, "").await?;
+        self.native_targets = listing["targets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|target| target["id"].as_str()?.parse().ok())
+            .collect();
+        if self
+            .live_target
+            .is_some_and(|target| !self.native_targets.contains(&target))
+        {
+            self.live_target = None;
+        }
+        listing["document_source"] = json!("live_capture");
+        listing["binding_id"] = json!(self.binding_id);
+        listing["selected_target_id"] = self
+            .live_target
+            .map(|target| json!(target.to_string()))
+            .unwrap_or(Value::Null);
+        Ok(listing)
+    }
+    async fn release_live_values(&mut self) -> Result<()> {
+        // Clear only documents used by this console connection. Stale native
+        // IDs fail closed; never find a replacement document for cleanup.
+        for target in self.accessed_targets.clone() {
+            let result = self.exchange(3, target, r#"{"operation":"clear"}"#).await?;
+            if result["runtime"]["status"] != "ok" && result["status"] != "stale_target" {
+                return Err(Error::conflict(
+                    "Live value cleanup was not confirmed; restart the capture binding",
+                ));
+            }
+        }
+        self.accessed_targets.clear();
+        Ok(())
     }
     async fn exchange(&mut self, operation: u16, target: u64, source: &str) -> Result<Value> {
         // If the HTTP future is cancelled mid-exchange, the session stays
@@ -283,7 +348,10 @@ impl ResponseHeader {
 pub struct NativeConsole {
     helper: PathBuf,
     browser: Option<PathBuf>,
+    // Lock order: `session`, then `live_bridge`.
     session: Mutex<Option<Session>>,
+    live_bridge: Mutex<Option<Session>>,
+    live_directory: Option<PathBuf>,
 }
 impl NativeConsole {
     pub fn new(options: &Options) -> Self {
@@ -295,6 +363,8 @@ impl NativeConsole {
             ),
             browser: options.brave_binary.clone(),
             session: Mutex::new(None),
+            live_bridge: Mutex::new(None),
+            live_directory: options.native_console_live_directory.clone(),
         }
     }
     fn available(&self) -> bool {
@@ -306,17 +376,50 @@ impl NativeConsole {
         if let Some(session) = guard.as_mut()
             && (session.poisoned
                 || session.started.elapsed() >= Duration::from_secs(3600)
-                || session.browser.child.try_wait().ok().flatten().is_some()
+                || session
+                    .browser
+                    .as_mut()
+                    .is_some_and(|browser| browser.child.try_wait().ok().flatten().is_some())
                 || session.bridge.child.try_wait().ok().flatten().is_some())
         {
             guard.take().unwrap().stop().await;
         }
-        let id = guard.as_ref().map(|s| s.id.as_str());
-        json!({"contract_version":2,"available":self.available(),"state":if id.is_some() {"ready"} else {"idle"},
-            "session_id":id,"message":if self.available() {"Native console uses a separate disposable browser profile"} else {"Configure a rebuilt custom Brave executable using REB_BRAVE_BINARY"}})
+        if guard.as_ref().is_some_and(|session| !session.live) || self.live_directory.is_none() {
+            let id = guard.as_ref().map(|session| session.id.as_str());
+            return json!({"contract_version":2,"available":self.available(),"state":if id.is_some() {"ready"} else {"idle"},
+                "session_id":id,"message":if self.available() {"Native console uses a separate disposable browser profile"} else {"Configure a rebuilt custom Brave executable using REB_BRAVE_BINARY"}});
+        }
+        let mut armed = self.live_bridge.lock().await;
+        let connected = guard.is_some();
+        let owner = if connected { &mut *guard } else { &mut *armed };
+        if let Some(session) = owner.as_mut() {
+            if !session.poisoned
+                && session.started.elapsed() < Duration::from_secs(3600)
+                && session.bridge.child.try_wait().ok().flatten().is_none()
+                && let Ok(mut listing) = session.list_live().await
+            {
+                listing["available"] = json!(self.available());
+                listing["live_available"] = json!(true);
+                listing["message"] = json!(LIVE_CAPTURE_MESSAGE);
+                if !connected {
+                    listing["state"] = json!("idle");
+                    listing["session_id"] = Value::Null;
+                }
+                return listing;
+            }
+            owner.take().unwrap().stop().await;
+        }
+        // A vanished or unavailable binding never changes the execution mode.
+        // Recover by restarting the capture, not by launching another browser.
+        json!({"contract_version":2,"available":self.available(),"live_available":false,"state":"idle","session_id":null,
+            "document_source":"live_capture","targets":[],"truncated":false,
+            "message":"Live capture console binding unavailable. Rebuild the matching browser and backend, then restart the capture. No second browser profile was launched."})
     }
     pub async fn stop(&self) {
         if let Some(session) = self.session.lock().await.take() {
+            session.stop().await;
+        }
+        if let Some(session) = self.live_bridge.lock().await.take() {
             session.stop().await;
         }
     }
@@ -359,6 +462,30 @@ impl NativeConsole {
             }
             return result;
         }
+        if action == "connect_live" {
+            validation::fields(
+                request,
+                &["action", "target_id", "binding_id", "confirm_live"],
+                "Native console live connect",
+            )?;
+            if guard.is_some() {
+                return Err(Error::conflict(
+                    "Stop the current native session before starting another",
+                ));
+            }
+            if request["confirm_live"] != true {
+                return Err(Error::bad(
+                    "Confirm that commands can change the specifically selected captured document",
+                ));
+            }
+            let selected =
+                validation::canonical(&request["target_id"], 64, true, "Console target")?;
+            let binding =
+                validation::canonical(&request["binding_id"], 64, true, "Console binding")?;
+            let (session, result) = bind_live(&self.live_bridge, selected, binding).await?;
+            *guard = Some(session);
+            return Ok(result);
+        }
         if action != "start" && !(action == "stop" && request["session_id"].is_null()) {
             validation::canonical(&request["session_id"], 64, true, "Console session")?;
         }
@@ -369,8 +496,21 @@ impl NativeConsole {
             {
                 return Err(Error::conflict("Native console session changed"));
             }
-            if let Some(session) = guard.take() {
-                session.stop().await;
+            if let Some(mut session) = guard.take() {
+                let bridge_alive = session.bridge.child.try_wait().ok().flatten().is_none();
+                if session.live && !session.poisoned && bridge_alive {
+                    if let Err(error) = session.release_live_values().await {
+                        session.stop().await;
+                        return Err(error);
+                    }
+                    session.live_target = None;
+                    let mut armed = self.live_bridge.lock().await;
+                    if let Some(previous) = armed.replace(session) {
+                        previous.stop().await;
+                    }
+                } else {
+                    session.stop().await;
+                }
             }
             return Ok(json!({"contract_version":2,"state":"idle","session_id":null}));
         }
@@ -390,14 +530,23 @@ impl NativeConsole {
         if request["session_id"] != session.id {
             return Err(Error::conflict("Native console session changed"));
         }
-        if session.poisoned
-            || session.started.elapsed() >= Duration::from_secs(3600)
-            || session.browser.child.try_wait()?.is_some()
-        {
+        let ended = if let Some(browser) = session.browser.as_mut() {
+            browser.child.try_wait()?.is_some()
+        } else {
+            session.bridge.child.try_wait()?.is_some()
+        };
+        if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
             guard.take().unwrap().stop().await;
             return Err(Error::conflict(
                 "Native console session ended; start another session",
             ));
+        }
+        if action == "targets" && session.live {
+            let result = session.list_live().await;
+            if result.is_err() {
+                guard.take().unwrap().stop().await;
+            }
+            return result;
         }
         let runtime_source;
         let (operation, target, source) = if action == "targets" {
@@ -424,20 +573,100 @@ impl NativeConsole {
             let target = validation::canonical(&request["target_id"], 64, true, "Console target")?;
             (2, target, source)
         };
+        if session.live && operation != 1 {
+            // Reject unknown ownership before any request. Refreshing may remove
+            // the exact ID but must never translate it to a replacement document.
+            if session.live_target != Some(target) || !session.native_targets.contains(&target) {
+                return Ok(stale_document(&session.id));
+            }
+            if let Err(error) = session.list_live().await {
+                guard.take().unwrap().stop().await;
+                return Err(error);
+            }
+            if !session.native_targets.contains(&target) {
+                return Ok(stale_document(&session.id));
+            }
+            session.accessed_targets.insert(target);
+        }
         let result = session.exchange(operation, target, source).await;
+        if session.live
+            && result
+                .as_ref()
+                .is_ok_and(|value| value["status"] == "stale_target")
+        {
+            session.live_target = None;
+        }
         if result.is_err() {
             guard.take().unwrap().stop().await;
         }
         result
+    }
+    pub async fn arm_live_bridge(&self) {
+        let Some(directory) = self.live_directory.clone() else {
+            return;
+        };
+        if !private_directory(&directory) || !worker::executable(&self.helper) {
+            if private_directory(&directory) {
+                write_absent(&directory);
+            }
+            return;
+        }
+        let _ = std::fs::remove_file(directory.join("binding.absent"));
+        let bridge = match self.spawn_bridge(&directory).await {
+            Ok(bridge) => bridge,
+            Err(_) => {
+                write_absent(&directory);
+                return;
+            }
+        };
+        if !wait_for_socket(&bridge.socket).await || write_binding(&directory, &bridge).is_err() {
+            bridge.stop().await;
+            write_absent(&directory);
+            return;
+        }
+        *self.live_bridge.lock().await = Some(bridge.session(ConsoleDir::Live(directory), true));
     }
     async fn launch(&self, address: &str) -> Result<Session> {
         let directory = tempfile::Builder::new()
             .prefix("reb-console.")
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in("/tmp")?;
+        let bridge = self.spawn_bridge(directory.path()).await?;
+        let mut browser = Command::new(self.browser.as_ref().unwrap());
+        browser
+            .arg(format!(
+                "--user-data-dir={}",
+                directory.path().join("profile").display()
+            ))
+            .args([
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--password-store=basic",
+                "--use-mock-keychain",
+                "--reb-native-console",
+            ])
+            .arg(format!(
+                "--reb-native-console-socket={}",
+                bridge.socket.display()
+            ))
+            .arg(format!(
+                "--reb-native-console-token-file={}",
+                bridge.token.display()
+            ))
+            .arg(format!("--reb-native-console-session-id={}", bridge.id))
+            .arg(address)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let browser = OwnedProcess::spawn(&mut browser)?;
+        let mut session = bridge.session(ConsoleDir::Disposable(directory), false);
+        session.browser = Some(browser);
+        Ok(session)
+    }
+    async fn spawn_bridge(&self, directory: &Path) -> Result<BridgeProcess> {
         let mut random = [0u8; 40];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
-        let token = directory.path().join("token");
+        let token = directory.join("token");
         let mut token_file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -447,7 +676,7 @@ impl NativeConsole {
         let id = u64::from_le_bytes(random[32..].try_into().unwrap())
             .max(1)
             .to_string();
-        let socket = directory.path().join("console.sock");
+        let socket = directory.join("console.sock");
         let mut helper = Command::new(&self.helper);
         helper
             .args(["--bridge", "--socket"])
@@ -470,42 +699,173 @@ impl NativeConsole {
             .stdout
             .take()
             .ok_or_else(|| Error::new(503, "Native console output unavailable"))?;
-        let mut browser = Command::new(self.browser.as_ref().unwrap());
-        browser
-            .arg(format!(
-                "--user-data-dir={}",
-                directory.path().join("profile").display()
-            ))
-            .args([
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--password-store=basic",
-                "--use-mock-keychain",
-                "--reb-native-console",
-            ])
-            .arg(format!("--reb-native-console-socket={}", socket.display()))
-            .arg(format!(
-                "--reb-native-console-token-file={}",
-                token.display()
-            ))
-            .arg(format!("--reb-native-console-session-id={id}"))
-            .arg(address)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let browser = OwnedProcess::spawn(&mut browser)?;
-        Ok(Session {
+        Ok(BridgeProcess {
             id,
             bridge,
-            browser,
             input,
             output,
-            _directory: directory,
+            socket,
+            token,
+        })
+    }
+}
+
+struct BridgeProcess {
+    id: String,
+    bridge: OwnedProcess,
+    input: ChildStdin,
+    output: ChildStdout,
+    socket: PathBuf,
+    token: PathBuf,
+}
+impl BridgeProcess {
+    fn session(self, directory: ConsoleDir, live: bool) -> Session {
+        Session {
+            binding_id: self.id.clone(),
+            id: self.id,
+            bridge: self.bridge,
+            browser: None,
+            input: self.input,
+            output: self.output,
+            directory,
             next_request: 1,
             poisoned: false,
             started: Instant::now(),
-        })
+            live,
+            live_target: None,
+            native_targets: BTreeSet::new(),
+            accessed_targets: BTreeSet::new(),
+        }
     }
+    async fn stop(mut self) {
+        self.bridge.stop().await;
+    }
+}
+
+const LIVE_CAPTURE_MESSAGE: &str =
+    "These documents come from the live capture. A second browser profile is not opened.";
+
+async fn bind_live(
+    live_bridge: &Mutex<Option<Session>>,
+    selected: u64,
+    binding: u64,
+) -> Result<(Session, Value)> {
+    let mut armed = live_bridge.lock().await;
+    let session = armed.as_mut().ok_or_else(|| Error::conflict(
+        "The live capture has no native console binding. Restart the capture; a second browser profile was not launched.",
+    ))?;
+    if session.binding_id != binding.to_string() {
+        return Err(Error::conflict(
+            "Live capture binding changed; select and authorize a current document",
+        ));
+    }
+    if session.poisoned
+        || session.started.elapsed() >= Duration::from_secs(3600)
+        || session.bridge.child.try_wait()?.is_some()
+    {
+        armed.take().unwrap().stop().await;
+        return Err(Error::conflict(
+            "Live console binding ended; restart the capture",
+        ));
+    }
+    let mut listing = match session.list_live().await {
+        Ok(listing) => listing,
+        Err(error) => {
+            armed.take().unwrap().stop().await;
+            return Err(error);
+        }
+    };
+    if !session.native_targets.contains(&selected) {
+        return Err(Error::conflict(
+            "Selected live document changed; explicitly select a current document",
+        ));
+    }
+    // HTTP connections get a fresh identity, independently of the existing
+    // authenticated wire connection. Requests and handles from before Stop
+    // cannot become valid again after reconnecting to the capture browser.
+    let mut random = [0u8; 8];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let next = u64::from_le_bytes(random).max(1).to_string();
+    if next == session.id {
+        return Err(Error::conflict("Console identity collision; connect again"));
+    }
+    session.id = next;
+    session.live_target = Some(selected);
+    listing["session_id"] = json!(session.id);
+    listing["selected_target_id"] = json!(selected.to_string());
+    Ok((armed.take().unwrap(), listing))
+}
+
+fn stale_document(session: &str) -> Value {
+    let mut result = json!({
+        "contract_version": 2,
+        "session_id": session,
+        "state": "ready",
+        "status": "stale_target",
+        "type": "undefined",
+        "text": "Selected document changed. Explicitly select a current live document.",
+        "truncated": false,
+    });
+    Reason::new(Code::TargetUnavailable).annotate(&mut result);
+    result
+}
+
+fn private_directory(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.permissions().mode() & 0o777 != 0o700 {
+        return false;
+    }
+    let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    let mut info = unsafe { std::mem::zeroed::<libc::stat>() };
+    unsafe { libc::lstat(path.as_ptr(), &mut info) == 0 && info.st_uid == libc::geteuid() }
+}
+
+fn write_absent(directory: &Path) {
+    let path = directory.join("binding.absent");
+    if path.exists() {
+        return;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path);
+}
+
+fn write_binding(directory: &Path, bridge: &BridgeProcess) -> Result<()> {
+    let temporary = directory.join(format!("binding.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&temporary);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(
+        format!(
+            "{}\n{}\n{}\n",
+            bridge.id,
+            bridge.socket.display(),
+            bridge.token.display()
+        )
+        .as_bytes(),
+    )?;
+    file.sync_all()?;
+    std::fs::rename(temporary, directory.join("binding"))?;
+    Ok(())
+}
+
+async fn wait_for_socket(path: &Path) -> bool {
+    for _ in 0..100 {
+        if std::fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
 // Runtime inspection commands have exact fields. Source is only accepted by
@@ -552,6 +912,7 @@ fn validate_command(command: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn wire_status_reasons_preserve_native_application_text() {
@@ -608,6 +969,283 @@ mod tests {
         );
         assert_eq!(result["code"], "application_failed");
         assert_eq!(result["details"], json!({}));
+    }
+    #[tokio::test]
+    async fn connect_live_does_not_launch_a_browser_when_the_capture_has_no_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = Options::try_parse_from([
+            "origin-trace-backend",
+            "--native-console-live-directory",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let console = NativeConsole::new(&options);
+        let state = console.state().await;
+        assert_eq!(state["state"], "idle");
+        assert_eq!(state["document_source"], "live_capture");
+        assert_eq!(state["available"], false);
+        assert_eq!(state["targets"], json!([]));
+        let error = console
+            .action(&json!({"action":"connect_live","binding_id":"42","target_id":"12","confirm_live":true}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(
+            error
+                .message
+                .contains("second browser profile was not launched")
+        );
+        assert!(console.session.lock().await.is_none());
+    }
+    // A scripted pipe peer tests backend dispatch, not Blink/V8 behavior.
+    async fn live_fixture() -> (NativeConsole, TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("targets.json"),
+            r#"[
+            {"id":11,"url":"https://same.test/page"},
+            {"id":22,"url":"https://same.test/page"}
+        ]"#,
+        )
+        .unwrap();
+        let script = r#"
+import json, pathlib, struct, sys
+root = pathlib.Path(sys.argv[1])
+request = struct.Struct('<IHHQQII')
+response = struct.Struct('<IHHQHHIII')
+target_record = struct.Struct('<QHHI256sHH128s512sI')
+while True:
+    header = sys.stdin.buffer.read(32)
+    if not header:
+        break
+    magic, version, operation, sequence, target, size, reserved = request.unpack(header)
+    source = sys.stdin.buffer.read(size).decode()
+    with (root / 'requests.jsonl').open('a') as log:
+        log.write(json.dumps({'operation':operation,'target':target,'source':source}) + '\n')
+    count, kind = 0, 11
+    if operation == 1:
+        documents = json.loads((root / 'targets.json').read_text())
+        records = []
+        for item in documents:
+            origin = b'https://same.test'
+            label = b'Identical page'
+            url = item['url'].encode()[:512]
+            records.append(target_record.pack(item['id'],len(origin),2,0,origin,len(label),len(url),label,url,0))
+        payload, count, kind = b''.join(records), len(records), 10
+    else:
+        payload = json.dumps({'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}).encode()
+    sys.stdout.buffer.write(response.pack(magic,version,0,sequence,kind,0,count,len(payload),0) + payload)
+    sys.stdout.buffer.flush()
+"#;
+        let mut command = Command::new("python3");
+        command
+            .args(["-u", "-c", script])
+            .arg(directory.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut bridge = OwnedProcess::spawn(&mut command).unwrap();
+        let input = bridge.child.stdin.take().unwrap();
+        let output = bridge.child.stdout.take().unwrap();
+        let session = Session {
+            id: "42".into(),
+            binding_id: "42".into(),
+            bridge,
+            browser: None,
+            input,
+            output,
+            directory: ConsoleDir::Live(directory.path().into()),
+            next_request: 1,
+            poisoned: false,
+            started: Instant::now(),
+            live: true,
+            live_target: None,
+            native_targets: BTreeSet::new(),
+            accessed_targets: BTreeSet::new(),
+        };
+        let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
+        options.native_console_live_directory = Some(directory.path().into());
+        let console = NativeConsole::new(&options);
+        *console.live_bridge.lock().await = Some(session);
+        (console, directory)
+    }
+    fn requests(directory: &TempDir) -> Vec<Value> {
+        std::fs::read_to_string(directory.path().join("requests.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+    async fn connect_fixture(console: &NativeConsole, target: &str) -> String {
+        console
+            .action(&json!({"action":"connect_live","binding_id":"42","target_id":target,"confirm_live":true}))
+            .await
+            .unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+    #[tokio::test]
+    async fn live_exact_ids_ignore_duplicate_urls_and_truncated_metadata() {
+        let (console, directory) = live_fixture().await;
+        let long_url = format!("https://same.test/{}", "a".repeat(600));
+        std::fs::write(
+            directory.path().join("targets.json"),
+            json!([
+                {"id":11,"url":format!("{long_url}first")},
+                {"id":22,"url":format!("{long_url}second")}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let state = console.state().await;
+        assert_eq!(state["targets"][0]["url"], state["targets"][1]["url"]);
+        assert_eq!(state["targets"][0]["id"], "11");
+        assert_eq!(state["targets"][1]["id"], "22");
+        let before = requests(&directory).len();
+        for confirmation in [json!(false), Value::Null] {
+            let error = console
+                .action(
+                    &json!({"action":"connect_live","binding_id":"42","target_id":"22","confirm_live":confirmation}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, 400);
+        }
+        assert_eq!(
+            requests(&directory).len(),
+            before,
+            "unconfirmed connection must not dispatch"
+        );
+        let identity = connect_fixture(&console, "22").await;
+        let connected = console.state().await;
+        assert_eq!(connected["selected_target_id"], "22");
+        let before = requests(&directory).len();
+        let wrong = console.action(&json!({"action":"runtime","session_id":identity,"target_id":"11","command":{"operation":"evaluate","source":"location.href"}})).await.unwrap();
+        assert_eq!(wrong["status"], "stale_target");
+        assert_eq!(
+            requests(&directory).len(),
+            before,
+            "another eligible tab is not authorized"
+        );
+        let result = console.action(&json!({"action":"runtime","session_id":identity,"target_id":"22","command":{"operation":"evaluate","source":"location.href"}})).await.unwrap();
+        assert_eq!(result["runtime"]["value"]["text"], "22");
+        assert_eq!(requests(&directory).last().unwrap()["target"], 22);
+        let refreshed = console
+            .action(&json!({"action":"targets","session_id":identity}))
+            .await
+            .unwrap();
+        assert_eq!(refreshed["selected_target_id"], "22");
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn live_replaced_binding_rejects_reused_document_id_before_dispatch() {
+        let (console, directory) = live_fixture().await;
+        assert_eq!(console.state().await["binding_id"], "42");
+        console
+            .live_bridge
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .binding_id = "99".into();
+        let before = requests(&directory).len();
+        let error = console.action(&json!({"action":"connect_live","binding_id":"42","target_id":"22","confirm_live":true})).await.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(requests(&directory).len(), before);
+        assert!(console.session.lock().await.is_none());
+        let state = console.state().await;
+        assert_eq!(state["binding_id"], "99");
+        assert_eq!(state["targets"][1]["id"], "22");
+        console.stop().await;
+    }
+
+    #[tokio::test]
+    async fn live_navigation_reload_close_revoke_authorization_without_dispatch() {
+        for replacement in [
+            json!([{"id":33,"url":"https://same.test/other"}]),
+            json!([{"id":33,"url":"https://same.test/page"}]),
+            json!([]),
+        ] {
+            let (console, directory) = live_fixture().await;
+            let identity = connect_fixture(&console, "22").await;
+            std::fs::write(
+                directory.path().join("targets.json"),
+                replacement.to_string(),
+            )
+            .unwrap();
+            let before = requests(&directory).len();
+            let result = console.action(&json!({"action":"runtime","session_id":identity,"target_id":"22","command":{"operation":"inspect","handle":"7","offset":0}})).await.unwrap();
+            assert_eq!(result["status"], "stale_target");
+            let after = requests(&directory);
+            assert_eq!(after.len(), before + 1);
+            assert_eq!(
+                after.last().unwrap()["operation"],
+                1,
+                "no runtime dispatched after document invalidation"
+            );
+            // Even a faulty peer reintroducing the old number cannot revive consent.
+            std::fs::write(
+                directory.path().join("targets.json"),
+                r#"[{"id":22,"url":"https://same.test/page"}]"#,
+            )
+            .unwrap();
+            let result = console.action(&json!({"action":"evaluate","session_id":identity,"target_id":"22","source":"location.href"})).await.unwrap();
+            assert_eq!(result["status"], "stale_target");
+            assert_eq!(requests(&directory).len(), after.len());
+            console.stop().await;
+        }
+    }
+    #[tokio::test]
+    async fn live_reconnect_clears_values_rotates_identity_and_rejects_stale_handles() {
+        let (console, directory) = live_fixture().await;
+        let first = connect_fixture(&console, "22").await;
+        console.action(&json!({"action":"runtime","session_id":first,"target_id":"22","command":{"operation":"evaluate","source":"({a:1})"}})).await.unwrap();
+        console
+            .action(&json!({"action":"stop","session_id":first}))
+            .await
+            .unwrap();
+        let last = requests(&directory).pop().unwrap();
+        assert_eq!(last["target"], 22);
+        assert_eq!(last["source"], r#"{"operation":"clear"}"#);
+        assert!(
+            console
+                .live_bridge
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .browser
+                .is_none()
+        );
+        let second = connect_fixture(&console, "11").await;
+        assert_ne!(first, second);
+        let before = requests(&directory).len();
+        let error = console.action(&json!({"action":"runtime","session_id":first,"target_id":"22","command":{"operation":"inspect","handle":"7","offset":0}})).await.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(requests(&directory).len(), before);
+        // Binding loss stays live/unavailable and cannot spawn or bind a replacement.
+        console
+            .session
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .bridge
+            .stop()
+            .await;
+        let state = console.state().await;
+        assert_eq!(state["document_source"], "live_capture");
+        assert_eq!(state["live_available"], false);
+        assert_eq!(state["targets"], json!([]));
+        assert!(
+            console
+                .action(&json!({"action":"connect_live","binding_id":"42","target_id":"11","confirm_live":true}))
+                .await
+                .is_err()
+        );
+        assert_eq!(requests(&directory).len(), before);
+        console.stop().await;
     }
     #[test]
     fn retired_session_does_not_claim_the_command_had_no_effect() {

@@ -22,6 +22,9 @@ inline constexpr std::uint32_t kNativeConsolePayloadLimit = 65536;
 inline constexpr int kNativeConsoleExecutionMillis = 200;
 inline constexpr int kNativeConsoleReplyMillis = 2000;
 inline constexpr char kNativeConsoleSwitch[] = "reb-native-console";
+// Binds this protocol to the browser a live capture is already using.
+// Remote debugging may stay enabled. Losing the socket must not exit that browser.
+inline constexpr char kNativeConsoleLiveBindingSwitch[] = "reb-native-console-live-binding";
 
 enum class NativeConsoleOperation : std::uint16_t { kTargets = 1, kEvaluate = 2, kRuntime = 3 };
 enum class NativeConsoleStatus : std::uint16_t {

@@ -112,6 +112,8 @@ impl App {
         }
     }
     pub async fn new(options: Options, port: u16) -> Arc<Self> {
+        let debugger = Debugger::new(&options);
+        let native_console = NativeConsole::new(&options);
         let app = Arc::new(Self {
             port,
             ui_root: options.ui_root(),
@@ -128,8 +130,8 @@ impl App {
                 "OriginTraceDeobfuscator",
                 "apps/deobfuscator-worker/target/debug/reb-deobfuscator-worker",
             )),
-            debugger: Debugger::new(&options),
-            native_console: NativeConsole::new(&options),
+            debugger,
+            native_console,
             owned_vm_debugger: OwnedVmDebugger::new(options.worker(
                 &options.owned_vm_fixture,
                 "OriginTraceOwnedVmFixture",
@@ -150,6 +152,7 @@ impl App {
             package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
         });
+        app.native_console.arm_live_bridge().await;
         app.debugger.start().await;
         app
     }

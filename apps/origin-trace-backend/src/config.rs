@@ -50,6 +50,10 @@ pub struct Options {
     pub artifact_socket: Option<PathBuf>,
     #[arg(long)]
     pub devtools_active_port: Option<PathBuf>,
+    /// Private directory where a live capture publishes the native-console binding.
+    /// When set, the console attaches to that capture browser instead of launching one.
+    #[arg(long)]
+    pub native_console_live_directory: Option<PathBuf>,
     #[arg(long)]
     pub capture_network_content: bool,
     /// Maximum multiplexed HTTP capture sessions; shares a fixed browser buffer budget.
@@ -101,6 +105,7 @@ impl Options {
             &mut self.socket,
             &mut self.artifact_socket,
             &mut self.devtools_active_port,
+            &mut self.native_console_live_directory,
             &mut self.endpoint_file,
         ]
         .into_iter()

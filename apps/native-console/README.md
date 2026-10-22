@@ -2,7 +2,11 @@
 
 `reb-console` is the dependency-free C++20 transport for Origin Trace's Console
 panel. The Rust backend launches its binary pipe mode and owns the disposable
-custom Brave process. The app bundles it as `OriginTraceNativeConsole`.
+custom Brave process. Explicit live capture binding instead reuses its existing
+bridge with native document-generation IDs, selected-document mutation consent,
+and no second browser. Rebuild the matching browser/backend together; see the
+[ownership and live acceptance gates](../../protocol/native-console-v2.md).
+The app bundles it as `OriginTraceNativeConsole`.
 
 ```sh
 make native-console-build

@@ -84,8 +84,11 @@ before adding a native network hook; ordinary groups do not isolate traffic.
 The disabled-by-default native console is a separate mutation path. Patch 0011
 wires the browser session and per-frame renderer agent; the overlay owns their
 Mojo contract and bounded local transport. It evaluates explicit commands in a
-selected main-world context inside a disposable browser profile. It creates no
-CDP endpoint and makes no undetectability guarantee. See
+selected main-world context. A disposable profile is the default. An explicit
+live-capture binding evaluates in a document the capture browser is already
+showing, keeps remote debugging, and does not exit that browser when the
+channel drops. It still cannot set breakpoints, step, or inspect paused frames.
+It creates no CDP endpoint and makes no undetectability guarantee. See
 [Native Console v2](../../../protocol/native-console-v2.md) for ownership,
 wire layouts, limits, and real-browser checks after rebuilding.
 Eligible HTTP and HTTPS documents must belong to a profile directory immediately

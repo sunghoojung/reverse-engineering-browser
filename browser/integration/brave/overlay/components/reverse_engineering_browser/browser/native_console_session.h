@@ -10,9 +10,14 @@
 
 namespace reb {
 
-// Disabled unless the dedicated disposable-profile launcher provides every
-// required flag. Called on the browser UI thread before renderer launch.
+// Disabled unless the launcher provides every required flag. A disposable
+// profile still rejects remote debugging. An explicit live-capture binding
+// may share the browser the capture is already using.
+// Called on the browser UI thread before renderer launch.
 [[nodiscard]] bool IsNativeConsoleEnabled();
+// A live-capture binding returns a no-op. A disposable session returns a null
+// closure so the Chrome browser client can exit that browser.
+[[nodiscard]] base::OnceClosure NativeConsoleRetireCallback();
 void StartNativeConsoleSession(base::OnceClosure retired);
 
 }  // namespace reb

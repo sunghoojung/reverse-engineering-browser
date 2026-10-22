@@ -270,10 +270,21 @@ for bounds, identity semantics and validation coverage.
 
 ## Native console
 
-The **Console** bottom dock starts a separate disposable custom Brave session for
-explicit main-world JavaScript commands. Set `REB_BRAVE_BINARY` to a rebuilt
-custom browser and use the live backend. Open the connection menu to connect a
-disposable browser, then select a document before entering commands.
+The **Console** bottom dock runs explicit mutable main-world JavaScript commands.
+Disposable browser session remains the default, even during capture. In Session
+settings, live execution requires **Live capture (explicit opt-in)**, an exact
+native document selection, and selected-document mutation consent before Connect.
+It is not read-only: commands can change the captured page, cookies and storage.
+No second profile is launched for live binding. Refresh preserves the exact
+document; navigation, reload, closure or binding loss clears authorization and
+retains an unavailable selection rather than silently choosing another tab or
+falling back to disposable execution. Disconnect before selecting and authorizing
+another document. Disconnect does not undo page effects or kill capture.
+
+Set `REB_BRAVE_BINARY` to the matching rebuilt custom browser and use the live
+backend. The [native contract](../../protocol/native-console-v2.md) specifies
+ownership, rebuild compatibility and the real-browser acceptance gates. No
+breakpoints, stepping or paused-frame inspection are supplied by this console.
 Workspace tabs sit across the top, with VM between Sources and Console. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
 for their value types. Coloring uses inert text spans and a bounded tokenizer.

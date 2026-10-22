@@ -320,9 +320,11 @@ impl App {
                 } else {
                     self.workspace.clone()
                 };
-                let value = self
-                    .blocking(move || store.load())
+                // These documents are at most 1–2 MiB. Do not wait behind VM
+                // analysis or Wasm inspection, which hold the shared reader permits.
+                let value = tokio::task::spawn_blocking(move || store.load())
                     .await
+                    .map_err(|e| Error::new(500, e.to_string()))?
                     .map_err(|e| Error::new(500, e.message))?;
                 etag = Some(format!(
                     "\"{}-{}\"",

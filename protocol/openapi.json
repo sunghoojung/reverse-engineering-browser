@@ -8629,8 +8629,7 @@
               },
               "secret": {
                 "type": "string",
-                "x-max-utf8-bytes": 4096,
-                "minLength": 1
+                "x-max-utf8-bytes": 4096
               }
             },
             "required": [

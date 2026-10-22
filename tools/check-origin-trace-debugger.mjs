@@ -788,6 +788,21 @@ assert.equal(networkModels.requestsFromDebuggerNetwork({...binaryNetwork, captur
 assert.equal(bodyCache.size, 0);
 const truncatedMethodNetwork=networkSnapshot([networkRecord('method-truncated',{method_truncated:true})]);
 assert.equal(networkModels.requestsFromDebuggerNetwork(truncatedMethodNetwork)[0].methodTruncated,true);
+const pendingExtra = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
+  networkRecord('worker', {state: 'pending', status: 200, duration_ms: null, resource_type: 'Script'})
+]))[0];
+assert.equal(pendingExtra.status, 'pending');
+assert.equal(pendingExtra.provisionalStatus, 200);
+assert.equal(pendingExtra.time, 'pending');
+assert.equal(pendingExtra.operation, 'cdp_pending');
+const finishedStatus = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
+  networkRecord('done', {state: 'complete', status: 200})
+]))[0];
+assert.equal(finishedStatus.status, 200);
+assert.equal(finishedStatus.provisionalStatus, null);
+assert.equal(networkModels.requestsFromDebuggerNetwork(networkSnapshot([
+  networkRecord('aborted', {state: 'failed', status: 200})
+]))[0].status, 'failed');
 console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
 
 // Public row IDs own selection, search and body-cache entries. Raw CDP IDs may

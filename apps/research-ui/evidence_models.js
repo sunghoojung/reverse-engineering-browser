@@ -1734,7 +1734,8 @@
             id: record.id,
             path: record.url,
             method: record.method,
-            status: record.state === 'failed' ? 'failed' : record.status ?? 'pending',
+            status: record.state === 'failed' ? 'failed' : record.state === 'pending' ? 'pending' : record.status ?? 'pending',
+            provisionalStatus: record.state === 'pending' && Number.isInteger(record.status) ? record.status : null,
             time: terminal && record.duration_ms !== null ? record.duration_ms : 'pending',
             // Response MIME identifies Wasm even when CDP calls its loader Fetch/XHR.
             type: record.mime_type.split(';', 1)[0].trim().toLowerCase() === 'application/wasm'

@@ -936,8 +936,23 @@
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
         if (selectedRequest?.protocolRequestId || String(selectedRequest?.operation).startsWith('cdp_')) {
-          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty',
-            'This CDP request has no exact native-event link. Host, method and timing matches cannot establish request-specific signal relationships.'));
+          const events = fingerprintEventsFromEvents(state.events ?? []);
+          const tabs = new Set(events.map(signalTabKey));
+          const summary = document.createElement('article');
+          summary.className = 'signal-request-card';
+          summary.append(
+            textElement('h3', '', 'No exact native request link'),
+            textElement('p', '', 'This debugger row has no native request id, so Origin Trace will not build a request signal profile from host, method, or timing. Those matches can belong to another request.'),
+            textElement('p', '', `${events.length} fingerprint ${events.length === 1 ? 'event' : 'events'}${tabs.size ? ` on ${tabs.size} tab ${tabs.size === 1 ? 'scope' : 'scopes'}` : ''}.`)
+          );
+          const open = textElement('button', 'secondary-button', 'Open Fingerprinting');
+          open.type = 'button';
+          open.addEventListener('click', () => {
+            state.signalTabId = 'all';
+            showScreen('signals', open);
+          });
+          summary.append(open);
+          elements.signalRequestProfile.replaceChildren(summary);
           return;
         }
         if (state.signalProfileStatus === 'loading') {
@@ -2669,7 +2684,7 @@
           const empty = document.createElement('div');
           empty.className = 'field-empty';
           empty.textContent = request?.origin === 'live'
-            ? request.protocolRequestId ? 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only.' : 'Structured fields were not captured. Request-level origin evidence is still available.'
+            ? request.protocolRequestId ? 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only. Related VM candidates opens session analysis, and Fingerprinting lists the session surfaces.' : 'Structured fields were not captured. Request-level origin evidence is still available.'
             : request?.origin === 'demo'
               ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
               : request
@@ -2791,7 +2806,23 @@
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
           if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
-            renderInspectorMessage('This CDP request has no exact native-event link. Host, method and timing matches cannot establish request-specific signal relationships. Raw fingerprint events remain available in Fingerprinting.');
+            const events = fingerprintEventsFromEvents(state.events ?? []);
+            const tabs = new Set(events.map(signalTabKey));
+            elements.prompt.textContent = 'Session fingerprint activity, not a request profile';
+            renderInspectorDetails([
+              {key: 'link', value: 'This debugger row has no native request id. Host, method, and timing matches are not a request profile.', type: 'unavailable'},
+              {key: 'session fingerprint events', value: String(events.length), type: 'count'},
+              {key: 'tab scopes', value: String(tabs.size), type: 'count'}
+            ]);
+            const open = document.createElement('button');
+            open.type = 'button';
+            open.className = 'secondary-button';
+            open.textContent = 'Open Fingerprinting';
+            open.addEventListener('click', () => {
+              state.signalTabId = 'all';
+              showScreen('signals', open);
+            });
+            elements.fieldTree.append(open);
             return;
           }
           if (state.signalProfileStatus === 'loading') {
@@ -12046,12 +12077,16 @@
       elements.requestVmCandidates.addEventListener('click', async () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
-          investigationNotice('This CDP request has no exact native-event link. Host, method and timing matches cannot identify request-specific VM candidates.', 'unavailable');
+          investigationNotice('This debugger row has no native request id, so Related VM candidates opens session analysis. Findings without a related request id stay visible. This is not a join to the selected request.', 'unavailable');
+          const refresh = refreshVmAnalysis(null);
+          showScreen('vm', elements.requestVmCandidates);
+          await refresh;
           return;
         }
         const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;
-        if (requestId) await refreshVmAnalysis(requestId);
+        const refresh = requestId ? refreshVmAnalysis(requestId) : null;
         showScreen('vm', elements.requestVmCandidates);
+        await refresh;
       });
       elements.sourceWindowPrevious.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;

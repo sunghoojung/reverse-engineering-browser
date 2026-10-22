@@ -50,6 +50,9 @@ impl Experiment {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    pub(super) fn next_session(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
 }
 impl Debugger {
     pub(super) fn group_response(&self, key: &str) -> Value {
@@ -177,6 +180,11 @@ impl Debugger {
             .configured
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = false;
+        *self
+            .hooks
+            .isolated_world
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.update(|s| {
             let empty: Value =
                 serde_json::from_str(include_str!("../../assets/debugger-empty.json")).unwrap();
@@ -744,6 +752,11 @@ impl Debugger {
             .unwrap_or_else(|e| e.into_inner()) = false;
         self.automation.erase_session();
         self.fields.erase_session();
+        *self
+            .hooks
+            .isolated_world
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let empty: Value = serde_json::from_str(include_str!("../../assets/debugger-empty.json"))
             .expect("Debugger initial state");
         self.update(|s| {

@@ -2546,7 +2546,7 @@
             },
             {
               "id": "debugger-exclusive-owner",
-              "condition": "No interception request may be running and Object Lab must not be navigating/searching/mutating. Active Repeater permits only cancel_repeater_request. Runtime Hooks arming/armed/handling/stopping permits only disarm_runtime_hooks, including blocking compare_runtime_field_test."
+              "condition": "No interception request may be running and Object Lab must not be navigating/searching/mutating. Active Repeater permits only cancel_repeater_request. Runtime Hooks arming/armed/handling/stopping permits disarm_runtime_hooks and dispose_request_interception_experiment, because disposal disarms hooks as cleanup. compare_runtime_field_test stays blocked."
             },
             {
               "id": "debugger-automation-owner",
@@ -10247,7 +10247,7 @@
               "prerequisites": [
                 {
                   "id": "hooks-editable",
-                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                  "condition": "Runtime Hooks requires its attached disposable page, or an already-attached captured document with a live JavaScript source, and must not be arming, armed, handling, or stopping (hooks_editable)."
                 },
                 {
                   "id": "live-hook-source",
@@ -10418,7 +10418,7 @@
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
-            "description": "Requires an attached isolated page, at least one definition and active breakpoints. Returns ok,runtime_hooks,generation.",
+            "description": "Requires an attached captured document or disposable page, at least one definition, active breakpoints, and confirmed true. Returns ok,runtime_hooks,generation.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
             "x-reb-execution": {
               "kind": "action",
@@ -10443,7 +10443,7 @@
               "prerequisites": [
                 {
                   "id": "hooks-editable",
-                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                  "condition": "Runtime Hooks requires its attached disposable page, or an already-attached captured document with a live JavaScript source, and must not be arming, armed, handling, or stopping (hooks_editable)."
                 },
                 {
                   "id": "hooks-ready",
@@ -10457,7 +10457,7 @@
                   "when": {}
                 }
               ],
-              "notes": "Installs browser breakpoints/network observation and enables selected hook logic and return overrides in the disposable page/workers.",
+              "notes": "Installs Debugger.setBreakpoint or Debugger.setBreakpointOnFunctionCall points and enables selected hook logic and return overrides. An already-attached document gets a named isolated world in that document. The disposable Experiment page stays on that context and its workers.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
@@ -10888,7 +10888,7 @@
               "prerequisites": [
                 {
                   "id": "hooks-editable",
-                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                  "condition": "Runtime Hooks requires its attached disposable page, or an already-attached captured document with a live JavaScript source, and must not be arming, armed, handling, or stopping (hooks_editable)."
                 }
               ],
               "confirmations": [],
@@ -11676,6 +11676,11 @@
               "action": {
                 "const": "disarm_runtime_hooks",
                 "type": "string"
+              },
+              "erase": {
+                "type": "boolean",
+                "default": false,
+                "description": "Erase a captured-document hook session without disposing a browser context. Refused while a disposable experiment context exists."
               }
             },
             "required": [
@@ -11684,7 +11689,7 @@
             "x-source": [
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
-            "description": "No action-specific request fields. Session/state prerequisites still apply.",
+            "description": "Optional erase clears a captured-document hook session and leaves the page open. Default disarm keeps definitions.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
             "x-reb-execution": {
               "kind": "action",
@@ -11706,11 +11711,11 @@
               "uncertainties": [],
               "prerequisites": [],
               "confirmations": [],
-              "notes": "Removes installed hook breakpoints and active point ownership; definitions and captured results remain.",
+              "notes": "Removes installed hook breakpoints and active point ownership. Definitions remain unless erase is true, which clears a captured-document session without closing the page or disposing a browser context. Erase is refused while a disposable experiment context exists.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
-                  "symbol": "Debugger::disarm_hooks"
+                  "symbol": "Debugger::disarm_hooks_from"
                 }
               ]
             }
@@ -11756,7 +11761,7 @@
               "prerequisites": [
                 {
                   "id": "experiment-present",
-                  "condition": "An owned disposable Experiment context must exist; common dispatcher ownership guards still apply before cleanup."
+                  "condition": "An owned disposable Experiment context must exist. Disposal is permitted while Runtime Hooks are armed because cleanup disarms them first."
                 }
               ],
               "confirmations": [],
@@ -12230,7 +12235,7 @@
               "prerequisites": [
                 {
                   "id": "hooks-editable",
-                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                  "condition": "Runtime Hooks requires its attached disposable page, or an already-attached captured document with a live JavaScript source, and must not be arming, armed, handling, or stopping (hooks_editable)."
                 },
                 {
                   "id": "known-hook",

@@ -4265,7 +4265,7 @@
         }));
       }
 
-      function renderRuntimeHookHits(hooks) {
+      function renderRuntimeHookHits(hooks, emptyMessage = 'Arm a hook, then exercise the isolated page.') {
         const hits = hooks?.hits ?? [];
         const requests = hooks?.requests ?? [];
         const total = hooks?.total_hits ?? 0;
@@ -4281,7 +4281,7 @@
         if (key === state.runtimeHookHitsKey) return;
         state.runtimeHookHitsKey = key;
         if (!hits.length && !requests.length) {
-          elements.hooksHits.replaceChildren(textElement('div', 'experiment-empty', 'Arm a hook, then exercise the isolated page.'));
+          elements.hooksHits.replaceChildren(textElement('div', 'experiment-empty', emptyMessage));
           return;
         }
         const events = [
@@ -4432,21 +4432,30 @@
           experiment.target_id === state.debuggerSession?.target?.id && hooks.target_id === state.debuggerSession?.target?.id &&
           ['ready', 'error'].includes(experiment.state) && !['attaching', 'disposing', 'disposed'].includes(hooks.state);
         const pageReady = contextReady && objectExperiment?.navigation_id > 0 && objectExperiment.url;
-        const canDispose = experiment?.isolated && experiment.pending_requests === 0 && !active && !contextWorking;
-        const editable = contextReady && !active && !contextWorking;
+        const disposableReady = contextReady;
+        const capturedTarget = state.debuggerSession?.target;
         const hookableScripts = (state.debuggerSession?.scripts ?? []).filter(script => {
           if (script.language !== 'JavaScript') return false;
           const url = script.url ?? '';
           return !url.startsWith('file:') && !url.startsWith('evaluate;') && !url.startsWith('pptr:') && !url.startsWith('reb-automation-');
         });
+        const capturedScripts = hookableScripts.filter(script => script.target_type !== 'worker' &&
+          (script.target_id ?? capturedTarget?.id) === capturedTarget?.id);
+        const capturedDocument = attached && !experiment?.isolated && Boolean(capturedTarget?.id) && capturedScripts.length > 0 &&
+          (!hooks?.isolated || hooks.target_id === capturedTarget.id) &&
+          !['attaching', 'disposing', 'disposed'].includes(hooks?.state ?? '');
+        const disposableEditable = disposableReady && !active && !contextWorking;
+        const capturedEditable = capturedDocument && !active && !contextWorking;
+        const editable = disposableEditable || capturedEditable;
         const workerScripts = hookableScripts.filter(script => script.target_type === 'worker').slice(-128);
         const scripts = [
           ...workerScripts,
           ...hookableScripts.filter(script => script.target_type !== 'worker').slice(-(256 - workerScripts.length))
         ];
-        elements.hooksWorkspace.dataset.sourceReady = String(Boolean(pageReady && scripts.length));
+        const listedScripts = capturedDocument && !disposableReady ? capturedScripts.slice(-256) : scripts;
+        elements.hooksWorkspace.dataset.sourceReady = String(Boolean((pageReady || capturedDocument) && listedScripts.length));
         const selectedScript = elements.hooksScript.value;
-        const options = scripts.map(script => {
+        const options = listedScripts.map(script => {
           const option = document.createElement('option'); option.value = script.script_id;
           option.textContent = `${script.target_type === 'worker' ? `Worker ${script.target_id.slice(0, 12)}` : 'Page'} · ${sourceName({...script, source_type: 'script'})} · lines ${script.start_line + 1}-${script.end_line + 1}`;
           return option;
@@ -4456,22 +4465,27 @@
           options.push(option);
         }
         elements.hooksScript.replaceChildren(...options);
-        if (scripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
+        if (listedScripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
 
         elements.experimentTitle.textContent = 'Runtime Hooks';
-        elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page or its worker.';
+        elements.experimentSubtitle.textContent = capturedDocument
+          ? 'Observe function calls or test return values on the captured document. Arming stays explicit.'
+          : 'Observe function calls or test return values on a disposable page or its worker.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (state.experimentNeedsRefresh) setExperimentNotice('working', 'Waiting for a current debugger snapshot. Runtime Hooks controls are paused until reconciliation.');
         else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
         else if (hooks.last_failure) setExperimentNotice('error', hooks.last_failure);
-        else if (hooks.state === 'armed' || contextReady || hooks.state === 'disposed') setExperimentNotice('ready', hooks.message);
+        else if (hooks.state === 'armed' || contextReady || (capturedDocument && hooks.isolated) || hooks.state === 'disposed') setExperimentNotice('ready', hooks.message);
         else if (!attached) setExperimentNotice('idle', 'Connect a browser target to configure hooks.');
         else setExperimentNotice('idle', hooks.message);
 
-        elements.hooksContextBadge.dataset.kind = hooks?.state === 'error' ? 'error' : hooks?.isolated ? '' : 'offline';
+        const documentName = String(capturedTarget?.title || capturedTarget?.url || 'Captured document').slice(0, 80);
+        elements.hooksContextBadge.dataset.kind = hooks?.state === 'error' ? 'error' : (hooks?.isolated || capturedDocument) ? '' : 'offline';
         elements.hooksContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
-          : experiment?.state === 'disposing' ? 'Disposing' : hooks?.isolated ? 'Isolated'
+          : experiment?.state === 'disposing' ? 'Disposing'
+            : capturedDocument ? documentName
+            : hooks?.isolated ? 'Isolated'
             : hooks?.state === 'disposed' ? 'Disposed' : 'Not created';
         const workerCount = hooks?.workers?.length ?? 0;
         const workerOverflow = hooks?.worker_overflow ?? 0;
@@ -4479,21 +4493,27 @@
           ? `${workerCount} ${workerCount === 1 ? 'worker' : 'workers'} discovered${workerOverflow ? ` · ${workerOverflow} beyond the attachment limit` : ''}`
           : '';
         elements.hooksContextMessage.hidden = !(workerCount || workerOverflow);
-        elements.hooksStorageState.textContent = hooks?.isolated ? 'Ephemeral and isolated'
+        elements.hooksStorageState.textContent = capturedDocument && hooks?.isolated
+          ? 'Ephemeral on the captured document'
+          : hooks?.isolated ? 'Ephemeral and isolated'
           : hooks?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
         elements.hooksPointUsage.textContent = `${hooks?.active_points ?? 0} / ${hooks?.limits?.active_points ?? 64}`;
-        elements.hooksPageBadge.dataset.kind = pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
-        elements.hooksPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening' : pageReady ? 'Loaded' : 'No page';
+        elements.hooksPageBadge.dataset.kind = capturedDocument ? '' : pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
+        elements.hooksPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening'
+          : capturedDocument ? 'Captured' : pageReady ? 'Loaded' : 'No page';
         const stateLabels = {arming: 'Arming', armed: 'Armed', handling: 'Handling', stopping: 'Stopping',
           disarmed: 'Disarmed', ready: 'Disarmed', error: 'Error'};
         elements.hooksStateBadge.textContent = stateLabels[hooks?.state] ?? 'Disarmed';
         elements.hooksStateBadge.dataset.kind = hooks?.last_failure ? 'error' : hooks?.state === 'armed' ? '' : 'offline';
 
+        const disposableDispose = experiment?.isolated && experiment.pending_requests === 0 && !contextWorking;
+        const capturedDispose = capturedDocument && hooks?.isolated && hooks.target_id === capturedTarget.id &&
+          (active || ['ready', 'disarmed', 'error'].includes(hooks.state)) && !contextWorking;
         elements.hooksCreate.disabled = !attached || Boolean(experiment?.isolated) || contextWorking || state.debuggerActionPending;
-        elements.hooksDispose.disabled = !canDispose || state.debuggerActionPending;
+        elements.hooksDispose.disabled = !(disposableDispose || capturedDispose) || state.debuggerActionPending;
         elements.hooksClear.disabled = !(hooks?.hits.length || hooks?.requests.length) || active || contextWorking || state.debuggerActionPending;
-        elements.hooksPageUrl.disabled = !editable;
-        elements.hooksNavigate.disabled = !editable || state.debuggerActionPending;
+        elements.hooksPageUrl.disabled = !disposableEditable;
+        elements.hooksNavigate.disabled = !disposableEditable || state.debuggerActionPending;
         elements.hooksDefinitionForm.querySelectorAll('input, select, textarea').forEach(field => { field.disabled = !editable; });
         const functionMode = elements.hooksEntryMode.value === 'function';
         elements.hooksSourceLocationFields.hidden = functionMode;
@@ -4504,15 +4524,15 @@
         elements.hooksReturnValueField.hidden = functionMode || elements.hooksReturnMode.value === 'none';
         elements.hooksReturnValueField.firstChild.textContent = elements.hooksReturnMode.value === 'json'
           ? 'Replacement JSON' : 'Replacement frame expression';
-        elements.hooksAdd.disabled = !editable || !scripts.length || !elements.hooksLabel.value.trim() ||
+        elements.hooksAdd.disabled = !editable || !listedScripts.length || !elements.hooksLabel.value.trim() ||
           (!elements.hooksEntryEnabled.checked && !elements.hooksReturnEnabled.checked) ||
           (functionMode && !elements.hooksFunctionExpression.value.trim()) || state.debuggerActionPending;
-        elements.hooksConfirm.disabled = !contextReady || active || !hooks?.definitions.length || contextWorking;
+        elements.hooksConfirm.disabled = !editable || !hooks?.definitions.length || contextWorking;
         elements.hooksArm.disabled = !editable || !hooks?.definitions.length || !elements.hooksConfirm.checked || state.debuggerActionPending;
         elements.hooksDisarm.disabled = !active || state.debuggerActionPending || state.experimentNeedsRefresh;
         renderRuntimeHookDefinitions(hooks, active);
-        renderRuntimeHookHits(hooks);
-        renderRuntimeFieldTest(hooks, editable, contextReady && !contextWorking &&
+        renderRuntimeHookHits(hooks, capturedDocument ? 'Arm a hook, then exercise the captured document.' : undefined);
+        renderRuntimeFieldTest(hooks, disposableEditable, contextReady && !contextWorking &&
           !['arming', 'handling', 'stopping'].includes(hooks?.state));
         elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
         elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentNeedsRefresh && !state.experimentError && !hooks.last_failure
@@ -4767,7 +4787,8 @@
         const hasPendingRequests = (experiment?.pending_requests ?? 0) > 0;
         const contextReady = attached && experiment?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state);
-        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !hookBusy && !automationBusy;
+        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !automationBusy;
+        const disposeBlocked = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) || automationBusy;
         elements.experimentSubtitle.textContent = request && state.selectedField
           ? `request-${request.id} · ${state.selectedField.label} ${state.selectedField.path} · isolated replay only`
           : attached
@@ -4803,7 +4824,7 @@
         elements.experimentPendingCount.textContent = `${experiment?.pending_requests ?? 0} / ${experiment?.limits?.pending_requests ?? 16}`;
 
         elements.experimentCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
-        elements.experimentDispose.disabled = !canDispose || working || state.debuggerActionPending;
+        elements.experimentDispose.disabled = !canDispose || disposeBlocked || state.debuggerActionPending;
         elements.experimentClear.disabled = !experiment || !['disposed', 'error'].includes(experiment.state) || experiment.isolated || working || state.debuggerActionPending;
         elements.experimentArmRule.disabled = !contextReady || hasPendingRequests || working || state.debuggerActionPending;
         elements.experimentRun.disabled = !contextReady || hasPendingRequests || working || state.debuggerActionPending;
@@ -12354,7 +12375,12 @@
         action: 'create_request_interception_experiment'
       }));
       elements.hooksDispose.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
+        const hooks = runtimeHooksState();
+        const experiment = requestInterception();
+        const captured = hooks?.isolated && hooks.target_id === state.debuggerSession?.target?.id && !experiment?.isolated;
+        const response = currentExperimentReceipt(await runExperimentAction(
+          captured ? {action: 'disarm_runtime_hooks', erase: true} : {action: 'dispose_request_interception_experiment'}
+        ));
         if (response) {
           elements.hooksConfirm.checked = false;
           elements.hooksDefinitionForm.reset();

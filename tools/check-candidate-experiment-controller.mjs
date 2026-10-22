@@ -10,6 +10,7 @@ import {candidateTargetChoiceReady} from './check-candidate-experiment-journey.m
 function deferred(){let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};}
 export async function checkCandidateExperimentController(root) {
   await checkRuntimeHooksSnapshotReadiness(root);
+  await checkCapturedDocumentHookControls(root);
   const source=await readFile(join(root,'apps/research-ui/field_provenance.js'),'utf8');
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const closeHooks=app.slice(app.indexOf('      function closeSourceHooks('),app.indexOf('      function pivotSourceToRuntimeHooks('));
@@ -258,4 +259,68 @@ async function checkRuntimeHooksSnapshotReadiness(root) {
   assert.equal(calls.length,0,'Fresh reconciliation never retries a refused navigation');
   await api.navigate();assert.equal(calls.length,1);assert.equal(calls[0].action,'navigate_object_experiment');
   console.log('PASS Runtime Hooks stale-GET admission: all mutations disabled, visible reason, retained draft, fail-closed event and explicit recovery (DOM model)');
+}
+
+async function checkCapturedDocumentHookControls(root) {
+  const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
+  const section = (start, end) => app.slice(app.indexOf(start), app.indexOf(end, app.indexOf(start)));
+  const hooksCode = section('      function renderRuntimeHooks(', '      function parseAutomationVariables(');
+  const node = () => ({dataset: {}, value: '', checked: false, firstChild: {}, children: [], hidden: false, disabled: false,
+    querySelectorAll: () => [], replaceChildren(...children) { this.children = children; }, append(...children) { this.children.push(...children); },
+    setAttribute() {}, addEventListener() {}, focus() {}});
+  const elements = new Proxy({}, {get(target, key) { return target[key] ??= node(); }});
+  const script = {script_id: 'captured-script', language: 'JavaScript', url: 'http://127.0.0.1/captured.js', target_type: 'page', start_line: 0, end_line: 3, start_column: 0};
+  const state = {sourceHooksOpen: true, experimentPending: false, debuggerActionPending: false, experimentNeedsRefresh: false, experimentError: null,
+    debuggerSession: {state: 'running', target: {id: 'captured-page', title: 'Captured demo', url: 'http://127.0.0.1/captured'}, scripts: [script],
+      request_interception: {isolated: false, target_id: null, state: 'idle', pending_requests: 0},
+      object_experiment: {state: 'idle', navigation_id: 0, url: ''},
+      runtime_hooks: {isolated: false, target_id: null, session_id: 0, state: 'idle', message: 'Idle', definitions: [], hits: [], requests: [], workers: [], total_hits: 0}}};
+  const context = {state, elements, document: {createElement: node}, requestInterception: () => state.debuggerSession.request_interception,
+    objectExperimentState: () => state.debuggerSession.object_experiment, runtimeHooksState: () => state.debuggerSession.runtime_hooks,
+    repeaterState: () => null, automationRecipesState: () => null, sourceName: item => item.url, textElement: () => node(),
+    renderRuntimeHookDefinitions() {}, renderRuntimeHookHits() {}, renderRuntimeFieldTest() {}, setExperimentNotice() {}};
+  const api = runInNewContext(hooksCode + '\n;({render:renderRuntimeHooks})', context);
+  elements.hooksLabel.value = 'Captured';
+  elements.hooksEntryEnabled.checked = true;
+  elements.hooksConfirm.checked = false;
+  api.render();
+  const optionText = elements.hooksScript.children.map(option => option.textContent);
+  assert(optionText.some(text => text.includes('http://127.0.0.1/captured.js')), 'Captured document source must be listed');
+  assert(!optionText.every(text => text === 'No live JavaScript sources'));
+  assert.equal(elements.hooksAdd.disabled, false);
+  assert.equal(elements.hooksArm.disabled, true);
+  assert.equal(elements.hooksConfirm.checked, false, 'Arming stays explicit');
+  assert.equal(elements.hooksNavigate.disabled, true, 'Captured document must not enable disposable navigation');
+  assert.equal(elements.hooksPageUrl.disabled, true);
+  assert.equal(elements.hooksContextBadge.textContent, 'Captured demo');
+  const hooks = state.debuggerSession.runtime_hooks;
+  Object.assign(hooks, {isolated: true, target_id: 'captured-page', session_id: 4, state: 'armed', definitions: [{id: 1}], total_hits: 0});
+  api.render();
+  assert.equal(elements.hooksContextBadge.textContent, 'Captured demo');
+  assert.equal(elements.hooksDisarm.disabled, false);
+  assert.equal(elements.hooksDispose.disabled, false);
+  assert.equal(elements.hooksArm.disabled, true);
+  assert.equal(elements.hooksConfirm.checked, false);
+  assert.equal(elements.hooksStorageState.textContent, 'Ephemeral on the captured document');
+  state.debuggerSession.request_interception = {isolated: true, target_id: 'captured-page', state: 'ready', pending_requests: 0};
+  hooks.state = 'armed';
+  api.render();
+  assert.equal(elements.hooksContextBadge.textContent, 'Isolated');
+  assert.equal(elements.hooksDispose.disabled, false, 'Disposable dispose stays available while hooks are armed');
+  assert.equal(elements.hooksDisarm.disabled, false);
+  const experimentCode = section('      function renderExperiment(', '      function experimentLifetimeKey(');
+  const experimentElements = new Proxy({}, {get(target, key) { return target[key] ??= node(); }});
+  experimentElements.experimentModeButtons = [];
+  const experimentState = {experimentMode: 'interceptor', experimentPending: false, debuggerActionPending: false, experimentError: null,
+    requests: [], selectedRequestId: null, selectedField: null,
+    debuggerSession: {state: 'running', target: {id: 'owned-page'},
+      request_interception: {isolated: true, target_id: 'owned-page', state: 'ready', pending_requests: 0, experiment_id: 0, message: 'Ready'},
+      runtime_hooks: {state: 'armed'}}};
+  runInNewContext(experimentCode + '\n;renderExperiment()', {state: experimentState, elements: experimentElements, document: {createElement: node, querySelector: () => ({hidden: false})},
+    localOverrideManager: {render() {}}, renderActionScope() {}, prefillExperimentRequest() {}, setExperimentRuleVisibility() {}, setExperimentNotice() {},
+    renderExperimentResult() {}, renderExperimentAudit() {}, requestInterception: () => experimentState.debuggerSession.request_interception,
+    runtimeHooksState: () => experimentState.debuggerSession.runtime_hooks, automationRecipesState: () => null});
+  assert.equal(experimentElements.experimentDispose.disabled, false, 'Dispose context stays available while the hooks badge is armed');
+  assert.equal(experimentElements.experimentRun.disabled, true, 'Other interceptor controls stay locked while hooks are armed');
+  console.log('PASS captured-document Runtime Hooks controls: live source list, explicit arm, disarm and dispose (DOM model)');
 }

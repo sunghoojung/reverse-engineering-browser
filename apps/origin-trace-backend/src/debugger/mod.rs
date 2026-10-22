@@ -716,7 +716,7 @@ impl Debugger {
             "add_runtime_hook" => return self.add_hook(request).await,
             "remove_runtime_hook" => return self.remove_hook(request),
             "arm_runtime_hooks" => return self.arm_hooks(request).await,
-            "disarm_runtime_hooks" => return self.disarm_hooks().await,
+            "disarm_runtime_hooks" => return self.disarm_hooks_from(request).await,
             "clear_runtime_hook_hits" => return self.clear_hook_hits(),
             "configure_runtime_field_test" => return self.configure_field(request).await,
             "compare_runtime_field_test" => return self.compare_field(request),
@@ -1036,6 +1036,7 @@ fn check_action_owner(action: &str, s: &Value) -> Result<()> {
     if ["arming", "armed", "handling", "stopping"]
         .contains(&s["runtime_hooks"]["state"].as_str().unwrap_or(""))
         && action != "disarm_runtime_hooks"
+        && action != "dispose_request_interception_experiment"
     {
         return Err(Error::conflict(
             "Runtime Hooks controls the isolated target until it is disarmed",

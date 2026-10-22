@@ -26,6 +26,9 @@ pub(super) struct Hooks {
     queue: mpsc::Sender<Pause>,
     receiver: Mutex<Option<mpsc::Receiver<Pause>>>,
     execution: tokio::sync::Mutex<()>,
+    /// Target id and `Page.createIsolatedWorld` context for a captured document.
+    /// Not part of the public hook snapshot. Breakpoints stay on the page world.
+    pub(super) isolated_world: Mutex<Option<(String, u64)>>,
 }
 struct Pause {
     target: String,
@@ -92,6 +95,7 @@ impl Hooks {
             queue,
             receiver: Mutex::new(Some(receiver)),
             execution: tokio::sync::Mutex::new(()),
+            isolated_world: Mutex::new(None),
         }
     }
 }
@@ -139,7 +143,12 @@ fn coordinate(source: &str, script: &Value, offset: usize) -> Result<Value> {
 }
 impl Debugger {
     pub(super) fn hooks_editable(&self) -> Result<()> {
-        self.isolated_target("runtime_hooks", false)?;
+        if let Err(error) = self.isolated_target("runtime_hooks", false) {
+            if self.experiment.context().is_some() {
+                return Err(error);
+            }
+            self.captured_hook_target()?;
+        }
         if ["arming", "armed", "handling", "stopping"].contains(
             &self.snapshot()["runtime_hooks"]["state"]
                 .as_str()
@@ -150,6 +159,182 @@ impl Debugger {
             ));
         }
         Ok(())
+    }
+    fn captured_hook_target(&self) -> Result<String> {
+        if self.experiment.context().is_some() {
+            return Err(Error::conflict(
+                "This tool requires its attached disposable Experiment page",
+            ));
+        }
+        let snapshot = self.snapshot();
+        let id = snapshot["target"]["id"].as_str().unwrap_or("");
+        if !["running", "paused"].contains(&snapshot["state"].as_str().unwrap_or(""))
+            || id.is_empty()
+        {
+            return Err(Error::conflict(
+                "Attach a browser target before using Runtime Hooks",
+            ));
+        }
+        if snapshot["runtime_hooks"]["isolated"] == true
+            && snapshot["runtime_hooks"]["target_id"].as_str() == Some(id)
+        {
+            return Ok(id.to_owned());
+        }
+        Err(Error::conflict(
+            "Runtime Hooks are not on the captured document",
+        ))
+    }
+    async fn prepare_hook_target(&self) -> Result<()> {
+        match self.isolated_target("runtime_hooks", false) {
+            Ok(_) => Ok(()),
+            Err(error) if self.experiment.context().is_some() => Err(error),
+            Err(_) => self.ensure_captured_document().await,
+        }
+    }
+    async fn ensure_captured_document(&self) -> Result<()> {
+        if self.experiment.context().is_some() {
+            return Err(Error::conflict(
+                "This tool requires its attached disposable Experiment page",
+            ));
+        }
+        let snapshot = self.snapshot();
+        let target_id = snapshot["target"]["id"].as_str().unwrap_or("").to_owned();
+        if !["running", "paused"].contains(&snapshot["state"].as_str().unwrap_or(""))
+            || target_id.is_empty()
+        {
+            return Err(Error::conflict(
+                "Attach a browser target before using Runtime Hooks",
+            ));
+        }
+        let hooks_target = snapshot["runtime_hooks"]["target_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        if snapshot["runtime_hooks"]["isolated"] == true && hooks_target != target_id {
+            return Err(Error::conflict(
+                "Runtime Hooks are bound to a different target",
+            ));
+        }
+        let has_script = snapshot["scripts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|script| {
+                script["language"] == "JavaScript"
+                    && script["target_type"] != "worker"
+                    && script
+                        .get("target_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&target_id)
+                        == target_id
+            });
+        if !has_script {
+            return Err(Error::conflict(
+                "Runtime Hooks requires a live JavaScript source on the captured document",
+            ));
+        }
+        let stored = self
+            .hooks
+            .isolated_world
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let context_id = match stored {
+            Some((stored_target, id)) if stored_target == target_id => id,
+            _ => self.create_captured_isolated_world().await?,
+        };
+        if snapshot["runtime_hooks"]["isolated"] == true && hooks_target == target_id {
+            *self
+                .hooks
+                .isolated_world
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some((target_id, context_id));
+            return Ok(());
+        }
+        let session = snapshot["runtime_hooks"]["session_id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .unwrap_or_else(|| self.experiment.next_session());
+        let label = validation::truncate(
+            snapshot["target"]["title"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .or(snapshot["target"]["url"]
+                    .as_str()
+                    .filter(|value| !value.is_empty()))
+                .unwrap_or("captured document"),
+            160,
+        );
+        let message = validation::truncate(
+            &format!(
+                "Hook session is on the captured document {label}. Confirm before arming. No separate browser profile was opened."
+            ),
+            512,
+        );
+        let mut applied = false;
+        let bound_target = target_id.clone();
+        self.update(|s| {
+            if s["target"]["id"].as_str() != Some(bound_target.as_str()) {
+                return;
+            }
+            applied = true;
+            let hooks = &mut s["runtime_hooks"];
+            hooks["isolated"] = json!(true);
+            hooks["target_id"] = json!(bound_target);
+            hooks["session_id"] = json!(session);
+            if ["idle", "disposed", "disarmed"].contains(&hooks["state"].as_str().unwrap_or("")) {
+                hooks["state"] = json!("ready");
+            }
+            hooks["message"] = json!(message);
+        });
+        if !applied {
+            return Err(Error::conflict(
+                "The captured document changed before the hook session was adopted",
+            ));
+        }
+        *self
+            .hooks
+            .isolated_world
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((target_id, context_id));
+        Ok(())
+    }
+    async fn create_captured_isolated_world(&self) -> Result<u64> {
+        let tree = self.command("Page.getFrameTree", json!({})).await?;
+        let frame_id = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("");
+        if validation::text(&json!(frame_id), "Main frame ID", 4096, false, false).is_err() {
+            return Err(Error::protocol("Captured document has no main frame"));
+        }
+        let created = self
+            .command(
+                "Page.createIsolatedWorld",
+                json!({
+                    "frameId": frame_id,
+                    "worldName": "Origin Trace Runtime Hooks",
+                    "grantUniveralAccess": false
+                }),
+            )
+            .await?;
+        created["executionContextId"].as_u64().ok_or_else(|| {
+            Error::protocol("Isolated world was not created in the captured document")
+        })
+    }
+    fn restore_runtime_hooks(&self, session_id: u64, state: &str, message: &str) {
+        *self
+            .hooks
+            .isolated_world
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        let empty: Value = serde_json::from_str(include_str!("../../assets/debugger-empty.json"))
+            .expect("Debugger initial state");
+        self.update(|s| {
+            s["runtime_hooks"] = empty["runtime_hooks"].clone();
+            if session_id > 0 {
+                s["runtime_hooks"]["session_id"] = json!(session_id);
+                s["runtime_hooks"]["state"] = json!(state);
+                s["runtime_hooks"]["message"] = json!(message);
+            }
+        });
     }
     async fn locate_function(
         &self,
@@ -260,9 +445,23 @@ impl Debugger {
         )
     }
     pub(super) async fn add_hook(&self, r: &Value) -> Result<Value> {
-        self.add_hook_with_candidate(r, None).await
+        let fresh_capture = self.experiment.context().is_none()
+            && self.snapshot()["runtime_hooks"]["isolated"] != true;
+        let result = self.add_hook_with_candidate(r, None).await;
+        if result.is_err() && fresh_capture && self.experiment.context().is_none() {
+            let hooks = self.snapshot()["runtime_hooks"].clone();
+            if hooks["isolated"] == true
+                && hooks["definitions"]
+                    .as_array()
+                    .is_some_and(|items| items.is_empty())
+            {
+                self.restore_runtime_hooks(0, "idle", "");
+            }
+        }
+        result
     }
     async fn add_hook_with_candidate(&self, r: &Value, candidate: Option<&Value>) -> Result<Value> {
+        self.prepare_hook_target().await?;
         self.hooks_editable()?;
         let snapshot = self.snapshot();
         if snapshot["runtime_hooks"]["definitions"]
@@ -402,6 +601,7 @@ impl Debugger {
             definition["candidate_guard"] = guard.clone();
         }
         let mut accepted = false;
+        let captured_document = self.experiment.context().is_none();
         self.update(|s| {
             if let Some(guard) = candidate
                 && !Self::candidate_commit_current(s, guard, &self.hooks)
@@ -414,9 +614,11 @@ impl Debugger {
                 .unwrap()
                 .push(definition);
             s["runtime_hooks"]["state"] = json!("ready");
-            s["runtime_hooks"]["message"] = json!(
+            s["runtime_hooks"]["message"] = json!(if captured_document {
+                "Runtime Hook definition added. Confirm captured-document execution before arming."
+            } else {
                 "Runtime Hook definition added. Confirm isolated-page execution before arming."
-            );
+            });
         });
         if !accepted {
             return Err(Error::conflict(
@@ -446,15 +648,23 @@ impl Debugger {
         Ok(self.group_response("runtime_hooks"))
     }
     pub(super) async fn arm_hooks(&self, r: &Value) -> Result<Value> {
-        self.hooks_editable()?;
+        if ["arming", "armed", "handling", "stopping"].contains(
+            &self.snapshot()["runtime_hooks"]["state"]
+                .as_str()
+                .unwrap_or(""),
+        ) {
+            return Err(Error::conflict(
+                "Disarm Runtime Hooks before changing definitions",
+            ));
+        }
         if r["confirmed"] != true {
             return Err(Error::bad(
                 "Runtime Hooks requires explicit isolated-page mutation confirmation",
             ));
         }
-        let s = self.snapshot();
-        if s["settings"]["breakpoints_active"] != true
-            || s["runtime_hooks"]["definitions"]
+        let ready = self.snapshot();
+        if ready["settings"]["breakpoints_active"] != true
+            || ready["runtime_hooks"]["definitions"]
                 .as_array()
                 .unwrap()
                 .is_empty()
@@ -463,6 +673,9 @@ impl Debugger {
                 "Add a hook and activate debugger breakpoints before arming",
             ));
         }
+        self.prepare_hook_target().await?;
+        self.hooks_editable()?;
+        let s = self.snapshot();
         let epoch = self.hooks.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.update(|s| {
             s["runtime_hooks"]["state"] = json!("arming");
@@ -505,6 +718,7 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
         let count = installed.len();
         *self.hooks.points.lock().unwrap_or_else(|e| e.into_inner()) = installed;
         let mut committed = false;
+        let captured_document = self.experiment.context().is_none();
         self.update(|s| {
             if self.hooks.epoch.load(Ordering::Acquire) != epoch
                 || definitions.iter().any(|d| {
@@ -519,8 +733,13 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
             s["runtime_hooks"]["active_points"] = json!(count);
             s["runtime_hooks"]["state"] = json!("armed");
             s["runtime_hooks"]["message"] = json!(format!(
-                "Armed {} hooks across {count} bounded points.",
-                definitions.len()
+                "Armed {} hooks across {count} bounded points{}.",
+                definitions.len(),
+                if captured_document {
+                    " on the captured document"
+                } else {
+                    ""
+                }
             ));
         });
         if !committed {
@@ -568,6 +787,41 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
             return Err(Error::conflict(errors.join("; ")));
         }
         Ok(self.group_response("runtime_hooks"))
+    }
+    pub(super) async fn disarm_hooks_from(&self, request: &Value) -> Result<Value> {
+        let erase = match request.get("erase") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(value)) => *value,
+            _ => return Err(Error::bad("Hook erase flag must be boolean")),
+        };
+        if erase {
+            if self.experiment.context().is_some() {
+                return Err(Error::conflict(
+                    "Dispose the disposable experiment context to erase its hooks",
+                ));
+            }
+            if self.snapshot()["runtime_hooks"]["session_id"]
+                .as_u64()
+                .unwrap_or(0)
+                == 0
+            {
+                return Err(Error::conflict("No captured document hook session exists"));
+            }
+        }
+        let result = self.disarm_hooks().await?;
+        if erase {
+            let session = self.snapshot()["runtime_hooks"]["session_id"]
+                .as_u64()
+                .unwrap_or(0)
+                .max(1);
+            self.restore_runtime_hooks(
+                session,
+                "disposed",
+                "Captured document hook session erased. The page stayed open.",
+            );
+            return Ok(self.group_response("runtime_hooks"));
+        }
+        Ok(result)
     }
     pub(super) fn clear_hook_hits(&self) -> Result<Value> {
         self.hooks_editable()?;
@@ -806,6 +1060,11 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
         Ok(())
     }
     pub(super) async fn hooks_navigated(&self) {
+        *self
+            .hooks
+            .isolated_world
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.hooks.candidate_epoch.fetch_add(1, Ordering::AcqRel);
         if !self.snapshot()["runtime_hooks"]["definitions"]
             .as_array()

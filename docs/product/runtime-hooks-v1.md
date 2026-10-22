@@ -1,17 +1,18 @@
 # Runtime Hooks v1
 
-Runtime Hooks extends the disposable Experiment BrowserContext with bounded
-function-entry and synchronous-return instrumentation on its page and dedicated
-workers. It provides the useful runtime workflow from the pinned WireBrowser
-comparison without granting a baseline target a persistent code-execution
-channel.
+Runtime Hooks provides bounded function-entry and synchronous-return
+instrumentation. On a document the live debugger is already attached to, hooks
+use a named isolated world in that same document. The disposable Experiment
+BrowserContext remains available for a separate page and its dedicated workers.
+Neither path opens a different browser profile, and arming stays explicit.
 
-The Chrome DevTools Protocol primitives include `Target.attachToTarget` with a
-flattened worker session, `Debugger.getPossibleBreakpoints`,
-`Debugger.setBreakpointOnFunctionCall`, `Debugger.evaluateOnCallFrame`, and the
-experimental `Debugger.setReturnValue`. A return replacement is available only
-at a source return break position, so Promise and other asynchronous
-continuations are outside this contract.
+The Chrome DevTools Protocol primitives include `Page.createIsolatedWorld` for
+an already-attached document, `Target.attachToTarget` with a flattened worker
+session on the disposable context, `Debugger.getPossibleBreakpoints`,
+`Debugger.setBreakpoint`, `Debugger.setBreakpointOnFunctionCall`,
+`Debugger.evaluateOnCallFrame`, and the experimental `Debugger.setReturnValue`.
+A return replacement is available only at a source return break position, so
+Promise and other asynchronous continuations are outside this contract.
 
 ## Safety boundary
 
@@ -19,9 +20,13 @@ Project-wide authorization and capture policy is defined in
 [`SAFETY.md`](../../SAFETY.md). This section describes Runtime Hooks' specific
 isolation and retention limits.
 
-- Hooks may be armed only on the page or dedicated workers owned by the
-  disposable Experiment BrowserContext. Browser target metadata must confirm
-  the worker's `browserContextId` before a CDP session is opened.
+- Hooks may be armed on a document the debugger is already attached to. That
+  path creates a named isolated world in the document (`Page.createIsolatedWorld`,
+  world name "Origin Trace Runtime Hooks", without universal access) and does
+  not open another browser context or profile. Hooks may also be armed on the
+  page or dedicated workers owned by the disposable Experiment BrowserContext.
+  Browser target metadata must confirm the worker's `browserContextId` before a
+  CDP session is opened.
 - The user must confirm that entry logic, return logic, and return replacement
   may mutate that isolated page before each arm operation.
 - Arming is atomic. If any breakpoint cannot be installed, every breakpoint

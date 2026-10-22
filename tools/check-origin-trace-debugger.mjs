@@ -6853,6 +6853,89 @@ try {
       passed++;
       continue;
     }
+    {
+      const captured = await until((s) => s.state === "running" && s.scripts.some((script) => script.url === fixtureUrl + "/page" && script.language === "JavaScript"));
+      const capturedTarget = captured.target.id;
+      const capturedScript = captured.scripts.find((script) => script.url === fixtureUrl + "/page" && script.language === "JavaScript");
+      const devtools = Number((await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0]);
+      const listTargets = async () => (await fetch(`http://127.0.0.1:${devtools}/json/list`)).json();
+      const pageBefore = (await listTargets()).find((target) => target.id === capturedTarget);
+      assert(pageBefore, "Captured document must already be a browser target");
+      const pageIds = () => listTargets().then((targets) => new Set(targets.filter((target) => target.type === "page").map((target) => target.id)));
+      const pagesBefore = await pageIds();
+      const post = async (body) => {
+        const response = await fetch(url + "/api/debugger/actions", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+        return {status: response.status, body: await response.json()};
+      };
+      const outside = await post({action: "add_runtime_hook", label: "Outside function", script_id: capturedScript.script_id, line: capturedScript.start_line, column: capturedScript.start_column, entry_enabled: true, return_enabled: false});
+      assert.equal(outside.status, 400);
+      assert.match(outside.body.error, /No enclosing JavaScript function was found/);
+      let rejected = await get();
+      assert.equal(rejected.runtime_hooks.definitions.length, 0);
+      assert.equal(rejected.runtime_hooks.isolated, false);
+      assert.equal(rejected.runtime_hooks.session_id, 0);
+      assert.equal(rejected.request_interception.isolated, false);
+      assert.equal(rejected.target.id, capturedTarget);
+      const unconfirmed = await post({action: "arm_runtime_hooks", confirmed: false});
+      assert.notEqual(unconfirmed.status, 200);
+      rejected = await get();
+      assert.notEqual(rejected.runtime_hooks.state, "armed");
+      const sourceResponse = await fetch(url + "/api/debugger/source?script_id=" + encodeURIComponent(capturedScript.script_id));
+      assert.equal(sourceResponse.status, 200);
+      const source = await sourceResponse.json();
+      const index = source.source.split("\n").findIndex((line) => line.includes('const out=input+"-observed"'));
+      assert(index >= 0);
+      await action("add_runtime_hook", {label: "Captured document", script_id: capturedScript.script_id, line: capturedScript.start_line + index, column: 0, entry_enabled: true, return_enabled: true, return_mode: "none"});
+      let adopted = await get();
+      assert.equal(adopted.runtime_hooks.isolated, true);
+      assert.equal(adopted.runtime_hooks.target_id, capturedTarget);
+      assert.equal(adopted.request_interception.isolated, false);
+      assert.equal(adopted.request_interception.target_id, null);
+      const pageAfterAdd = (await listTargets()).find((target) => target.id === capturedTarget);
+      assert.equal(pageAfterAdd.browserContextId, pageBefore.browserContextId);
+      await action("arm_runtime_hooks", {confirmed: true});
+      const pageForClick = (await listTargets()).find((target) => target.id === capturedTarget);
+      const socket = new WebSocket(pageForClick.webSocketDebuggerUrl);
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          socket.close();
+          reject(Error("Captured document click did not finish"));
+        }, 15000);
+        socket.addEventListener("open", () => {
+          socket.send(JSON.stringify({id: 1, method: "Runtime.evaluate", params: {expression: 'document.querySelector("button").click()', returnByValue: true}}));
+        });
+        socket.addEventListener("message", (event) => {
+          const message = JSON.parse(event.data);
+          if (message.id !== 1) return;
+          clearTimeout(timer);
+          socket.close();
+          message.error ? reject(Error(JSON.stringify(message.error))) : resolve();
+        });
+        socket.addEventListener("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+      });
+      const hit = await until((s) => s.runtime_hooks.hits.some((hookHit) => hookHit.category === "entry" || hookHit.category === "return"));
+      assert.equal(hit.runtime_hooks.target_id, capturedTarget);
+      assert.equal(hit.target.id, capturedTarget);
+      assert.deepEqual(await pageIds(), pagesBefore);
+      const pageAfterHit = (await listTargets()).find((target) => target.id === capturedTarget);
+      assert.equal(pageAfterHit.browserContextId, pageBefore.browserContextId);
+      await action("disarm_runtime_hooks", {erase: true});
+      const erased = await get();
+      assert.equal(erased.runtime_hooks.state, "disposed");
+      assert.equal(erased.runtime_hooks.isolated, false);
+      assert.equal(erased.runtime_hooks.definitions.length, 0);
+      assert.equal(erased.runtime_hooks.hits.length, 0);
+      assert.equal(erased.target.id, capturedTarget);
+      assert.equal(erased.request_interception.isolated, false);
+      const pageAfterErase = (await listTargets()).find((target) => target.id === capturedTarget);
+      assert(pageAfterErase, "Erasing the hook session must leave the captured page open");
+      assert.equal(pageAfterErase.browserContextId, pageBefore.browserContextId);
+      console.log(`PASS ${name} captured-document runtime hooks`);
+      passed++;
+    }
     await action("create_request_interception_experiment");
     let s = await until(
       (s) =>

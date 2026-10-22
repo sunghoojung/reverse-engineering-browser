@@ -2310,21 +2310,65 @@
         return matches.length === 1 ? matches[0] : null;
       }
 
-      function vmOpcodeRows(workspace) {
-        return workspace.handlers.map(handler => ({
+      function vmOpcodeSamplePositions(samples) {
+        return samples.slice(0, 4).map(sample =>
+          `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`);
+      }
+
+      function vmOpcodeHandlerRow(workspace, handler) {
+        const retainedSamples = workspace.samples.filter(sample => sample.opcode === handler.opcode);
+        return {
           key: `${handler.opcode}:${handler.handler_index ?? ''}:${handler.source.byte_offset}`,
           opcode: handler.opcode === null ? 'unknown' : `0x${handler.opcode.toString(16).padStart(2, '0')}`,
           label: handler.label || (handler.opcode === null ? 'Unbound dispatch arm' : `handler ${handler.handler_index ?? handler.opcode}`),
           state: handler.state,
           samples: handler.sample_count,
           operandWidth: handler.operand_width,
-          retainedSamples: workspace.samples.filter(sample => sample.opcode === handler.opcode),
-          positions: workspace.samples.filter(sample => sample.opcode === handler.opcode).slice(0, 4).map(sample =>
-            `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`),
-          retainedPositions: workspace.samples.filter(sample => sample.opcode === handler.opcode).length,
+          retainedSamples,
+          positions: vmOpcodeSamplePositions(retainedSamples),
+          retainedPositions: retainedSamples.length,
           notes: handler.notes || 'No handler notes recorded.',
           source: `${handler.source.byte_offset} + ${handler.source.byte_size} bytes`
-        }));
+        };
+      }
+
+      // Several WASM selectors can cite one dispatch instruction. The workspace
+      // still keeps every selector; only the visible row collapses.
+      function vmSharedDispatchRow(workspace, handlers) {
+        const first = handlers[0];
+        const offset = first.source.byte_offset;
+        const size = first.source.byte_size;
+        const opcodes = new Set(handlers.map(handler => handler.opcode));
+        const retainedSamples = workspace.samples.filter(sample => opcodes.has(sample.opcode));
+        const notes = first.notes || 'No handler notes recorded.';
+        const sameWidth = handlers.every(handler => handler.operand_width === first.operand_width);
+        const brTable = handlers.every(handler => typeof handler.label === 'string' && handler.label.startsWith('br_table'));
+        return {
+          key: `span:${offset}:${size}`,
+          opcode: 'shared',
+          label: `${brTable ? 'br_table' : 'Shared dispatch'} · ${handlers.length} selectors`,
+          state: handlers.every(handler => handler.state === 'inferred') ? 'inferred' : 'unknown',
+          samples: handlers.reduce((total, handler) => total + handler.sample_count, 0),
+          operandWidth: sameWidth ? first.operand_width : 0,
+          retainedSamples,
+          positions: vmOpcodeSamplePositions(retainedSamples),
+          retainedPositions: retainedSamples.length,
+          notes: `${notes} ${handlers.length} selectors share this instruction and are not separate handler bodies.`,
+          source: `${offset} + ${size} bytes`
+        };
+      }
+
+      function vmOpcodeRows(workspace) {
+        if (workspace.runtime !== 'webassembly') return workspace.handlers.map(handler => vmOpcodeHandlerRow(workspace, handler));
+        const groups = new Map();
+        for (const handler of workspace.handlers) {
+          const span = `${handler.source.byte_offset}:${handler.source.byte_size}`;
+          const group = groups.get(span);
+          if (group) group.push(handler);
+          else groups.set(span, [handler]);
+        }
+        return [...groups.values()].map(handlers =>
+          handlers.length > 1 ? vmSharedDispatchRow(workspace, handlers) : vmOpcodeHandlerRow(workspace, handlers[0]));
       }
 
       function retainVmOpcodeWorkspaceOnFailure(targetState, status, errorMessage) {

@@ -1539,13 +1539,15 @@
 
       function renderVmHandlers(workspace, onSelection = null) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
-        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
-        heading.append(
-          textElement('h4', '', 'Handler listing'),
-          textElement('span', '', workspace.runtime === 'webassembly' ? `${workspace.handlers.length} dispatch-arm candidates` : `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`)
-        );
-        section.append(heading);
         const rows = vmOpcodeRows(workspace);
+        const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
+        const listingCount = workspace.runtime !== 'webassembly'
+          ? `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`
+          : rows.length === workspace.handlers.length
+            ? `${workspace.handlers.length} dispatch-arm candidates`
+            : `${rows.length} dispatch sites · ${workspace.handlers.length} selectors`;
+        heading.append(textElement('h4', '', 'Handler listing'), textElement('span', '', listingCount));
+        section.append(heading);
         if (!rows.some(row => row.key === state.selectedVmHandlerKey)) {
           state.selectedVmHandlerKey = rows[0]?.key ?? null;
         }

@@ -831,7 +831,8 @@ pub(crate) fn workspace(
         }
     }
     if sample_count == 0 {
-        omissions.push(json!({"reason":"sampler-unavailable"}));
+        omissions.push(json!({"reason":"sampler-unavailable", "detail":
+            "No runtime dispatch samples were retained. Static dispatch, Canvas calls and buffer snapshots do not prove a guest PC. Brave has no guest dispatch emitter; owned native fixtures are separate producers."}));
     } else if sample_count > retained_samples.len() as u64 {
         omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
     }
@@ -1503,6 +1504,73 @@ mod tests {
             invalid[field] = json!(value);
             assert!(validate_snapshot_artifact(&invalid).is_err(), "{field}");
         }
+    }
+
+    #[test]
+    fn canvas_burst_and_snapshot_do_not_create_guest_dispatch_evidence() {
+        let mut events = (0..256)
+            .map(|index| {
+                let mut host = event(80);
+                host["sequence_number"] = json!((index + 2).to_string());
+                host["category"] = json!("canvas");
+                host["type"] = json!("api_call");
+                host["payload"] = json!(hex::encode(b"canvas.getImageData"));
+                host
+            })
+            .collect::<Vec<_>>();
+        // An invocation marker alone is not a dispatch sample either.
+        events.insert(0, invocation());
+        let (root, _, document) =
+            analyze_with_snapshot(&fixture("stack-vm.js"), &events, Some(&[1, 2, 3]));
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["sample_count"], 0);
+        assert_eq!(workspace["samples"], json!([]));
+        assert_eq!(workspace["snapshots"].as_array().unwrap().len(), 1);
+        assert!(
+            workspace["handlers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|handler| { handler["state"] != "observed" && handler["sample_count"] == 0 })
+        );
+        let omission = workspace["coverage"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|omission| omission["reason"] == "sampler-unavailable")
+            .unwrap();
+        assert!(
+            omission["detail"]
+                .as_str()
+                .unwrap()
+                .contains("no guest dispatch emitter")
+        );
+        assert!(omission["detail"].as_str().unwrap().len() <= 240);
+        assert_schema(&document);
+        // Exercise the shipped strict consumer on the actual emitted document,
+        // not a hand-written fixture that could miss a backend/frontend bound.
+        let model =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../research-ui/evidence_models.js");
+        let checked = std::process::Command::new("node")
+            .args([
+                "--eval",
+                r#"
+const fs = require('node:fs');
+const validate = new Function(fs.readFileSync(process.argv[1], 'utf8') +
+  '\nreturn isVmOpcodeWorkspaceDocument;')();
+const document = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (!validate(document)) throw new Error('Backend workspace rejected by shipped UI validator');
+"#,
+            ])
+            .arg(model)
+            .arg(root.path().join("analysis/vm-opcode-workspace-v2.json"))
+            .output()
+            .expect("Node.js is required for the shipped UI contract regression");
+        assert!(
+            checked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
     }
 
     #[test]

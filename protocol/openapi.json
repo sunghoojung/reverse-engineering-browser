@@ -17,6 +17,15 @@
     }
   ],
   "security": [],
+  "x-reb-mcp": {
+    "transport": "stdio",
+    "command": ["reb-api", "mcp"],
+    "tool_name": "operationId",
+    "default_tools": "read_only_eligible",
+    "effects_flag": "--allow-effects",
+    "inline_json_limit_bytes": 131072,
+    "binary_inline": false
+  },
   "paths": {
     "/api/health": {
       "get": {

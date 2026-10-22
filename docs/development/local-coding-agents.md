@@ -4,8 +4,14 @@ Use Codex or Claude Code in a local checkout to inspect a researcher-selected
 Origin Trace session through `reb-api`, compare evidence, and author client
 code with offline tests. This integration adds repo-scoped instructions and CLI
 discovery/guard options. It does not install an agent, change account settings,
-configure permissions, or add a transport server. MCP remains deferred by
-[AGENTS.md](../../AGENTS.md).
+or configure permissions.
+
+`reb-api mcp` is the only MCP surface. It is a stdio projection of the embedded
+OpenAPI document, described by `x-reb-mcp`. Tool names are operation IDs. The
+default list is the read-only projection. `--allow-effects` lists the other
+operations; it is not authorization or capture redaction. The server calls only
+the selected loopback root. It does not inline binary artifact bodies. See
+[AGENTS.md](../../AGENTS.md) and the [HTTP API guide](../../protocol/http-api.md).
 
 ## Discovery without account setup
 

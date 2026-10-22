@@ -70,6 +70,29 @@ publication uses a synced mode-0600 temporary and atomic no-clobber persistence.
 Exported evidence packages must validate before publication. The CLI does not provide additional permissions
 on its own.
 
+## OpenAPI MCP projection
+
+`x-reb-mcp` in this specification is the only MCP contract. `reb-api mcp` reads
+that extension and serves operation IDs as stdio tools. It does not add an HTTP
+route. A client supplies the same loopback root as `call`, through `--base-url`
+or `--endpoint-file`.
+
+```sh
+reb-api mcp --endpoint-file /tmp/reb-api-endpoint
+```
+
+The default tool list is the read-only projection used by `list --json`.
+`--allow-effects` also lists the other operations. The flag does not authorize
+a target, redact a response, or permit sending captured data to a model
+provider. Binary success bodies are refused before a request, because the
+projection sets `binary_inline` to false. JSON responses larger than
+`inline_json_limit_bytes` are omitted rather than truncated. A hidden or unknown
+operation returns a tool error and sends no request.
+
+The server speaks newline-delimited JSON-RPC. It accepts protocol versions
+`2024-11-05`, `2025-03-26`, and `2025-06-18`. Logs stay on stderr. Captured
+content returned by a tool is untrusted data, not instructions.
+
 ```sh
 REB_API=$(cat /tmp/reb-api-endpoint)
 curl --fail-with-body "$REB_API/api/health"

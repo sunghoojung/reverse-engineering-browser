@@ -10,8 +10,14 @@ artifact receiver, debugger transport, decoder, and heap analyzer remain C++.
 make origin-trace-backend
 make ui
 apps/origin-trace-backend/target/debug/reb-api list
+apps/origin-trace-backend/target/debug/reb-api mcp --endpoint-file /tmp/reb-api-endpoint
 make backend-e2e
 ```
+
+`reb-api mcp` projects [`protocol/openapi.json`](../../protocol/openapi.json)
+onto a local stdio MCP server. Tool names are the OpenAPI operation IDs. The
+default list is read-only. `--allow-effects` is explicit and is not
+authorization. See [OpenAPI MCP projection](../../protocol/http-api.md#openapi-mcp-projection).
 
 `backend-e2e` uses Node.js 22 or newer and a disposable browser profile. Set
 `ORIGIN_TRACE_TEST_BROWSER` to a Chromium-compatible executable on other hosts.

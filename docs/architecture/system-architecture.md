@@ -89,7 +89,9 @@ behavior and limits.
 The diagram separates existing paths from planned broader Blink, V8, and GPU
 probe coverage, origin-aware capture authorization, a general agent SDK and
 gateway, and exact field-level value provenance. A supported event category or
-UI view does not imply complete native probe coverage. MCP remains deferred.
+UI view does not imply complete native probe coverage. The local MCP adapter is
+only a stdio projection of the OpenAPI document. A general agent SDK or gateway
+remains out of scope.
 
 Tracked Brave overlays and patches are implemented integration sources, not
 proof that a complete custom browser has been compiled on every host. Native,

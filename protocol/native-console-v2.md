@@ -1,25 +1,49 @@
 # Native Console v2
 
-Origin Trace executes explicit console commands through the native console
-protocol. Without a live capture, that is a separately launched custom Brave
-process with a disposable profile. When a live capture already has HTTP(S)
-documents, the console lists those documents and Connect evaluates in the
-selected document. That path does not launch a second Brave profile, does not
-use browser-root `Target.setAutoAttach`, does not use CDP `Runtime.evaluate`,
-and does not resume a target the session did not pause. The console still
-cannot set breakpoints, step, or inspect paused frames. Remote-debugging flags
-reject only the disposable profile. Loss of the control channel exits only that
-disposable browser; a live-capture binding leaves the capture browser running.
-This replaces the [v1 transport](native-console-v1.md); helpers, backend,
-packaged assets and browser must be rebuilt together. Old wire versions fail
-closed. Native V8 REPL evaluation uses the pinned engine's debug evaluation
-API. This does not promise undetectability or zero active cost.
+Origin Trace executes explicit mutable main-world console commands through the
+native console protocol. **Disposable browser session is the default**, including
+when a live capture has documents. It launches a separate custom Brave profile.
+Live execution is a separate explicit opt-in: choose **Live capture (explicit
+opt-in)**, select one exact captured document, check the selected-document
+mutation authorization, then Connect. `connect_live` requires `confirm_live:true`.
+Only that document is authorized; no browser is launched for this binding.
+
+Live documents come directly from the native bridge attached to that same
+capture browser, not from a URL/CDP join. Native IDs represent exact weak-document
+generations, scoped to the nonsecret random `binding_id` in that listing. Connect
+must echo that exact binding ID; a backend/browser restart with reused numeric
+document IDs still invalidates prior selection and consent. No authentication
+token or socket path is exposed by this generation field. Duplicate URLs and truncated titles/URLs are display metadata, not
+identity. Refresh preserves an unchanged document. Navigation, reload, closure,
+or binding loss revokes authorization, leaves a disabled unavailable selection,
+and never chooses another document or falls back to a disposable context.
+Disconnect, explicitly select a current document, and authorize again to proceed.
+
+This is **not read-only or side-effect-safe evaluation**. Commands can mutate the
+captured page, cookies and storage, initiate network requests, and schedule work.
+Disconnect clears retained console values/monitors in reachable selected documents;
+stale documents are never remapped for cleanup and retain their bounded native
+expiry. Disconnect does not undo mutations or
+scheduled work, or kill the capture browser. A command already running during
+navigation or disconnect may have had effects; requests are never retried.
+
+The console does not use browser-root `Target.setAutoAttach` or CDP
+`Runtime.evaluate`, resume a target it did not pause, set breakpoints, step, or
+inspect paused frames. Remote-debugging flags reject only the disposable profile.
+Loss of its control channel exits the disposable browser; a live binding leaves
+the capture browser running. This replaces [v1](native-console-v1.md); helpers,
+backend, packaged assets and browser must be rebuilt together. Wire version is
+unchanged from v2, but stable live IDs require this matching browser overlay.
+Older v2 browsers that rotate IDs on each listing fail closed, not by URL fallback.
+Native V8 REPL evaluation uses the pinned engine's debug evaluation API. This does
+not promise undetectability or zero active cost.
 
 ## User operation
 
-Set `REB_BRAVE_BINARY` to a rebuilt custom browser. Open Console, connect an
-authorized HTTP(S) URL, then explicitly select a document. Enter runs a complete
-expression; Shift+Enter adds a line; Command/Ctrl+Enter submits immediately.
+Set `REB_BRAVE_BINARY` to a rebuilt custom browser. For the default disposable
+mode, connect an authorized HTTP(S) URL, then explicitly select a document.
+For live mode, follow the separate selected-document opt-in above. Enter runs a
+complete expression; Shift+Enter adds a line; Command/Ctrl+Enter submits immediately.
 An unmatched bracket continues on Enter. Up/Down recalls bounded history only
 at the first/last line. Undo/redo includes completion insertion. The prompt has
 no placeholder and the next draft remains editable during evaluation.
@@ -38,8 +62,8 @@ or changed document selection invalidates older value actions. Getters/setters r
 Proxies and host interceptors are opaque; DOM Elements have explicit native
 previews. Function source uses V8's intrinsic FunctionProtoToString, bypassing
 page overrides. Source locations link to corresponding URLs in the current
-read-only evidence workspace; absent source is reported. The console browser
-and captured Sources are separate contexts.
+read-only evidence workspace; absent source is reported. Disposable Console and captured Sources are separate contexts. Live Console is
+bound only to its explicitly selected captured document; source links are not ownership.
 
 Top-level await uses native V8 REPL semantics. Promise settlement is polled and
 waiting stops after ten seconds; Await can be requested again. Stop waiting
@@ -63,13 +87,15 @@ output releases values but preserves command history. A separate transcript
 generation discards delayed pre-Clear message replies without invalidating the
 execution context or newer explicit commands. Forget command history
 removes it. Snippets load into the prompt without automatic execution. Disconnect
-kills the owned process groups and removes their profile. Closing the dock keeps
+kills disposable owned process groups and removes their profile. Live disconnect
+releases retained values/monitors, revokes consent, and rotates session identity on
+the next connection without killing the capture browser. Closing the dock keeps
 the session alive.
 
 ## Experiment activity
 
 The browser collects resource-completion metadata only for documents in its
-owned profile and current target listing. Experiment activity opens an isolated
+bound profile and current native target listing. Experiment activity opens an isolated
 Traffic view, retaining prior delivered metadata for that session/document.
 Each record has an event ID, document ID, browser resource ID, completion time,
 origin, method, HTTP status, network error, cache state and last evaluation
@@ -171,3 +197,30 @@ This checks real logs, lexical completion, object getter isolation, promise
 settlement, release, watchdog recovery, UTF-8 bounds, navigation rejection and
 control-channel disposal. Browser compilation and real execution remain required
 before treating runtime behavior or active performance as verified.
+
+### Required live-browser acceptance (not established by synthetic tests)
+
+After rebuilding the matching pinned browser, backend and packaged assets:
+
+1. Start an authorized synthetic capture with two tabs at the same complete URL,
+   plus two URLs whose first 512 bytes match. Verify Console stays disposable
+   until explicit live opt-in; each native document has its own ID and label.
+2. Select the second tab and authorize it. Evaluate a per-document marker and
+   confirm only that tab changed. Refresh twice; its ID and selection must persist.
+   Change neither page nor selection by CDP/URL inference.
+3. Reload that tab at the same URL, navigate it, and close it in separate trials.
+   The selected ID becomes unavailable, consent clears, and Run/value inspection/
+   completion/poll cannot execute in the replacement. The other tab stays unchanged.
+4. Disconnect and explicitly reconnect to another document. Old HTTP session IDs
+   and retained handles must fail; native retained values/monitors must be cleared.
+   Capture remains running. Scheduled page effects are not promised to be undone.
+5. Stop/restart the capture/browser and lose/reconnect the native bridge. Old
+   ownership/consent must stay invalid; no second browser/profile may launch.
+   Missing/older bindings must fail closed with the matching rebuild explanation.
+6. Repeat in the packaged macOS app, including selection/consent visibility,
+   narrow layout and keyboard focus. Check native overlays compile against the
+   pinned Brave/Chromium/V8 revisions before claiming runtime acceptance.
+
+Rust scripted-peer and DOM fixtures cover backend/UI ownership and zero stale
+runtime dispatch. They do not prove weak-document lifetime semantics in Blink,
+real browser cleanup, visual rendering, or packaged native acceptance.

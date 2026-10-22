@@ -1380,7 +1380,9 @@
             <details id="native-console-connection" class="native-console-connection">
               <summary aria-label="Console connection settings" title="Console connection settings"><span id="native-console-badge" class="native-console-badge">Checking</span><span aria-hidden="true">⌄</span></summary>
               <div class="native-console-connection-body">
-                <strong>Disposable browser session</strong>
+                <strong id="native-console-mode-title">Disposable browser session</strong>
+                  <label class="native-console-setting">Execution mode <select id="native-console-mode" aria-label="Console execution mode"><option value="disposable">Disposable browser (default)</option><option value="live_capture">Live capture (explicit opt-in)</option></select></label>
+                  <label id="native-console-live-confirmation" class="native-console-setting" hidden><input id="native-console-live-consent" type="checkbox" /> I authorize commands that can change this specifically selected captured document. Disconnect before choosing another document.</label>
                 <div class="native-console-controls">
                   <input id="native-console-url" type="url" aria-label="Authorized page URL" maxlength="4096" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
                   <button id="native-console-start" type="button" class="native-console-button native-console-primary" disabled>Connect</button>
@@ -1392,7 +1394,7 @@
                 </div>
                 <label class="native-console-setting"><input id="native-console-timestamps" type="checkbox" /> Show timestamps</label>
                 <details class="native-console-utilities"><summary>History &amp; utilities</summary><p><code>$_</code> reads the last result. Expand a value to copy it, store it as <code>temp1</code>, or inspect its source. <code>await</code> accepts an async expression. Up/Down recalls history at the first/last line. Clearing output keeps command history.</p><select id="native-console-snippets" aria-label="Console snippets" disabled><option>No snippets saved</option></select><button id="native-console-load-snippet" type="button" class="native-console-button">Load snippet</button><button id="native-console-forget" type="button" class="native-console-button">Forget command history</button></details>
-                <p>Commands can change the selected page. Disconnect removes this disposable browser and profile. Output and history stay in memory only; clear output before sharing.</p>
+                <p id="native-console-mode-description">Commands can change the selected page. Disconnect removes this disposable browser and profile. Output and history stay in memory only; clear output before sharing.</p>
               </div>
             </details>
             <button id="native-console-close" type="button" class="icon-button" aria-label="Close console panel" title="Close panel (⌘ / Ctrl + J)">×</button>

@@ -1,12 +1,16 @@
 (() => {
   const root = document.querySelector('#native-console-panel');
   const element = name => document.querySelector(`#native-console-${name}`);
-  const controls = Object.fromEntries(['url', 'start', 'stop', 'notice', 'target', 'refresh', 'clear', 'output', 'scroll', 'connection', 'form', 'source', 'run', 'filter', 'level'].map(name => [name, element(name)]));
+  const controls = Object.fromEntries(['url', 'start', 'stop', 'notice', 'target', 'refresh', 'clear', 'output', 'scroll', 'connection', 'form', 'source', 'run', 'filter', 'level', 'mode', 'live-consent'].map(name => [name, element(name)]));
   const toggle = element('toggle');
   const encoder = new TextEncoder();
   const history = [];
   let historyIndex = null, draft = '', historyBytes = 0;
-  let session = null, available = false, pending = 0, disconnected = false, initialized = false, documentSource = '';
+  let session = null, available = false, pending = 0, disconnected = false, initialized = false, documentSource = 'disposable';
+  let liveListing = null, liveAvailable = false, listingRunning = false;
+  let liveBinding = null, selectedBinding = null;
+  controls.mode.value = 'disposable';
+  const selectedDocument = () => !!controls.target.value && [...controls.target.options].some(option => option.value === controls.target.value && !option.disabled);
   let outputBytes = 0, outputNodes = 0, removed = 0, partialTargets = false, outputGeneration = 0;
   let queue = Promise.resolve(), generation = 0, pollRunning = false;
   let checking = false, submitting = false, commandNumber = 0, unread = 0;
@@ -25,17 +29,23 @@
     const status = checking ? 'checking' : disconnected ? 'disconnected' : busy ? 'working' : session ? 'connected' : initialized && !available && !live ? 'unavailable' : 'idle';
     const badge = element('badge'); badge.textContent = {checking: 'Checking', disconnected: 'Connection lost', working: 'Working', connected: 'Connected', unavailable: 'Unavailable', idle: 'Connect'}[status]; badge.dataset.state = status;
     controls.connection.querySelector('summary').setAttribute('aria-label', `Console connection: ${status}. Session settings`);
-    controls.start.disabled = !!busy || checking || !!session || (live ? !controls.target.value : !available);
+    controls.start.disabled = !!busy || checking || listingRunning || !!session || (live ? !liveAvailable || !selectedDocument() || selectedBinding !== liveBinding || !controls['live-consent'].checked : !available);
     controls.clear.disabled = !!busy;
-    controls.stop.disabled = !!busy || !session; controls.refresh.disabled = !!busy || !session;
-    controls.target.disabled = !!busy || !(session || live) || controls.target.options.length <= 1;
+    controls.stop.disabled = !!busy || !session; controls.refresh.disabled = !!busy || checking || !(session || live);
+    controls.target.disabled = !!busy || !!(session && live) || !(session || live) || controls.target.options.length <= 1;
+    controls.mode.disabled = !!busy || checking || !!session;
+    controls.mode.value = live ? 'live_capture' : 'disposable';
+    element('live-confirmation').hidden = !live;
+    controls['live-consent'].disabled = !!busy || !!session || !selectedDocument();
+    element('mode-title').textContent = live ? 'Selected live capture document' : 'Disposable browser session';
+    element('mode-description').textContent = live ? 'Commands can change the captured page, cookies, and storage. This is not read-only evaluation. Disconnect stops this console connection, not the capture browser or work already scheduled by a command. Output stays in memory.' : 'Commands can change the selected page. Disconnect removes this disposable browser and profile. Output and history stay in memory only; clear output before sharing.';
     controls.url.disabled = !!busy || checking || !!session || live;
-    element('check').hidden = !!session || available; element('check').disabled = checking;
+    element('check').hidden = !!session || (live ? liveAvailable : available); element('check').disabled = checking;
     // The next draft stays editable. Only explicit submission is serialized.
-    controls.source.disabled = disconnected || !session || !controls.target.value;
+    controls.source.disabled = disconnected || !session || !selectedDocument();
     controls.run.disabled = !!busy || controls.source.disabled || !controls.source.value.trim();
     controls.run.textContent = submitting ? 'Running…' : 'Run';
-    const liveNotice = 'These documents come from the live capture. Select one and connect to evaluate in that page. This console cannot set breakpoints, step, or inspect paused frames.';
+    const liveNotice = 'These documents come from the live capture. Select one, explicitly authorize mutation, then connect. Commands can change that captured page. This console cannot set breakpoints, step, or inspect paused frames.';
     element('composer-status').textContent = submitting ? 'Running · next draft stays editable' : disconnected ? 'Connection lost · refresh documents to recover' : !session ? (live ? (controls.target.value ? 'Connect to evaluate in the selected live document' : 'Select a live capture document') : 'Connect a disposable browser to begin') : !controls.target.value ? 'Select the document to execute in' : `Document ${controls.target.value} · ${encoder.encode(controls.source.value).length} / 8192 bytes`;
     const emptyTitle = element('empty-title'), emptyText = element('empty-text'), emptyAction = element('empty-action');
     emptyTitle.textContent = checking ? 'Checking native Console' : disconnected ? 'Connection interrupted' : !available && initialized && !live ? 'Native Console unavailable' : !session ? (live ? (controls.target.value ? 'Connect to the live capture' : 'Select a live capture document') : 'Connect a disposable browser') : !controls.target.value ? 'Choose an execution document' : 'Ready for your first command';
@@ -43,6 +53,12 @@
     emptyAction.textContent = checking ? 'Checking…' : !session ? (live ? (controls.target.value ? 'Connect' : 'Select a document') : available ? 'Session settings' : 'Check availability') : !controls.target.value ? 'Refresh documents' : 'Focus command';
     const privacy = root.querySelector('.native-console-private');
     if (privacy) privacy.textContent = live ? 'Ephemeral · live capture' : 'Ephemeral · disposable profile';
+    if (live && session && !selectedDocument()) {
+      element('composer-status').textContent = 'Selected document unavailable · disconnect to authorize another';
+      emptyTitle.textContent = 'Selected document unavailable';
+      emptyText.textContent = 'The selected document changed or closed. Disconnect, select a current document, and authorize again. No replacement document is chosen automatically.';
+      emptyAction.textContent = 'Disconnect';
+    }
     emptyAction.disabled = checking || !!busy;
     updateOutputState();
   }
@@ -60,10 +76,11 @@
   element('latest').addEventListener('click', followLatest);
   element('empty-action').addEventListener('click', () => {
     if (!session) {
-      if (documentSource === 'live_capture') { if (controls.target.value) controls.start.click(); else controls.target.focus(); }
+      if (documentSource === 'live_capture') { if (selectedDocument()) { controls.connection.open = true; if (controls['live-consent'].checked) controls.start.click(); else controls['live-consent'].focus(); } else controls.target.focus(); }
       else if (!available) initialize(true);
       else { controls.connection.open = true; controls.url.focus(); }
     }
+    else if (documentSource === 'live_capture' && !selectedDocument()) controls.stop.click();
     else if (!controls.target.value) controls.refresh.click();
     else controls.source.focus();
   });
@@ -71,6 +88,33 @@
     const option = document.createElement('option'); option.value = ''; option.textContent = 'Select a document';
     controls.target.replaceChildren(option); controls.target.title = 'Select a document';
   }
+  function invalidateTargets() {
+    if (documentSource === 'live_capture' && controls.target.value) targets({targets: [], truncated: false, binding_id: liveBinding});
+    else clearTargets();
+  }
+  function captureState(value) {
+    if (value.document_source === 'live_capture') {
+      liveListing = value; liveAvailable = value.live_available === true && numberId(value.binding_id);
+      liveBinding = numberId(value.binding_id) ? value.binding_id : null;
+      if (session) {
+        documentSource = 'live_capture';
+        if (!selectedBinding) selectedBinding = liveBinding;
+      }
+    } else { liveListing = null; liveAvailable = false; }
+    if (documentSource === 'live_capture') {
+      targets(liveListing || {targets: [], truncated: false}, session && numberId(value.selected_target_id) ? value.selected_target_id : controls.target.value);
+      if (!liveAvailable) notice(value.message || 'Live capture binding unavailable. Restart the capture; no second browser was launched.', true);
+    }
+  }
+  controls.mode.addEventListener('change', () => {
+    if (session || pending || checking) return;
+    ++generation; completion.close(); clearTargets(); selectedBinding = null; controls['live-consent'].checked = false;
+    documentSource = controls.mode.value === 'live_capture' ? 'live_capture' : 'disposable';
+    if (documentSource === 'live_capture') targets(liveListing || {targets: [], truncated: false});
+    else notice('Commands run in a separate disposable browser profile.');
+    renderControls();
+  });
+  controls['live-consent'].addEventListener('change', renderControls);
   async function request(action, fields = {}, identity = session) {
     const response = await fetch('/api/native-console/actions', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, cache: 'no-store',
@@ -92,7 +136,7 @@
         if (epoch !== generation) return null;
         disconnected = false; return apply ? apply(value) : value;
       } catch (error) {
-        if (epoch === generation) { clearTargets(); disconnected = true; notice(`${error.message}. Commands are never retried automatically.`, true); renderControls(); }
+        if (epoch === generation) { invalidateTargets(); disconnected = true; notice(`${error.message}. Commands are never retried automatically.`, true); renderControls(); }
         return null;
       } finally { if (!quiet) { --pending; renderControls(); } }
     };
@@ -101,10 +145,10 @@
   function runtime(command, target = controls.target.value, quiet = false, identity = session, epoch = generation) {
     if (epoch !== generation) return Promise.resolve({status: 'error', text: 'This value belongs to an earlier document selection. Run a new command to inspect a current value.'});
     if (identity !== session) return Promise.resolve({status: 'error', text: 'This value belongs to a disconnected console session.'});
-    if (!target || target !== controls.target.value) return Promise.resolve({status: 'error', text: 'Select the original document to inspect this value.'});
+    if (!selectedDocument() || !target || target !== controls.target.value) return Promise.resolve({status: 'error', text: 'Select the original document to inspect this value.'});
     return enqueue('runtime', {target_id: target, command}, value => {
       if (!value.runtime) {
-        if (value.status === 'stale_target') { boundary('Document changed. Refresh and select the current document.'); clearTargets(); renderControls(); }
+        if (value.status === 'stale_target') { boundary('Document changed. Disconnect and explicitly select the current document.'); invalidateTargets(); renderControls(); }
         return {status: value.status || 'error', text: value.text || 'Runtime response unavailable', request_id: value.request_id};
       }
       const result = value.runtime;
@@ -113,13 +157,19 @@
       return result;
     }, {quiet, context: true});
   }
-  function targets(value) {
-    if (value.document_source === 'live_capture') documentSource = 'live_capture';
+  function targets(value, selected = controls.target.value) {
+    if (documentSource === 'live_capture') {
+      liveBinding = numberId(value.binding_id) ? value.binding_id : null;
+      if (selected && selectedBinding && selectedBinding !== liveBinding && !selected.startsWith('unavailable:')) {
+        selected = `unavailable:${selectedBinding}:${selected}`;
+        controls['live-consent'].checked = false;
+      }
+    }
     if (!Array.isArray(value.targets) || value.targets.length > 64 || typeof value.truncated !== 'boolean' || value.targets.some(target =>
       !numberId(target.id) || typeof target.origin !== 'string' || encoder.encode(target.origin).length > 256 ||
       typeof target.label !== 'string' || encoder.encode(target.label).length > 128 || typeof target.url !== 'string' || encoder.encode(target.url).length > 512 ||
       typeof target.main_frame !== 'boolean' || typeof target.truncated !== 'boolean') || new Set(value.targets.map(target => target.id)).size !== value.targets.length) throw new TypeError('Malformed document listing');
-    const selected = controls.target.value;
+    const invalid = documentSource === 'live_capture' && !!session && value.selected_target_id === null;
     clearTargets(); partialTargets = value.truncated;
     for (const target of value.targets) {
       const option = document.createElement('option'); option.value = target.id;
@@ -127,8 +177,15 @@
       option.dataset.url = target.url;
       option.title = `${target.label} · ${target.url} · document ${target.id}`; controls.target.append(option);
     }
-    if ([...controls.target.options].some(option => option.value === selected)) controls.target.value = selected;
-    const liveNotice = 'These documents come from the live capture. Select one and connect to evaluate in that page. This console cannot set breakpoints, step, or inspect paused frames.';
+    if (!invalid && [...controls.target.options].some(option => option.value === selected)) controls.target.value = selected;
+    else if (selected && documentSource === 'live_capture') {
+      for (const option of [...controls.target.options]) if (option.value === selected) option.remove();
+      const missing = document.createElement('option'); missing.value = selected; missing.disabled = true;
+      missing.textContent = `Document ${selected} unavailable · select a current document`;
+      controls.target.append(missing); controls.target.value = selected;
+      controls['live-consent'].checked = false;
+    }
+    const liveNotice = 'These documents come from the live capture. Select one, explicitly authorize mutation, then connect. Commands can change that captured page. This console cannot set breakpoints, step, or inspect paused frames.';
     notice(documentSource === 'live_capture'
       ? (value.targets.length ? `${liveNotice}${partialTargets ? ' Document listing is partial.' : ''}` : 'No eligible documents yet. Open an HTTP or HTTPS page in the live capture.')
       : (value.targets.length ? `Select a document in the disposable browser.${partialTargets ? ' Document listing is partial.' : ''}` : 'No eligible documents yet. Open an HTTP or HTTPS page in the disposable browser, then refresh.'));
@@ -350,23 +407,22 @@
     const epoch = outputGeneration, context = generation;
     try { const value = await runtime({operation: 'poll'}, controls.target.value, true); if (value?.status === 'ok') logs(value, epoch); }
     catch (error) {
-      if (context === generation) { clearTargets(); disconnected = true; notice(`${error.message}. Refresh documents to recover. Commands were not retried.`, true); renderControls(); }
+      if (context === generation) { invalidateTargets(); disconnected = true; notice(`${error.message}. Refresh documents to recover. Commands were not retried.`, true); renderControls(); }
     }
     finally { pollRunning = false; }
   }
   let listingTick = 0;
-  async function refreshLiveDocuments() {
-    if (root.hidden || session || disconnected || checking || pending || submitting) return;
-    if (++listingTick % 4) return;
+  async function refreshLiveDocuments(force = false) {
+    if ((!force && root.hidden) || session || checking || pending || submitting || listingRunning) return;
+    if (!force && ++listingTick % 4) return;
+    const epoch = generation; listingRunning = true; renderControls();
     try {
       const response = await fetch('/api/native-console', {cache: 'no-store'});
       const value = await response.json();
-      if (!response.ok || !validState(value) || session) return;
-      available = value.available;
-      if (value.document_source === 'live_capture' && Array.isArray(value.targets)) targets(value);
-      else if (documentSource === 'live_capture') { documentSource = ''; clearTargets(); notice(available ? '' : value.message, !available); }
-      renderControls();
+      if (!response.ok || !validState(value) || session || epoch !== generation || pending) return;
+      available = value.available; captureState(value); renderControls();
     } catch { /* The next availability check reports a hard failure. */ }
+    finally { listingRunning = false; renderControls(); }
   }
   setInterval(() => { poll(); refreshLiveDocuments(); }, 500);
   function filter() {
@@ -389,12 +445,8 @@
       const response = await fetch('/api/native-console', {cache: 'no-store'}); const value = await response.json();
       if (!response.ok || !validState(value) || typeof value.available !== 'boolean') throw new TypeError('Native console unavailable');
       available = value.available; session = value.session_id; initialized = true;
-      if (value.document_source === 'live_capture' && Array.isArray(value.targets)) targets(value);
-      else {
-        if (!session && documentSource === 'live_capture') clearTargets();
-        if (!session) documentSource = '';
-        notice(available ? '' : value.message, !available);
-      }
+      captureState(value);
+      if (documentSource !== 'live_capture') notice(available ? '' : value.message, !available);
     } catch (error) { initialized = true; available = false; notice(`${error.message}. Use Check availability to try again.`, true); }
     checking = false; renderControls();
     if (!root.hidden && root.contains(document.activeElement) && controls.source.disabled) focusPrompt();
@@ -403,8 +455,8 @@
   controls.start.addEventListener('click', () => {
     if (documentSource === 'live_capture') {
       const target = controls.target.value;
-      if (!target) return;
-      enqueue('connect_live', {target_id: target}, value => {
+      if (!selectedDocument() || !liveAvailable || selectedBinding !== liveBinding || !controls['live-consent'].checked) return;
+      enqueue('connect_live', {target_id: target, binding_id: liveBinding, confirm_live: true}, value => {
         ++generation; session = value.session_id; documentSource = 'live_capture'; targets(value);
         if ([...controls.target.options].some(option => option.value === target)) controls.target.value = target;
         controls.connection.open = false;
@@ -416,20 +468,21 @@
     enqueue('start', {url: controls.url.value.trim()}, value => { ++generation; session = value.session_id; documentSource = 'disposable'; targets(value); controls.connection.open = false; boundary('Disposable experiment connected. Select a document.'); });
   });
   controls.stop.addEventListener('click', () => enqueue('stop', {}, () => {
-    ++generation; session = null;
+    ++generation; session = null; controls['live-consent'].checked = false;
     if (documentSource === 'live_capture') {
       boundary('Live capture evaluation disconnected. The capture browser stays open.');
-      notice('These documents come from the live capture. Select one and connect to evaluate in that page. This console cannot set breakpoints, step, or inspect paused frames.');
+      notice('These documents come from the live capture. Select one, explicitly authorize mutation, then connect. Commands can change that captured page. This console cannot set breakpoints, step, or inspect paused frames.');
     } else {
       documentSource = ''; clearTargets(); boundary('Experiment disconnected. Retained values released.'); notice('Disposable browser and profile removed.');
     }
   }));
-  controls.refresh.addEventListener('click', () => enqueue('targets', {}, value => { ++generation; targets(value); controls.connection.open = false; boundary('Document listing refreshed. Select the current execution context.'); }));
+  controls.refresh.addEventListener('click', () => !session ? refreshLiveDocuments(true) : enqueue('targets', {}, value => { ++generation; targets(value); controls.connection.open = false; boundary('Document listing refreshed. A missing live document requires disconnect and explicit reselection.'); }));
   controls.target.addEventListener('change', () => {
-    ++generation; completion.close(); renderControls(); controls.target.title = controls.target.selectedOptions[0]?.title || 'Select a document';
+    selectedBinding = liveBinding;
+    ++generation; completion.close(); controls['live-consent'].checked = false; renderControls(); controls.target.title = controls.target.selectedOptions[0]?.title || 'Select a document';
     if (controls.target.value) {
       boundary(`Context selected: ${controls.target.selectedOptions[0].textContent}`);
-      notice(documentSource === 'live_capture' ? `These documents come from the live capture. Select one and connect to evaluate in that page. This console cannot set breakpoints, step, or inspect paused frames.${partialTargets ? ' Document listing is partial.' : ''}` : (partialTargets ? 'Document listing is partial.' : ''));
+      notice(documentSource === 'live_capture' ? `These documents come from the live capture. Select one, explicitly authorize mutation, then connect. Commands can change that captured page. This console cannot set breakpoints, step, or inspect paused frames.${partialTargets ? ' Document listing is partial.' : ''}` : (partialTargets ? 'Document listing is partial.' : ''));
       if (session) controls.source.focus(); else controls.start.focus();
       poll();
     }
@@ -505,7 +558,7 @@
     while (history.length > 128 || historyBytes > 262144) historyBytes -= encoder.encode(history.shift()).length;
   }
   controls.form.addEventListener('submit', async event => {
-    event.preventDefault(); if (submitting || pending || !session || disconnected || !controls.target.value) return;
+    event.preventDefault(); if (submitting || pending || !session || disconnected || !selectedDocument()) return;
     const source = controls.source.value;
     if (!source.trim() || encoder.encode(source).length > 8192) { notice('Enter 1 to 8192 UTF-8 bytes of JavaScript.', true); return; }
     const helper = source.trim().match(/^(copy|inspect|getEventListeners|monitorEvents|unmonitorEvents)\(([\s\S]*)\)\s*;?$/);

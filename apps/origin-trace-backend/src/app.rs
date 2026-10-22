@@ -113,7 +113,7 @@ impl App {
     }
     pub async fn new(options: Options, port: u16) -> Arc<Self> {
         let debugger = Debugger::new(&options);
-        let native_console = NativeConsole::new(&options, debugger.clone());
+        let native_console = NativeConsole::new(&options);
         let app = Arc::new(Self {
             port,
             ui_root: options.ui_root(),

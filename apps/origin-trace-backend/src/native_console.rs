@@ -1,6 +1,5 @@
 use crate::{
     config::Options,
-    debugger::Debugger,
     error::{Cause, Code, Error, Reason, Result},
     validation, worker,
 };
@@ -12,7 +11,6 @@ use std::{
     os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
@@ -54,8 +52,10 @@ impl OwnedProcess {
         Ok(Self { child, group })
     }
     async fn stop(&mut self) {
-        unsafe {
-            libc::kill(-self.group, libc::SIGKILL);
+        if self.group > 0 {
+            unsafe {
+                libc::kill(-self.group, libc::SIGKILL);
+            }
         }
         let _ = self.child.start_kill();
         let _ = self.child.wait().await;
@@ -78,14 +78,10 @@ enum ConsoleDir {
     Live(PathBuf),
 }
 
-struct NativeTarget {
-    id: u64,
-    url: String,
-    main_frame: bool,
-}
-
 struct Session {
     id: String,
+    // Public nonsecret generation, separate from the private authentication token.
+    binding_id: String,
     bridge: OwnedProcess,
     // None when this bridge is bound to the capture browser. Stop must not kill it.
     browser: Option<OwnedProcess>,
@@ -96,7 +92,9 @@ struct Session {
     poisoned: bool,
     started: Instant,
     live: bool,
-    native_targets: Vec<NativeTarget>,
+    live_target: Option<u64>,
+    native_targets: BTreeSet<u64>,
+    accessed_targets: BTreeSet<u64>,
 }
 impl Session {
     async fn stop(mut self) {
@@ -112,6 +110,44 @@ impl Session {
         if let Some(browser) = self.browser.as_mut() {
             browser.stop().await;
         }
+    }
+    async fn list_live(&mut self) -> Result<Value> {
+        // The authenticated capture browser is the only document authority.
+        // URLs, titles and debugger target IDs are never execution identities.
+        let mut listing = self.exchange(1, 0, "").await?;
+        self.native_targets = listing["targets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|target| target["id"].as_str()?.parse().ok())
+            .collect();
+        if self
+            .live_target
+            .is_some_and(|target| !self.native_targets.contains(&target))
+        {
+            self.live_target = None;
+        }
+        listing["document_source"] = json!("live_capture");
+        listing["binding_id"] = json!(self.binding_id);
+        listing["selected_target_id"] = self
+            .live_target
+            .map(|target| json!(target.to_string()))
+            .unwrap_or(Value::Null);
+        Ok(listing)
+    }
+    async fn release_live_values(&mut self) -> Result<()> {
+        // Clear only documents used by this console connection. Stale native
+        // IDs fail closed; never find a replacement document for cleanup.
+        for target in self.accessed_targets.clone() {
+            let result = self.exchange(3, target, r#"{"operation":"clear"}"#).await?;
+            if result["runtime"]["status"] != "ok" && result["status"] != "stale_target" {
+                return Err(Error::conflict(
+                    "Live value cleanup was not confirmed; restart the capture binding",
+                ));
+            }
+        }
+        self.accessed_targets.clear();
+        Ok(())
     }
     async fn exchange(&mut self, operation: u16, target: u64, source: &str) -> Result<Value> {
         // If the HTTP future is cancelled mid-exchange, the session stays
@@ -312,14 +348,13 @@ impl ResponseHeader {
 pub struct NativeConsole {
     helper: PathBuf,
     browser: Option<PathBuf>,
-    // Lock order: `session`, then `live_bridge`. `state` releases `live_bridge` first.
+    // Lock order: `session`, then `live_bridge`.
     session: Mutex<Option<Session>>,
     live_bridge: Mutex<Option<Session>>,
     live_directory: Option<PathBuf>,
-    debugger: Arc<Debugger>,
 }
 impl NativeConsole {
-    pub fn new(options: &Options, debugger: Arc<Debugger>) -> Self {
+    pub fn new(options: &Options) -> Self {
         Self {
             helper: options.worker(
                 &options.native_console,
@@ -330,7 +365,6 @@ impl NativeConsole {
             session: Mutex::new(None),
             live_bridge: Mutex::new(None),
             live_directory: options.native_console_live_directory.clone(),
-            debugger,
         }
     }
     fn available(&self) -> bool {
@@ -338,7 +372,6 @@ impl NativeConsole {
             && self.browser.as_ref().is_some_and(|p| worker::executable(p))
     }
     pub async fn state(&self) -> Value {
-        self.reap_armed_bridge().await;
         let mut guard = self.session.lock().await;
         if let Some(session) = guard.as_mut()
             && (session.poisoned
@@ -351,19 +384,36 @@ impl NativeConsole {
         {
             guard.take().unwrap().stop().await;
         }
-        let disposable = guard.as_ref().is_some_and(|session| !session.live);
-        let id = guard.as_ref().map(|session| session.id.clone());
-        drop(guard);
-        let mut value = json!({"contract_version":2,"available":self.available(),"state":if id.is_some() {"ready"} else {"idle"},
-            "session_id":id,"message":if self.available() {"Native console uses a separate disposable browser profile"} else {"Configure a rebuilt custom Brave executable using REB_BRAVE_BINARY"}});
-        let listing = capture_listing(&self.debugger);
-        if !disposable && !listing.documents.is_empty() {
-            value["message"] = json!(LIVE_CAPTURE_MESSAGE);
-            value["document_source"] = json!("live_capture");
-            value["targets"] = Value::Array(document_values(&listing.documents));
-            value["truncated"] = json!(listing.truncated);
+        if guard.as_ref().is_some_and(|session| !session.live) || self.live_directory.is_none() {
+            let id = guard.as_ref().map(|session| session.id.as_str());
+            return json!({"contract_version":2,"available":self.available(),"state":if id.is_some() {"ready"} else {"idle"},
+                "session_id":id,"message":if self.available() {"Native console uses a separate disposable browser profile"} else {"Configure a rebuilt custom Brave executable using REB_BRAVE_BINARY"}});
         }
-        value
+        let mut armed = self.live_bridge.lock().await;
+        let connected = guard.is_some();
+        let owner = if connected { &mut *guard } else { &mut *armed };
+        if let Some(session) = owner.as_mut() {
+            if !session.poisoned
+                && session.started.elapsed() < Duration::from_secs(3600)
+                && session.bridge.child.try_wait().ok().flatten().is_none()
+                && let Ok(mut listing) = session.list_live().await
+            {
+                listing["available"] = json!(self.available());
+                listing["live_available"] = json!(true);
+                listing["message"] = json!(LIVE_CAPTURE_MESSAGE);
+                if !connected {
+                    listing["state"] = json!("idle");
+                    listing["session_id"] = Value::Null;
+                }
+                return listing;
+            }
+            owner.take().unwrap().stop().await;
+        }
+        // A vanished or unavailable binding never changes the execution mode.
+        // Recover by restarting the capture, not by launching another browser.
+        json!({"contract_version":2,"available":self.available(),"live_available":false,"state":"idle","session_id":null,
+            "document_source":"live_capture","targets":[],"truncated":false,
+            "message":"Live capture console binding unavailable. Rebuild the matching browser and backend, then restart the capture. No second browser profile was launched."})
     }
     pub async fn stop(&self) {
         if let Some(session) = self.session.lock().await.take() {
@@ -371,15 +421,6 @@ impl NativeConsole {
         }
         if let Some(session) = self.live_bridge.lock().await.take() {
             session.stop().await;
-        }
-    }
-    async fn reap_armed_bridge(&self) {
-        let mut armed = self.live_bridge.lock().await;
-        let expired = armed.as_mut().is_some_and(|session| {
-            session.poisoned || session.bridge.child.try_wait().ok().flatten().is_some()
-        });
-        if expired {
-            armed.take().unwrap().stop().await;
         }
     }
     pub async fn action(&self, request: &Value) -> Result<Value> {
@@ -424,7 +465,7 @@ impl NativeConsole {
         if action == "connect_live" {
             validation::fields(
                 request,
-                &["action", "target_id"],
+                &["action", "target_id", "binding_id", "confirm_live"],
                 "Native console live connect",
             )?;
             if guard.is_some() {
@@ -432,9 +473,16 @@ impl NativeConsole {
                     "Stop the current native session before starting another",
                 ));
             }
+            if request["confirm_live"] != true {
+                return Err(Error::bad(
+                    "Confirm that commands can change the specifically selected captured document",
+                ));
+            }
             let selected =
                 validation::canonical(&request["target_id"], 64, true, "Console target")?;
-            let (session, result) = bind_live(&self.live_bridge, &self.debugger, selected).await?;
+            let binding =
+                validation::canonical(&request["binding_id"], 64, true, "Console binding")?;
+            let (session, result) = bind_live(&self.live_bridge, selected, binding).await?;
             *guard = Some(session);
             return Ok(result);
         }
@@ -451,6 +499,11 @@ impl NativeConsole {
             if let Some(mut session) = guard.take() {
                 let bridge_alive = session.bridge.child.try_wait().ok().flatten().is_none();
                 if session.live && !session.poisoned && bridge_alive {
+                    if let Err(error) = session.release_live_values().await {
+                        session.stop().await;
+                        return Err(error);
+                    }
+                    session.live_target = None;
                     let mut armed = self.live_bridge.lock().await;
                     if let Some(previous) = armed.replace(session) {
                         previous.stop().await;
@@ -489,16 +542,11 @@ impl NativeConsole {
             ));
         }
         if action == "targets" && session.live {
-            let listed = session.exchange(1, 0, "").await;
-            let value = match listed {
-                Ok(value) => value,
-                Err(error) => {
-                    guard.take().unwrap().stop().await;
-                    return Err(error);
-                }
-            };
-            session.native_targets = native_targets_from(&value);
-            return Ok(ready_listing(&self.debugger, &session.id));
+            let result = session.list_live().await;
+            if result.is_err() {
+                guard.take().unwrap().stop().await;
+            }
+            return result;
         }
         let runtime_source;
         let (operation, target, source) = if action == "targets" {
@@ -525,21 +573,29 @@ impl NativeConsole {
             let target = validation::canonical(&request["target_id"], 64, true, "Console target")?;
             (2, target, source)
         };
-        let target = if session.live && operation != 1 {
-            match native_target_id(&self.debugger, session, target).await {
-                Ok(id) => id,
-                Err(error) => {
-                    guard.take().unwrap().stop().await;
-                    return Err(error);
-                }
+        if session.live && operation != 1 {
+            // Reject unknown ownership before any request. Refreshing may remove
+            // the exact ID but must never translate it to a replacement document.
+            if session.live_target != Some(target) || !session.native_targets.contains(&target) {
+                return Ok(stale_document(&session.id));
             }
-        } else {
-            target
-        };
-        if session.live && operation != 1 && target == 0 {
-            return Ok(stale_document(&session.id));
+            if let Err(error) = session.list_live().await {
+                guard.take().unwrap().stop().await;
+                return Err(error);
+            }
+            if !session.native_targets.contains(&target) {
+                return Ok(stale_document(&session.id));
+            }
+            session.accessed_targets.insert(target);
         }
         let result = session.exchange(operation, target, source).await;
+        if session.live
+            && result
+                .as_ref()
+                .is_ok_and(|value| value["status"] == "stale_target")
+        {
+            session.live_target = None;
+        }
         if result.is_err() {
             guard.take().unwrap().stop().await;
         }
@@ -665,6 +721,7 @@ struct BridgeProcess {
 impl BridgeProcess {
     fn session(self, directory: ConsoleDir, live: bool) -> Session {
         Session {
+            binding_id: self.id.clone(),
             id: self.id,
             bridge: self.bridge,
             browser: None,
@@ -675,7 +732,9 @@ impl BridgeProcess {
             poisoned: false,
             started: Instant::now(),
             live,
-            native_targets: Vec::new(),
+            live_target: None,
+            native_targets: BTreeSet::new(),
+            accessed_targets: BTreeSet::new(),
         }
     }
     async fn stop(mut self) {
@@ -686,80 +745,55 @@ impl BridgeProcess {
 const LIVE_CAPTURE_MESSAGE: &str =
     "These documents come from the live capture. A second browser profile is not opened.";
 
-struct ListedDocument {
-    id: u64,
-    origin: String,
-    label: String,
-    url: String,
-    wire_url: String,
-    main_frame: bool,
-    truncated: bool,
-}
-
-struct DocumentListing {
-    documents: Vec<ListedDocument>,
-    truncated: bool,
-}
-
-fn capture_listing(debugger: &Debugger) -> DocumentListing {
-    let snapshot = debugger.snapshot();
-    let empty = Vec::new();
-    let capture = snapshot["targets"].as_array().unwrap_or(&empty);
-    selector_documents(capture, &[])
-}
-
-fn ready_listing(debugger: &Debugger, session_id: &str) -> Value {
-    let listing = capture_listing(debugger);
-    json!({
-        "contract_version": 2,
-        "state": "ready",
-        "session_id": session_id,
-        "targets": document_values(&listing.documents),
-        "truncated": listing.truncated,
-        "document_source": "live_capture",
-    })
-}
-
 async fn bind_live(
     live_bridge: &Mutex<Option<Session>>,
-    debugger: &Debugger,
     selected: u64,
+    binding: u64,
 ) -> Result<(Session, Value)> {
-    let documents = capture_listing(debugger).documents;
-    if !documents.iter().any(|document| document.id == selected) {
-        return Err(Error::conflict("That document is not in the live capture"));
-    }
-    let Some(mut session) = live_bridge.lock().await.take() else {
+    let mut armed = live_bridge.lock().await;
+    let session = armed.as_mut().ok_or_else(|| Error::conflict(
+        "The live capture has no native console binding. Restart the capture; a second browser profile was not launched.",
+    ))?;
+    if session.binding_id != binding.to_string() {
         return Err(Error::conflict(
-            "The live capture has no native console binding. A second browser profile was not launched.",
+            "Live capture binding changed; select and authorize a current document",
         ));
-    };
-    match session.exchange(1, 0, "").await {
-        Ok(value) => {
-            session.native_targets = native_targets_from(&value);
-            session.live = true;
-            let listing = ready_listing(debugger, &session.id);
-            Ok((session, listing))
-        }
+    }
+    if session.poisoned
+        || session.started.elapsed() >= Duration::from_secs(3600)
+        || session.bridge.child.try_wait()?.is_some()
+    {
+        armed.take().unwrap().stop().await;
+        return Err(Error::conflict(
+            "Live console binding ended; restart the capture",
+        ));
+    }
+    let mut listing = match session.list_live().await {
+        Ok(listing) => listing,
         Err(error) => {
-            session.stop().await;
-            Err(error)
+            armed.take().unwrap().stop().await;
+            return Err(error);
         }
+    };
+    if !session.native_targets.contains(&selected) {
+        return Err(Error::conflict(
+            "Selected live document changed; explicitly select a current document",
+        ));
     }
-}
-
-async fn native_target_id(
-    debugger: &Debugger,
-    session: &mut Session,
-    selected: u64,
-) -> Result<u64> {
-    let documents = capture_listing(debugger).documents;
-    if let Some(id) = address_selected_document(selected, &documents, &session.native_targets) {
-        return Ok(id);
+    // HTTP connections get a fresh identity, independently of the existing
+    // authenticated wire connection. Requests and handles from before Stop
+    // cannot become valid again after reconnecting to the capture browser.
+    let mut random = [0u8; 8];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let next = u64::from_le_bytes(random).max(1).to_string();
+    if next == session.id {
+        return Err(Error::conflict("Console identity collision; connect again"));
     }
-    let listed = session.exchange(1, 0, "").await?;
-    session.native_targets = native_targets_from(&listed);
-    Ok(address_selected_document(selected, &documents, &session.native_targets).unwrap_or(0))
+    session.id = next;
+    session.live_target = Some(selected);
+    listing["session_id"] = json!(session.id);
+    listing["selected_target_id"] = json!(selected.to_string());
+    Ok((armed.take().unwrap(), listing))
 }
 
 fn stale_document(session: &str) -> Value {
@@ -769,191 +803,11 @@ fn stale_document(session: &str) -> Value {
         "state": "ready",
         "status": "stale_target",
         "type": "undefined",
-        "text": "Selected document is not in the live capture",
+        "text": "Selected document changed. Explicitly select a current live document.",
         "truncated": false,
     });
     Reason::new(Code::TargetUnavailable).annotate(&mut result);
     result
-}
-
-fn document_values(documents: &[ListedDocument]) -> Vec<Value> {
-    documents
-        .iter()
-        .map(|document| {
-            json!({
-                "id": document.id.to_string(),
-                "origin": document.origin,
-                "label": document.label,
-                "url": document.wire_url,
-                "main_frame": document.main_frame,
-                "truncated": document.truncated,
-            })
-        })
-        .collect()
-}
-
-fn native_targets_from(value: &Value) -> Vec<NativeTarget> {
-    value["targets"]
-        .as_array()
-        .map(|targets| {
-            targets
-                .iter()
-                .filter_map(|target| {
-                    Some(NativeTarget {
-                        id: target["id"].as_str()?.parse().ok()?,
-                        url: target["url"].as_str()?.to_owned(),
-                        main_frame: target["main_frame"].as_bool().unwrap_or(false),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn selector_documents(capture: &[Value], disposable: &[Value]) -> DocumentListing {
-    let live = list_http_documents(capture, true);
-    if !live.documents.is_empty() {
-        return live;
-    }
-    list_http_documents(disposable, false)
-}
-
-fn list_http_documents(values: &[Value], capture: bool) -> DocumentListing {
-    let mut documents = Vec::new();
-    let mut used = BTreeSet::new();
-    let mut truncated = false;
-    for value in values {
-        if capture {
-            let kind = value["type"].as_str().unwrap_or("");
-            if !matches!(kind, "page" | "webview") {
-                continue;
-            }
-        }
-        let Some(url) = value["url"].as_str().and_then(http_document_url) else {
-            continue;
-        };
-        if documents.len() == TARGET_LIMIT {
-            truncated = true;
-            break;
-        }
-        let key = value["id"].as_str().unwrap_or(url.as_str());
-        let id = if !capture && value["id"].as_str().is_some_and(canonical_id) {
-            let id = key.parse::<u64>().unwrap_or(1).max(1);
-            if !used.insert(id) {
-                stable_id(key, &mut used)
-            } else {
-                id
-            }
-        } else {
-            stable_id(key, &mut used)
-        };
-        let (origin, origin_cut) = bounded(&http_origin(&url), 256);
-        let label_source = if capture {
-            value["title"].as_str().unwrap_or("").trim().to_owned()
-        } else {
-            value["label"].as_str().unwrap_or("").trim().to_owned()
-        };
-        let label_source = if label_source.is_empty() {
-            "page".to_owned()
-        } else {
-            label_source
-        };
-        let (label, label_cut) = bounded(&label_source, 128);
-        let (wire_url, url_cut) = bounded(url.as_str(), 512);
-        let main_frame = if capture {
-            true
-        } else {
-            value["main_frame"].as_bool().unwrap_or(false)
-        };
-        documents.push(ListedDocument {
-            id,
-            origin,
-            label,
-            url: url.to_string(),
-            wire_url,
-            main_frame,
-            truncated: origin_cut || label_cut || url_cut,
-        });
-    }
-    DocumentListing {
-        documents,
-        truncated,
-    }
-}
-
-fn address_selected_document(
-    selected: u64,
-    documents: &[ListedDocument],
-    native: &[NativeTarget],
-) -> Option<u64> {
-    let document = documents.iter().find(|document| document.id == selected)?;
-    let mut fallback = None;
-    for target in native {
-        if target.id == 0 || (target.url != document.url && target.url != document.wire_url) {
-            continue;
-        }
-        if target.main_frame {
-            return Some(target.id);
-        }
-        if fallback.is_none() {
-            fallback = Some(target.id);
-        }
-    }
-    fallback
-}
-
-fn http_document_url(raw: &str) -> Option<url::Url> {
-    let url = url::Url::parse(raw).ok()?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return None;
-    }
-    Some(url)
-}
-
-fn http_origin(url: &url::Url) -> String {
-    match (url.host_str(), url.port()) {
-        (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
-        (Some(host), None) => format!("{}://{host}", url.scheme()),
-        _ => format!("{}://", url.scheme()),
-    }
-}
-
-fn bounded(text: &str, max: usize) -> (String, bool) {
-    let limited = validation::truncate(text, max);
-    let truncated = limited.len() != text.len();
-    (limited, truncated)
-}
-
-fn canonical_id(text: &str) -> bool {
-    !text.is_empty()
-        && text.bytes().all(|byte| byte.is_ascii_digit())
-        && (text.len() == 1 || !text.starts_with('0'))
-        && text.parse::<u64>().ok().is_some_and(|id| id > 0)
-}
-
-fn stable_id(key: &str, used: &mut BTreeSet<u64>) -> u64 {
-    let mut salt = 0u64;
-    loop {
-        let mut hash = 0xcbf29ce484222325u64;
-        for byte in key.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        if salt != 0 {
-            hash ^= salt;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        if hash == 0 {
-            hash = 1;
-        }
-        if used.insert(hash) {
-            return hash;
-        }
-        salt = salt.saturating_add(1);
-    }
 }
 
 fn private_directory(path: &Path) -> bool {
@@ -1116,109 +970,282 @@ mod tests {
         assert_eq!(result["code"], "application_failed");
         assert_eq!(result["details"], json!({}));
     }
-    #[test]
-    fn live_documents_are_listed_when_the_disposable_browser_has_none() {
-        let capture = json!([
-            {"id":"cdp-alpha","type":"page","title":"Alpha","url":"https://alpha.test/a"},
-            {"id":"cdp-beta","type":"webview","title":"Beta","url":"http://beta.test:8080/b"},
-            {"id":"cdp-new","type":"page","title":"New Tab","url":"chrome://newtab/"},
-            {"id":"cdp-about","type":"page","title":"About","url":"about:blank"},
-            {"id":"cdp-worker","type":"worker","title":"Worker","url":"https://worker.test/"},
-            {"id":"cdp-creds","type":"page","title":"Hidden","url":"https://user:secret@hidden.test/"}
-        ]);
-        let disposable = json!([
-            {"id":"7","type":"page","title":"Disposable","url":"https://disposable.test/","label":"Disposable","main_frame":true,"truncated":false}
-        ]);
-        let listing =
-            selector_documents(capture.as_array().unwrap(), disposable.as_array().unwrap());
-        assert_eq!(listing.documents.len(), 2);
-        assert!(!listing.truncated);
-        assert_eq!(listing.documents[0].url, "https://alpha.test/a");
-        assert_eq!(listing.documents[1].url, "http://beta.test:8080/b");
-        assert_eq!(listing.documents[1].origin, "http://beta.test:8080");
-        assert_ne!(listing.documents[0].id, 0);
-        assert_ne!(listing.documents[0].id, listing.documents[1].id);
-        assert!(
-            listing
-                .documents
-                .iter()
-                .all(|document| !document.url.contains("disposable"))
-        );
-        let native = [
-            NativeTarget {
-                id: 10,
-                url: "https://alpha.test/a".into(),
-                main_frame: true,
-            },
-            NativeTarget {
-                id: 11,
-                url: "http://beta.test:8080/b".into(),
-                main_frame: false,
-            },
-            NativeTarget {
-                id: 12,
-                url: "http://beta.test:8080/b".into(),
-                main_frame: true,
-            },
-            NativeTarget {
-                id: 0,
-                url: "http://beta.test:8080/b".into(),
-                main_frame: true,
-            },
-        ];
-        let addressed =
-            address_selected_document(listing.documents[1].id, &listing.documents, &native)
-                .unwrap();
-        assert_eq!(addressed, 12);
-        assert_ne!(addressed, 10);
-        assert_ne!(addressed, 11);
-        assert_eq!(
-            address_selected_document(listing.documents[0].id, &listing.documents, &native)
-                .unwrap(),
-            10
-        );
-        assert!(address_selected_document(999, &listing.documents, &native).is_none());
-        let only_disposable = selector_documents(&[], disposable.as_array().unwrap());
-        assert_eq!(only_disposable.documents.len(), 1);
-        assert_eq!(only_disposable.documents[0].id, 7);
-        assert_eq!(only_disposable.documents[0].url, "https://disposable.test/");
-    }
     #[tokio::test]
     async fn connect_live_does_not_launch_a_browser_when_the_capture_has_no_binding() {
-        let options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
-        let debugger = Debugger::new(&options);
-        debugger.set_targets_for_test(json!([
-            {"id":"page-a","type":"page","title":"Alpha","url":"https://alpha.test/"},
-            {"id":"page-b","type":"page","title":"Beta","url":"http://beta.test/path"},
-            {"id":"blank","type":"page","title":"New Tab","url":"chrome://newtab/"},
-            {"id":"about","type":"page","title":"About","url":"about:blank"}
-        ]));
-        let console = NativeConsole::new(&options, debugger);
+        let directory = tempfile::tempdir().unwrap();
+        let options = Options::try_parse_from([
+            "origin-trace-backend",
+            "--native-console-live-directory",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let console = NativeConsole::new(&options);
         let state = console.state().await;
         assert_eq!(state["state"], "idle");
-        assert!(state["session_id"].is_null());
         assert_eq!(state["document_source"], "live_capture");
-        assert_eq!(state["message"], LIVE_CAPTURE_MESSAGE);
-        let targets = state["targets"].as_array().unwrap();
-        assert_eq!(targets.len(), 2);
-        assert_eq!(targets[0]["url"], "https://alpha.test/");
-        assert_eq!(targets[1]["url"], "http://beta.test/path");
-        assert!(targets.iter().all(|target| {
-            !target["url"].as_str().unwrap_or("").starts_with("chrome")
-                && !target["url"].as_str().unwrap_or("").starts_with("about")
-        }));
+        assert_eq!(state["available"], false);
+        assert_eq!(state["targets"], json!([]));
         let error = console
-            .action(&json!({"action":"connect_live","target_id":targets[1]["id"]}))
+            .action(&json!({"action":"connect_live","binding_id":"42","target_id":"12","confirm_live":true}))
             .await
             .unwrap_err();
         assert_eq!(error.status, 409);
         assert!(
             error
                 .message
-                .contains("A second browser profile was not launched.")
+                .contains("second browser profile was not launched")
         );
-        assert!(!error.message.contains("bundled helper"));
-        assert!(!error.message.contains("could not start"));
+        assert!(console.session.lock().await.is_none());
+    }
+    // A scripted pipe peer tests backend dispatch, not Blink/V8 behavior.
+    async fn live_fixture() -> (NativeConsole, TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("targets.json"),
+            r#"[
+            {"id":11,"url":"https://same.test/page"},
+            {"id":22,"url":"https://same.test/page"}
+        ]"#,
+        )
+        .unwrap();
+        let script = r#"
+import json, pathlib, struct, sys
+root = pathlib.Path(sys.argv[1])
+request = struct.Struct('<IHHQQII')
+response = struct.Struct('<IHHQHHIII')
+target_record = struct.Struct('<QHHI256sHH128s512sI')
+while True:
+    header = sys.stdin.buffer.read(32)
+    if not header:
+        break
+    magic, version, operation, sequence, target, size, reserved = request.unpack(header)
+    source = sys.stdin.buffer.read(size).decode()
+    with (root / 'requests.jsonl').open('a') as log:
+        log.write(json.dumps({'operation':operation,'target':target,'source':source}) + '\n')
+    count, kind = 0, 11
+    if operation == 1:
+        documents = json.loads((root / 'targets.json').read_text())
+        records = []
+        for item in documents:
+            origin = b'https://same.test'
+            label = b'Identical page'
+            url = item['url'].encode()[:512]
+            records.append(target_record.pack(item['id'],len(origin),2,0,origin,len(label),len(url),label,url,0))
+        payload, count, kind = b''.join(records), len(records), 10
+    else:
+        payload = json.dumps({'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}).encode()
+    sys.stdout.buffer.write(response.pack(magic,version,0,sequence,kind,0,count,len(payload),0) + payload)
+    sys.stdout.buffer.flush()
+"#;
+        let mut command = Command::new("python3");
+        command
+            .args(["-u", "-c", script])
+            .arg(directory.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut bridge = OwnedProcess::spawn(&mut command).unwrap();
+        let input = bridge.child.stdin.take().unwrap();
+        let output = bridge.child.stdout.take().unwrap();
+        let session = Session {
+            id: "42".into(),
+            binding_id: "42".into(),
+            bridge,
+            browser: None,
+            input,
+            output,
+            directory: ConsoleDir::Live(directory.path().into()),
+            next_request: 1,
+            poisoned: false,
+            started: Instant::now(),
+            live: true,
+            live_target: None,
+            native_targets: BTreeSet::new(),
+            accessed_targets: BTreeSet::new(),
+        };
+        let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
+        options.native_console_live_directory = Some(directory.path().into());
+        let console = NativeConsole::new(&options);
+        *console.live_bridge.lock().await = Some(session);
+        (console, directory)
+    }
+    fn requests(directory: &TempDir) -> Vec<Value> {
+        std::fs::read_to_string(directory.path().join("requests.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+    async fn connect_fixture(console: &NativeConsole, target: &str) -> String {
+        console
+            .action(&json!({"action":"connect_live","binding_id":"42","target_id":target,"confirm_live":true}))
+            .await
+            .unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+    #[tokio::test]
+    async fn live_exact_ids_ignore_duplicate_urls_and_truncated_metadata() {
+        let (console, directory) = live_fixture().await;
+        let long_url = format!("https://same.test/{}", "a".repeat(600));
+        std::fs::write(
+            directory.path().join("targets.json"),
+            json!([
+                {"id":11,"url":format!("{long_url}first")},
+                {"id":22,"url":format!("{long_url}second")}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let state = console.state().await;
+        assert_eq!(state["targets"][0]["url"], state["targets"][1]["url"]);
+        assert_eq!(state["targets"][0]["id"], "11");
+        assert_eq!(state["targets"][1]["id"], "22");
+        let before = requests(&directory).len();
+        for confirmation in [json!(false), Value::Null] {
+            let error = console
+                .action(
+                    &json!({"action":"connect_live","binding_id":"42","target_id":"22","confirm_live":confirmation}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, 400);
+        }
+        assert_eq!(
+            requests(&directory).len(),
+            before,
+            "unconfirmed connection must not dispatch"
+        );
+        let identity = connect_fixture(&console, "22").await;
+        let connected = console.state().await;
+        assert_eq!(connected["selected_target_id"], "22");
+        let before = requests(&directory).len();
+        let wrong = console.action(&json!({"action":"runtime","session_id":identity,"target_id":"11","command":{"operation":"evaluate","source":"location.href"}})).await.unwrap();
+        assert_eq!(wrong["status"], "stale_target");
+        assert_eq!(
+            requests(&directory).len(),
+            before,
+            "another eligible tab is not authorized"
+        );
+        let result = console.action(&json!({"action":"runtime","session_id":identity,"target_id":"22","command":{"operation":"evaluate","source":"location.href"}})).await.unwrap();
+        assert_eq!(result["runtime"]["value"]["text"], "22");
+        assert_eq!(requests(&directory).last().unwrap()["target"], 22);
+        let refreshed = console
+            .action(&json!({"action":"targets","session_id":identity}))
+            .await
+            .unwrap();
+        assert_eq!(refreshed["selected_target_id"], "22");
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn live_replaced_binding_rejects_reused_document_id_before_dispatch() {
+        let (console, directory) = live_fixture().await;
+        assert_eq!(console.state().await["binding_id"], "42");
+        console
+            .live_bridge
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .binding_id = "99".into();
+        let before = requests(&directory).len();
+        let error = console.action(&json!({"action":"connect_live","binding_id":"42","target_id":"22","confirm_live":true})).await.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(requests(&directory).len(), before);
+        assert!(console.session.lock().await.is_none());
+        let state = console.state().await;
+        assert_eq!(state["binding_id"], "99");
+        assert_eq!(state["targets"][1]["id"], "22");
+        console.stop().await;
+    }
+
+    #[tokio::test]
+    async fn live_navigation_reload_close_revoke_authorization_without_dispatch() {
+        for replacement in [
+            json!([{"id":33,"url":"https://same.test/other"}]),
+            json!([{"id":33,"url":"https://same.test/page"}]),
+            json!([]),
+        ] {
+            let (console, directory) = live_fixture().await;
+            let identity = connect_fixture(&console, "22").await;
+            std::fs::write(
+                directory.path().join("targets.json"),
+                replacement.to_string(),
+            )
+            .unwrap();
+            let before = requests(&directory).len();
+            let result = console.action(&json!({"action":"runtime","session_id":identity,"target_id":"22","command":{"operation":"inspect","handle":"7","offset":0}})).await.unwrap();
+            assert_eq!(result["status"], "stale_target");
+            let after = requests(&directory);
+            assert_eq!(after.len(), before + 1);
+            assert_eq!(
+                after.last().unwrap()["operation"],
+                1,
+                "no runtime dispatched after document invalidation"
+            );
+            // Even a faulty peer reintroducing the old number cannot revive consent.
+            std::fs::write(
+                directory.path().join("targets.json"),
+                r#"[{"id":22,"url":"https://same.test/page"}]"#,
+            )
+            .unwrap();
+            let result = console.action(&json!({"action":"evaluate","session_id":identity,"target_id":"22","source":"location.href"})).await.unwrap();
+            assert_eq!(result["status"], "stale_target");
+            assert_eq!(requests(&directory).len(), after.len());
+            console.stop().await;
+        }
+    }
+    #[tokio::test]
+    async fn live_reconnect_clears_values_rotates_identity_and_rejects_stale_handles() {
+        let (console, directory) = live_fixture().await;
+        let first = connect_fixture(&console, "22").await;
+        console.action(&json!({"action":"runtime","session_id":first,"target_id":"22","command":{"operation":"evaluate","source":"({a:1})"}})).await.unwrap();
+        console
+            .action(&json!({"action":"stop","session_id":first}))
+            .await
+            .unwrap();
+        let last = requests(&directory).pop().unwrap();
+        assert_eq!(last["target"], 22);
+        assert_eq!(last["source"], r#"{"operation":"clear"}"#);
+        assert!(
+            console
+                .live_bridge
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .browser
+                .is_none()
+        );
+        let second = connect_fixture(&console, "11").await;
+        assert_ne!(first, second);
+        let before = requests(&directory).len();
+        let error = console.action(&json!({"action":"runtime","session_id":first,"target_id":"22","command":{"operation":"inspect","handle":"7","offset":0}})).await.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(requests(&directory).len(), before);
+        // Binding loss stays live/unavailable and cannot spawn or bind a replacement.
+        console
+            .session
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .bridge
+            .stop()
+            .await;
+        let state = console.state().await;
+        assert_eq!(state["document_source"], "live_capture");
+        assert_eq!(state["live_available"], false);
+        assert_eq!(state["targets"], json!([]));
+        assert!(
+            console
+                .action(&json!({"action":"connect_live","binding_id":"42","target_id":"11","confirm_live":true}))
+                .await
+                .is_err()
+        );
+        assert_eq!(requests(&directory).len(), before);
+        console.stop().await;
     }
     #[test]
     fn retired_session_does_not_claim_the_command_had_no_effect() {

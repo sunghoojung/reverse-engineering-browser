@@ -475,6 +475,9 @@ The effect vocabulary is deliberately separate from HTTP method and success:
 - `disposable-target-mutation`: changes an owned experiment/native-console
   target, context, page, or its instrumentation; the label is not proof that
   arbitrary downstream page code stays within any authorization boundary
+- `live-target-mutation`: changes the exact captured document explicitly selected
+  and authorized for live Console commands; this is not a disposable context
+  or a read-only evaluation guarantee
 - `code-execution`: evaluates expressions, executes supplied scripts or helper
   JavaScript, or enables subsequent target execution; static parsing/decoding
   alone is `analysis`

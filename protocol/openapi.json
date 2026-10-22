@@ -2736,6 +2736,14 @@
                 "data-discard"
               ],
               "when": "An expired, poisoned, disconnected, or failed native session can be retired, killing its owned processes and deleting its temporary profile."
+            },
+            {
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "data-discard"
+              ],
+              "when": "A live capture binding is present: lists exact native documents and revokes stale selected-document authorization. No supplied JavaScript is evaluated."
             }
           ],
           "uncertainties": [],
@@ -2746,7 +2754,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reports native session state, and may retire an invalid session even though this is GET.",
+          "notes": "Reports disposable startup availability and separately live binding availability. Live discovery lists native documents from the same capture browser, never via CDP or URL matching, and does not opt into live execution. May retire invalid sessions even though this is GET.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -16223,7 +16231,7 @@
             "enum": [
               "live_capture"
             ],
-            "description": "Present when targets are documents the live capture is already recording. Omitted for an idle disposable console."
+            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs/titles are bounded display metadata only."
           },
           "targets": {
             "type": "array",
@@ -16268,6 +16276,27 @@
           },
           "truncated": {
             "type": "boolean"
+          },
+          "selected_target_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact native document generation authorized by connect_live, or null after invalidation. Never a URL-derived or CDP target identity; scoped to this binding/session."
+          },
+          "live_available": {
+            "type": "boolean",
+            "description": "Whether the existing capture browser has a usable native binding. Independent of available, which describes disposable-browser startup."
+          },
+          "binding_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "description": "Public nonsecret random generation of the authenticated native bridge. Not the token or a path. Exact document IDs are scoped to this generation; a replacement binding invalidates prior selection and consent."
           }
         },
         "required": [
@@ -16388,7 +16417,24 @@
             "enum": [
               "live_capture"
             ],
-            "description": "Present when the listed documents come from the live capture. Console ids are stable selector ids, translated to the native document at evaluation."
+            "description": "Present for native HTTP(S) documents in the already-bound capture browser. Discovery does not opt the user into live execution. URLs/titles are bounded display metadata only."
+          },
+          "selected_target_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact native document generation authorized by connect_live, or null after invalidation. Never a URL-derived or CDP target identity; scoped to this binding/session."
+          },
+          "binding_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "description": "Public nonsecret random generation of the authenticated native bridge. Not the token or a path. Exact document IDs are scoped to this generation; a replacement binding invalidates prior selection and consent."
           }
         },
         "required": [
@@ -16581,12 +16627,24 @@
               "target_id": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$",
-                "description": "Stable selector id of an HTTP(S) document the live capture is already recording."
+                "description": "Exact native document ID from the current live listing, never a URL/CDP mapping. Refresh preserves an unchanged document; navigation/reload/close/restart invalidates it."
+              },
+              "confirm_live": {
+                "type": "boolean",
+                "const": true,
+                "description": "Explicitly authorizes mutable main-world commands in this exact selected captured document, not any replacement."
+              },
+              "binding_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Public nonsecret random generation of the authenticated native bridge. Not the token or a path. Exact document IDs are scoped to this generation; a replacement binding invalidates prior selection and consent."
               }
             },
             "required": [
               "action",
-              "target_id"
+              "target_id",
+              "confirm_live",
+              "binding_id"
             ],
             "x-reb-execution": {
               "kind": "action",
@@ -16611,11 +16669,17 @@
                 },
                 {
                   "id": "native-live-document",
-                  "condition": "target_id must be one of the HTTP(S) documents already listed from the live capture, and that capture must already have a native console binding."
+                  "condition": "target_id must still identify the exact native document in the same already-bound capture browser; confirm_live must explicitly authorize mutation in that document. binding_id must echo the exact generation in the selected listing; mismatches fail before any native dispatch."
                 }
               ],
-              "confirmations": [],
-              "notes": "Binds the console to a document the live capture is already recording. It does not launch a second browser profile. Evaluation uses the native console protocol in that document. This console cannot set breakpoints, step, or inspect paused frames.",
+              "confirmations": [
+                {
+                  "field": "confirm_live",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Explicitly opts into mutable live evaluation for one selected native document. Rotates the HTTP session identity and pins the document until disconnect or invalidation. No second browser, URL join, automatic remapping, retry or disposable fallback. No breakpoints, stepping or paused-frame inspection.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -16657,13 +16721,25 @@
               "kind": "action",
               "effects": [
                 "local-state-write",
-                "filesystem-write",
                 "browser-control",
-                "disposable-target-mutation",
-                "process-stop",
                 "data-discard"
               ],
-              "state_dependent_effects": [],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "filesystem-write",
+                    "disposable-target-mutation",
+                    "process-stop"
+                  ],
+                  "when": "Disposable mode kills owned processes and removes its temporary profile."
+                },
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "A failed live cleanup retires only the native bridge, never the capture browser."
+                }
+              ],
               "uncertainties": [],
               "prerequisites": [
                 {
@@ -16676,7 +16752,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Stops the owned bridge/browser process groups and removes the temporary profile. An idle session may be stopped without creating one.",
+              "notes": "Disconnect revokes selected-document authorization and releases retained values/monitors in accessed live documents before rearming the existing bridge. It does not undo page mutations or scheduled work, or stop the capture browser. Stale session IDs cannot address a later connection.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -16734,7 +16810,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Lists native documents through the existing bridge and advances exchange state. A listing can retire a failed session.",
+              "notes": "Lists native documents through the existing bridge. For live mode, unchanged exact weak documents keep IDs; losing the selected ID permanently revokes its authorization. This never selects a replacement.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -16779,7 +16855,6 @@
               "effects": [
                 "local-state-write",
                 "browser-control",
-                "disposable-target-mutation",
                 "code-execution",
                 "network-access"
               ],
@@ -16794,6 +16869,18 @@
                     "data-discard"
                   ],
                   "when": "An expired, poisoned, disconnected, or failed native session can be retired, killing its owned processes and deleting its temporary profile."
+                },
+                {
+                  "effects": [
+                    "disposable-target-mutation"
+                  ],
+                  "when": "The command mutates an explicitly started disposable session."
+                },
+                {
+                  "effects": [
+                    "live-target-mutation"
+                  ],
+                  "when": "The command mutates the exact captured document explicitly authorized through connect_live. This is not read-only or side-effect-safe evaluation."
                 }
               ],
               "uncertainties": [
@@ -16810,11 +16897,11 @@
                 },
                 {
                   "id": "native-document",
-                  "condition": "target_id must identify the selected current document; the native bridge validates it."
+                  "condition": "target_id and value handles must identify the exact current document. Live mode additionally requires the pin authorized by confirm_live; any navigation, reload, closure or binding loss revokes it before further dispatch."
                 }
               ],
               "confirmations": [],
-              "notes": "Evaluates arbitrary supplied JavaScript in the explicitly selected native document. The request has no confirmation boolean; that is not permission to execute.",
+              "notes": "Evaluates arbitrary supplied JavaScript in the explicitly selected native document. The request has no confirmation boolean; that is not permission to execute. Live ownership is revalidated immediately before dispatch and again by native weak-document/token guards. A stale request never remaps to another document; mutation before an in-flight navigation may already have occurred.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -16868,12 +16955,23 @@
                 },
                 {
                   "effects": [
-                    "disposable-target-mutation",
                     "code-execution",
                     "network-access",
                     "data-discard"
                   ],
                   "when": "command.operation selects evaluation, retained handle/state changes, monitoring, cancellation, or clearing; evaluate accepts arbitrary source."
+                },
+                {
+                  "effects": [
+                    "disposable-target-mutation"
+                  ],
+                  "when": "The command mutates an explicitly started disposable session."
+                },
+                {
+                  "effects": [
+                    "live-target-mutation"
+                  ],
+                  "when": "The command mutates the exact captured document explicitly authorized through connect_live. This is not read-only or side-effect-safe evaluation."
                 }
               ],
               "uncertainties": [
@@ -16890,11 +16988,11 @@
                 },
                 {
                   "id": "native-document",
-                  "condition": "target_id and any value handle must remain valid in the selected native document."
+                  "condition": "target_id and value handles must identify the exact current document. Live mode additionally requires the pin authorized by confirm_live; any navigation, reload, closure or binding loss revokes it before further dispatch."
                 }
               ],
               "confirmations": [],
-              "notes": "Dispatches a nested native runtime command. inspect/complete and other names must not be used to infer that the whole action is read-only.",
+              "notes": "Dispatches a nested native runtime command. inspect/complete and other names must not be used to infer that the whole action is read-only. Live ownership is revalidated immediately before dispatch and again by native weak-document/token guards. A stale request never remaps to another document; mutation before an in-flight navigation may already have occurred.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -17420,6 +17518,7 @@
                     "filesystem-write",
                     "browser-control",
                     "disposable-target-mutation",
+                    "live-target-mutation",
                     "code-execution",
                     "network-access",
                     "process-launch",
@@ -17455,6 +17554,7 @@
                       "filesystem-write",
                       "browser-control",
                       "disposable-target-mutation",
+                      "live-target-mutation",
                       "code-execution",
                       "network-access",
                       "process-launch",
@@ -17584,6 +17684,7 @@
                       "filesystem-write",
                       "browser-control",
                       "disposable-target-mutation",
+                      "live-target-mutation",
                       "code-execution",
                       "network-access",
                       "process-launch",

@@ -74,11 +74,14 @@ it.
 - Experiments do not read or modify baseline tabs, production cookies, storage,
   or credentials. Never execute extracted code automatically.
 
-- The native Console panel visibly opts into arbitrary JavaScript. Without a
-  live capture, that runs in a separate disposable browser profile. When the
-  live capture already has HTTP(S) documents, Connect evaluates in the selected
-  captured document through the native console protocol and does not open a
-  second profile. That evaluation can change the captured page. The console
+- The native Console defaults to a separate disposable browser profile. Explicit
+  Live capture mode additionally requires a specifically selected native document
+  and confirmation that commands can mutate that live document before the first
+  mutable command. Commands are pinned to its native document generation and
+  capture binding. Navigation, replacement, or lost ownership clears authorization
+  and requires explicit reselection or reconnection. Never select an execution
+  target by URL, remap automatically, retry a command, or fall back to a disposable
+  browser without an explicit mode change. The console
   cannot set breakpoints, step, or inspect paused frames. Expressions and
   primitive results may contain sensitive values; they stay in bounded,
   ephemeral panel memory and are not automatically captured, redacted, logged,

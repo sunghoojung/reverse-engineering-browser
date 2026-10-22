@@ -80,35 +80,41 @@ export async function checkNativeConsoleLiveDocuments(root) {
   get('level').value = 'all';
   get('scroll').append(get('output'));
   get('source').value = '';
-  const documents = [
+  let documents = [
     {id: '11', origin: 'https://alpha.test', label: 'Alpha', url: 'https://alpha.test/a', main_frame: true, truncated: false},
-    {id: '22', origin: 'http://beta.test:8080', label: 'Beta', url: 'http://beta.test/b', main_frame: true, truncated: false},
+    {id: '22', origin: 'https://alpha.test', label: 'Beta', url: 'https://alpha.test/a', main_frame: true, truncated: false},
   ];
   const calls = [];
-  let session = null;
+  let session = null, selected = null, liveAvailable = true, nextSession = 42, binding = '7';
   const state = () => ({contract_version: 2, state: session ? 'ready' : 'idle', session_id: session, available: true});
+  const listing = () => ({...state(), document_source: 'live_capture', live_available: liveAvailable, binding_id: binding, targets: documents, truncated: false, selected_target_id: session && documents.some(item => item.id === selected) ? selected : null});
   const fetch = async (path, options) => {
     const action = options?.body ? JSON.parse(options.body) : null;
     if (path === '/api/native-console') {
-      return {ok: true, status: 200, json: async () => ({...state(), document_source: 'live_capture', targets: documents, truncated: false, message: 'These documents come from the live capture. A second browser profile is not opened.'})};
+      return {ok: true, status: 200, json: async () => ({...listing(), message: liveAvailable ? 'These documents come from the live capture.' : 'Live capture binding unavailable. Restart the capture.'})};
     }
     calls.push(action);
-    if (action.action === 'targets' || action.action === 'start') throw new Error('Disposable browser actions are not used when the live capture already has documents');
-    if (!session && action.action !== 'connect_live') throw new Error(`Unexpected action before connect: ${action.action}`);
+    assert.notEqual(action.action, 'start', 'live selection must never silently launch a disposable browser');
     if (action.action === 'connect_live') {
-      assert.equal(action.target_id, '22');
+      assert.equal(action.confirm_live, true); assert.equal(action.binding_id, binding);
       assert.equal(Object.hasOwn(action, 'url'), false);
       assert.equal(Object.hasOwn(action, 'session_id'), false);
-      session = '42';
-      return {ok: true, status: 200, json: async () => ({...state(), document_source: 'live_capture', targets: documents, truncated: false})};
+      assert.ok(documents.some(item => item.id === action.target_id));
+      selected = action.target_id; session = String(nextSession++);
+      return {ok: true, status: 200, json: async () => listing()};
     }
     assert.equal(action.session_id, session);
-    assert.equal(action.target_id, '22', 'evaluation must address the selected live document');
+    if (action.action === 'stop') {
+      session = null;
+      return {ok: true, status: 200, json: async () => state()};
+    }
+    if (action.action === 'targets') return {ok: true, status: 200, json: async () => listing()};
+    assert.equal(action.target_id, selected, 'runtime must address the explicitly authorized native document');
     const command = action.command;
     let runtime = {status: 'ok', text: 'Complete'};
     if (command.operation === 'evaluate') {
       assert.equal(command.source, 'location.href');
-      runtime = {status: 'ok', value: {type: 'string', text: 'http://beta.test/b', truncated: false}};
+      runtime = {status: 'ok', value: {type: 'string', text: `document ${selected}`, truncated: false}};
     }
     if (command.operation === 'poll') runtime = {status: 'ok', messages: [], dropped: 0};
     return {ok: true, status: 200, json: async () => ({...state(), request_id: '1', runtime})};
@@ -122,36 +128,71 @@ export async function checkNativeConsoleLiveDocuments(root) {
     createSourceTokenizer: () => ({}), SOURCE_HIGHLIGHT_TOKEN_LIMIT: 8192,
     sourceSyntaxTokens: text => [{type: 'plain', text}], sourcePrettyTokens: () => [], fetch,
   };
-  runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize};})();'), context);
+  runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, refreshLiveDocuments, runtime};})();'), context);
+  const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const select = async id => { get('target').value = id; await get('target').emit('change'); };
+  const consent = async () => { get('live-consent').checked = true; await get('live-consent').emit('change'); };
   await context.testConsole.initialize();
+  assert.equal(get('mode').value, 'disposable', 'live discovery cannot change the default execution mode');
+  assert.equal(get('target').options.filter(option => option.value).length, 0);
+  get('url').value = 'https://disposable.test/retained-url';
+  get('mode').value = 'live_capture'; await get('mode').emit('change');
   const labels = [...get('target').options].map(option => option.textContent);
-  assert.match(labels.join('\n'), /Alpha/);
-  assert.match(labels.join('\n'), /Beta/);
-  assert.equal(get('target').options.filter(option => option.value).length, 2);
-  assert.match(get('notice').textContent, /live capture/);
+  assert.match(labels.join('\n'), /Alpha/); assert.match(labels.join('\n'), /Beta/);
   assert.match(get('notice').textContent, /cannot set breakpoints, step, or inspect paused frames/);
-  assert.match(get('empty-text').textContent, /live capture/);
+  assert.match(get('mode-description').textContent, /not read-only/);
   assert.equal(get('start').disabled, true);
-  get('target').value = '22';
-  await get('target').emit('change');
-  assert.equal(get('start').disabled, false);
-  assert.match(get('notice').textContent, /These documents come from the live capture/);
-  await get('start').click();
-  for (let i = 0; i < 12; i++) await Promise.resolve();
-  assert.equal(calls[0].action, 'connect_live');
-  assert.equal(calls[0].target_id, '22');
+  await select('22');
+  assert.equal(get('start').disabled, true, 'selection alone is not mutation consent');
+  await get('start').click(); await settle(); assert.equal(calls.length, 0);
+  await consent(); assert.equal(get('start').disabled, false);
+  await get('start').click(); await settle();
+  assert.equal(calls[0].action, 'connect_live'); assert.equal(calls[0].target_id, '22');
   assert.equal(get('target').value, '22');
-  get('source').value = 'location.href';
-  await get('source').emit('input');
-  await get('form').emit('submit');
+  assert.equal(get('target').disabled, true, 'changing an authorized live document requires disconnect');
+  get('source').value = 'location.href'; await get('source').emit('input'); await get('form').emit('submit');
   const evaluation = calls.find(call => call.command?.operation === 'evaluate');
-  assert.ok(evaluation, 'connect must be followed by evaluation of the selected document');
-  assert.equal(evaluation.action, 'runtime');
-  assert.equal(evaluation.target_id, '22');
-  assert.equal(evaluation.command.source, 'location.href');
-  assert.match(get('output').textContent, /live capture/);
-  assert.equal(calls.some(call => call.action === 'start' || call.action === 'targets'), false);
-  console.log('PASS native console lists both live documents and evaluates the selected one without a disposable browser');
+  assert.ok(evaluation); assert.equal(evaluation.target_id, '22');
+  assert.match(get('output').textContent, /document 22/);
+  await get('refresh').click(); await settle();
+  assert.equal(get('target').value, '22', 'refresh preserves the exact surviving document');
+  documents = [{...documents[1], id: '33'}]; // Same-URL reload, new native generation.
+  await get('refresh').click(); await settle();
+  assert.equal(get('target').value, '22'); assert.equal(get('target').selectedOptions[0].disabled, true);
+  assert.match(get('target').selectedOptions[0].textContent, /unavailable/);
+  assert.equal(get('live-consent').checked, false);
+  const beforeStale = calls.length;
+  get('source').value = 'location.href'; await get('form').emit('submit');
+  assert.equal(calls.length, beforeStale, 'invalidated selection must not dispatch');
+  assert.equal(get('run').disabled, true);
+  await get('stop').click(); await settle();
+  assert.equal(get('mode').value, 'live_capture');
+  assert.equal(get('start').disabled, true);
+  await select('33'); await consent(); await get('start').click(); await settle();
+  assert.equal(calls.filter(call => call.action === 'connect_live').at(-1).target_id, '33');
+  assert.equal(session, '43');
+  const beforeOldHandle = calls.length;
+  await context.testConsole.runtime({operation: 'inspect', handle: '7', offset: 0}, '22', false, '42', 0);
+  assert.equal(calls.length, beforeOldHandle, 'old value actions cannot cross reconnect');
+  await get('stop').click(); await settle(); await consent();
+  binding = '8'; // New browser/backend binding reuses the same numeric document ID.
+  const beforeRebind = calls.length;
+  await context.testConsole.refreshLiveDocuments(true);
+  assert.equal(get('target').selectedOptions[0].disabled, true);
+  assert.equal(get('live-consent').checked, false); assert.equal(get('start').disabled, true);
+  await get('start').click(); await settle(); assert.equal(calls.length, beforeRebind);
+  await select('33'); await consent(); // Explicit selection and fresh consent can use the new binding.
+  documents = [];
+  await context.testConsole.refreshLiveDocuments(true);
+  assert.equal(get('mode').value, 'live_capture', 'disappearance must not switch to disposable mode');
+  assert.equal(get('target').value, '33'); assert.equal(get('target').selectedOptions[0].disabled, true);
+  assert.equal(get('live-consent').checked, false); assert.equal(get('start').disabled, true);
+  await get('start').click(); await settle();
+  liveAvailable = false; await context.testConsole.refreshLiveDocuments(true);
+  assert.match(get('notice').textContent, /binding unavailable/); assert.equal(get('mode').value, 'live_capture');
+  assert.equal(calls.some(call => call.action === 'start'), false);
+  console.log('PASS native live mode requires exact document consent, preserves selection, revokes stale authorization, and never launches a fallback');
+
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

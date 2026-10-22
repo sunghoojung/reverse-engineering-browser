@@ -319,10 +319,15 @@ class Session final {
   }
 
   void List(std::shared_ptr<Reply> reply) {
+    const bool live =
+        base::CommandLine::ForCurrentProcess()->HasSwitch(kNativeConsoleLiveBindingSwitch);
+    auto previous = std::move(targets_);
     targets_.clear();
-    activity_drops_ =
-        std::min(2147483647u, activity_drops_ + static_cast<unsigned>(activity_.size()));
-    activity_.clear();
+    if (!live) {
+      activity_drops_ =
+          std::min(2147483647u, activity_drops_ + static_cast<unsigned>(activity_.size()));
+      activity_.clear();
+    }
     std::erase_if(observers_,
                   [](const auto& observer) { return observer->web_contents() == nullptr; });
     bool truncated = false;
@@ -341,7 +346,24 @@ class Session final {
           return;
         }
         Target target;
-        target.id = next_target_++;
+        // Keep an ID only while its exact weak document is still alive. A
+        // navigation/reload can reuse the frame host, URL and title, but cannot
+        // reuse this document generation. Never join native ownership by URL.
+        if (live) {
+          const auto same_document =
+              std::find_if(previous.begin(), previous.end(), [frame](const Target& old) {
+                return old.document.AsRenderFrameHostIfValid() == frame;
+              });
+          if (same_document != previous.end())
+            target.id = same_document->id;
+        }
+        if (!target.id) {
+          if (!next_target_) {
+            truncated = true;
+            return;
+          }
+          target.id = next_target_++;
+        }
         target.document = frame->GetWeakDocumentPtr();
         auto* contents = content::WebContents::FromRenderFrameHost(frame);
         if (contents && observers_.size() < kNativeConsoleTargetLimit &&
@@ -367,6 +389,16 @@ class Session final {
         frame->GetRemoteAssociatedInterfaces()->GetInterface(&target.agent);
         targets_.push_back(std::move(target));
       });
+    }
+    if (live) {
+      const auto before = activity_.size();
+      std::erase_if(activity_, [this](const auto& event) {
+        return std::none_of(targets_.begin(), targets_.end(), [&](const Target& target) {
+          return *event.FindString("document_id") == base::NumberToString(target.id);
+        });
+      });
+      activity_drops_ =
+          std::min(2147483647u, activity_drops_ + static_cast<unsigned>(before - activity_.size()));
     }
     reply->header.type = NativeConsoleType::kTargets;
     reply->header.flags = truncated ? kNativeConsoleTruncated : 0;
@@ -480,9 +512,9 @@ bool IsNativeConsoleEnabled() {
   if (!command.HasSwitch(kNativeConsoleSwitch))
     return false;
   const auto socket = command.GetSwitchValuePath("reb-native-console-socket");
-  const bool credentials =
-      socket.IsAbsolute() && !command.GetSwitchValuePath("reb-native-console-token-file").empty() &&
-      command.HasSwitch("reb-native-console-session-id");
+  const bool credentials = socket.IsAbsolute() &&
+                           !command.GetSwitchValuePath("reb-native-console-token-file").empty() &&
+                           command.HasSwitch("reb-native-console-session-id");
   if (!credentials)
     return false;
   if (command.HasSwitch(kNativeConsoleLiveBindingSwitch)) {

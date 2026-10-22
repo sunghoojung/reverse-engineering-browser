@@ -126,13 +126,6 @@ impl Debugger {
     pub fn snapshot(&self) -> Value {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
-    #[cfg(test)]
-    pub fn set_targets_for_test(&self, targets: Value) {
-        self.update(|state| {
-            state["targets"] = targets;
-            state["state"] = json!("running");
-        });
-    }
     fn update(&self, edit: impl FnOnce(&mut Value)) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         edit(&mut state);

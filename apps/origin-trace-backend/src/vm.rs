@@ -736,9 +736,11 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
     }
     let mut graph_ids = BTreeSet::new();
     let mut graph_omitted = 0usize;
-    // Keep the scoring representatives first, so every retained relevance
+    // Scoring representatives stay first, so every retained relevance
     // explanation has a graph node even when later context exceeds the cap.
-    for (event, observed) in representatives.values().copied().chain(runtime_events) {
+    // Request edges follow, before individual signal events. A browser-signal
+    // flood must not consume the cap and drop every correlated request.
+    for (event, observed) in representatives.values().copied() {
         let node = event_node("event", event);
         if !graph_entry(
             &mut nodes,
@@ -764,6 +766,18 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
                 requests.push(request.into());
             }
         } else {
+            graph_omitted += 1;
+        }
+    }
+    for (event, observed) in runtime_events {
+        let node = event_node("event", event);
+        if !graph_entry(
+            &mut nodes,
+            &mut edges,
+            &mut graph_ids,
+            json!({"id":node,"kind":"browser-signal","label":format!("{} {}",event["category"].as_str().unwrap(),event["type"].as_str().unwrap()),"event":event_value(event),"event_sequence":event["sequence_number"]}),
+            json!({"from":node,"to":finding_node,"state":if observed {"observed"} else {"correlated"},"reason":if observed {"Captured nonzero artifact attribution; no value flow is claimed."} else {"Matching session, navigation metadata, and nonzero frame; script attribution and causality remain unknown."}}),
+        ) {
             graph_omitted += 1;
         }
     }

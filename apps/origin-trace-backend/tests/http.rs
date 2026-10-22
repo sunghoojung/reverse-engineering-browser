@@ -1994,7 +1994,26 @@ fn vm_runtime_graph_limit_is_explicit_and_preserves_representative() {
         result["coverage"]["omissions"],
         json!([{"reason":"runtime-graph-edge-limit","omitted_records":8}])
     );
-    assert_eq!(result["related_request_ids"], json!([]));
+    let network = events.last().unwrap();
+    let request_id = network["request_id"].as_str().unwrap();
+    assert_eq!(result["related_request_ids"], json!([request_id]));
+    assert!(
+        result["graph"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| {
+                n["id"]
+                    == format!(
+                        "request:{}:{}:{}",
+                        network["session_id"].as_str().unwrap(),
+                        network["process_id"].as_u64().unwrap(),
+                        network["sequence_number"].as_str().unwrap()
+                    )
+                    && n["kind"] == "request"
+                    && n["request_id"] == request_id
+            })
+    );
 }
 #[tokio::test]
 async fn vm_opcode_workspace_has_etag_and_failure_isolated_from_vm_analysis() {

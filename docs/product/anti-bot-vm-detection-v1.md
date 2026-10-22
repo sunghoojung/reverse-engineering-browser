@@ -46,7 +46,8 @@ separately and never invalidate retained signals. A `capture-gap` omission count
 markers only, not lost events; overlapping queue/sequence losses are not summed.
 The 1,024-edge graph
 bound includes the artifact-to-finding edge. Scoring representatives are retained
-first; excluded graph records produce an explicit `runtime-graph-edge-limit`
+first, then correlated request edges, then individual browser-signal events.
+Excluded graph records produce an explicit `runtime-graph-edge-limit`
 omission and partial coverage. Request roots also keep composite event identity,
 while `related_request_ids` remains a legacy ID-only summary.
 

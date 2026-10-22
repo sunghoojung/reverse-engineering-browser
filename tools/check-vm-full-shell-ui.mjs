@@ -59,6 +59,13 @@ const html = await readFile(join(root, 'apps/research-ui/index.html'), 'utf8');
 const model = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const fixture = JSON.parse(await readFile(join(root, 'tests/research_ui/fixtures/vm-opcode-workspace-v2.json'), 'utf8'));
 const workspace = fixture.workspaces[0];
+// Source-backed diagnostic copy, not runtime evidence. The Rust producer test
+// separately validates the actual emitted no-samples workspace.
+const opcodeSource = await readFile(join(root, 'apps/origin-trace-backend/src/vm_opcode.rs'), 'utf8');
+const samplerDetail = opcodeSource.match(/"reason":"sampler-unavailable", "detail":\s*("[^"\n]+")/);
+assert(samplerDetail, 'The no-samples producer diagnostic must be available to the UI regression');
+const samplerOmission = {reason: 'sampler-unavailable', detail: JSON.parse(samplerDetail[1])};
+assert(samplerOmission.detail.startsWith('Brave has no guest dispatch emitter.'), 'The native capability limitation must lead, not follow secondary caveats');
 const analysis = {
   contract_version: 1, document_kind: 'vm-analysis', document_digest: fixture.analysis_digest,
   profile_digest: fixture.profile_digest, profile: {profile_id: 'anti-bot-vm-detection-v1'},
@@ -72,6 +79,17 @@ const analysis = {
   mixed_findings: [], opcode_workspace: fixture
 };
 assert(runInNewContext(`${model}\nisVmAnalysisDocument(analysis) && isVmOpcodeWorkspaceDocument(fixture)`, {analysis, fixture, TextEncoder}));
+const noSamplerFixture = structuredClone(fixture), noSamplerWorkspace = noSamplerFixture.workspaces[0];
+noSamplerWorkspace.runtime = 'webassembly'; noSamplerWorkspace.model = 'unknown';
+noSamplerWorkspace.samples = []; noSamplerWorkspace.sample_count = noSamplerFixture.summary.sample_count = 0;
+for (const handler of noSamplerWorkspace.handlers) {
+  handler.sample_count = 0;
+  if (handler.state === 'observed') handler.state = 'inferred';
+}
+noSamplerWorkspace.coverage.complete = false;
+noSamplerWorkspace.coverage.omissions.push(samplerOmission);
+noSamplerFixture.document_digest = 'b'.repeat(64);
+assert(runInNewContext(`${model}\nisVmOpcodeWorkspaceDocument(noSamplerFixture)`, {noSamplerFixture, TextEncoder}));
 const assets = new Set(['index.html', ...[...html.matchAll(/(?:src|href)="([^"/]+\.(?:js|css))"/g)].map(match => match[1])]);
 const compareInputs = {};
 for (const [key, name] of [['pack','pack.json'],['left','build-a.workspace.json'],['right','build-b.workspace.json']]) {
@@ -620,11 +638,33 @@ if (process.argv.includes('--fixture-only')) {
       assert.equal(await evaluate("document.querySelector('[data-owned-vm-action=create]').disabled"), true, 'An existing authored run cannot expose Create');
       await screenshot(`vm-live-authored-controls-${width}`);
     }
+    // Exercise the actual HTTP loader and Coverage tab with zero authored samples.
+    // Canvas, a retained snapshot and static handlers do not create guest evidence.
+    Object.assign(fixture, noSamplerFixture);
+    analysis.results[0].runtime = 'webassembly';
+    await evaluate('refreshVmAnalysis()');
+    await click('#vm-show-findings');
+    await until(() => evaluate("state.vmOpcodeWorkspace?.summary.sample_count === 0"), 'no-samples workspace through HTTP');
+    for (const width of [1440, 390]) {
+      await resize(width);
+      await click('[data-vm-panel="coverage"]');
+      await key('Enter', 'Enter', 13);
+      assert.equal(await evaluate("document.activeElement.dataset.vmPanel"), 'coverage', 'Coverage remains keyboard operable');
+      const omissionSelector = '[data-vm-panel-content="coverage"] .vm-coverage-omissions li:last-child';
+      assert.equal(await evaluate(`document.querySelector(${JSON.stringify(omissionSelector)}).textContent`),
+        'sampler-unavailable: ' + samplerOmission.detail, 'Complete diagnostic survives the shipped renderer');
+      await evaluate(`document.querySelector(${JSON.stringify(omissionSelector)}).scrollIntoView({block:'center',inline:'nearest'})`);
+      await evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+      await assertReachable(omissionSelector, 'Complete no-sampler diagnostic ' + width);
+      await assertFits('[data-vm-panel-content="coverage"]', 'No-sampler Coverage ' + width);
+      assert.equal(await evaluate("document.querySelector('.vm-selection-inspector').textContent.includes('No retained PC or guest-byte position.')"), true);
+      await screenshot(`vm-no-sampler-coverage-${width}`);
+    }
     assert.equal(requests.some(request => request.path === '/api/vm-debugger/actions'), false, 'No native command was sent by read-only Live presentation');
     assert.deepEqual(errors, []);
     assert.equal(requests.some(request => request.method !== 'GET' && !(request.method === 'POST' && request.path === '/api/analysis/vm/packs/compare')), false, 'Only exact authored comparison may POST');
     await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440,1280,900,390],
-      scope: 'Actual index.html and shipped scripts. Authored retained Findings, imported fixed-program Execution trace, actual local Static/Contextual analysis, declared versus supplied jump linkage, real File imports, current-mode menu routing, and authored pack/ledger results at every viewport. Live is a read-only presentation of checked-in independent golden transitions; no native command or command completion was fabricated. No live capture, native-helper execution or imported-code execution.',
+      scope: 'Actual index.html and shipped scripts. Authored retained Findings, imported fixed-program Execution trace, actual local Static/Contextual analysis, declared versus supplied jump linkage, real File imports, current-mode menu routing, and authored pack/ledger results at every viewport. No-sampler Coverage exposes the complete producer diagnostic with the native capability limitation first at wide and narrow widths. Live is a read-only presentation of checked-in independent golden transitions; no native command or command completion was fabricated. No live capture, native-helper execution or imported-code execution.',
       populated_modes: ['findings','execution','static','contextual','packs','ledger','owned'],
       fixture_counts: {execution_steps: executionTrace.steps.length, static_instructions: staticReport.coverage.instruction_count, contextual_contexts: contextualReport.analysis.instructions.length, contextual_observed_edges: contextualReport.observed_edges.length, live_golden_records: liveRecords.length}, requests}, null, 2));
     console.log(`PASS full VM product shell: ${output}`);

@@ -871,7 +871,7 @@ pub(crate) fn workspace(
     }
     if sample_count == 0 {
         omissions.push(json!({"reason":"sampler-unavailable", "detail":
-            "No runtime dispatch samples were retained. Static dispatch, Canvas calls and buffer snapshots do not prove a guest PC. Brave has no guest dispatch emitter; owned native fixtures are separate producers."}));
+            "Brave has no guest dispatch emitter. No runtime dispatch samples were retained. Static dispatch, Canvas calls and buffer snapshots do not prove a guest PC. Owned native fixtures are separate producers."}));
     } else if sample_count > retained_samples.len() as u64 {
         omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
     }
@@ -1726,7 +1726,7 @@ mod tests {
             omission["detail"]
                 .as_str()
                 .unwrap()
-                .contains("no guest dispatch emitter")
+                .starts_with("Brave has no guest dispatch emitter.")
         );
         assert!(omission["detail"].as_str().unwrap().len() <= 240);
         assert_schema(&document);

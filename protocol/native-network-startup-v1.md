@@ -95,7 +95,7 @@ MIME/protocol or synthetic provenance. No query, fragment, credentials, headers 
 request body is added. Existing explicitly authorized JS/Wasm artifact capture
 has its own sensitive-data limits and receiver acknowledgment.
 
-The browser queue holds 1,024 records. Full queues count drops; the existing writer
+The browser queue holds 8,192 records. Full queues count drops; the existing writer
 reports weighted gaps when it can next drain records. The 128-byte payload cap
 sets truncation flags. Queue-wide gaps are unattributed and may overlap sequence
 discontinuities; never add them as independent losses. Disconnect/final-tail

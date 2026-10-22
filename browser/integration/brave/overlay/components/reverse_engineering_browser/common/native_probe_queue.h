@@ -22,7 +22,9 @@ namespace reb {
 
 inline constexpr std::uint32_t kNativeProbeQueueMagic = 0x52454251;
 inline constexpr std::uint16_t kNativeProbeQueueVersion = 2;
-inline constexpr std::size_t kNativeProbeQueueCapacity = 1024;
+// More headroom for bursts that overflowed 1,024 slots; not a no-loss guarantee.
+// A producer that stays ahead of the consumer can still drop.
+inline constexpr std::size_t kNativeProbeQueueCapacity = 8192;
 
 inline NativeProbeEvent MakeNativeProbeGapEvent(const NativeProbeEvent& reference,
                                                 const std::uint64_t dropped) noexcept {
@@ -204,7 +206,7 @@ class alignas(64) NativeProbeQueue final {
   alignas(64) std::array<Slot, kNativeProbeQueueCapacity> slots_{};
 };
 
-static_assert(sizeof(NativeProbeQueue) == 393536);
+static_assert(sizeof(NativeProbeQueue) == 3146048);
 static_assert(alignof(NativeProbeQueue) == 64);
 
 }  // namespace reb

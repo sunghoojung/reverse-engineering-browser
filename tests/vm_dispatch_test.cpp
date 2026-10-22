@@ -1,11 +1,15 @@
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <latch>
+#include <thread>
 
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_vm_dispatch.h"
+#include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
 #include "reb/vm_dispatch.hpp"
@@ -22,6 +26,66 @@ bool Check(const bool condition, const char* const message) {
 }  // namespace
 
 int main() {
+  // Model a reader paused after policy validation, then a replacement config.
+  // This is the same reservation state used by NativeProbeSink, not a copy of
+  // its algorithm. No timing sleeps or native browser are required.
+  reb::NativeVmDispatchBudget budget;
+  std::latch validated(1);
+  std::latch resume(1);
+  std::thread stale([&] {
+    validated.count_down();
+    resume.wait();
+    static_cast<void>(budget.TryReserve(2));
+  });
+  validated.wait();
+  const auto first_new = budget.TryReserve(4);
+  resume.count_down();
+  stale.join();
+  if (!Check(first_new == 0, "new configuration lost its first reservation")) {
+    return 1;
+  }
+  for (std::uint32_t slot = 1; slot < reb::kNativeVmDispatchSampleBudget; ++slot) {
+    if (!Check(budget.TryReserve(4) == slot, "stale reader consumed new configuration budget")) {
+      return 1;
+    }
+  }
+  if (!Check(budget.TryReserve(4) == reb::kNativeVmDispatchSampleBudget,
+             "configuration exceeded its budget") ||
+      !Check(budget.TryReserve(2) == reb::kNativeVmDispatchSampleBudget,
+             "stale generation overwrote newer claims") ||
+      !Check(budget.TryReserve(0) == reb::kNativeVmDispatchSampleBudget,
+             "inactive generation reserved budget") ||
+      !Check(budget.TryReserve(5) == reb::kNativeVmDispatchSampleBudget,
+             "unstable generation reserved budget")) {
+    return 1;
+  }
+  for (std::uint32_t slot = 0; slot < reb::kNativeVmDispatchSampleBudget; ++slot) {
+    if (!Check(budget.TryReserve(6) == slot, "next configuration did not reclaim budget")) {
+      return 1;
+    }
+  }
+
+  reb::NativeVmDispatchBudget concurrent_budget;
+  std::array<std::thread, 32> contenders;
+  std::atomic<std::uint32_t> accepted{0};
+  std::latch start(1);
+  for (auto& contender : contenders) {
+    contender = std::thread([&] {
+      start.wait();
+      if (concurrent_budget.TryReserve(2) < reb::kNativeVmDispatchSampleBudget) {
+        accepted.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+  start.count_down();
+  for (auto& contender : contenders) {
+    contender.join();
+  }
+  if (!Check(accepted.load() == reb::kNativeVmDispatchSampleBudget,
+             "concurrent callers violated a stable configuration budget")) {
+    return 1;
+  }
+
   static_assert(sizeof(reb::VmDispatchSamplePayload) == 128);
   static_assert(offsetof(reb::VmDispatchSamplePayload, instruction_pointer) == 4);
   static_assert(offsetof(reb::VmDispatchSamplePayload, finding_id) == 24);
@@ -112,6 +176,43 @@ int main() {
   }
   event.header.payload_size = 127;
   if (!Check(!reb::DecodeVmDispatchSample(event, decoded), "short sample accepted")) {
+    return 1;
+  }
+
+  auto native = std::bit_cast<reb::NativeVmDispatchSamplePayload>(sample);
+  reb::NativeProbeEvent probe;
+  if (!Check(reb::PrepareVmDispatchProbeEvent(native, 0, 8, 9, 10, 11, 12, 13, probe) ==
+                 reb::NativeVmDispatchPrepareStatus::kReady,
+             "observed sample was not prepared") ||
+      !Check(probe.header.category == reb::NativeProbeCategory::kVm, "probe category") ||
+      !Check(probe.header.type == reb::NativeProbeType::kVmDispatchSample, "probe type") ||
+      !Check(probe.header.payload_size == sizeof(native), "probe payload size") ||
+      !Check(probe.header.artifact_id == native.interpreter_artifact_id, "probe artifact id") ||
+      !Check(probe.header.sequence_number == 8 && probe.header.frame_id == 13, "probe identity") ||
+      !Check(std::memcmp(probe.inline_payload.data(), &native, sizeof(native)) == 0,
+             "probe payload bytes")) {
+    return 1;
+  }
+  native.interpreter_artifact_id = 0;
+  if (!Check(!reb::IsEmittableVmDispatchSample(native), "missing interpreter artifact accepted") ||
+      !Check(reb::PrepareVmDispatchProbeEvent(native, 0, 1, 1, 1, 1, 1, 1, probe) ==
+                 reb::NativeVmDispatchPrepareStatus::kMalformed,
+             "missing interpreter artifact prepared")) {
+    return 1;
+  }
+  native.interpreter_artifact_id = sample.interpreter_artifact_id;
+  native.finding_id = 0;
+  if (!Check(reb::PrepareVmDispatchProbeEvent(native, 0, 1, 1, 1, 1, 1, 1, probe) ==
+                 reb::NativeVmDispatchPrepareStatus::kMalformed,
+             "missing finding id prepared")) {
+    return 1;
+  }
+  native.finding_id = sample.finding_id;
+  if (!Check(reb::PrepareVmDispatchProbeEvent(native, reb::kNativeVmDispatchSampleBudget, 1, 1, 1,
+                                              1, 1, 1, probe) ==
+                 reb::NativeVmDispatchPrepareStatus::kBudgetExhausted,
+             "sample past the budget was prepared") ||
+      !Check(reb::kNativeVmDispatchSampleBudget == 16, "dispatch budget drifted")) {
     return 1;
   }
   return 0;

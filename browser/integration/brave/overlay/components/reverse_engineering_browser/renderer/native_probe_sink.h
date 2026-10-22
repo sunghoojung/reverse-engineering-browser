@@ -14,6 +14,7 @@
 #include "base/component_export.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+#include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 
 namespace reb {
 
@@ -112,6 +113,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void RecordRequestInitiated(std::int32_t request_id,
                               std::string_view method,
                               std::string_view url) noexcept;
+  // Copies one guest step the caller already observed. The instruction
+  // pointer, opcode, and handler index are not read from V8, Wasm, canvas,
+  // or a static handler table. At most kNativeVmDispatchSampleBudget samples
+  // are admitted for one capture configuration.
+  void RecordVmDispatchSample(const NativeVmDispatchSamplePayload& sample) noexcept;
 
  private:
   NativeProbeSink() noexcept;
@@ -139,6 +145,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
   std::atomic<std::size_t> runtime_typed_array_count_{0};
+  NativeVmDispatchBudget dispatch_sample_budget_;
 };
 
 }  // namespace reb

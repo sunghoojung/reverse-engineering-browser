@@ -1,7 +1,6 @@
 #ifndef REB_ORIGIN_TRACE_HPP_
 #define REB_ORIGIN_TRACE_HPP_
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -10,13 +9,14 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "reb/event.hpp"
 
 namespace reb {
 
 inline constexpr std::uint16_t kOriginTraceProtocolVersion = 1;
-inline constexpr std::size_t kMaxOriginTraceEdgesPerEvent = 3;
+inline constexpr std::size_t kMaxDirectOriginTraceEdgesPerEvent = 3;
 
 enum class OriginTraceRelation : std::uint16_t {
   kUnknown = 0,
@@ -63,8 +63,9 @@ static_assert(offsetof(OriginTraceEdge, to) == 32);
 static_assert(offsetof(OriginTraceEdge, request_id) == 56);
 
 struct OriginTraceEdgeBatch final {
-  std::array<OriginTraceEdge, kMaxOriginTraceEdgesPerEvent> edges{};
-  std::size_t count = 0;
+  // Up to three direct edges plus at most index-capacity delayed initiators.
+  // This cold-path container is not a wire record.
+  std::vector<OriginTraceEdge> edges;
 };
 
 struct OriginTraceIndexStats final {
@@ -124,11 +125,15 @@ class OriginTraceIndex final {
     std::uint64_t browser_context_id_high = 0;
     std::uint64_t browser_context_id_low = 0;
     bool ambiguous = false;
+    OriginTraceEventReference initiator{};
   };
 
   [[nodiscard]] bool Contains(const OriginTraceEventReference& event) const;
   [[nodiscard]] OriginTraceEventReference FindRequest(const EventRecord& event) const;
   [[nodiscard]] OriginTraceEventReference FindLegacyRequest(const LegacyRequestKey& key) const;
+  [[nodiscard]] OriginTraceEventReference FindInitiator(const LegacyRequestKey& key) const;
+  void RememberPendingInitiator(const EventRecord& event, const LegacyRequestKey& key);
+  void ResolvePendingInitiators(const EventRecord& event, OriginTraceEdgeBatch& batch);
   void RememberEvent(const OriginTraceEventReference& event);
   void RememberRequest(const EventRecord& event, const OriginTraceEventReference& reference);
   void AddEdge(OriginTraceEdgeBatch& batch,
@@ -144,6 +149,9 @@ class OriginTraceIndex final {
   std::deque<RequestKey> request_order_;
   std::unordered_map<LegacyRequestKey, LegacyRequestState, LegacyRequestKeyHash> legacy_requests_;
   std::deque<LegacyRequestKey> legacy_request_order_;
+  std::unordered_multimap<LegacyRequestKey, OriginTraceEdge, LegacyRequestKeyHash>
+      pending_initiators_;
+  std::deque<std::pair<LegacyRequestKey, OriginTraceEventReference>> pending_initiator_order_;
   OriginTraceIndexStats stats_;
 };
 

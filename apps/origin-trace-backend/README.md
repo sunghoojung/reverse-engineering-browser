@@ -69,6 +69,13 @@ focus switches, target replacement or reconnect. Retired owners leave retained
 history and explicit unfinished-evidence gaps. `network.capture_epoch` remains
 the focused debugger/selection identity, not the HTTP owner token.
 
+Supplementary HTTP target-list discovery validates the browser connection and
+catalog epoch from before the list read, then admits under the catalog lock.
+It retains at most 4,096 retired target IDs per connection. At that limit, list-only
+recovery fails closed and coverage is visibly partial until capture reconnects;
+normal browser Target events continue. No first-navigation or short-lived-page
+capture guarantee is added.
+
 Passive capture does not pause startup or guarantee the first full URL:
 requests before attachment/Network.enable and very short-lived targets can
 lack a debugger row. Unmatched native rows stay in the Traffic ledger as

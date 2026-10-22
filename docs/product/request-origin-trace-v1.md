@@ -73,12 +73,7 @@ Select any live network request in Traffic and choose **Trace origin**. The
 trace remains available when structured request fields were not captured. The
 result starts at the exact request-start event selected by the UI, works
 backward to the earliest retained browser signal, and exposes the same records
-under Supporting evidence. Backtraces also offers a native root when retained
-evidence has an exact `request_started` or `request_initiated` identity, or a
-`request_initiator` edge identified by session, process, and sequence. A CDP row
-is not that root. Host, method, URL, and time do not choose it. Loading the root
-includes a stored `request_initiator` predecessor when that edge is the retained
-link.
+under Supporting evidence.
 
 The current feature traces event origin. Exact field-level JavaScript value
 provenance and asynchronous continuation capture remain future work.

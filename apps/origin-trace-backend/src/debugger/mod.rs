@@ -276,6 +276,9 @@ impl Debugger {
         }
         let browser_capture =
             self.options.capture_network_content && self.refresh_browser_capture().await;
+        let list_snapshot = browser_capture
+            .then(|| self.capture_list_snapshot())
+            .flatten();
         let targets = match self.discover().await {
             Ok(targets) => targets,
             Err(error) => {
@@ -293,9 +296,11 @@ impl Debugger {
             }
         };
         if browser_capture {
-            // Sources and Console already see this list. A missed targetCreated
+            // Sources already sees this debugger list. A missed targetCreated
             // must not leave an open http(s) page out of Traffic.
-            self.admit_discovered_http_pages(&targets).await;
+            if let Some((connection, epoch)) = list_snapshot {
+                self.admit_discovered_http_pages(&targets, &connection, epoch);
+            }
         } else {
             self.refresh_captures(&targets).await;
         }

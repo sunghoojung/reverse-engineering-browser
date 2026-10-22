@@ -150,6 +150,7 @@ if(process.argv[2]==='--transport') {
   await checkPartialFixtureRecord();
   const info=(id,type='page',parent)=>({targetId:id,type,title:id,url:`http://localhost/${id}`,...(parent?{parent}:{})});
   async function fixture(initial,options,run) {
+    if(process.env.REB_LIST_DISCOVERY_ONLY==='1'&&!options.listDiscovery)return;
     if(process.env.REB_EXTRA_STATUS_ONLY==='1'&&!options.extraStatus)return;
     if(process.env.REB_ENDPOINT_ONLY==='1'&&!options.endpointCase)return;
     if(process.env.REB_TERMINAL_HANDOFF_ONLY==='1'&&!options.terminalHandoff)return;
@@ -157,7 +158,13 @@ if(process.argv[2]==='--transport') {
     const directory=await mkdtemp(join(tmpdir(),'reb-browser-sessions-'));let backend,exited,address,diagnostics='';let targets=initial;
     await writeFile(join(directory,'options'),JSON.stringify(options));
     const save=()=>writeFileSync(join(directory,'targets'),JSON.stringify(targets));save();await writeFile(join(directory,'events'),'');await writeFile(join(directory,'commands'),'');
-    const server=createServer((_req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(targets.filter(t=>t.type==='page').map(t=>({...t,id:t.targetId,webSocketDebuggerUrl:`ws://127.0.0.1:${server.address().port}/devtools/page/${t.targetId}`}))));});
+    let holdList=false,heldList=null,listReads=0;
+    const server=createServer((_req,res)=>{
+      listReads++;
+      const body=JSON.stringify(targets.filter(t=>t.type==='page').map(t=>({...t,id:t.targetId,webSocketDebuggerUrl:`ws://127.0.0.1:${server.address().port}/devtools/page/${t.targetId}`})));
+      const reply=()=>{res.setHeader('Content-Type','application/json');res.end(body);};
+      if(holdList&&!heldList){holdList=false;heldList=reply;}else reply();
+    });
     await new Promise(r=>server.listen(0,'127.0.0.1',r));
     const send=value=>appendFileSync(join(directory,'events'),JSON.stringify(value)+'\n');
     const commands=()=>completeLines(join(directory,'commands')).map(JSON.parse);
@@ -178,8 +185,9 @@ if(process.argv[2]==='--transport') {
       backend=spawn(binary,['--port','0','--endpoint-file',join(directory,'endpoint'),'--devtools-active-port',join(directory,'active'),'--debugger-transport',join(directory,'transport'),...(options.capture===false?[]:['--capture-network-content']),...(options.limit?['--capture-target-limit',String(options.limit)]:[])],{cwd:directory,env:{...process.env,REB_CAPTURE_FIXTURE:directory}});
       exited=new Promise(r=>{backend.once('exit',r);backend.once('error',e=>{diagnostics+=e.message;r();});});
       for(const stream of [backend.stdout,backend.stderr])stream.on('data',chunk=>diagnostics=(diagnostics+chunk).slice(-8192));
-      await run({send,state,until,commands,publishEndpoint:()=>writeFile(join(directory,'active'),`${server.address().port}\n/devtools/browser/fixture\n`),supportDiscovery:()=>writeFile(join(directory,'discovery-supported'),'1'),forget:id=>{targets=targets.filter(t=>t.targetId!==id);save();},add:t=>{targets.push(t);save();send({add:t.targetId});},listOnly:t=>{targets.push({...t,listOnly:true});save();},destroy:id=>{targets=targets.filter(t=>t.targetId!==id);save();send({destroy:id});}});
+      await run({send,state,until,commands,holdList:()=>{holdList=true;},listHeld:()=>heldList!==null,releaseList:()=>{const reply=heldList;heldList=null;reply?.();},listReads:()=>listReads,publishEndpoint:()=>writeFile(join(directory,'active'),`${server.address().port}\n/devtools/browser/fixture\n`),supportDiscovery:()=>writeFile(join(directory,'discovery-supported'),'1'),forget:id=>{targets=targets.filter(t=>t.targetId!==id);save();},add:t=>{targets.push(t);save();send({add:t.targetId});},listOnly:t=>{targets.push({...t,listOnly:true});save();},destroy:id=>{targets=targets.filter(t=>t.targetId!==id);save();send({destroy:id});}});
     } finally {
+      heldList?.();heldList=null;
       if(backend?.exitCode===null&&backend.signalCode===null){backend.kill('SIGTERM');await Promise.race([exited,delay(3000)]);if(backend.exitCode===null&&backend.signalCode===null){backend.kill('SIGKILL');await exited;}}
       await new Promise(r=>server.close(r));await rm(directory,{recursive:true,force:true});
     }
@@ -645,7 +653,7 @@ if(process.argv[2]==='--transport') {
     assert(!controls.some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'Explicit passive admission never resumes targets');
     console.log('PASS browser sessions: discovery events promptly admit a bounded burst without browser-root auto-attach or resume');
   });
-  await fixture([info('a')],{},async({until,commands,listOnly,send,state})=>{
+  await fixture([info('a')],{listDiscovery:true},async({until,commands,listOnly,send,state})=>{
     await until(s=>s.network.capture_status.attached_target_ids.includes('a')&&s.target.id==='a','Initial page attached without changing focus');
     listOnly({...info('example'),url:'https://example.com/stay-open',title:'Example Domain'});
     const attached=await until(s=>s.network.capture_status.attached_target_ids.includes('example')&&commands().some(c=>c.method==='Network.enable'&&c.sessionId?.endsWith(':example')),'Open https page missed by targetCreated is admitted from the debugger list',10000);
@@ -660,6 +668,48 @@ if(process.argv[2]==='--transport') {
     assert(!commands().some(c=>c.method==='Runtime.runIfWaitingForDebugger'),'List admission must not resume a target this session did not pause');
     assert(recorded.network.requests.some(row=>row.protocol_request_id==='later-script'));
     console.log('PASS browser sessions: an http(s) page visible to the debugger list is captured without targetCreated, browser-root auto-attach, or resume');
+  });
+  await fixture([info('a')],{listDiscovery:true},async({until,commands,listOnly,forget,add,holdList,listHeld,releaseList,listReads})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Initial page before stale catalog list');
+    holdList();listOnly(info('stale-list'));
+    const deadline=Date.now()+10000;
+    while(!listHeld()&&Date.now()<deadline)await delay(10);
+    assert(listHeld(),'Hold a captured HTTP response before catalog changes');
+    forget('stale-list');add(info('epoch-barrier'));
+    await until(s=>s.network.capture_status.attached_target_ids.includes('epoch-barrier'),
+      'Target event barrier advances the catalog after the HTTP snapshot');
+    releaseList();
+    const reads=listReads();
+    await until(s=>listReads()>reads&&s.network.capture_status.eligible_targets===2,
+      'Changed catalog rejects the complete stale list snapshot');
+    assert(!commands().some(c=>c.method==='Target.attachToTarget'&&c.params?.targetId==='stale-list'));
+    console.log('PASS browser sessions: changed catalog rejects a delayed HTTP list snapshot before any stale attach');
+  });
+  await fixture([info('a')],{listDiscovery:true},async({until,commands,listOnly,send,holdList,listHeld,releaseList,listReads,destroy})=>{
+    await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Initial page before delayed list');
+    holdList();
+    listOnly({...info('retired-list'),url:'https://example.com/retired'});
+    const deadline=Date.now()+10000;
+    while(!listHeld()&&Date.now()<deadline)await delay(10);
+    assert(listHeld(),'The HTTP list response must be held before target destruction');
+    destroy('retired-list');
+    // A following captured request is an event-stream barrier: its appearance
+    // proves the preceding targetDestroyed has been processed.
+    send({target:'a',method:'Network.requestWillBeSent',params:{requestId:'destroy-barrier',timestamp:1,wallTime:1,type:'Fetch',request:{url:'https://example.com/barrier',method:'GET',headers:{}}}});
+    await until(s=>s.network.requests.some(row=>row.protocol_request_id==='destroy-barrier'),
+      'Ordered network event proves target destruction was consumed');
+    releaseList();
+    const initialReads=listReads();
+    await until(s=>listReads()>initialReads&&s.network.capture_status.eligible_targets===1,
+      'A delayed HTTP list cannot restore the destroyed target');
+    assert(!commands().some(c=>c.method==='Target.attachToTarget'&&c.params?.targetId==='retired-list'));
+    // Even a later stale HTTP list must not forget a retained destruction ID.
+    listOnly({...info('retired-list'),url:'https://example.com/retired'});
+    const laterReads=listReads();
+    await until(s=>listReads()>laterReads&&s.network.capture_status.eligible_targets===1,
+      'A later stale list keeps the destroyed target excluded');
+    assert(!commands().some(c=>c.method==='Target.attachToTarget'&&c.params?.targetId==='retired-list'));
+    console.log('PASS browser sessions: delayed and repeated stale HTTP lists cannot resurrect a destroyed page');
   });
   await fixture([info('a')],{slowAdmission:true},async({until,commands,add,send})=>{
     await until(s=>s.network.capture_status.attached_target_ids.includes('a'),'Initial owner before slow admission');

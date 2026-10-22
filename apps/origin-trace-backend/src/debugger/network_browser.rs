@@ -89,6 +89,11 @@ struct CleanupQueue {
     keys: BTreeMap<CleanupKey, CleanupProof>,
 }
 
+// A connection remembers retired IDs without allowing tab/worker churn to grow
+// memory forever. At the bound, supplementary list admission fails closed;
+// browser Target events continue to drive capture until reconnection.
+const MAX_RETIRED_LIST_TARGETS: usize = 4096;
+
 pub(super) struct BrowserCapture {
     connection: Mutex<Option<Arc<Connection>>>,
     targets: Mutex<BTreeMap<String, Value>>,
@@ -218,6 +223,7 @@ impl Debugger {
         let missing=targets.values().filter(|t|eligible(t)&&!ids.contains(&t["id"])).map(|t|json!({"id":t["id"],"title":crate::validation::truncate(t["title"].as_str().unwrap_or(""),128)})).collect::<Vec<_>>();
         let count = targets.values().filter(|t| eligible(t)).count();
         let limit = self.options.capture_target_limit as usize;
+        let list_limited = self.list_discovery_limited();
         self.update(|s| {
             let v = &mut s["network"]["capture_status"];
             v["scope"] = json!("http-browser-targets");
@@ -239,7 +245,10 @@ impl Debugger {
             );
             v["unattached_targets"] = json!(missing.iter().take(16).collect::<Vec<_>>());
             v["unattached_targets_omitted"] = json!(missing.len().saturating_sub(16));
-            let incomplete = self.capture.browser.catalog_incomplete.load(Ordering::Acquire);
+            let incomplete = self.capture.browser.catalog_incomplete.load(Ordering::Acquire) || list_limited;
+            if list_limited {
+                v["message"] = json!("Passive browser target events remain enabled. List-only discovery is disabled because retired target history reached its bound; capture reconnection resets it. Requests before Network.enable remain unavailable.");
+            }
             v["catalog_incomplete"] = json!(incomplete);
             v["state"] = json!(if incomplete { "partial" } else if count == 0 {
                 "waiting"
@@ -418,13 +427,7 @@ impl Debugger {
             waiting.push_back(id);
         }
     }
-    /// Queue http(s) pages that `/json/list` already published and the browser
-    /// catalog missed. Known catalog ids are left untouched: refreshing them
-    /// would bump the catalog epoch and discard an in-flight snapshot. A target
-    /// this browser connection already reported as destroyed is not queued again
-    /// from that list. Admission stays the explicit attach path. This does not
-    /// enable browser-root auto-attach and does not resume a target.
-    pub(super) async fn admit_discovered_http_pages(self: &Arc<Self>, discovered: &[Value]) {
+    pub(super) fn capture_list_snapshot(&self) -> Option<(Arc<Connection>, u64)> {
         let connection = self
             .capture
             .browser
@@ -432,69 +435,112 @@ impl Debugger {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .filter(|connection| !connection.is_closed());
-        let Some(connection) = connection else {
+            .filter(|connection| !connection.is_closed())?;
+        Some((
+            connection,
+            self.capture.browser.catalog_epoch.load(Ordering::Acquire),
+        ))
+    }
+    fn list_discovery_limited(&self) -> bool {
+        self.capture
+            .browser
+            .destroyed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+            >= MAX_RETIRED_LIST_TARGETS
+    }
+    // Called with the catalog lock held, as is list admission. The retained set
+    // is never evicted into accepting an old list identity again.
+    fn remember_destroyed_list_target(&self, id: &str) {
+        if id.is_empty() || id.len() > 4096 {
             return;
-        };
-        let mut admitted = false;
-        for page in discovered {
-            if page["type"] != "page" {
-                continue;
-            }
-            let Some(url) = page["url"].as_str() else {
-                continue;
-            };
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                continue;
-            }
-            let Some(id) = page["id"]
-                .as_str()
-                .filter(|id| !id.is_empty() && id.len() <= 4096)
-            else {
-                continue;
-            };
-            let known = self
+        }
+        let mut destroyed = self
+            .capture
+            .browser
+            .destroyed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if destroyed.len() >= MAX_RETIRED_LIST_TARGETS {
+            return;
+        }
+        destroyed.insert(id.to_owned());
+        if destroyed.len() == MAX_RETIRED_LIST_TARGETS {
+            self.update(|state| {
+                let status = &mut state["network"]["capture_status"];
+                status["gaps"] = json!(status["gaps"].as_u64().unwrap_or(0).saturating_add(1));
+                status["last_error"] = json!("Retired target history reached its bound; list-only discovery is disabled until capture reconnects. Browser target events still capture new pages.");
+            });
+        }
+    }
+    /// Supplement browser Target events with a bounded http(s) list snapshot.
+    /// Connection and epoch are captured BEFORE the HTTP request. Validation and
+    /// insertion share the catalog lock with destruction, so neither a delayed
+    /// reply nor a concurrent destroy can resurrect a target. No startup holds,
+    /// browser-root auto-attach, or target resumption are requested.
+    pub(super) fn admit_discovered_http_pages(
+        self: &Arc<Self>,
+        discovered: &[Value],
+        connection: &Arc<Connection>,
+        epoch: u64,
+    ) {
+        let admitted = {
+            let mut targets = self
                 .capture
                 .browser
                 .targets
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(id);
+                .unwrap_or_else(|e| e.into_inner());
+            if connection.is_closed()
+                || !self.capture.browser.current(connection)
+                || self.capture.browser.catalog_epoch.load(Ordering::Acquire) != epoch
+            {
+                return;
+            }
             let destroyed = self
                 .capture
                 .browser
                 .destroyed
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(id);
-            if known || destroyed {
-                continue;
+                .unwrap_or_else(|e| e.into_inner());
+            if destroyed.len() >= MAX_RETIRED_LIST_TARGETS {
+                return;
             }
-            let waiting = self
-                .capture
-                .browser
-                .waiting
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .len();
-            self.remember_capture_target(&json!({
-                "targetId": id,
-                "type": "page",
-                "title": page["title"].as_str().unwrap_or(""),
-                "url": url,
-            }));
-            let queued = self
-                .capture
-                .browser
-                .waiting
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .len()
-                > waiting;
-            admitted |= queued;
-        }
+            let mut admitted = false;
+            for page in discovered.iter().take(512) {
+                if page["type"] != "page" {
+                    continue;
+                }
+                let Some(url) = page["url"].as_str() else {
+                    continue;
+                };
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    continue;
+                }
+                let Some(id) = page["id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty() && id.len() <= 4096)
+                else {
+                    continue;
+                };
+                if targets.contains_key(id) || destroyed.contains(id) {
+                    continue;
+                }
+                let Some(record) = target(&json!({"targetId": id, "type": "page",
+                    "title": page["title"].as_str().unwrap_or(""), "url": url}))
+                else {
+                    continue;
+                };
+                // Use this insertion's outcome, not queue length: the independent
+                // admission pump may drain other entries concurrently.
+                admitted |=
+                    self.remember_capture_target_locked(&mut targets, id.to_owned(), record);
+            }
+            admitted
+        };
         if admitted {
-            self.schedule_capture_admission(&connection);
+            self.schedule_capture_admission(connection);
             self.browser_status();
         }
     }
@@ -1273,12 +1319,7 @@ impl Debugger {
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(id);
                     targets.remove(id);
-                    self.capture
-                        .browser
-                        .destroyed
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(id.to_owned());
+                    self.remember_destroyed_list_target(id);
                     self.capture
                         .browser
                         .catalog_epoch
@@ -1674,6 +1715,28 @@ mod tests {
             state["network"]["requests"][0]["target_title"],
             "Example demo"
         );
+    }
+    #[test]
+    fn retired_list_target_history_is_bounded_and_reports_its_limit_once() {
+        let d = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        for index in 0..MAX_RETIRED_LIST_TARGETS + 1024 {
+            let _catalog = d.capture.browser.targets.lock().unwrap();
+            d.remember_destroyed_list_target(&format!("retired-{index}"));
+        }
+        assert_eq!(
+            d.capture.browser.destroyed.lock().unwrap().len(),
+            MAX_RETIRED_LIST_TARGETS
+        );
+        assert!(d.list_discovery_limited());
+        assert_eq!(d.snapshot()["network"]["capture_status"]["gaps"], 1);
+        assert!(
+            d.snapshot()["network"]["capture_status"]["last_error"]
+                .as_str()
+                .unwrap()
+                .contains("list-only discovery is disabled")
+        );
+        d.capture.browser.destroyed.lock().unwrap().clear();
+        assert!(!d.list_discovery_limited());
     }
     #[test]
     fn waiting_catalog_cannot_grow_past_target_bound() {

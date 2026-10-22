@@ -1348,6 +1348,26 @@ console.log('PASS request signal profile late headers/bodies/errors, exact owner
   state.requests[0] = {id:'native', event:{request_id:'7'}}; state.selectedRequestId='native';
   await click(); assert.deepEqual(queried,[null,null,'7']); assert.equal(navigated.length,3,'Native request pivot remains available');
 }
+// Related VM entry navigates synchronously; a late fetch cannot reopen the pane.
+for (const request of [
+  {id:'cdp',protocolRequestId:'raw',operation:'cdp_pending'},
+  {id:'cdp-marker',operation:'cdp_complete'},
+  {id:'native',event:{request_id:'7'}}
+]) {
+  let click, finish, screen='traffic'; const queries=[];
+  const pending = new Promise(resolve=>{finish=resolve;});
+  const state={selectedRequestId:request.id,requests:[request]};
+  const elements={requestVmCandidates:{addEventListener(_name,handler){click=handler;}}};
+  runInNewContext(appSection("      elements.requestVmCandidates.addEventListener(", "      elements.sourceWindowPrevious.addEventListener("), {
+    state,elements,refreshVmAnalysis:id=>{queries.push(id);return pending;},
+    showScreen:name=>{screen=name;},investigationNotice(){}
+  });
+  const reading=click();
+  assert.equal(screen,'vm','Related VM entry must not wait for a slow analysis');
+  assert.deepEqual(queries,[request.id==='native'?'7':null]);
+  screen='sources';finish();await reading;
+  assert.equal(screen,'sources','Late VM analysis cannot override newer navigation');
+}
 console.log('PASS cross-tab heuristic candidates cannot become exact Signal/VM queries; native pivot and raw metadata preserved');
 
 

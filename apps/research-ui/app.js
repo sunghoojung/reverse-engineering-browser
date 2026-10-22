@@ -12069,13 +12069,15 @@
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
           investigationNotice('This debugger row has no native request id, so Related VM candidates opens session analysis. Findings without a related request id stay visible. This is not a join to the selected request.', 'unavailable');
-          await refreshVmAnalysis(null);
+          const refresh = refreshVmAnalysis(null);
           showScreen('vm', elements.requestVmCandidates);
+          await refresh;
           return;
         }
         const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;
-        if (requestId) await refreshVmAnalysis(requestId);
+        const refresh = requestId ? refreshVmAnalysis(requestId) : null;
         showScreen('vm', elements.requestVmCandidates);
+        await refresh;
       });
       elements.sourceWindowPrevious.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;

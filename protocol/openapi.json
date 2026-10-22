@@ -24,7 +24,9 @@
     "default_tools": "read_only_eligible",
     "effects_flag": "--allow-effects",
     "inline_json_limit_bytes": 131072,
-    "binary_inline": false
+    "binary_inline": false,
+    "oversized_json": "structural_summary",
+    "summary_string_chars": 160
   },
   "paths": {
     "/api/health": {

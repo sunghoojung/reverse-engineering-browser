@@ -207,6 +207,8 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
     assert_eq!(spec["x-reb-mcp"]["transport"], "stdio");
     assert_eq!(spec["x-reb-mcp"]["default_tools"], "read_only_eligible");
     assert_eq!(spec["x-reb-mcp"]["binary_inline"], false);
+    assert_eq!(spec["x-reb-mcp"]["oversized_json"], "structural_summary");
+    assert_eq!(spec["x-reb-mcp"]["summary_string_chars"], 160);
     let server = Server::start();
     let discovery: Value = serde_json::from_slice(
         &Command::new(env!("CARGO_BIN_EXE_reb-api"))

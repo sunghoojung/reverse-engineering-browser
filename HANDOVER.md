@@ -28,7 +28,7 @@ Stop here. The live Brave session is already killed. This note is for the next a
 - Tool name: `operationId`
 - Default tools: the 24 read-only-eligible operations
 - `--allow-effects`: also lists the other 15, including VM analysis GETs and owned-fixture actions
-- Inline JSON limit: 131072 bytes. Oversized JSON is omitted, not truncated.
+- Inline JSON limit: 131072 bytes. Larger JSON is a structural summary, not a truncated document. Source, bytecode, disassembly, and long strings are omitted.
 - Binary responses, including `get_artifact_content`, are refused before any HTTP request.
 - Root URL must be loopback.
 
@@ -120,18 +120,68 @@ Deobfuscation of artifact 1: HTTP 200, schema `deobfuscation-analysis-v1`, engin
 
 Owned fixture: create paused at pc 0, one step retained, pause and stop completed, `target_kind: owned_fixture`, program `owned-register-v1`. That run did not add page dispatch samples. The captured-workspace experiment was rejected before execution.
 
+## Second demo pass
+
+Fresh session `3943300171726072501` under `/tmp/reb-hcaptcha-mcp`. The page was opened once with CDP `PUT /json/new`. The checkbox was not clicked. Canvas image capture stayed off. Mock keychain was on. The session is stopped.
+
+The branch launcher passes `--native-console-live-directory`. The installed Origin Trace.app `0.3.2` (32) backend rejects that flag, so this pass used that app's own launcher and binaries, and the branch `reb-api mcp --allow-effects` against its loopback root. Brave Development was `151.1.95.0`. Provenance `capture_mode` was `cdp-attached`. Health was ok, with the broker and artifact receiver connected and the debugger `running`.
+
+Five artifacts, every `parent_artifact_id` `0`:
+
+| id | kind | origin | bytes | host |
+| --- | --- | --- | ---: | --- |
+| 1 | javascript | network_response | 40274 | newtab |
+| 2 | javascript | network_response | 389901 | js.hcaptcha.com |
+| 3 | wasm | webassembly_module | 8 | newassets.hcaptcha.com |
+| 4 | javascript | network_response | 1478662 | newassets.hcaptcha.com |
+| 5 | wasm | webassembly_instantiate | 971370 | newassets.hcaptcha.com |
+
+Event tail: 1269 records. `property_read` 862, `api_call` 309, `request_initiated` 56, `request_started` / `response_started` / `request_completed` 12 each, `artifact_captured` 5, `gap` 1. No `vm_dispatch_sample`.
+
+Catalog: 23 retained, 15 skipped, 0 dropped, 7 endpoint groups. `GET /1/api.js` and the widget script were 200. `POST /checksiteconfig` was 200. One logo response was `failed`. Response bodies that were present were truncated. No request body was copied into this note.
+
+MCP with the structural summary, 39 tools listed:
+
+| tool | result |
+| --- | --- |
+| `get_vm_analysis` | summary of 1407433 bytes |
+| `get_vm_host_links` | summary of 133675 bytes |
+| `get_vm_opcode_workspace` | inline, under the limit |
+| `inspect_wasm` artifact 3 | inline, decoded, 8 bytes, 0 sections |
+| `inspect_wasm` artifact 5 | summary of 1102127 bytes |
+| `get_deobfuscation` artifacts 2 and 4 | summaries, `original_source` omitted |
+| `get_origin_trace` without `request_id` | `Missing parameter: request_id`, no request sent |
+
+`vm_pack_apply` and the owned debugger were not called.
+
+VM analysis is `origin-trace-vm-detector` 1.2.0 from the installed app, not 1.3.0. Summary: analyzed 5, likely-vm 3, failed 0, candidates 0, mixed 0. Input coverage is incomplete, one `capture-gap`.
+
+- artifact 1: tier `none`, score 0, anti-bot 80, status `partial`
+- artifact 2: `likely-vm`, score 60, anti-bot 100, status `partial`. Omissions `javascript-unterminated-function` and `capture-gap`. Bytecode snapshot unavailable. Family `dispatch`
+- artifact 3: tier `none`, score 0, anti-bot 75, status `partial`. Omissions `runtime-graph-edge-limit` and `capture-gap`
+- artifact 4: `likely-vm`, score 60, anti-bot 100, status `partial`. Omissions `javascript-unterminated-function`, `runtime-graph-edge-limit`, and `capture-gap`. Families `dispatch` and `handlers`
+- artifact 5: `likely-vm`, score 95, anti-bot 75, status `partial`. Omissions `runtime-graph-edge-limit` and `capture-gap`. Families `wasm.dispatch-loop` and `wasm.handler-table`
+
+Opcode workspace is `origin-trace-vm-opcode` 2.0.0, `capture_mode: cdp-attached`. Summary: 3 workspaces, 105 handlers, 0 samples, 0 snapshots, 6 unknowns. Artifacts 2 and 4: model `unknown`, 0 handlers, 0 characterized bytes, traversal incomplete, 0 edges. Omissions `handler-unavailable`, `sampler-unavailable`, `runtime-snapshot-unavailable`, `reachable-frontier`, `snapshot-bytes-unavailable`. Artifact 5: 105 handlers (104 inferred, 1 unknown), 0 samples, 0 characterized bytes, 0 edges. Same omissions except `handler-unavailable`.
+
+Host-link summary: artifact 2 has 100 rows, artifacts 4 and 5 have 256. Every reason is `dispatch-samples-unavailable`. Every `guest_position` is null.
+
+Wasm artifact 5 summary: status `partial`, 971370 bytes, 9 sections, 24 defined functions, 188 imports, 7863 instructions, 8192 rows, 1 omission. Instruction text was omitted.
+
+Deobfuscation summaries: engine `rust-oxc`, mode `analysis`. Artifact 2 classification `minified`, confidence 95, source omitted (389484 chars). Artifact 4 classification `packed`, confidence 55, source omitted (1478662 chars). String-table entry values were not inlined.
+
 ## Gaps that still exist
 
 1. No live producer emitted `vm_dispatch_sample`. Workspace omission `sampler-unavailable` is still the live result.
 2. No runtime bytecode snapshots. `snapshot_count` is 0, there is no `bytecode_buffer` artifact, and both JavaScript bytecode snapshots are unavailable. The older "allocate-then-XOR snapshot is zeros" bug was not observable because no snapshot was retained (`runtime-snapshot-unavailable`, `snapshot-bytes-unavailable`).
-3. `parent_artifact_id` is 0 on all four artifacts. Child scripts and the wasm instantiate did not join a parent.
+3. `parent_artifact_id` is 0 on every artifact, including the five from the second pass. Child scripts and the wasm instantiate did not join a parent.
 4. JavaScript opcode workspaces for the two large scripts have zero handlers. The wasm `likely-vm` workspace has static handler candidates only. Model stays `unknown`.
 5. Guest CFG is absent: traversal incomplete, 0 edges, omission `reachable-frontier`. Characterized guest bytes are 0.
 6. Host events (canvas, webgl, audio, network) are stored, and host-link rows exist, but none attach to a guest position.
 7. Owned debugger and owned opcode experiments stay on the repository fixture. They do not fill the page opcode workspace. The captured hCaptcha workspace was refused.
-8. `vm_pack_compare` has no program-family binding for this capture. `vm_pack_apply` runs, but its response is unusable through MCP because it inlines the whole analysis.
-9. CDP was attached for the whole session. Scripts and `checksiteconfig` still loaded, and the debugger was `running` rather than paused at read time. A quiet-mode comparison was not done. Quiet mode would drop CDP, the debugger tools, and this network catalog.
-10. MCP inline limit is 128 KiB. On this capture it hid `get_vm_analysis`, `get_debugger`, `get_vm_host_links`, `get_deobfuscation`, real wasm inspection, and `vm_pack_apply`. An agent using only MCP cannot see the VM findings document.
+8. `vm_pack_compare` has no program-family binding for this capture. `vm_pack_apply` was not repeated. An oversized pack report now returns a structural summary instead of an omitted body.
+9. CDP was attached for the whole session. Scripts and `checksiteconfig` still loaded, and the debugger was `running` rather than paused at read time. A quiet-mode comparison was not done. Quiet mode would drop CDP, the debugger tools, and this network catalog. The second pass also did not click the checkbox.
+10. Oversized JSON now returns a structural summary. On the second pass that covered VM analysis, host links, both deobfuscations, and the real wasm inspection. Source and string-table values stayed omitted. The opcode workspace was still small enough to inline.
 
 ## Suggested next product work
 
@@ -139,8 +189,7 @@ Stay on owned fixtures, imported traces, or static findings. Do not add page-gue
 
 Useful follow-ups, in order:
 
-- Let large JSON analysis documents be paged or saved out of band so MCP can return a summary without inlining scripts or the whole analysis.
 - A live `vm_dispatch_sample` producer is still missing. Until it exists, opcode evidence on a page stays static and `sampler-unavailable`.
 - Runtime buffer snapshots and `parent_artifact_id` joins are still missing on this capture path.
 - JavaScript dispatch regions on this demo produced workspaces with no handlers. That is a static extractor gap, separate from the missing sampler.
-- Re-run only if asked, and prefer a fresh `/tmp` session. Delete `/tmp/reb-hcaptcha-live` when it is no longer needed. The `/tmp` wrappers (`reb-no-open.sh`, `reb-brave-demo.sh`, `reb-backend-vm.sh`) were session-local and are not part of this branch.
+- Re-run only if asked, and prefer a fresh `/tmp` session. Delete `/tmp/reb-hcaptcha-live` and `/tmp/reb-hcaptcha-mcp` when they are no longer needed. The `/tmp` wrappers (`reb-no-open.sh`, `reb-brave-demo.sh`, `reb-backend-vm.sh`) were session-local and are not part of this branch.

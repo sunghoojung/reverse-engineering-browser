@@ -85,9 +85,16 @@ The default tool list is the read-only projection used by `list --json`.
 `--allow-effects` also lists the other operations. The flag does not authorize
 a target, redact a response, or permit sending captured data to a model
 provider. Binary success bodies are refused before a request, because the
-projection sets `binary_inline` to false. JSON responses larger than
-`inline_json_limit_bytes` are omitted rather than truncated. A hidden or unknown
-operation returns a tool error and sends no request.
+projection sets `binary_inline` to false. JSON whose raw bytes or pretty text
+exceed `inline_json_limit_bytes` is not inlined and is not truncated. The tool
+returns `mcp_projection: structural_summary`: short scalars, collection sizes,
+and low-cardinality histograms for object arrays longer than eight items.
+Strings longer than `summary_string_chars` are replaced with character and byte
+counts. Fields that carry source, bytecode, derived text, or disassembly
+(`original_source`, `representation`, `text`, `body`, `raw`, `value`, and the
+other content names in the adapter) are omitted even when short. The summary is not the
+OpenAPI response document. A hidden or unknown operation returns a tool error
+and sends no request.
 
 The server speaks newline-delimited JSON-RPC. It accepts protocol versions
 `2024-11-05`, `2025-03-26`, and `2025-06-18`. Logs stay on stderr. Captured

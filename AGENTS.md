@@ -52,6 +52,8 @@ operation IDs onto local stdio tools and calls the existing loopback HTTP API.
 It adds no route, dependency, or second API. Do not add another MCP server.
 Effectful tools stay hidden unless `--allow-effects` is set. That flag is not
 authorization, redaction, or permission to send captured data to a model.
+JSON larger than the inline limit returns a structural summary. It does not
+inline source, bytecode, or request bodies.
 
 ## Repository ownership
 

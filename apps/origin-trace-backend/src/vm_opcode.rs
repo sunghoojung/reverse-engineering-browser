@@ -1179,7 +1179,10 @@ mod tests {
                 .find(|omission| omission["reason"] == "runtime-snapshot-unavailable")
                 .and_then(|omission| omission["detail"].as_str())
                 .unwrap_or("");
-            assert!(snapshot_detail.contains("module bytes"), "{snapshot_detail}");
+            assert!(
+                snapshot_detail.contains("module bytes"),
+                "{snapshot_detail}"
+            );
             assert!(
                 !snapshot_detail.contains("may not have been captured"),
                 "{snapshot_detail}"

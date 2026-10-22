@@ -65,8 +65,12 @@ thread, so network and renderer capture paths never wait for the socket.
 Both event queues reuse 8,192 slots (3,146,048 bytes per queue); that capacity is
 an in-flight bound, not a lifetime limit on captured events. A full queue drops
 without blocking and preserves visible, saturating drop accounting. The larger
-bound holds one public-demo canvas burst. A producer that stays ahead of the
-consumer can still drop. Coalesced
+bound adds burst headroom; it does not prove a public-demo load is lossless.
+The component test retains 4,096 synthetic Canvas calls without coalescing and
+rejects legacy/wrong-size mappings. Both browser and renderer must be rebuilt;
+the transport checks exact mapping bytes before reading the queue's version,
+record size and capacity. A producer that stays ahead of the consumer can still
+drop. Rebuilt-browser runtime acceptance is separate. Coalesced
 wake-ups use an acquire/release exchange on every announcement and clear: a
 producer racing with the consumer's empty check either becomes visible to that
 check or owns a new wake-up. A load-only already-pending shortcut can strand an

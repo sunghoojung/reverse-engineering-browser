@@ -22,7 +22,7 @@ namespace reb {
 
 inline constexpr std::uint32_t kNativeProbeQueueMagic = 0x52454251;
 inline constexpr std::uint16_t kNativeProbeQueueVersion = 2;
-// One public-demo canvas burst overflowed 1,024 slots. 8,192 holds that burst.
+// More headroom for bursts that overflowed 1,024 slots; not a no-loss guarantee.
 // A producer that stays ahead of the consumer can still drop.
 inline constexpr std::size_t kNativeProbeQueueCapacity = 8192;
 

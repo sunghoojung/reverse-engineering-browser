@@ -186,8 +186,8 @@ bool StoreEvent(reb::EventBroker& broker,
   }
   if (trace_index && trace_store) {
     const reb::OriginTraceEdgeBatch edges = trace_index->Ingest(event);
-    for (std::size_t index = 0; index < edges.count; ++index) {
-      *trace_store << reb::OriginTraceEdgeToJson(edges.edges[index]) << '\n';
+    for (const reb::OriginTraceEdge& edge : edges.edges) {
+      *trace_store << reb::OriginTraceEdgeToJson(edge) << '\n';
     }
     if (!*trace_store) {
       std::cerr << "Unable to write origin trace store\n";

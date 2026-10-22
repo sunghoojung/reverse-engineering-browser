@@ -62,6 +62,8 @@ original bytes. Unsupported component/version encodings also fail with 422.
 
 Sources opens captured WASM in Hex. Inspect switches to the derived listing;
 Hex returns to original evidence. Enabled offset buttons reveal the matching
-hex row. Offsets beyond the existing 20,000-row hex viewer remain labeled and
-cannot imply successful navigation. Find searches the displayed listing.
+hex row when that byte was formatted. Hex formatting covers every retained byte
+whose rows fit in the 8 MiB editor index. A longer module keeps a labeled
+prefix, and an offset past that prefix stays disabled. Find searches the
+formatted hex, not bytes left outside the index.
 Inspection errors provide Retry inspection, and Hex remains available.

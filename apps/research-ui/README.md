@@ -1642,8 +1642,9 @@ Tab, navigator, Quick Open and retry handlers retain descriptors only; obsolete
 empty/retry controls are removed when the editor becomes ready. Hidden UI
 closures cannot keep evicted preview or analysis payloads alive. This never
 deletes captured evidence. Canvas thumbnails and the existing bounded
-Facts/WASM inspectors retain their separate ownership contracts. WASM Hex expands
-only the first 20,000 display rows, rather than formatting the whole 2 MiB input.
+Facts/WASM inspectors retain their separate ownership contracts. WASM Hex formats
+every retained byte whose text fits in the 8 MiB editor index, about 1.6 MiB of
+module bytes. A longer module keeps a labeled prefix, and Find covers that prefix.
 
 Deob retains at most eight documents, 16 MiB of original/derived UTF-16 text and
 250,000 map segments and 32 MiB of serialized response data in total. Formatting retains at most two documents, 12 MiB

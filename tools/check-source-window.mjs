@@ -6,7 +6,19 @@ import {performance} from 'node:perf_hooks';
 
 export async function checkSourceWindowModel(root) {
   const model=runInNewContext((await readFile(join(root,'apps/research-ui/source_syntax.js'),'utf8'))+
-    ';({sourceDocumentIndex,sourceDocumentOffset,sourceDocumentPosition,sourceDocumentLine,sourceDocumentMatches,sourceDocumentWindow,sourceWindowMapping,sourceRepresentationLineMap,prettyPrintSource})');
+    ';({sourceDocumentIndex,sourceDocumentOffset,sourceDocumentPosition,sourceDocumentLine,sourceDocumentMatches,sourceDocumentWindow,sourceWindowMapping,sourceRepresentationLineMap,prettyPrintSource,sourceName,formatWasmHex,wasmHexByteLimit})', {URL});
+  const wasmLimit=model.wasmHexByteLimit();
+  assert.equal(wasmLimit % 16, 0);
+  assert(wasmLimit >= 990157, 'A retained ~990 KB module must format in full');
+  assert.equal(model.formatWasmHex(new Uint8Array(32)).split('\n')[0].length, 77);
+  const formattedLimit=model.formatWasmHex(new Uint8Array(wasmLimit));
+  const hexNotice=`\n\n[Hex preview limited to the first ${wasmLimit} bytes; original bytes are unchanged]`;
+  assert.equal(formattedLimit.length, (wasmLimit / 16) * 78 - 1);
+  assert(formattedLimit.length + hexNotice.length <= 8 * 1024 * 1024, 'The labeled prefix must stay inside the editor index');
+  assert.equal(model.sourceName({kind:'wasm', url:'https://accounts.hcaptcha.com/hcaptcha.html', capture_origin:'webassembly_instantiate', artifact_id:'5', source_type:'artifact'}), 'wasm webassembly instantiate');
+  assert.equal(model.sourceName({kind:'wasm', url:'https://cdn.invalid/path/module.wasm?x=1', capture_origin:'webassembly_instantiate', artifact_id:'6', source_type:'artifact'}), 'module.wasm');
+  assert.equal(model.sourceName({kind:'javascript', url:'https://accounts.hcaptcha.com/hcaptcha.html', artifact_id:'7', source_type:'artifact'}), 'hcaptcha.html');
+  assert.equal(model.sourceName({source_type:'script', script_id:'9'}), '(anonymous 9)');
   for(const text of ['', '\n', 'a\r\nb\n', '\ufeffconst 雪="😀";\r\nK İ k\n', '\n'.repeat(385)+'last']) {
     const index=model.sourceDocumentIndex(text),lines=text.split('\n');
     assert.equal(index.lineCount,lines.length);

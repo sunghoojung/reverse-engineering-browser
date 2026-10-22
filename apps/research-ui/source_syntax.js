@@ -132,13 +132,33 @@
       }
 
       function sourceName(source) {
-        if (!source.url) return source.source_type === 'script' ? `(anonymous ${source.script_id})` : `artifact-${source.artifact_id}`;
-        try {
-          const path = new URL(source.url).pathname;
-          return path.split('/').filter(Boolean).at(-1) || source.url;
-        } catch {
-          return source.url.split('/').filter(Boolean).at(-1) || source.url;
+        // Kept inside sourceName: the navigator check extracts this function
+        // through the following formatByteSize declaration.
+        const fileName = () => {
+          if (!source?.url) return '';
+          try {
+            return new URL(source.url).pathname.split('/').filter(Boolean).at(-1) || '';
+          } catch {
+            return String(source.url).split('/').filter(Boolean).at(-1) || '';
+          }
+        };
+        const wasm = source?.kind === 'wasm' || String(source?.mime_type ?? '').split(';', 1)[0].toLowerCase() === 'application/wasm' || source?.language === 'WebAssembly';
+        const file = fileName();
+        if (wasm) {
+          if (file.toLowerCase().endsWith('.wasm')) return file;
+          const origin = String(source?.capture_origin || 'module').replaceAll('_', ' ');
+          return `wasm ${origin}`;
         }
+        if (!source?.url) return source?.source_type === 'script' ? `(anonymous ${source.script_id})` : `artifact-${source?.artifact_id}`;
+        return file || source.url;
+      }
+
+      // One hex row is 78 UTF-16 units, including its newline. Stay inside the
+      // editor index so Find and Go to line can reach every formatted byte.
+      const WASM_HEX_ROW_UNITS = 78;
+      function wasmHexByteLimit() {
+        const rows = Math.floor((SOURCE_DOCUMENT_LIMIT - 160) / WASM_HEX_ROW_UNITS);
+        return rows * 16;
       }
 
       function formatByteSize(bytes) {

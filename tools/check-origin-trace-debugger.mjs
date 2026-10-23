@@ -6328,6 +6328,23 @@ async function checkTrafficBrowser() {
     assert(await evaluate("[document.querySelector('.request-row').children[1],document.querySelector('.request-row .request-type')].every(node=>node.clientWidth>0&&node.scrollWidth<=node.clientWidth)"), "Pending and type labels must fit their compact cells");
     await click('[data-request-id="qa-22"]');
     assert.equal(await evaluate("state.selectedRequestId"), "qa-22");
+    // Exercise native keyboard input against the real product controller. Row
+    // selection must not rescan retained content or replace the focused node.
+    await evaluate(`window.selectionWork={select:selectRequest,search:trafficSearchRequests,sort:trafficSortedRequests,scopes:renderRequestScopes,calls:0,selections:0,active:false,node:document.querySelector('[data-request-id="qa-22"]')};
+      selectRequest=(...args)=>{selectionWork.active=true;selectionWork.selections++;try{return selectionWork.select(...args);}finally{selectionWork.active=false;}};
+      trafficSearchRequests=(...args)=>{if(selectionWork.active)selectionWork.calls++;return selectionWork.search(...args);};
+      trafficSortedRequests=(...args)=>{if(selectionWork.active)selectionWork.calls++;return selectionWork.sort(...args);};
+      renderRequestScopes=(...args)=>{if(selectionWork.active)selectionWork.calls++;return selectionWork.scopes(...args);};`);
+    try {
+      await key('ArrowDown');
+      assert.equal(await evaluate("state.selectedRequestId"), "qa-23");
+      await key('ArrowUp');
+      assert(await evaluate("state.selectedRequestId==='qa-22' && document.activeElement===selectionWork.node && selectionWork.node.getAttribute('aria-selected')==='true' && selectionWork.node.tabIndex===0"));
+      assert.equal(await evaluate('selectionWork.selections'), 2);
+      assert.equal(await evaluate('selectionWork.calls'), 0, 'Keyboard selection does not repeat retained-window work');
+    } finally {
+      await evaluate('selectRequest=selectionWork.select;trafficSearchRequests=selectionWork.search;trafficSortedRequests=selectionWork.sort;renderRequestScopes=selectionWork.scopes;delete window.selectionWork');
+    }
     await click('#inspector-tab-response');
     assert.equal(await evaluate("elements.selectedStatus.textContent"), "pending");
     assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /Loading response/);

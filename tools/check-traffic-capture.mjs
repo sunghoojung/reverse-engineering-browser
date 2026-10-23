@@ -281,7 +281,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
 {
   const app = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
   const first = app.indexOf('      function renderRequestScopes()');
-  const last = app.indexOf('      function renderRequests()', first);
+  const last = app.indexOf('      function renderRequests(', first);
   class ScopeNode {
     constructor() { this.children=[];this.dataset={}; }
     append(...nodes) { this.children.push(...nodes);for(const node of nodes)node.parent=this; }

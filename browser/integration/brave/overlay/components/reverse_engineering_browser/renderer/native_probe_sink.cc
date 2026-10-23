@@ -1477,8 +1477,8 @@ void NativeProbeSink::PublishVmDispatchBudgetGap() noexcept {
       return;
     }
     std::uint64_t claimed = dropped;
-    static_cast<void>(dispatch_loss_reported_.compare_exchange_strong(
-        claimed, reported, std::memory_order_relaxed));
+    static_cast<void>(dispatch_loss_reported_.compare_exchange_strong(claimed, reported,
+                                                                      std::memory_order_relaxed));
     return;
   }
 }

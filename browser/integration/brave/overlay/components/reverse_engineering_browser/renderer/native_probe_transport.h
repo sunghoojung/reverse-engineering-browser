@@ -52,9 +52,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  base::UnsafeSharedMemoryRegion queue_region) override;
   void Disable() override;
 
-  [[nodiscard]] static NativeProbeEmitStatus EmitStatus(
-      const NativeProbeEvent& event,
-      std::uint64_t config_generation) noexcept;
+  [[nodiscard]] static NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
+                                                        std::uint64_t config_generation) noexcept;
 
  private:
   friend class base::NoDestructor<NativeProbeTransport>;

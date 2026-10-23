@@ -55,8 +55,8 @@ class NativeVmDispatchBudget {
       return;
     }
     auto claimed = generation;
-    static_cast<void>(generations_[slot].compare_exchange_strong(
-        claimed, generation - 1, std::memory_order_relaxed));
+    static_cast<void>(generations_[slot].compare_exchange_strong(claimed, generation - 1,
+                                                                 std::memory_order_relaxed));
   }
 
  private:

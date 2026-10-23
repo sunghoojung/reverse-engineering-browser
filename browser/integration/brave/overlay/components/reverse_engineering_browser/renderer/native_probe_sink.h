@@ -116,8 +116,15 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // Copies one guest step the caller already observed. The instruction
   // pointer, opcode, and handler index are not read from V8, Wasm, canvas,
   // or a static handler table. At most kNativeVmDispatchSampleBudget samples
-  // are admitted for one capture configuration.
+  // are admitted for one capture configuration. Overflow and rejected emits
+  // stay on a generation-scoped counter until PublishVmDispatchBudgetGap
+  // writes one vm gap whose decimal payload is the exact unreported count.
   void RecordVmDispatchSample(const NativeVmDispatchSamplePayload& sample) noexcept;
+  // Emits one coalesced vm gap for dispatch observations that were not
+  // retained. A full probe queue already counts its own drops, so this gap
+  // covers budget overflow and emits rejected before the queue. Safe to call
+  // when capture is inactive or the counter is caught up.
+  void PublishVmDispatchBudgetGap() noexcept;
 
  private:
   NativeProbeSink() noexcept;
@@ -133,6 +140,14 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       std::string_view operation,
       std::atomic<std::uint64_t>* observed_generation = nullptr) noexcept;
 
+  void NoteVmDispatchLoss(std::uint64_t generation,
+                          std::uint64_t session_id,
+                          std::uint64_t monotonic_time_ns,
+                          std::uint64_t frame_id,
+                          std::uint32_t process_id,
+                          std::uint32_t thread_id,
+                          std::uint64_t interpreter_artifact_id) noexcept;
+
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};
@@ -146,6 +161,19 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<bool> capture_canvas_images_{false};
   std::atomic<std::size_t> runtime_typed_array_count_{0};
   NativeVmDispatchBudget dispatch_sample_budget_;
+  // Cumulative dispatch losses for the active capture. reported_ trails
+  // dropped_ until a vm gap is admitted. Identity fields describe the losses
+  // still waiting to be published. The counters are not reset: a generation
+  // bump publishes the remainder first, then new losses append.
+  std::atomic<std::uint64_t> dispatch_loss_generation_{0};
+  std::atomic<std::uint64_t> dispatch_loss_dropped_{0};
+  std::atomic<std::uint64_t> dispatch_loss_reported_{0};
+  std::atomic<std::uint64_t> dispatch_loss_artifact_id_{0};
+  std::atomic<std::uint64_t> dispatch_loss_session_id_{0};
+  std::atomic<std::uint64_t> dispatch_loss_time_ns_{0};
+  std::atomic<std::uint64_t> dispatch_loss_frame_id_{0};
+  std::atomic<std::uint32_t> dispatch_loss_process_id_{0};
+  std::atomic<std::uint32_t> dispatch_loss_thread_id_{0};
 };
 
 }  // namespace reb

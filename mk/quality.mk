@@ -12,7 +12,7 @@ magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decode
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
 
-check: all native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark
+check: all native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
@@ -83,7 +83,7 @@ shellcheck:
 	}
 	shellcheck $(SHELL_SOURCES)
 
-python-check:
+python-check: vm-lab-check
 	python3 tools/check-brave-services.py
 	python3 tools/release-companion-test.py
 	python3 tools/write-release-pair-test.py
@@ -92,6 +92,9 @@ python-check:
 	python3 tools/check-cookie-import-terminal.py
 	python3 -m compileall -q tools
 	$(RUFF) check tools
+
+vm-lab-check:
+	python3 tests/research_ui/test_vm_lab.py
 
 repository-check:
 	./scripts/check-repository-hygiene.sh

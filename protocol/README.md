@@ -173,7 +173,10 @@ to `artifacts/analysis/vm-opcode-workspace-v2.json`. It is bound by digest to
 the detector profile, VM analysis document, artifact manifest, and event store.
 Integer switch cases and statically visible numeric handler tables are
 `inferred`. A matching `vm_dispatch_sample` event upgrades that opcode to
-`observed`; absent sampling remains the named `sampler-unavailable` omission.
+`observed` for both JavaScript and Wasm artifacts. Absent sampling remains the
+named `sampler-unavailable` omission. A vm gap that names the interpreter and
+carries a decimal drop count adds `dispatch-sample-budget` so a capped trace
+stays incomplete.
 
 The `vm_dispatch_sample` v1 payload is the fixed 128-byte little-endian
 `VmDispatchSamplePayload`. Validators require protocol version `1`, payload

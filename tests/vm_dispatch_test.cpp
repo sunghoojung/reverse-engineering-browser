@@ -166,6 +166,14 @@ int main() {
   if (!Check(!reb::IsValidVmDispatchSample(invalid), "dirty reserved tail accepted")) {
     return 1;
   }
+  invalid = sample;
+  invalid.interpreter_artifact_id = 0;
+  if (!Check(!reb::IsValidVmDispatchSample(invalid),
+             "missing interpreter artifact accepted by harness validator") ||
+      !Check(!reb::SetVmDispatchSamplePayload(event, invalid),
+             "missing interpreter artifact was encoded")) {
+    return 1;
+  }
   event.inline_payload.back() = std::byte{1};
   if (!Check(!reb::DecodeVmDispatchSample(event, decoded),
              "encoded dirty reserved tail accepted")) {
@@ -213,6 +221,23 @@ int main() {
                  reb::NativeVmDispatchPrepareStatus::kBudgetExhausted,
              "sample past the budget was prepared") ||
       !Check(reb::kNativeVmDispatchSampleBudget == 16, "dispatch budget drifted")) {
+    return 1;
+  }
+
+  reb::NativeVmDispatchBudget releasable;
+  for (std::uint32_t slot = 0; slot < reb::kNativeVmDispatchSampleBudget; ++slot) {
+    if (!Check(releasable.TryReserve(4) == slot, "release fixture did not reserve")) {
+      return 1;
+    }
+  }
+  releasable.Release(0, 4);
+  if (!Check(releasable.TryReserve(2) == reb::kNativeVmDispatchSampleBudget,
+             "stale generation reclaimed a released slot") ||
+      !Check(releasable.TryReserve(4) == 0, "failed emit did not return the budget slot")) {
+    return 1;
+  }
+  releasable.Release(0, 4);
+  if (!Check(releasable.TryReserve(6) == 0, "newer generation did not reclaim a released slot")) {
     return 1;
   }
   return 0;

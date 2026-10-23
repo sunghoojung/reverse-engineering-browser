@@ -91,6 +91,12 @@ void NativeProbeTransport::Disable() {
 
 bool NativeProbeTransport::Emit(const NativeProbeEvent& event,
                                 const std::uint64_t config_generation) noexcept {
+  return EmitStatus(event, config_generation) == NativeProbeEmitStatus::kAdmitted;
+}
+
+NativeProbeEmitStatus NativeProbeTransport::EmitStatus(
+    const NativeProbeEvent& event,
+    const std::uint64_t config_generation) noexcept {
   return Get().EmitEvent(event, config_generation);
 }
 
@@ -106,28 +112,31 @@ void NativeProbeTransport::EmitArtifact(const NativeArtifactKind kind,
                               frame_id, source_url, content, script);
 }
 
-bool NativeProbeTransport::EmitEvent(const NativeProbeEvent& event,
-                                     const std::uint64_t config_generation) noexcept {
+NativeProbeEmitStatus NativeProbeTransport::EmitEvent(
+    const NativeProbeEvent& event,
+    const std::uint64_t config_generation) noexcept {
   NativeProbeQueue* const queue = queue_.load(std::memory_order_acquire);
   // Acquire the mapping before validating its policy generation. Configure
   // clears the old sink generation before publishing a replacement queue, and
   // publishes that queue before enabling its new sink generation. A stale
   // producer can therefore finish only in the retained old mapping, never in
   // a replacement mapping (including reconfiguration with the same session ID).
-  if (!queue || !NativeProbeSink::Get().CanAdmitEvent(event, config_generation) ||
-      !queue->TryPush(event)) {
-    return false;
+  if (!queue || !NativeProbeSink::Get().CanAdmitEvent(event, config_generation)) {
+    return NativeProbeEmitStatus::kRejected;
+  }
+  if (!queue->TryPush(event, NativeProbeDropWeight(event))) {
+    return NativeProbeEmitStatus::kQueueFull;
   }
 
   if (!queue->MarkNotificationPending()) {
-    return true;
+    return NativeProbeEmitStatus::kAdmitted;
   }
 
   auto* const thread_host = HostForCurrentSequence();
   if (*thread_host) {
     (*thread_host)->EventsAvailable();
   }
-  return true;
+  return NativeProbeEmitStatus::kAdmitted;
 }
 
 void NativeProbeTransport::EmitGeneratedArtifact(const NativeArtifactKind kind,

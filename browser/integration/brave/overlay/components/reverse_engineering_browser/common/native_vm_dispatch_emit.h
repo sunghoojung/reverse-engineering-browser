@@ -19,8 +19,8 @@
 namespace reb {
 
 // One capture configuration may publish this many observed guest steps.
-// Matches the owned fixture budget. Further observations are dropped here
-// rather than filling the probe queue.
+// Matches the owned fixture budget. Further observations stay off the probe
+// queue until one vm gap carries their exact count.
 inline constexpr std::uint32_t kNativeVmDispatchSampleBudget = 16;
 
 // Each slot records its owning configuration generation. Never reset these
@@ -44,6 +44,19 @@ class NativeVmDispatchBudget {
       }
     }
     return kNativeVmDispatchSampleBudget;
+  }
+
+  // Return a claim after an emit that did not retain the sample. The slot
+  // becomes generation - 1, which is odd. The same even generation can reclaim
+  // it. An older even generation cannot, and a newer one still can. Releasing
+  // to zero would let a stale reader spend a replacement configuration's budget.
+  void Release(const std::uint32_t slot, const std::uint64_t generation) noexcept {
+    if (slot >= kNativeVmDispatchSampleBudget || generation == 0 || (generation & 1U) != 0) {
+      return;
+    }
+    auto claimed = generation;
+    static_cast<void>(generations_[slot].compare_exchange_strong(
+        claimed, generation - 1, std::memory_order_relaxed));
   }
 
  private:

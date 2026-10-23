@@ -31,11 +31,21 @@ records are deduplicated by the existing input reader. Matching an opcode alone
 never establishes interpreter identity.
 
 `sample_count` counts all accepted samples for the workspace, including opcodes
-without static handlers. `samples` retains the first 4096 in input order; further
+without static handlers. JavaScript and Wasm workspaces both admit a
+`vm_dispatch_sample` whose interpreter artifact id is that workspace's
+artifact. `samples` retains the first 4096 in input order; further
 accepted samples still count and add `sample-limit`. Handler counts include only
 the accepted samples of that opcode; document counts sum workspace counts.
 Unmatched opcodes stay in samples and residual unknowns. No accepted samples
-produces `sampler-unavailable`, preserving static handler candidates.
+and no dispatch-budget loss produces `sampler-unavailable`, preserving static
+handler candidates.
+
+A `vm` `gap` whose artifact id is the interpreter and whose payload is a
+decimal count is a dispatch-budget loss. The workspace adds
+`dispatch-sample-budget` with that summed count and keeps coverage incomplete.
+`sampler-unavailable` stays reserved for a workspace that retained no samples
+and has no such loss. The 16-sample cap is one gap weight, not one gap per
+dropped step.
 
 ## Native browser capability boundary
 
@@ -50,10 +60,13 @@ score, a Wasm dispatch instruction and a retained buffer
 cannot establish which guest opcode ran or its program counter. More of those
 records cannot fill the missing runtime channel.
 
-A workspace with no admitted samples retains static handlers and the explicit
-`sampler-unavailable` omission, leading with the observed absence of retained
-samples and the automatic sampler limitation, not a claim that every dispatch
-writer is absent. The host-links report keeps `guest_position` null and
+A workspace with no admitted samples and no dispatch-budget loss retains static
+handlers and the explicit `sampler-unavailable` omission, leading with the
+observed absence of retained samples and the automatic sampler limitation.
+A budget gap records that observations were dropped after the writer admitted
+its 16-sample cap. That omission is present when the capped trace still holds
+some samples, and it replaces `sampler-unavailable` when every observation was
+dropped. The host-links report keeps `guest_position` null and
 `dispatch-samples-unavailable`. The owned fixture
 below demonstrates the transport/consumer contract only, not support for a
 captured JavaScript or Wasm interpreter. Rebuilding an overlay with a caller-fed

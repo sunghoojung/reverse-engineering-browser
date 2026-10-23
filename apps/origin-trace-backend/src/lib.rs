@@ -1,6 +1,7 @@
 mod analysis_catalog;
 mod analyst;
 mod app;
+mod artifact_lookup;
 mod config;
 mod debugger;
 mod decoder;

@@ -215,6 +215,34 @@ bounded inert decoding. The native app bundles the same helper; see
 coverage semantics. HTTP tests verify offsets, imported function numbering,
 CLI parity, malformed and oversized input, partial coverage, and corruption.
 
+Exact artifact lookups used by content and deobfuscation requests keep
+an in-memory manifest index capped at 64 MiB and 100,000 artifact IDs. It retains
+manifest bytes and numeric ID/offset pairs, not parsed JSON trees or blob content.
+Every indexed lookup rereads and compares the exact manifest bytes; on Unix, unchanged
+prefixes of the same file reuse validation and only complete appended rows are
+parsed. Unterminated tails, rewrites, rotation and truncation rebuild the index.
+Change stamps before/after the read and validation reject observed concurrent
+changes; this is not a stopped-store lease.
+Duplicate IDs and malformed rows anywhere in the manifest still reject the
+lookup, even after the selected row. Over-cap stores fall back to complete
+streaming validation within the same five-second deadline, never a partial index.
+A bounded line lookahead avoids reparsing a large prefix on fallback; the cache
+lock is released before streaming, preserving independent reader concurrency.
+One bounded file-identity/minimum-size hint avoids repeat indexing attempts for
+an over-record-cap file. The hint only selects complete streaming validation;
+it never authorizes a returned artifact. Shrink or replacement discards it. A
+same-size rewrite to fewer, larger rows may stay uncached, but is still fully
+validated on every lookup.
+The previous and current byte buffers can coexist (at most 128 MiB), plus the
+bounded index. Waiting lookups do not occupy shared reader permits. Full blob
+hash verification still runs for every content read; only metadata parsing is
+reused. Non-Unix platforms conservatively rebuild rather than reuse the index.
+`python3 tools/benchmark-artifact-lookup.py PATH_TO_RELEASE_BACKEND` measures
+process-cold, warm and append lookups over an authored 50,000-record manifest.
+Compare preserved binaries built with the same release toolchain; the benchmark
+never reads capture stores or sends requests outside its own loopback fixture.
+See the [measured results and validation limits](../../docs/development/backend-artifact-lookup-performance.md).
+
 Immutable JavaScript source facts use `GET /api/source-facts` with exact
 `session_id` and `artifact_id`. The adapter verifies the complete artifact and
 strict UTF-8 before invoking the existing Rust/Oxc worker under its shared lock.

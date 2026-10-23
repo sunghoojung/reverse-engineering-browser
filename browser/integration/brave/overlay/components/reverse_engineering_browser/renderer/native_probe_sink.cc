@@ -69,6 +69,7 @@ struct RuntimeObservation final {
   std::uint64_t script = 0;
   bool candidate = false;
   bool dispatch = false;
+  bool examined = false;
 };
 struct RuntimeObservationCache final {
   std::uint64_t generation = 0;
@@ -126,7 +127,7 @@ std::string_view SanitizeRuntimeSourceUrl(
 // Same structural weights as the offline JavaScript detector. Anti-bot lexical
 // rules are relevance only and do not admit a buffer. The scan never executes
 // source. One malloc/free pair keeps this path noexcept under -fno-exceptions.
-constexpr std::size_t kRuntimeSourceScanBytes = 256U * 1024U;
+constexpr std::size_t kRuntimeSourceScanBytes = kRuntimeScriptNoteBytes;
 constexpr std::size_t kRuntimeSourceMaxFunctions = 256;
 constexpr int kRuntimeCandidateScore = 20;
 constexpr int kRuntimeLikelyScore = 60;
@@ -168,6 +169,43 @@ constexpr std::size_t AlignUp(const std::size_t value, const std::size_t alignme
   return (value + alignment - 1U) & ~(alignment - 1U);
 }
 
+constexpr bool KeywordAllowsRegex(const std::span<const char> text,
+                                  const std::size_t end) noexcept {
+  constexpr std::array<std::string_view, 14> kWords = {
+      "return", "throw", "typeof", "case",  "void",  "delete", "else",
+      "do",     "in",    "of",     "yield", "await", "new",    "instanceof"};
+  if (end >= text.size() || !IsIdentCont(static_cast<unsigned char>(text[end]))) {
+    return false;
+  }
+  std::size_t start = end;
+  while (start > 0 && IsIdentCont(static_cast<unsigned char>(text[start - 1U]))) {
+    --start;
+  }
+  const std::string_view word(text.data() + start, end - start + 1U);
+  for (const std::string_view keyword : kWords) {
+    if (word == keyword) {
+      return true;
+    }
+  }
+  return false;
+}
+
+constexpr bool SlashStartsRegex(const std::span<const char> text,
+                                const std::size_t index) noexcept {
+  std::size_t cursor = index;
+  while (cursor > 0 && IsAsciiSpace(static_cast<unsigned char>(text[cursor - 1U]))) {
+    --cursor;
+  }
+  if (cursor == 0) {
+    return true;
+  }
+  const auto previous = static_cast<unsigned char>(text[cursor - 1U]);
+  if (IsIdentCont(previous) || previous == ')' || previous == ']') {
+    return KeywordAllowsRegex(text, cursor - 1U);
+  }
+  return true;
+}
+
 void MaskScriptSource(const std::span<char> text, const std::size_t length) noexcept {
   bool line = false;
   bool block = false;
@@ -204,6 +242,31 @@ void MaskScriptSource(const std::span<char> text, const std::size_t length) noex
       ++index;
       line = next == '/';
       block = next == '*';
+    } else if (current == '/' && SlashStartsRegex(text, index)) {
+      text[index] = ' ';
+      bool character_class = false;
+      bool regex_escaped = false;
+      for (std::size_t cursor = index + 1U; cursor < length; ++cursor) {
+        const char regex_char = text[cursor];
+        text[cursor] = ' ';
+        if (regex_escaped) {
+          regex_escaped = false;
+        } else if (regex_char == '\\') {
+          regex_escaped = true;
+        } else if (regex_char == '[') {
+          character_class = true;
+        } else if (regex_char == ']') {
+          character_class = false;
+        } else if (regex_char == '/' && !character_class) {
+          while (cursor + 1U < length &&
+                 IsIdentCont(static_cast<unsigned char>(text[cursor + 1U]))) {
+            text[++cursor] = ' ';
+          }
+          index = cursor;
+          break;
+        }
+        index = cursor;
+      }
     } else if (current == '"' || current == '\'' || current == '`') {
       text[index] = ' ';
       quote = current;
@@ -1008,7 +1071,76 @@ bool NativeProbeSink::RegisterRuntimeScriptObservation(
     entry->dispatch = true;
   else
     entry->candidate = true;
+  entry->examined = true;
   return true;
+}
+
+bool NativeProbeSink::RuntimeScriptSourceNoted(const std::uint64_t generation,
+                                               const std::uint64_t execution_context_id,
+                                               const std::uint64_t script_id) const noexcept {
+  if (generation == 0 || runtime_observations.generation != generation ||
+      execution_context_id == 0 || script_id == 0)
+    return false;
+  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
+    const auto& current = runtime_observations.observations[index];
+    if (current.context == execution_context_id && current.script == script_id)
+      return current.examined;
+  }
+  return false;
+}
+
+bool NativeProbeSink::RuntimeScriptNoteAccepts(const std::uint64_t generation,
+                                               const std::uint64_t execution_context_id,
+                                               const std::uint64_t script_id) const noexcept {
+  if (generation == 0 || generation != RuntimeCaptureGeneration() || execution_context_id == 0 ||
+      script_id == 0) {
+    return false;
+  }
+  if (runtime_observations.generation != generation) {
+    return true;
+  }
+  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
+    const auto& current = runtime_observations.observations[index];
+    if (current.context == execution_context_id && current.script == script_id) {
+      return !current.examined;
+    }
+  }
+  return runtime_observations.count < runtime_observations.observations.size();
+}
+
+bool NativeProbeSink::NoteRuntimeScriptSource(const std::uint64_t generation,
+                                              const std::uint64_t execution_context_id,
+                                              const std::uint64_t script_id,
+                                              const std::span<const std::uint8_t> source) noexcept {
+  if (generation == 0 || generation != RuntimeCaptureGeneration() || execution_context_id == 0 ||
+      script_id == 0 || source.empty())
+    return false;
+  if (runtime_observations.generation != generation) {
+    runtime_observations = {};
+    runtime_observations.generation = generation;
+  }
+  RuntimeObservation* entry = nullptr;
+  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
+    auto& current = runtime_observations.observations[index];
+    if (current.context == execution_context_id && current.script == script_id)
+      entry = &current;
+  }
+  if (entry != nullptr && entry->examined)
+    return entry->candidate || entry->dispatch;
+  if (entry == nullptr) {
+    if (runtime_observations.count == runtime_observations.observations.size())
+      return false;
+    entry = &runtime_observations.observations[runtime_observations.count++];
+    entry->context = execution_context_id;
+    entry->script = script_id;
+  }
+  entry->examined = true;
+  const RuntimeSourceTier tier = ClassifyRuntimeSource(source);
+  if (tier.likely || tier.candidate)
+    entry->candidate = true;
+  if (tier.dispatch)
+    entry->dispatch = true;
+  return entry->candidate || entry->dispatch;
 }
 
 bool NativeProbeSink::RuntimeBufferHasSignal(const std::uint64_t generation,

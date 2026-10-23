@@ -480,14 +480,63 @@ void RuntimeSourceFeed() {
       "var vm=pc=>{while(pc<program.length){switch(program[pc++]){case 1:stack.push(1);return;}}};",
       32);
   assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  capture(
+      "function vm(op){const n=program.length/2;const re=/[{]/;"
+      "while(n<op){switch(op){case 1:stack=1;return 1;}}}",
+      32);
+  assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
   const std::string_view unrelated{"function add(a,b){return a+b;}"};
   const std::vector<std::uint8_t> unrelated_bytes(unrelated.begin(), unrelated.end());
   const reb::NativeRuntimeScript other_context{likely_id, false, unrelated_bytes};
   sink.CaptureRuntimeTypedArray(99, 8, "fixture://owned/script.js", std::span(buffer).first(32),
                                 other_context);
   assert(Drain(queue) == 0);
-  assert(reb::mojom::NativeProbeHost::artifacts == before + 6);
-  std::cout << "PASS runtime source feed for candidate, likely-VM, dispatch and closed failures\n";
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 7);
+
+  const auto generation = sink.RuntimeCaptureGeneration();
+  const std::string_view regex_source =
+      "function vm(op){const n=program.length/2;const re=/[{]/;"
+      "while(n<op){switch(op){case 1:stack=1;return 1;}}}";
+  const std::vector<std::uint8_t> regex_bytes(regex_source.begin(), regex_source.end());
+  assert(!sink.RuntimeScriptSourceNoted(generation, 7, 90));
+  assert(sink.NoteRuntimeScriptSource(generation, 7, 90, regex_bytes));
+  assert(sink.RuntimeScriptSourceNoted(generation, 7, 90));
+  assert(sink.NoteRuntimeScriptSource(generation, 7, 90, regex_bytes));
+  assert(sink.RuntimeBufferHasSignal(generation, 7, 8, 32, 90, false));
+  assert(!sink.RuntimeScriptNoteAccepts(generation, 7, 90));
+  assert(Drain(queue) == 0);
+
+  const std::string_view plain{"function add(a,b){return a+b;}"};
+  const std::vector<std::uint8_t> plain_bytes(plain.begin(), plain.end());
+  assert(!sink.NoteRuntimeScriptSource(generation, 7, 91, plain_bytes));
+  assert(sink.RuntimeScriptSourceNoted(generation, 7, 91));
+  assert(!sink.NoteRuntimeScriptSource(generation, 7, 91, plain_bytes));
+  assert(!sink.RuntimeBufferHasSignal(generation, 7, 8, 32, 91, false));
+  // This generation already reported the missing signal. A later plain script
+  // stays rejected without a second failure event or artifact.
+  assert(Drain(queue) == 0);
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 7);
+
+  const std::vector<std::uint8_t> closed{'v', 'a', 'r', ' ', 'x', '=', '1', ';'};
+  std::uint64_t closed_id = 300;
+  std::size_t closed_count = 0;
+  while (sink.RuntimeScriptNoteAccepts(generation, 7, closed_id)) {
+    assert(!sink.NoteRuntimeScriptSource(generation, 7, closed_id, closed));
+    assert(sink.RuntimeScriptSourceNoted(generation, 7, closed_id));
+    assert(!sink.RuntimeScriptNoteAccepts(generation, 7, closed_id));
+    ++closed_count;
+    ++closed_id;
+    assert(closed_count <= 64);
+  }
+  assert(closed_count > 0);
+  assert(!sink.RuntimeScriptNoteAccepts(generation, 7, closed_id));
+  assert(!sink.NoteRuntimeScriptSource(generation, 7, closed_id, closed));
+  assert(!sink.RuntimeScriptSourceNoted(generation, 7, closed_id));
+  assert(!sink.RuntimeBufferHasSignal(generation, 7, 8, 32, closed_id, false));
+  assert(Drain(queue) == 0);
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 7);
+  std::cout << "PASS runtime source feed for candidate, likely-VM, dispatch, regex literal and "
+               "closed failures\n";
 }
 
 void RuntimeCheckpointQueue() {

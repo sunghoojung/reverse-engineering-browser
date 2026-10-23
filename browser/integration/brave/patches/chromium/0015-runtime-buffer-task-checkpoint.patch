@@ -46,6 +46,26 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +    const auto context_id = StableExecutionContextId(execution_context);
 +    const auto frame_id = StableFrameId(execution_context);
 +    const auto script_id = static_cast<std::uint64_t>(allocator.script_id);
++    // Classify before the signal gate. The gate used to run first, so a
++    // normal script could never record the observation that would admit it.
++    // A full 64-entry table refuses the conversion instead of repeating it.
++    if (script_id != 0 && !allocator.source.IsEmpty() &&
++        sink.RuntimeScriptNoteAccepts(generation, context_id, script_id)) {
++      const std::size_t utf8_length = allocator.source->Utf8Length(isolate_);
++      const std::size_t prefix =
++          std::min(utf8_length, reb::kRuntimeScriptNoteBytes);
++      if (prefix > 0) {
++        std::vector<std::uint8_t> noted(prefix);
++        const std::size_t written = allocator.source->WriteUtf8(
++            isolate_, reinterpret_cast<char*>(noted.data()), noted.size(),
++            v8::String::WriteFlags::kReplaceInvalidUtf8);
++        if (written > 0) {
++          noted.resize(std::min(written, prefix));
++          sink.NoteRuntimeScriptSource(generation, context_id, script_id,
++                                       noted);
++        }
++      }
++    }
 +    if (!sink.RuntimeBufferHasSignal(generation, context_id, frame_id, size,
 +                                     script_id, allocator.is_eval))
 +      return;

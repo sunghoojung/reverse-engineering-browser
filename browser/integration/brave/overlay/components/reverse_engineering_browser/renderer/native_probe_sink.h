@@ -18,6 +18,10 @@
 
 namespace reb {
 
+// Bytes of allocating-script source scanned once to admit a runtime buffer.
+// The same bound is the renderer classifier's window.
+inline constexpr std::size_t kRuntimeScriptNoteBytes = 256U * 1024U;
+
 // True means admitted to the renderer ring, not delivered to the browser,
 // broker, or evidence store. The generation identifies the captured policy.
 // Emitters must remain non-blocking and non-throwing.
@@ -66,6 +70,25 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       std::uint64_t execution_context_id,
       std::uint64_t script_id,
       NativeRuntimeScriptObservation observation) noexcept;
+  // True after this script's source has been scanned for this generation,
+  // including a scan that found no VM signal.
+  [[nodiscard]] bool RuntimeScriptSourceNoted(std::uint64_t generation,
+                                              std::uint64_t execution_context_id,
+                                              std::uint64_t script_id) const noexcept;
+  // True when this generation can still scan this script once. False after a
+  // scan, and false once the 64-entry table is full, so the caller does not
+  // convert that source again.
+  [[nodiscard]] bool RuntimeScriptNoteAccepts(std::uint64_t generation,
+                                              std::uint64_t execution_context_id,
+                                              std::uint64_t script_id) const noexcept;
+  // Scans source once and records candidate, likely, or dispatch observations
+  // when the bounded structural scan finds them. Returns whether a signal was
+  // recorded. A non-matching scan is remembered and returns false. A script
+  // that does not fit in the table is not remembered and returns false.
+  [[nodiscard]] bool NoteRuntimeScriptSource(std::uint64_t generation,
+                                             std::uint64_t execution_context_id,
+                                             std::uint64_t script_id,
+                                             std::span<const std::uint8_t> source) noexcept;
   [[nodiscard]] bool RuntimeBufferHasSignal(std::uint64_t generation,
                                             std::uint64_t execution_context_id,
                                             std::uint64_t frame_id,

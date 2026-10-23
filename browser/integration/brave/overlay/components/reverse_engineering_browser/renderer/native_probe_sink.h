@@ -6,7 +6,9 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_PROBE_SINK_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_PROBE_SINK_H_
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -18,9 +20,10 @@
 
 namespace reb {
 
-// Bytes of allocating-script source scanned once to admit a runtime buffer.
+// Maximum allocating-script source prefix scanned to admit a runtime buffer.
 // The same bound is the renderer classifier's window.
 inline constexpr std::size_t kRuntimeScriptNoteBytes = 256U * 1024U;
+inline constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 
 // True means admitted to the renderer ring, not delivered to the browser,
 // broker, or evidence store. The generation identifies the captured policy.
@@ -70,22 +73,21 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       std::uint64_t execution_context_id,
       std::uint64_t script_id,
       NativeRuntimeScriptObservation observation) noexcept;
-  // True after this script's source has been scanned for this generation,
-  // including a scan that found no VM signal.
+  // True while this script's source attempt is remembered in this generation,
+  // including a negative classification or an unavailable conversion.
   [[nodiscard]] bool RuntimeScriptSourceNoted(std::uint64_t generation,
                                               std::uint64_t execution_context_id,
                                               std::uint64_t script_id) const noexcept;
-  // True when this generation can still scan this script once. False after a
-  // scan, and false once the 64-entry table is full, so the caller does not
-  // convert that source again.
+  // Check before UTF-8 conversion. Positive observations stay pinned; negative
+  // entries rotate within 64 slots. At most 256 attempts (including conversion
+  // misses and scan allocation failures) run per generation and thread.
   [[nodiscard]] bool RuntimeScriptNoteAccepts(std::uint64_t generation,
                                               std::uint64_t execution_context_id,
                                               std::uint64_t script_id) const noexcept;
-  // Scans source once and records candidate, likely, or dispatch observations
-  // when the bounded structural scan finds them. Returns whether a signal was
-  // recorded. A non-matching scan is remembered and returns false. A script
-  // that does not fit in the table is not remembered and returns false. A scan
-  // that does not run is not remembered, so the caller can try again.
+  // Records a bounded structural classification, returning whether it found a
+  // signal. Cached entries are not rescanned. Evicted negatives can be retried
+  // only within the total attempt budget. Allocation failure is retryable within
+  // that budget; a full positive table or exhausted budget refuses the scan.
   // source_truncated is true when source is a prefix of a longer script.
   [[nodiscard]] bool NoteRuntimeScriptSource(std::uint64_t generation,
                                              std::uint64_t execution_context_id,
@@ -175,7 +177,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
-  std::atomic<std::size_t> runtime_typed_array_count_{0};
+  // Monotonic generation claims are never reset: an old capture cannot spend
+  // or release a replacement configuration's snapshot quota.
+  std::array<std::atomic<std::uint64_t>, kRuntimeTypedArrayMaxSnapshots>
+      runtime_snapshot_generations_{};
   NativeVmDispatchBudget dispatch_sample_budget_;
 };
 

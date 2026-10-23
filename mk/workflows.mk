@@ -54,6 +54,7 @@ e2e: native-request-identity-check origin-trace-backend native-vm-fixture produc
 	$(ARTIFACT_PRODUCER_BINARY) | $(ARTIFACT_RECEIVER_BINARY) --store $(BUILD_DIR)/sessions/artifacts
 	$(VM_ANALYZER) --artifacts $(BUILD_DIR)/sessions/artifacts --events $(BUILD_DIR)/sessions/demo.jsonl
 	python3 tools/check-runtime-snapshot-producer.py --producer $(ARTIFACT_PRODUCER_BINARY) --receiver $(ARTIFACT_RECEIVER_BINARY) --analyzer $(VM_ANALYZER)
+	CXX="$(CXX)" python3 tools/check-runtime-snapshot-pipeline.py --receiver $(ARTIFACT_RECEIVER_BINARY) --broker $(BROKER_BINARY) --analyzer $(VM_ANALYZER) --backend $(ORIGIN_TRACE_BACKEND)
 	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "14"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/origin-trace.jsonl | tr -d ' ')" = "12"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/request-signals.jsonl | tr -d ' ')" = "2"

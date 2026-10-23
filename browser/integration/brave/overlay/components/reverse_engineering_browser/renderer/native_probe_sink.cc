@@ -55,7 +55,6 @@ bool IsFingerprintSurfaceCategory(const NativeProbeCategory category) noexcept {
 // preview. Other generated artifact kinds retain their 16 MiB transport cap.
 constexpr std::size_t kCanvasDataUrlMaxBytes = 2U * 1024U * 1024U;
 constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
-constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 
 struct RuntimeScriptCache final {
   std::uint64_t generation = 0;
@@ -70,14 +69,76 @@ struct RuntimeObservation final {
   bool candidate = false;
   bool dispatch = false;
   bool examined = false;
+  bool unavailable = false;
 };
 struct RuntimeObservationCache final {
   std::uint64_t generation = 0;
   std::array<RuntimeObservation, 64> observations{};
   std::size_t count = 0;
+  std::size_t next_negative = 0;
+  std::size_t scans = 0;
   bool no_signal_reported = false;
+  bool classification_limit_reported = false;
+  bool classification_unavailable_reported = false;
+  bool snapshot_limit_reported = false;
 };
 thread_local RuntimeObservationCache runtime_observations;
+
+// Negative results may rotate so ordinary allocations cannot occupy every
+// observation slot forever. Pin positive evidence, and bound all conversions
+// (including retries after allocation failure) per generation and thread.
+constexpr std::size_t kRuntimeScriptScanLimit = 256;
+
+RuntimeObservation* FindRuntimeObservation(const std::uint64_t context,
+                                           const std::uint64_t script) noexcept {
+  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
+    auto& entry = runtime_observations.observations[index];
+    if (entry.context == context && entry.script == script) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+bool RuntimeObservationHasCapacity() noexcept {
+  if (runtime_observations.count < runtime_observations.observations.size()) {
+    return true;
+  }
+  for (const auto& entry : runtime_observations.observations) {
+    if (!entry.candidate && !entry.dispatch) {
+      return true;
+    }
+  }
+  return false;
+}
+
+RuntimeObservation* ClaimRuntimeObservation(const std::uint64_t context,
+                                            const std::uint64_t script) noexcept {
+  if (auto* entry = FindRuntimeObservation(context, script)) {
+    return entry;
+  }
+  auto* entry = static_cast<RuntimeObservation*>(nullptr);
+  if (runtime_observations.count < runtime_observations.observations.size()) {
+    entry = &runtime_observations.observations[runtime_observations.count++];
+  } else {
+    const std::size_t capacity = runtime_observations.observations.size();
+    for (std::size_t offset = 0; offset < capacity; ++offset) {
+      const std::size_t index = (runtime_observations.next_negative + offset) % capacity;
+      auto& candidate = runtime_observations.observations[index];
+      if (!candidate.candidate && !candidate.dispatch) {
+        entry = &candidate;
+        runtime_observations.next_negative = (index + 1U) % capacity;
+        break;
+      }
+    }
+  }
+  if (entry) {
+    *entry = {};
+    entry->context = context;
+    entry->script = script;
+  }
+  return entry;
+}
 
 constexpr char AsciiLower(unsigned char c) noexcept;
 
@@ -252,184 +313,198 @@ constexpr std::size_t AlignUp(const std::size_t value, const std::size_t alignme
   return (value + alignment - 1U) & ~(alignment - 1U);
 }
 
-constexpr bool KeywordAllowsRegex(const std::span<const char> text,
-                                  const std::size_t end) noexcept {
-  constexpr std::array<std::string_view, 14> kWords = {
-      "return", "throw", "typeof", "case",  "void",  "delete", "else",
-      "do",     "in",    "of",     "yield", "await", "new",    "instanceof"};
-  if (end >= text.size() || !IsIdentCont(static_cast<unsigned char>(text[end]))) {
-    return false;
-  }
-  std::size_t start = end;
-  while (start > 0 && IsIdentCont(static_cast<unsigned char>(text[start - 1U]))) {
-    --start;
-  }
-  const std::string_view word(text.data() + start, end - start + 1U);
-  for (const std::string_view keyword : kWords) {
-    if (word == keyword) {
-      return true;
-    }
-  }
-  return false;
-}
+// The mask is a forward lexer, not a parser. Retain token context separately
+// from the bytes being blanked: a string, template or regex is still an operand
+// when deciding whether the next slash is division. Reuse the classifier's
+// bounded scratch stack for delimiter context instead of rescanning backwards.
+enum class ScriptDelimiter : std::size_t {
+  kGroup,
+  kControl,
+  kFunctionExpression,
+  kFunctionDeclaration,
+  kObject,
+  kExpressionBody,
+  kStatementBody,
+  kBracket,
+  kPendingClassExpression,
+  kPendingClassDeclaration,
+};
 
-constexpr bool StatementKeywordBeforeParen(const std::span<const char> text,
-                                           const std::size_t paren) noexcept {
-  if (paren >= text.size() || text[paren] != ')') {
-    return false;
-  }
-  std::size_t depth = 1;
-  std::size_t cursor = paren;
-  constexpr std::size_t kMaxSteps = 4096;
-  for (std::size_t steps = 0; cursor > 0 && depth > 0 && steps < kMaxSteps; ++steps) {
-    --cursor;
-    const char ch = text[cursor];
-    if (ch == ')') {
-      ++depth;
-    } else if (ch == '(') {
-      --depth;
-    }
-  }
-  if (depth != 0 || text[cursor] != '(') {
-    return false;
-  }
-  while (cursor > 0 && IsAsciiSpace(static_cast<unsigned char>(text[cursor - 1U]))) {
-    --cursor;
-  }
-  if (cursor == 0) {
-    return false;
-  }
-  constexpr std::array<std::string_view, 6> kWords = {"if",   "while",  "for",
-                                                      "with", "switch", "catch"};
-  const std::size_t end = cursor - 1U;
-  if (!IsIdentCont(static_cast<unsigned char>(text[end]))) {
-    return false;
-  }
-  std::size_t start = end;
-  while (start > 0 && IsIdentCont(static_cast<unsigned char>(text[start - 1U]))) {
-    --start;
-  }
-  const std::string_view word(text.data() + start, end - start + 1U);
-  for (const std::string_view keyword : kWords) {
-    if (word == keyword) {
-      return true;
-    }
-  }
-  return false;
-}
-
-constexpr bool SlashStartsRegex(const std::span<const char> text,
-                                const std::size_t index) noexcept {
-  std::size_t cursor = index;
-  while (cursor > 0 && IsAsciiSpace(static_cast<unsigned char>(text[cursor - 1U]))) {
-    --cursor;
-  }
-  if (cursor == 0) {
-    return true;
-  }
-  const auto previous = static_cast<unsigned char>(text[cursor - 1U]);
-  if (previous == ')') {
-    return StatementKeywordBeforeParen(text, cursor - 1U);
-  }
-  // Postfix ++/-- and a binary + or - are division. A unary + or - can open a regex.
-  // Spaces around the operator do not change which one it is. A keyword such as
-  // return, immediately before the operator, still opens a regex.
-  if (previous == '+' || previous == '-') {
-    if (cursor >= 2U && static_cast<unsigned char>(text[cursor - 2U]) == previous) {
-      return false;
-    }
-    std::size_t before = cursor - 1U;
-    while (before > 0 && IsAsciiSpace(static_cast<unsigned char>(text[before - 1U]))) {
-      --before;
-    }
-    if (before == 0) {
-      return true;
-    }
-    const auto earlier = static_cast<unsigned char>(text[before - 1U]);
-    if (IsIdentCont(earlier)) {
-      return KeywordAllowsRegex(text, before - 1U);
-    }
-    if (earlier == ')' || earlier == ']' || earlier == '}' || (earlier >= '0' && earlier <= '9')) {
-      return false;
-    }
-    return true;
-  }
-  // A slash after a block or a function expression is division. Blanking through
-  // the rest of the window would hide a later dispatch loop.
-  if (previous == '}') {
-    return false;
-  }
-  if (IsIdentCont(previous) || previous == ']') {
-    return KeywordAllowsRegex(text, cursor - 1U);
-  }
-  return true;
-}
-
-void MaskScriptSource(const std::span<char> text, const std::size_t length) noexcept {
-  bool line = false;
-  bool block = false;
-  bool escaped = false;
-  char quote = 0;
-  for (std::size_t index = 0; index < length; ++index) {
+void MaskScriptSource(const std::span<char> text,
+                      const std::span<std::size_t> delimiters) noexcept {
+  std::size_t depth = 0;
+  bool operand_expected = true;
+  bool statement_start = true;
+  bool property_name = false;
+  bool control_paren = false;
+  bool label_pending = false;
+  ScriptDelimiter function_paren = ScriptDelimiter::kGroup;
+  ScriptDelimiter function_body = ScriptDelimiter::kGroup;
+  for (std::size_t index = 0; index < text.size(); ++index) {
     const char current = text[index];
-    const char next = index + 1 < length ? text[index + 1] : '\0';
-    if (line) {
-      if (current == '\n') {
-        line = false;
-      } else {
-        text[index] = ' ';
-      }
-    } else if (block) {
+    const char next = index + 1U < text.size() ? text[index + 1U] : '\0';
+    if (IsAsciiSpace(static_cast<unsigned char>(current))) {
+      continue;
+    }
+    if (current == '/' && (next == '/' || next == '*')) {
+      const bool line = next == '/';
+      text[index++] = ' ';
       text[index] = ' ';
-      if (current == '*' && next == '/') {
-        text[index + 1] = ' ';
+      while (index + 1U < text.size()) {
         ++index;
-        block = false;
-      }
-    } else if (quote != 0) {
-      text[index] = ' ';
-      if (escaped) {
-        escaped = false;
-      } else if (current == '\\') {
-        escaped = true;
-      } else if (current == quote) {
-        quote = 0;
-      }
-    } else if (current == '/' && (next == '/' || next == '*')) {
-      text[index] = ' ';
-      text[index + 1] = ' ';
-      ++index;
-      line = next == '/';
-      block = next == '*';
-    } else if (current == '/' && SlashStartsRegex(text, index)) {
-      text[index] = ' ';
-      bool character_class = false;
-      bool regex_escaped = false;
-      for (std::size_t cursor = index + 1U; cursor < length; ++cursor) {
-        const char regex_char = text[cursor];
-        text[cursor] = ' ';
-        if (regex_escaped) {
-          regex_escaped = false;
-        } else if (regex_char == '\\') {
-          regex_escaped = true;
-        } else if (regex_char == '[') {
-          character_class = true;
-        } else if (regex_char == ']') {
-          character_class = false;
-        } else if (regex_char == '/' && !character_class) {
-          while (cursor + 1U < length &&
-                 IsIdentCont(static_cast<unsigned char>(text[cursor + 1U]))) {
-            text[++cursor] = ' ';
-          }
-          index = cursor;
+        const char ch = text[index];
+        text[index] = ' ';
+        if (line && (ch == '\n' || ch == '\r')) {
+          text[index] = ch;
           break;
         }
-        index = cursor;
+        if (!line && ch == '*' && index + 1U < text.size() && text[index + 1U] == '/') {
+          text[++index] = ' ';
+          break;
+        }
       }
-    } else if (current == '"' || current == '\'' || current == '`') {
-      text[index] = ' ';
-      quote = current;
+      continue;
     }
+    if (current == '\'' || current == '"' || current == '`' ||
+        (current == '/' && operand_expected)) {
+      const bool regex = current == '/';
+      bool escaped = false;
+      bool character_class = false;
+      text[index] = ' ';
+      while (index + 1U < text.size()) {
+        ++index;
+        const char ch = text[index];
+        text[index] = ' ';
+        if (escaped) {
+          escaped = false;
+        } else if (ch == '\\') {
+          escaped = true;
+        } else if (regex && ch == '[') {
+          character_class = true;
+        } else if (regex && ch == ']') {
+          character_class = false;
+        } else if (ch == current && !character_class) {
+          if (regex) {
+            while (index + 1U < text.size() &&
+                   IsIdentCont(static_cast<unsigned char>(text[index + 1U]))) {
+              text[++index] = ' ';
+            }
+          }
+          break;
+        }
+      }
+      operand_expected = false;
+      statement_start = false;
+      property_name = false;
+      control_paren = false;
+      function_body = ScriptDelimiter::kGroup;
+      continue;
+    }
+    if (IsIdentStart(static_cast<unsigned char>(current))) {
+      const std::size_t start = index;
+      while (index + 1U < text.size() &&
+             IsIdentCont(static_cast<unsigned char>(text[index + 1U]))) {
+        ++index;
+      }
+      const std::string_view word(text.data() + start, index - start + 1U);
+      if (!property_name && word == "class") {
+        // Pending classes are stack entries too: an extends expression can
+        // contain another class or function without losing the outer body.
+        delimiters[depth++] =
+            static_cast<std::size_t>(statement_start ? ScriptDelimiter::kPendingClassDeclaration
+                                                     : ScriptDelimiter::kPendingClassExpression);
+      }
+      const bool starts_statement = statement_start;
+      label_pending = !property_name && starts_statement;
+      if (!property_name && word == "function") {
+        function_paren = statement_start ? ScriptDelimiter::kFunctionDeclaration
+                                         : ScriptDelimiter::kFunctionExpression;
+      }
+      control_paren = !property_name && (word == "if" || word == "while" || word == "for" ||
+                                         word == "with" || word == "switch" || word == "catch");
+      operand_expected = !property_name && (control_paren || word == "return" || word == "throw" ||
+                                            word == "typeof" || word == "case" || word == "void" ||
+                                            word == "delete" || word == "in" || word == "of" ||
+                                            word == "yield" || word == "await" || word == "new" ||
+                                            word == "instanceof" || word == "else" || word == "do");
+      statement_start =
+          !property_name && (word == "else" || word == "do" || word == "try" || word == "finally" ||
+                             word == "catch" || (word == "async" && starts_statement));
+      property_name = false;
+      function_body = ScriptDelimiter::kGroup;
+      continue;
+    }
+    if (current >= '0' && current <= '9') {
+      while (index + 1U < text.size()) {
+        const char ch = text[index + 1U];
+        if (!IsIdentCont(static_cast<unsigned char>(ch)) && ch != '.' &&
+            !((ch == '+' || ch == '-') && (text[index] == 'e' || text[index] == 'E'))) {
+          break;
+        }
+        ++index;
+      }
+      operand_expected = false;
+      statement_start = false;
+    } else if (current == '(') {
+      const auto kind = function_paren != ScriptDelimiter::kGroup
+                            ? function_paren
+                            : (control_paren ? ScriptDelimiter::kControl : ScriptDelimiter::kGroup);
+      delimiters[depth++] = static_cast<std::size_t>(kind);
+      function_paren = ScriptDelimiter::kGroup;
+      operand_expected = true;
+      statement_start = false;
+    } else if (current == '{' || current == '[') {
+      auto class_body = ScriptDelimiter::kGroup;
+      if (current == '{' && depth > 0) {
+        const auto pending = static_cast<ScriptDelimiter>(delimiters[depth - 1U]);
+        if (pending == ScriptDelimiter::kPendingClassExpression ||
+            pending == ScriptDelimiter::kPendingClassDeclaration) {
+          --depth;
+          class_body = pending == ScriptDelimiter::kPendingClassDeclaration
+                           ? ScriptDelimiter::kStatementBody
+                           : ScriptDelimiter::kExpressionBody;
+        }
+      }
+      const auto kind = current == '['                             ? ScriptDelimiter::kBracket
+                        : class_body != ScriptDelimiter::kGroup    ? class_body
+                        : function_body != ScriptDelimiter::kGroup ? function_body
+                        : statement_start || !operand_expected     ? ScriptDelimiter::kStatementBody
+                                                                   : ScriptDelimiter::kObject;
+      delimiters[depth++] = static_cast<std::size_t>(kind);
+      operand_expected = true;
+      statement_start =
+          kind == ScriptDelimiter::kStatementBody || kind == ScriptDelimiter::kExpressionBody;
+    } else if (current == ')' || current == '}' || current == ']') {
+      const auto kind =
+          depth == 0 ? ScriptDelimiter::kGroup : static_cast<ScriptDelimiter>(delimiters[--depth]);
+      operand_expected =
+          kind == ScriptDelimiter::kControl || kind == ScriptDelimiter::kStatementBody;
+      statement_start = operand_expected;
+      function_body =
+          kind == ScriptDelimiter::kFunctionDeclaration  ? ScriptDelimiter::kStatementBody
+          : kind == ScriptDelimiter::kFunctionExpression ? ScriptDelimiter::kExpressionBody
+                                                         : ScriptDelimiter::kGroup;
+      control_paren = false;
+      property_name = false;
+      continue;
+    } else if (current == '=' && next == '>') {
+      ++index;
+      function_body = ScriptDelimiter::kExpressionBody;
+      operand_expected = true;
+      statement_start = false;
+      continue;
+    } else if ((current == '+' || current == '-') && next == current) {
+      // Prefix ++/-- still needs an operand; postfix ++/-- has one.
+      ++index;
+      statement_start = false;
+    } else {
+      operand_expected = current != '.';
+      statement_start = current == ';' || (current == ':' && label_pending);
+    }
+    label_pending = false;
+    property_name = current == '.';
+    control_paren = false;
+    function_body = ScriptDelimiter::kGroup;
   }
 }
 
@@ -944,7 +1019,7 @@ RegionScore ScoreRegion(const RegionScan& scan) noexcept {
   const auto brace_stack = typed.template operator()<std::size_t>(
       storage.subspan(stack_off, length * sizeof(std::size_t)));
   std::ranges::copy(std::as_bytes(source.first(length)), std::as_writable_bytes(text).begin());
-  MaskScriptSource(text, length);
+  MaskScriptSource(text, brace_stack);
 
   std::size_t opening_count = 0;
   std::size_t cursor = 0;
@@ -1120,7 +1195,6 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   category_mask_.store(active ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_canvas_images_.store(active && capture_canvas_images, std::memory_order_relaxed);
-  runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
@@ -1224,24 +1298,15 @@ bool NativeProbeSink::RegisterRuntimeScriptObservation(
     runtime_observations = {};
     runtime_observations.generation = generation;
   }
-  auto* entry = static_cast<RuntimeObservation*>(nullptr);
-  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-    auto& current = runtime_observations.observations[index];
-    if (current.context == execution_context_id && current.script == script_id)
-      entry = &current;
-  }
-  if (!entry) {
-    if (runtime_observations.count == runtime_observations.observations.size())
-      return false;
-    entry = &runtime_observations.observations[runtime_observations.count++];
-    entry->context = execution_context_id;
-    entry->script = script_id;
-  }
+  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  if (!entry)
+    return false;
   if (observation == NativeRuntimeScriptObservation::kStaticDispatchLoop)
     entry->dispatch = true;
   else
     entry->candidate = true;
   entry->examined = true;
+  entry->unavailable = false;
   return true;
 }
 
@@ -1251,12 +1316,8 @@ bool NativeProbeSink::RuntimeScriptSourceNoted(const std::uint64_t generation,
   if (generation == 0 || runtime_observations.generation != generation ||
       execution_context_id == 0 || script_id == 0)
     return false;
-  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-    const auto& current = runtime_observations.observations[index];
-    if (current.context == execution_context_id && current.script == script_id)
-      return current.examined;
-  }
-  return false;
+  const auto* entry = FindRuntimeObservation(execution_context_id, script_id);
+  return entry && entry->examined;
 }
 
 bool NativeProbeSink::RuntimeScriptNoteAccepts(const std::uint64_t generation,
@@ -1269,13 +1330,9 @@ bool NativeProbeSink::RuntimeScriptNoteAccepts(const std::uint64_t generation,
   if (runtime_observations.generation != generation) {
     return true;
   }
-  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-    const auto& current = runtime_observations.observations[index];
-    if (current.context == execution_context_id && current.script == script_id) {
-      return !current.examined;
-    }
-  }
-  return runtime_observations.count < runtime_observations.observations.size();
+  const auto* entry = FindRuntimeObservation(execution_context_id, script_id);
+  return (!entry || !entry->examined) && runtime_observations.scans < kRuntimeScriptScanLimit &&
+         (entry || RuntimeObservationHasCapacity());
 }
 
 bool NativeProbeSink::RememberRuntimeScriptMiss(const std::uint64_t generation,
@@ -1289,20 +1346,15 @@ bool NativeProbeSink::RememberRuntimeScriptMiss(const std::uint64_t generation,
     runtime_observations = {};
     runtime_observations.generation = generation;
   }
-  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-    auto& current = runtime_observations.observations[index];
-    if (current.context == execution_context_id && current.script == script_id) {
-      current.examined = true;
-      return false;
-    }
-  }
-  if (runtime_observations.count == runtime_observations.observations.size()) {
+  if (!RuntimeScriptNoteAccepts(generation, execution_context_id, script_id)) {
     return false;
   }
-  auto& entry = runtime_observations.observations[runtime_observations.count++];
-  entry.context = execution_context_id;
-  entry.script = script_id;
-  entry.examined = true;
+  ++runtime_observations.scans;
+  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  if (entry) {
+    entry->examined = true;
+    entry->unavailable = true;
+  }
   return false;
 }
 
@@ -1318,25 +1370,20 @@ bool NativeProbeSink::NoteRuntimeScriptSource(const std::uint64_t generation,
     runtime_observations = {};
     runtime_observations.generation = generation;
   }
-  RuntimeObservation* entry = nullptr;
-  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-    auto& current = runtime_observations.observations[index];
-    if (current.context == execution_context_id && current.script == script_id)
-      entry = &current;
-  }
-  if (entry != nullptr && entry->examined)
-    return entry->candidate || entry->dispatch;
-  if (entry == nullptr && runtime_observations.count == runtime_observations.observations.size()) {
+  const auto* existing = FindRuntimeObservation(execution_context_id, script_id);
+  if (existing && existing->examined)
+    return existing->candidate || existing->dispatch;
+  if (!RuntimeScriptNoteAccepts(generation, execution_context_id, script_id)) {
     return false;
   }
+  ++runtime_observations.scans;
   const RuntimeSourceTier tier = ClassifyRuntimeSource(source, source_truncated);
   if (!tier.scanned) {
     return false;
   }
-  if (entry == nullptr) {
-    entry = &runtime_observations.observations[runtime_observations.count++];
-    entry->context = execution_context_id;
-    entry->script = script_id;
+  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  if (!entry) {
+    return false;
   }
   entry->examined = true;
   if (tier.likely || tier.candidate)
@@ -1355,21 +1402,26 @@ bool NativeProbeSink::RuntimeBufferHasSignal(const std::uint64_t generation,
   if (generation == 0 || generation != RuntimeCaptureGeneration() || bytes < 32 ||
       bytes > kNativeArtifactMaxContentBytes || execution_context_id == 0 || script_id == 0)
     return false;
-  bool candidate = false;
-  bool dispatch = false;
-  if (runtime_observations.generation == generation) {
-    for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-      const auto& observation = runtime_observations.observations[index];
-      if (observation.context == execution_context_id && observation.script == script_id) {
-        candidate = observation.candidate;
-        dispatch = observation.dispatch;
-      }
-    }
+  if (runtime_observations.generation != generation) {
+    runtime_observations = {};
+    runtime_observations.generation = generation;
   }
+  const auto* observation = FindRuntimeObservation(execution_context_id, script_id);
+  const bool candidate = observation && observation->candidate;
+  const bool dispatch = observation && observation->dispatch;
   if (!candidate && !is_eval && !(bytes >= 256 && dispatch)) {
-    if (runtime_observations.generation != generation) {
-      runtime_observations = {};
-      runtime_observations.generation = generation;
+    if (!observation || !observation->examined || observation->unavailable) {
+      const bool limited = !observation && (runtime_observations.scans >= kRuntimeScriptScanLimit ||
+                                            !RuntimeObservationHasCapacity());
+      auto& reported = limited ? runtime_observations.classification_limit_reported
+                               : runtime_observations.classification_unavailable_reported;
+      if (!reported) {
+        reported = RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                                            limited ? "runtime_script_classification_limit"
+                                                    : "runtime_script_classification_unavailable",
+                                            generation) != 0;
+      }
+      return false;
     }
     if (!runtime_observations.no_signal_reported) {
       runtime_observations.no_signal_reported =
@@ -1378,17 +1430,17 @@ bool NativeProbeSink::RuntimeBufferHasSignal(const std::uint64_t generation,
     }
     return false;
   }
-  auto count = runtime_typed_array_count_.load(std::memory_order_relaxed);
-  if (count >= kRuntimeTypedArrayMaxSnapshots) {
-    if (count == kRuntimeTypedArrayMaxSnapshots &&
-        RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
-                                 "runtime_typed_array_session_limit", generation) != 0) {
-      runtime_typed_array_count_.compare_exchange_strong(count, count + 1,
-                                                         std::memory_order_relaxed);
+  for (const auto& slot : runtime_snapshot_generations_) {
+    if (slot.load(std::memory_order_relaxed) < generation) {
+      return true;
     }
-    return false;
   }
-  return true;
+  if (!runtime_observations.snapshot_limit_reported) {
+    runtime_observations.snapshot_limit_reported =
+        RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
+                                 "runtime_typed_array_session_limit", generation) != 0;
+  }
+  return false;
 }
 
 void NativeProbeSink::RecordRuntimeBufferOmission(const std::uint64_t generation,
@@ -1447,46 +1499,55 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
                              "allocating_script_url_unavailable", generation);
     return;
   }
-  // Source is present only on the first observed copy of this script. Register
-  // that structural result before the keep-list read so later empty copies of
-  // the same script still match. The winning region supplies every flag.
+  // Both the allocation hook and direct captures share the same bounded cache.
+  // Repeated sources must not bypass negative caching or the total scan budget.
   if (!script.source.empty()) {
-    const RuntimeSourceTier tier = ClassifyRuntimeSource(script.source);
-    if (tier.likely) {
-      (void)RegisterRuntimeScriptObservation(generation, execution_context_id, script.script_id,
-                                             NativeRuntimeScriptObservation::kCapturedLikelyVm);
-    } else if (tier.candidate) {
-      (void)RegisterRuntimeScriptObservation(generation, execution_context_id, script.script_id,
-                                             NativeRuntimeScriptObservation::kCapturedVmCandidate);
-    }
-    if (tier.dispatch) {
-      (void)RegisterRuntimeScriptObservation(generation, execution_context_id, script.script_id,
-                                             NativeRuntimeScriptObservation::kStaticDispatchLoop);
-    }
+    (void)NoteRuntimeScriptSource(generation, execution_context_id, script.script_id,
+                                  script.source);
   }
   if (!RuntimeBufferHasSignal(generation, execution_context_id, frame_id, content.size(),
                               script.script_id, script.is_eval))
     return;
-  const std::size_t snapshot_index =
-      runtime_typed_array_count_.fetch_add(1, std::memory_order_relaxed);
-  if (snapshot_index >= kRuntimeTypedArrayMaxSnapshots) {
-    if (snapshot_index == kRuntimeTypedArrayMaxSnapshots) {
-      RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
-                               "runtime_typed_array_session_limit", generation);
-    }
-    return;
-  }
   NativeRuntimeScript scoped_script = script;
   scoped_script.session_id = session_id_.load(std::memory_order_relaxed);
   if (config_generation_.load(std::memory_order_acquire) != generation) {
     return;
   }
+  std::atomic<std::uint64_t>* claim = nullptr;
+  for (auto& slot : runtime_snapshot_generations_) {
+    auto previous = slot.load(std::memory_order_relaxed);
+    // One CAS per slot bounds contention. A newer generation can reclaim an
+    // old slot, but a delayed old capture can never reclaim a newer slot.
+    if (previous < generation &&
+        slot.compare_exchange_strong(previous, generation, std::memory_order_relaxed)) {
+      claim = &slot;
+      break;
+    }
+  }
+  if (!claim) {
+    if (RuntimeBufferHasSignal(generation, execution_context_id, frame_id, content.size(),
+                               script.script_id, script.is_eval)) {
+      RecordRuntimeBufferOmission(generation, frame_id, "runtime_buffer_snapshot_contention");
+    }
+    return;
+  }
   const std::uint64_t creator_event_id =
       RecordRuntimeBufferEvent(NativeProbeType::kApiCall, frame_id,
                                "runtime_typed_array_task_checkpoint_snapshot", generation);
+  // Rejected creator metadata cannot produce an artifact. Release only our
+  // generation's reservation, never a slot reclaimed by a replacement session.
+  if (creator_event_id == 0 || RuntimeCaptureGeneration() != generation) {
+    auto expected = generation;
+    claim->compare_exchange_strong(expected, generation - 1U, std::memory_order_relaxed);
+    return;
+  }
+  scoped_script.capture_generation = generation;
   artifact_emitter(NativeArtifactKind::kBytecodeBuffer,
                    NativeArtifactCaptureOrigin::kRuntimeTypedArray, creator_event_id,
                    execution_context_id, frame_id, sanitized_url, content, scoped_script);
+  if (RuntimeCaptureGeneration() != generation) {
+    return;
+  }
   if (!script.source.empty() && RuntimeScriptSourceNeeded(execution_context_id, script.script_id) &&
       runtime_script_cache.count < runtime_script_cache.keys.size()) {
     runtime_script_cache.keys[runtime_script_cache.count++] = {execution_context_id,

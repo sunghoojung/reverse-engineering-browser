@@ -270,6 +270,36 @@ void CanvasCreatorAdmission() {
   std::cout << "PASS Canvas artifact requires admitted creator metadata\n";
 }
 
+void RuntimeCreatorAdmission() {
+  NativeProbeQueue queue;
+  Configure(queue);
+  std::array<std::uint8_t, 32> bytes{};
+  const std::string_view text = "function vm(){while(pc<n){switch(op){case 1:return;}}}";
+  const std::vector<std::uint8_t> source(text.begin(), text.end());
+  const reb::NativeRuntimeScript script{9, false, source};
+  const auto before = reb::mojom::NativeProbeHost::artifacts.load();
+  Fill(queue);
+  for (unsigned index = 0; index < 32; ++index) {
+    sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/vm.js", bytes, script);
+  }
+  assert(queue.DroppedCount() == 32);
+  assert(reb::mojom::NativeProbeHost::artifacts == before);
+  assert(sink.RuntimeScriptSourceNeeded(7, 9));
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  for (unsigned index = 0; index < 16; ++index) {
+    sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/vm.js", bytes, script);
+    assert(One(queue).header.type == reb::NativeProbeType::kApiCall);
+  }
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 16);
+  assert(!sink.RuntimeScriptSourceNeeded(7, 9));
+  sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/vm.js", bytes, script);
+  assert(One(queue).header.type == reb::NativeProbeType::kArtifactCaptureFailed);
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 16);
+  transport.Disable();
+  std::cout << "PASS runtime artifact requires creator admission; full-ring retries preserve "
+               "source and snapshot budgets\n";
+}
+
 void RuntimeScriptProvenance() {
   NativeProbeQueue queue;
   Configure(queue);
@@ -601,11 +631,61 @@ void RuntimeSourceFeed() {
       96,
       "function vm(){const n=function(){return 1} /2;while(n<op){switch(op){case 1:stack=1;return "
       "1;}}}");
-  admit(98, "function vm(){const n=pc + /2;while(n<op){switch(op){case 1:stack=1;return 1;}}}");
+  admit(98, "function vm(){const n=pc + /[{]/;while(n<op){switch(op){case 1:stack=1;return 1;}}}");
   admit(99, "function vm(){return + /[{]/;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
   admit(100, "function vm(){const n=(a+b)/2;while(n<op){switch(op){case 1:stack=1;return 1;}}}");
+  admit(101,
+        "function vm(){const n='8' / 2;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(102,
+        "function vm(){const n=`8` / 2;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(103, "function vm(){if(ok){} /[{]/;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(104,
+        "function vm(){const n=({value:8}) / 2;while(pc<n){switch(op){case "
+        "1:stack.push(1);return;}}}");
+  admit(105,
+        "function vm(){const n=obj.return / 2;while(pc<n){switch(op){case "
+        "1:stack.push(1);return;}}}");
+  admit(106,
+        "function vm(){const n=/[\\/{}]/.test('x');while(pc<n){switch(op){case "
+        "1:stack.push(1);return;}}}");
+  admit(107,
+        "function vm(){const n=pc - /[{]/;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(108,
+        "function vm(){const n=8 / /* /[{]/ */ 2;while(pc<n){switch(op){case "
+        "1:stack.push(1);return;}}}");
+  admit(
+      109,
+      "function vm(){const n=class {} / 2;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(110,
+        "function vm(){try{} catch{} /[{]/;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(111,
+        "function vm(){async function a(){} /[{]/;while(pc<n){switch(op){case "
+        "1:stack.push(1);return;}}}");
+  admit(112, "function vm(){label:{} /[{]/;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(113,
+        "function vm(){const n=class extends (class {}){} / 2;while(pc<n){switch(op){case "
+        "1:stack.push(1);return;}}}");
+  admit(114,
+        "function vm(){const n=class extends (function(){return class {}})(){} / "
+        "2;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
   assert(Drain(queue) == 0);
   assert(reb::mojom::NativeProbeHost::artifacts == before + 7);
+
+  // VM-looking text in non-code tokens must not create a signal either.
+  const std::array<std::string_view, 4> lexical_negatives = {
+      "const re=/instructionPointer/;",
+      "function plain(){const n=pc + /instructionPointer/;}",
+      "function plain(){if(ok){} /instructionPointer/;}",
+      "function plain(){const n=`instructionPointer`;}",
+  };
+  std::uint64_t negative_id = 200;
+  for (const auto source : lexical_negatives) {
+    const std::vector<std::uint8_t> bytes(source.begin(), source.end());
+    assert(!sink.NoteRuntimeScriptSource(generation, 7, negative_id, bytes));
+    assert(!sink.RuntimeBufferHasSignal(generation, 7, 8, 32, negative_id, false));
+    ++negative_id;
+  }
+  assert(Drain(queue) == 0);
 
   assert(sink.RuntimeScriptNoteAccepts(generation, 7, 97));
   assert(!sink.RememberRuntimeScriptMiss(generation, 7, 97));
@@ -613,32 +693,75 @@ void RuntimeSourceFeed() {
   assert(!sink.RuntimeScriptNoteAccepts(generation, 7, 97));
   assert(!sink.RuntimeBufferHasSignal(generation, 7, 8, 32, 97, false));
 
+  assert(payload(One(queue)) == "runtime_script_classification_unavailable");
+
   Configure(queue, 79);
   const auto fresh = sink.RuntimeCaptureGeneration();
   const std::vector<std::uint8_t> closed{'v', 'a', 'r', ' ', 'x', '=', '1', ';'};
-  std::uint64_t closed_id = 1;
-  std::size_t closed_count = 0;
-  while (sink.RuntimeScriptNoteAccepts(fresh, 7, closed_id)) {
-    assert(!sink.NoteRuntimeScriptSource(fresh, 7, closed_id, closed));
-    assert(sink.RuntimeScriptSourceNoted(fresh, 7, closed_id));
-    assert(!sink.RuntimeScriptNoteAccepts(fresh, 7, closed_id));
-    ++closed_count;
-    ++closed_id;
+  for (std::uint64_t id = 1; id <= 64; ++id) {
+    assert(sink.RuntimeScriptNoteAccepts(fresh, 7, id));
+    assert(!sink.NoteRuntimeScriptSource(fresh, 7, id, closed));
+    assert(sink.RuntimeScriptSourceNoted(fresh, 7, id));
+    assert(!sink.RuntimeScriptNoteAccepts(fresh, 7, id));
+    // A retained negative never reconverts or rescans, nor spends scan budget.
+    for (unsigned repeat = 0; repeat < 8; ++repeat) {
+      assert(!sink.NoteRuntimeScriptSource(fresh, 7, id, regex_bytes));
+    }
   }
-  assert(closed_count == 64);
-  assert(!sink.RuntimeScriptNoteAccepts(fresh, 7, closed_id));
-  assert(!sink.NoteRuntimeScriptSource(fresh, 7, closed_id, closed));
-  assert(!sink.RuntimeScriptSourceNoted(fresh, 7, closed_id));
-  assert(sink.RuntimeScriptSourceNoted(fresh, 7, 1));
-  assert(!sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, closed_id, false));
+  // A later real VM must not be starved by the first 64 unrelated scripts.
+  assert(sink.RuntimeScriptNoteAccepts(fresh, 7, 65));
+  assert(sink.NoteRuntimeScriptSource(fresh, 7, 65, regex_bytes));
+  assert(sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, 65, false));
+  assert(!sink.RuntimeScriptSourceNoted(fresh, 7, 1));
+  for (std::uint64_t id = 66; id <= 256; ++id) {
+    assert(sink.RuntimeScriptNoteAccepts(fresh, 7, id));
+    assert(!sink.NoteRuntimeScriptSource(fresh, 7, id, closed));
+  }
+  assert(sink.RuntimeScriptSourceNoted(fresh, 7, 65));
+  assert(sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, 65, false));
+  // Neither a new script nor an evicted negative can bypass the work budget.
+  for (const std::uint64_t id : {1U, 257U}) {
+    assert(!sink.RuntimeScriptNoteAccepts(fresh, 7, id));
+    assert(!sink.NoteRuntimeScriptSource(fresh, 7, id, regex_bytes));
+    assert(!sink.RuntimeScriptSourceNoted(fresh, 7, id));
+  }
+  Fill(queue);
+  assert(!sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, 257, false));
+  assert(queue.DroppedCount() == 1);
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  assert(!sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, 257, false));
   const auto missed = One(queue);
   assert(missed.header.type == reb::NativeProbeType::kArtifactCaptureFailed);
-  assert(payload(missed) == "runtime_buffer_no_vm_signal");
-  assert(!sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, closed_id + 1, false));
+  assert(payload(missed) == "runtime_script_classification_limit");
+  assert(!sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, 258, false));
   assert(Drain(queue) == 0);
+  // A known negative is distinct from an unexamined script after exhaustion.
+  assert(!sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, 256, false));
+  assert(payload(One(queue)) == "runtime_buffer_no_vm_signal");
+
+  Configure(queue, 79);  // Reusing a session still replaces the generation.
+  const auto reset = sink.RuntimeCaptureGeneration();
+  assert(reset != fresh);
+  assert(!sink.RuntimeScriptNoteAccepts(fresh, 7, 257));
+  assert(!sink.NoteRuntimeScriptSource(fresh, 7, 257, regex_bytes));
+  assert(sink.RuntimeScriptNoteAccepts(reset, 7, 257));
+  assert(sink.NoteRuntimeScriptSource(reset, 7, 257, regex_bytes));
+  assert(!sink.RuntimeScriptSourceNoted(reset, 7, 65));
+  assert(!sink.RuntimeBufferHasSignal(reset, 99, 8, 32, 257, false));
+  assert(payload(One(queue)) == "runtime_script_classification_unavailable");
+  // Trusted observations stay pinned even when every table entry is positive.
+  for (std::uint64_t id = 1; id <= 63; ++id) {
+    assert(sink.RegisterRuntimeScriptObservation(
+        reset, 7, id, reb::NativeRuntimeScriptObservation::kCapturedVmCandidate));
+  }
+  assert(!sink.RuntimeScriptNoteAccepts(reset, 7, 258));
+  assert(!sink.NoteRuntimeScriptSource(reset, 7, 258, regex_bytes));
+  assert(!sink.RuntimeBufferHasSignal(reset, 7, 8, 32, 258, false));
+  assert(payload(One(queue)) == "runtime_script_classification_limit");
+  assert(sink.RuntimeBufferHasSignal(reset, 7, 8, 32, 257, false));
   assert(reb::mojom::NativeProbeHost::artifacts == before + 7);
-  std::cout << "PASS runtime source feed for candidate, likely-VM, dispatch, regex literal and "
-               "closed failures\n";
+  std::cout << "PASS runtime source feed: valid regex/division, late VM admission, pinned signals, "
+               "bounded scans, generation reset and explicit omissions\n";
 }
 
 void RuntimeCheckpointQueue() {
@@ -808,6 +931,7 @@ int main() {
   ConfigurationRaces();
   DisabledExpiredAndMalformed();
   CanvasCreatorAdmission();
+  RuntimeCreatorAdmission();
   RuntimeScriptProvenance();
   RuntimeKeepList();
   RuntimeBufferFrameSelection();

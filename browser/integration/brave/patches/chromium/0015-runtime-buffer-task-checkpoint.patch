@@ -15,7 +15,7 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
  #include <algorithm>
  #include <bit>
  #include <cstdint>
-@@ -252,64 +258,266 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+@@ -252,64 +258,270 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                           UNSAFE_BUFFERS(base::span(bytes, size)));
  }
  
@@ -46,29 +46,39 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +    const auto context_id = StableExecutionContextId(execution_context);
 +    const auto frame_id = StableFrameId(execution_context);
 +    const auto script_id = static_cast<std::uint64_t>(allocator.script_id);
++    if (allocator.source.IsEmpty() ||
++        allocator.source->Length() > static_cast<int>(reb::kNativeArtifactMaxContentBytes)) {
++      sink.RecordRuntimeBufferOmission(generation, frame_id,
++                                        "allocating_script_unavailable");
++      return;
++    }
 +    // Classify before the signal gate. The gate used to run first, so a
 +    // normal script could never record the observation that would admit it.
-+    // A full 64-entry table refuses the conversion instead of repeating it.
-+    if (script_id != 0 && !allocator.source.IsEmpty() &&
++    // The bounded cache and scan budget gate conversion before allocating.
++    if (script_id != 0 &&
 +        sink.RuntimeScriptNoteAccepts(generation, context_id, script_id)) {
-+      const std::size_t utf8_length = allocator.source->Utf8Length(isolate_);
-+      const std::size_t prefix =
-+          std::min(utf8_length, reb::kRuntimeScriptNoteBytes);
++      const std::size_t characters = static_cast<std::size_t>(allocator.source->Length());
++      // UTF-8 needs at most three bytes per UTF-16 code unit. Clamp before
++      // multiplying, and avoid Utf8Length's whole-script walk on this path.
++      const std::size_t prefix = std::min(
++          std::min(characters, reb::kRuntimeScriptNoteBytes) * 3U,
++          reb::kRuntimeScriptNoteBytes);
 +      if (prefix > 0) {
 +        std::vector<std::uint8_t> noted(prefix);
++        std::size_t processed_characters = 0;
 +        const std::size_t written = allocator.source->WriteUtf8(
 +            isolate_, reinterpret_cast<char*>(noted.data()), noted.size(),
-+            v8::String::WriteFlags::kReplaceInvalidUtf8);
++            v8::String::WriteFlags::kReplaceInvalidUtf8, &processed_characters);
 +        if (written > 0) {
 +          noted.resize(std::min(written, prefix));
 +          // The prefix is not a finished file when the script continues.
-+          sink.NoteRuntimeScriptSource(generation, context_id, script_id,
-+                                       noted, utf8_length > noted.size());
++          (void)sink.NoteRuntimeScriptSource(generation, context_id, script_id,
++                                            noted, processed_characters < characters);
 +        } else {
-+          sink.RememberRuntimeScriptMiss(generation, context_id, script_id);
++          (void)sink.RememberRuntimeScriptMiss(generation, context_id, script_id);
 +        }
 +      } else {
-+        sink.RememberRuntimeScriptMiss(generation, context_id, script_id);
++        (void)sink.RememberRuntimeScriptMiss(generation, context_id, script_id);
 +      }
 +    }
 +    if (!sink.RuntimeBufferHasSignal(generation, context_id, frame_id, size,
@@ -88,12 +98,6 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +         allocator.name->Utf8Length(isolate_) > reb::kNativeArtifactMaxUrlBytes)) {
 +      sink.RecordRuntimeBufferOmission(generation, frame_id,
 +                                        "allocating_script_url_unavailable");
-+      return;
-+    }
-+    if (allocator.source->Length() >
-+        static_cast<int>(reb::kNativeArtifactMaxContentBytes)) {
-+      sink.RecordRuntimeBufferOmission(generation, frame_id,
-+                                        "allocating_script_unavailable");
 +      return;
 +    }
 +    const std::size_t source_bytes = allocator.source->Utf8Length(isolate_);

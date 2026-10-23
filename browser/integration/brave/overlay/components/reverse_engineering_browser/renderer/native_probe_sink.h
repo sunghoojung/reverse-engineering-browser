@@ -84,11 +84,19 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // Scans source once and records candidate, likely, or dispatch observations
   // when the bounded structural scan finds them. Returns whether a signal was
   // recorded. A non-matching scan is remembered and returns false. A script
-  // that does not fit in the table is not remembered and returns false.
+  // that does not fit in the table is not remembered and returns false. A scan
+  // that does not run is not remembered, so the caller can try again.
+  // source_truncated is true when source is a prefix of a longer script.
   [[nodiscard]] bool NoteRuntimeScriptSource(std::uint64_t generation,
                                              std::uint64_t execution_context_id,
                                              std::uint64_t script_id,
-                                             std::span<const std::uint8_t> source) noexcept;
+                                             std::span<const std::uint8_t> source,
+                                             bool source_truncated = false) noexcept;
+  // Remembers a conversion that produced no bytes, so the caller does not
+  // allocate the prefix again. Returns false.
+  [[nodiscard]] bool RememberRuntimeScriptMiss(std::uint64_t generation,
+                                               std::uint64_t execution_context_id,
+                                               std::uint64_t script_id) noexcept;
   [[nodiscard]] bool RuntimeBufferHasSignal(std::uint64_t generation,
                                             std::uint64_t execution_context_id,
                                             std::uint64_t frame_id,

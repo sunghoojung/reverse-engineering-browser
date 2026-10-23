@@ -517,22 +517,61 @@ void RuntimeSourceFeed() {
   assert(Drain(queue) == 0);
   assert(reb::mojom::NativeProbeHost::artifacts == before + 7);
 
+  const std::string_view cut_source =
+      "function vm(){while(pc<program.length){switch(program[pc++]){case "
+      "1:stack.push(1);return;}}} function rest(){";
+  const std::vector<std::uint8_t> cut_bytes(cut_source.begin(), cut_source.end());
+  assert(!sink.NoteRuntimeScriptSource(generation, 7, 92, cut_bytes, false));
+  assert(sink.RuntimeScriptSourceNoted(generation, 7, 92));
+  assert(!sink.RuntimeBufferHasSignal(generation, 7, 8, 32, 92, false));
+  assert(sink.NoteRuntimeScriptSource(generation, 7, 93, cut_bytes, true));
+  assert(sink.RuntimeBufferHasSignal(generation, 7, 8, 32, 93, false));
+
+  const auto admit = [&](const std::uint64_t id, const std::string_view source) {
+    const std::vector<std::uint8_t> bytes(source.begin(), source.end());
+    assert(sink.NoteRuntimeScriptSource(generation, 7, id, bytes));
+    assert(sink.RuntimeBufferHasSignal(generation, 7, 8, 32, id, false));
+  };
+  admit(94, "function vm(){if(ok)/[{]/;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(95, "function vm(){const n=pc++ /2;while(n<op){switch(op){case 1:stack=1;return 1;}}}");
+  admit(
+      96,
+      "function vm(){const n=function(){return 1} /2;while(n<op){switch(op){case 1:stack=1;return "
+      "1;}}}");
+  admit(98, "function vm(){const n=pc + /2;while(n<op){switch(op){case 1:stack=1;return 1;}}}");
+  admit(99, "function vm(){return + /[{]/;while(pc<n){switch(op){case 1:stack.push(1);return;}}}");
+  admit(100, "function vm(){const n=(a+b)/2;while(n<op){switch(op){case 1:stack=1;return 1;}}}");
+  assert(Drain(queue) == 0);
+  assert(reb::mojom::NativeProbeHost::artifacts == before + 7);
+
+  assert(sink.RuntimeScriptNoteAccepts(generation, 7, 97));
+  assert(!sink.RememberRuntimeScriptMiss(generation, 7, 97));
+  assert(sink.RuntimeScriptSourceNoted(generation, 7, 97));
+  assert(!sink.RuntimeScriptNoteAccepts(generation, 7, 97));
+  assert(!sink.RuntimeBufferHasSignal(generation, 7, 8, 32, 97, false));
+
+  Configure(queue, 79);
+  const auto fresh = sink.RuntimeCaptureGeneration();
   const std::vector<std::uint8_t> closed{'v', 'a', 'r', ' ', 'x', '=', '1', ';'};
-  std::uint64_t closed_id = 300;
+  std::uint64_t closed_id = 1;
   std::size_t closed_count = 0;
-  while (sink.RuntimeScriptNoteAccepts(generation, 7, closed_id)) {
-    assert(!sink.NoteRuntimeScriptSource(generation, 7, closed_id, closed));
-    assert(sink.RuntimeScriptSourceNoted(generation, 7, closed_id));
-    assert(!sink.RuntimeScriptNoteAccepts(generation, 7, closed_id));
+  while (sink.RuntimeScriptNoteAccepts(fresh, 7, closed_id)) {
+    assert(!sink.NoteRuntimeScriptSource(fresh, 7, closed_id, closed));
+    assert(sink.RuntimeScriptSourceNoted(fresh, 7, closed_id));
+    assert(!sink.RuntimeScriptNoteAccepts(fresh, 7, closed_id));
     ++closed_count;
     ++closed_id;
-    assert(closed_count <= 64);
   }
-  assert(closed_count > 0);
-  assert(!sink.RuntimeScriptNoteAccepts(generation, 7, closed_id));
-  assert(!sink.NoteRuntimeScriptSource(generation, 7, closed_id, closed));
-  assert(!sink.RuntimeScriptSourceNoted(generation, 7, closed_id));
-  assert(!sink.RuntimeBufferHasSignal(generation, 7, 8, 32, closed_id, false));
+  assert(closed_count == 64);
+  assert(!sink.RuntimeScriptNoteAccepts(fresh, 7, closed_id));
+  assert(!sink.NoteRuntimeScriptSource(fresh, 7, closed_id, closed));
+  assert(!sink.RuntimeScriptSourceNoted(fresh, 7, closed_id));
+  assert(sink.RuntimeScriptSourceNoted(fresh, 7, 1));
+  assert(!sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, closed_id, false));
+  const auto missed = One(queue);
+  assert(missed.header.type == reb::NativeProbeType::kArtifactCaptureFailed);
+  assert(payload(missed) == "runtime_buffer_no_vm_signal");
+  assert(!sink.RuntimeBufferHasSignal(fresh, 7, 8, 32, closed_id + 1, false));
   assert(Drain(queue) == 0);
   assert(reb::mojom::NativeProbeHost::artifacts == before + 7);
   std::cout << "PASS runtime source feed for candidate, likely-VM, dispatch, regex literal and "

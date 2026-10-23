@@ -61,9 +61,14 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +            v8::String::WriteFlags::kReplaceInvalidUtf8);
 +        if (written > 0) {
 +          noted.resize(std::min(written, prefix));
++          // The prefix is not a finished file when the script continues.
 +          sink.NoteRuntimeScriptSource(generation, context_id, script_id,
-+                                       noted);
++                                       noted, utf8_length > noted.size());
++        } else {
++          sink.RememberRuntimeScriptMiss(generation, context_id, script_id);
 +        }
++      } else {
++        sink.RememberRuntimeScriptMiss(generation, context_id, script_id);
 +      }
 +    }
 +    if (!sink.RuntimeBufferHasSignal(generation, context_id, frame_id, size,

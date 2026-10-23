@@ -137,6 +137,8 @@ struct RuntimeSourceTier final {
   bool likely = false;
   bool candidate = false;
   bool dispatch = false;
+  // False only when the scan did not run, so the caller can try again.
+  bool scanned = false;
 };
 
 struct RuntimeRegion final {
@@ -190,6 +192,51 @@ constexpr bool KeywordAllowsRegex(const std::span<const char> text,
   return false;
 }
 
+constexpr bool StatementKeywordBeforeParen(const std::span<const char> text,
+                                           const std::size_t paren) noexcept {
+  if (paren >= text.size() || text[paren] != ')') {
+    return false;
+  }
+  std::size_t depth = 1;
+  std::size_t cursor = paren;
+  constexpr std::size_t kMaxSteps = 4096;
+  for (std::size_t steps = 0; cursor > 0 && depth > 0 && steps < kMaxSteps; ++steps) {
+    --cursor;
+    const char ch = text[cursor];
+    if (ch == ')') {
+      ++depth;
+    } else if (ch == '(') {
+      --depth;
+    }
+  }
+  if (depth != 0 || text[cursor] != '(') {
+    return false;
+  }
+  while (cursor > 0 && IsAsciiSpace(static_cast<unsigned char>(text[cursor - 1U]))) {
+    --cursor;
+  }
+  if (cursor == 0) {
+    return false;
+  }
+  constexpr std::array<std::string_view, 6> kWords = {"if",   "while",  "for",
+                                                      "with", "switch", "catch"};
+  const std::size_t end = cursor - 1U;
+  if (!IsIdentCont(static_cast<unsigned char>(text[end]))) {
+    return false;
+  }
+  std::size_t start = end;
+  while (start > 0 && IsIdentCont(static_cast<unsigned char>(text[start - 1U]))) {
+    --start;
+  }
+  const std::string_view word(text.data() + start, end - start + 1U);
+  for (const std::string_view keyword : kWords) {
+    if (word == keyword) {
+      return true;
+    }
+  }
+  return false;
+}
+
 constexpr bool SlashStartsRegex(const std::span<const char> text,
                                 const std::size_t index) noexcept {
   std::size_t cursor = index;
@@ -200,7 +247,38 @@ constexpr bool SlashStartsRegex(const std::span<const char> text,
     return true;
   }
   const auto previous = static_cast<unsigned char>(text[cursor - 1U]);
-  if (IsIdentCont(previous) || previous == ')' || previous == ']') {
+  if (previous == ')') {
+    return StatementKeywordBeforeParen(text, cursor - 1U);
+  }
+  // Postfix ++/-- and a binary + or - are division. A unary + or - can open a regex.
+  // Spaces around the operator do not change which one it is. A keyword such as
+  // return, immediately before the operator, still opens a regex.
+  if (previous == '+' || previous == '-') {
+    if (cursor >= 2U && static_cast<unsigned char>(text[cursor - 2U]) == previous) {
+      return false;
+    }
+    std::size_t before = cursor - 1U;
+    while (before > 0 && IsAsciiSpace(static_cast<unsigned char>(text[before - 1U]))) {
+      --before;
+    }
+    if (before == 0) {
+      return true;
+    }
+    const auto earlier = static_cast<unsigned char>(text[before - 1U]);
+    if (IsIdentCont(earlier)) {
+      return KeywordAllowsRegex(text, before - 1U);
+    }
+    if (earlier == ')' || earlier == ']' || earlier == '}' || (earlier >= '0' && earlier <= '9')) {
+      return false;
+    }
+    return true;
+  }
+  // A slash after a block or a function expression is division. Blanking through
+  // the rest of the window would hide a later dispatch loop.
+  if (previous == '}') {
+    return false;
+  }
+  if (IsIdentCont(previous) || previous == ']') {
     return KeywordAllowsRegex(text, cursor - 1U);
   }
   return true;
@@ -744,13 +822,23 @@ RegionScore ScoreRegion(const RegionScan& scan) noexcept {
   return scored;
 }
 
+[[nodiscard]] RuntimeSourceTier ScannedNone() noexcept {
+  RuntimeSourceTier tier;
+  tier.scanned = true;
+  return tier;
+}
+
 [[nodiscard]] RuntimeSourceTier ClassifyRuntimeSource(
-    const std::span<const std::uint8_t> source) noexcept {
+    const std::span<const std::uint8_t> source,
+    const bool source_truncated = false) noexcept {
   if (source.empty()) {
-    return {};
+    return ScannedNone();
   }
-  const bool truncated = source.size() > kRuntimeSourceScanBytes;
-  const std::size_t length = truncated ? kRuntimeSourceScanBytes : source.size();
+  // A caller that already cut the script to the scan window must say so.
+  // Otherwise an unclosed brace at the cut erases a complete function inside it.
+  // length never exceeds the bytes actually passed in.
+  const bool truncated = source_truncated || source.size() > kRuntimeSourceScanBytes;
+  const std::size_t length = std::min(source.size(), kRuntimeSourceScanBytes);
   const std::size_t owner_off = AlignUp(length, alignof(std::uint16_t));
   const std::size_t marks_off = owner_off + length * sizeof(std::uint16_t);
   const std::size_t stack_off = AlignUp(marks_off + length, alignof(std::size_t));
@@ -803,7 +891,7 @@ RegionScore ScoreRegion(const RegionScan& scan) noexcept {
   }
   if (too_many_functions) {
     std::free(block);
-    return {};
+    return ScannedNone();
   }
 
   std::array<RuntimeRegion, kRuntimeSourceMaxFunctions + 1U> regions{};
@@ -828,7 +916,7 @@ RegionScore ScoreRegion(const RegionScan& scan) noexcept {
   if (closed != opening_count) {
     if (!truncated) {
       std::free(block);
-      return {};
+      return ScannedNone();
     }
     for (std::size_t index = 0; index < depth; ++index) {
       if (marks[brace_stack[index]] != 0U && brace_stack[index] < earliest_unclosed) {
@@ -864,6 +952,7 @@ RegionScore ScoreRegion(const RegionScan& scan) noexcept {
   }
 
   RuntimeSourceTier best_tier;
+  best_tier.scanned = true;
   int best_score = -1;
   int best_families = -1;
   std::size_t best_start = 0;
@@ -1108,10 +1197,39 @@ bool NativeProbeSink::RuntimeScriptNoteAccepts(const std::uint64_t generation,
   return runtime_observations.count < runtime_observations.observations.size();
 }
 
+bool NativeProbeSink::RememberRuntimeScriptMiss(const std::uint64_t generation,
+                                                const std::uint64_t execution_context_id,
+                                                const std::uint64_t script_id) noexcept {
+  if (generation == 0 || generation != RuntimeCaptureGeneration() || execution_context_id == 0 ||
+      script_id == 0) {
+    return false;
+  }
+  if (runtime_observations.generation != generation) {
+    runtime_observations = {};
+    runtime_observations.generation = generation;
+  }
+  for (std::size_t index = 0; index < runtime_observations.count; ++index) {
+    auto& current = runtime_observations.observations[index];
+    if (current.context == execution_context_id && current.script == script_id) {
+      current.examined = true;
+      return false;
+    }
+  }
+  if (runtime_observations.count == runtime_observations.observations.size()) {
+    return false;
+  }
+  auto& entry = runtime_observations.observations[runtime_observations.count++];
+  entry.context = execution_context_id;
+  entry.script = script_id;
+  entry.examined = true;
+  return false;
+}
+
 bool NativeProbeSink::NoteRuntimeScriptSource(const std::uint64_t generation,
                                               const std::uint64_t execution_context_id,
                                               const std::uint64_t script_id,
-                                              const std::span<const std::uint8_t> source) noexcept {
+                                              const std::span<const std::uint8_t> source,
+                                              const bool source_truncated) noexcept {
   if (generation == 0 || generation != RuntimeCaptureGeneration() || execution_context_id == 0 ||
       script_id == 0 || source.empty())
     return false;
@@ -1127,15 +1245,19 @@ bool NativeProbeSink::NoteRuntimeScriptSource(const std::uint64_t generation,
   }
   if (entry != nullptr && entry->examined)
     return entry->candidate || entry->dispatch;
+  if (entry == nullptr && runtime_observations.count == runtime_observations.observations.size()) {
+    return false;
+  }
+  const RuntimeSourceTier tier = ClassifyRuntimeSource(source, source_truncated);
+  if (!tier.scanned) {
+    return false;
+  }
   if (entry == nullptr) {
-    if (runtime_observations.count == runtime_observations.observations.size())
-      return false;
     entry = &runtime_observations.observations[runtime_observations.count++];
     entry->context = execution_context_id;
     entry->script = script_id;
   }
   entry->examined = true;
-  const RuntimeSourceTier tier = ClassifyRuntimeSource(source);
   if (tier.likely || tier.candidate)
     entry->candidate = true;
   if (tier.dispatch)

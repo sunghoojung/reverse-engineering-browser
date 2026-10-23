@@ -79,49 +79,130 @@ struct RuntimeObservationCache final {
 };
 thread_local RuntimeObservationCache runtime_observations;
 
-// Bounded, allocation-free metadata sanitization. Ambiguous/control-containing
-// URLs are unavailable; data/javascript URLs must never become source metadata.
-std::string_view SanitizeRuntimeSourceUrl(
-    std::string_view input,
-    std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
-  if (input.empty() || input.size() > output.size())
+constexpr char AsciiLower(unsigned char c) noexcept;
+
+[[nodiscard]] bool StartsWithAscii(const std::string_view text,
+                                   const std::string_view prefix) noexcept {
+  if (text.size() < prefix.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < prefix.size(); ++index) {
+    if (AsciiLower(static_cast<unsigned char>(text[index])) != prefix[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Bounded, allocation-free metadata sanitization. Ambiguous or control-containing
+// URLs are unavailable. data and javascript URLs must never become source metadata.
+// allow_blob is false while decoding the inner origin of a blob URL.
+std::string_view SanitizeRuntimeSourceUrl(std::string_view input,
+                                          std::array<char, kNativeArtifactMaxUrlBytes>& output,
+                                          const bool allow_blob) noexcept {
+  if (input.empty() || input.size() > output.size()) {
     return {};
+  }
   for (const char character : input) {
     const auto ch = static_cast<unsigned char>(character);
-    if (ch <= 0x20 || ch == 0x7f || ch == '\\')
+    if (ch <= 0x20 || ch == 0x7f || ch == '\\') {
       return {};
+    }
   }
   input = input.substr(0, input.find_first_of("?#"));
+  if (allow_blob && StartsWithAscii(input, "blob:")) {
+    std::array<char, kNativeArtifactMaxUrlBytes> inner_storage{};
+    const auto inner = SanitizeRuntimeSourceUrl(input.substr(5), inner_storage, false);
+    if (inner.empty() ||
+        (!StartsWithAscii(inner, "https://") && !StartsWithAscii(inner, "http://"))) {
+      return {};
+    }
+    constexpr std::string_view kBlob = "blob:";
+    if (kBlob.size() + inner.size() > output.size()) {
+      return {};
+    }
+    for (std::size_t index = 0; index < kBlob.size(); ++index) {
+      output[index] = kBlob[index];
+    }
+    for (std::size_t index = 0; index < inner.size(); ++index) {
+      output[kBlob.size() + index] = inner[index];
+    }
+    return {output.data(), kBlob.size() + inner.size()};
+  }
   const auto scheme = input.find("://");
-  if (scheme == std::string_view::npos || scheme > 7)
+  if (scheme == std::string_view::npos || scheme > 7) {
     return {};
+  }
   std::array<char, 8> scheme_storage{};
   for (std::size_t index = 0; index < scheme; ++index) {
     const auto ch = input[index];
     scheme_storage[index] = ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch + ('a' - 'A')) : ch;
   }
   const std::string_view scheme_name(scheme_storage.data(), scheme);
-  if (scheme_name != "http" && scheme_name != "https" && scheme_name != "fixture")
+  const bool script_label = scheme_name == "script";
+  if (scheme_name != "http" && scheme_name != "https" && scheme_name != "fixture" &&
+      !script_label) {
     return {};
-  std::size_t cut_begin = 0;
+  }
+  const std::size_t cut_begin = scheme + 3;
+  const auto authority_end = input.find('/', cut_begin);
+  const auto authority = input.substr(cut_begin, authority_end - cut_begin);
   std::size_t cut_end = 0;
-  if (scheme != std::string_view::npos) {
-    cut_begin = scheme + 3;
-    const auto authority_end = input.find('/', cut_begin);
-    const auto authority = input.substr(cut_begin, authority_end - cut_begin);
-    const auto at = authority.rfind('@');
-    if (at != std::string_view::npos)
-      cut_end = cut_begin + at + 1;
-    if (authority.empty() || cut_end == cut_begin + authority.size())
+  const auto at = authority.rfind('@');
+  if (at != std::string_view::npos) {
+    cut_end = cut_begin + at + 1;
+  }
+  if (authority.empty() || cut_end == cut_begin + authority.size()) {
+    return {};
+  }
+  if (script_label) {
+    if (at != std::string_view::npos || authority_end != std::string_view::npos) {
       return {};
+    }
+    for (const char character : authority) {
+      if (character < '0' || character > '9') {
+        return {};
+      }
+    }
   }
   std::size_t length = 0;
   for (std::size_t index = 0; index < input.size(); ++index) {
-    if (cut_end != 0 && index >= cut_begin && index < cut_end)
+    if (cut_end != 0 && index >= cut_begin && index < cut_end) {
       continue;
+    }
     output[length++] = input[index];
   }
   return {output.data(), length};
+}
+
+std::string_view SanitizeRuntimeSourceUrl(
+    const std::string_view input,
+    std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
+  return SanitizeRuntimeSourceUrl(input, output, true);
+}
+
+// A script with no name is still the allocating script. The label is the id
+// only, so the page cannot put source text into the URL field.
+std::string_view RuntimeScriptIdentityLabel(
+    std::uint64_t script_id,
+    std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
+  constexpr std::string_view kPrefix = "script://";
+  char digits[20];
+  std::size_t count = 0;
+  do {
+    digits[count++] = static_cast<char>('0' + static_cast<int>(script_id % 10U));
+    script_id /= 10U;
+  } while (script_id != 0 && count < sizeof(digits));
+  if (kPrefix.size() + count > output.size()) {
+    return {};
+  }
+  for (std::size_t index = 0; index < kPrefix.size(); ++index) {
+    output[index] = kPrefix[index];
+  }
+  for (std::size_t index = 0; index < count; ++index) {
+    output[kPrefix.size() + index] = digits[count - 1U - index];
+  }
+  return {output.data(), kPrefix.size() + count};
 }
 
 // Same structural weights as the offline JavaScript detector. Anti-bot lexical
@@ -1355,7 +1436,12 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
     return;
   }
   std::array<char, kNativeArtifactMaxUrlBytes> sanitized_storage{};
-  const auto sanitized_url = SanitizeRuntimeSourceUrl(source_url, sanitized_storage);
+  auto sanitized_url = SanitizeRuntimeSourceUrl(source_url, sanitized_storage);
+  if (sanitized_url.empty() && source_url.empty()) {
+    std::array<char, kNativeArtifactMaxUrlBytes> label_storage{};
+    const auto label = RuntimeScriptIdentityLabel(script.script_id, label_storage);
+    sanitized_url = SanitizeRuntimeSourceUrl(label, sanitized_storage);
+  }
   if (execution_context_id == 0 || sanitized_url.empty()) {
     RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, frame_id,
                              "allocating_script_url_unavailable", generation);

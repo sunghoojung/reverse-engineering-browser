@@ -15,6 +15,7 @@
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
+#include "brave/components/reverse_engineering_browser/common/runtime_buffer_frame.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
@@ -386,19 +387,25 @@ void RuntimeKeepList() {
   capture(256);
   assert(Drain(queue) == 1);
   script.is_eval = true;
-  sink.CaptureRuntimeTypedArray(7, 8, "", bytes, script);
-  const auto missing = One(queue);
-  assert(std::string(reinterpret_cast<const char*>(missing.inline_payload.data()),
-                     missing.header.payload_size) == "allocating_script_url_unavailable");
   sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 44,
                    reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm), kForever);
+  captured_runtime_url.clear();
+  sink.CaptureRuntimeTypedArray(7, 8, "", bytes, script);
+  assert(captured_runtime_url == "script://14");
   sink.CaptureRuntimeTypedArray(7, 8, "https://user:password@owned.test/vm.js?token=secret#private",
                                 bytes, script);
   assert(captured_runtime_url == "https://owned.test/vm.js");
+  captured_runtime_url.clear();
+  sink.CaptureRuntimeTypedArray(7, 8, "blob:https://user:password@host/id?token=1#private", bytes,
+                                script);
+  assert(captured_runtime_url == "blob:https://host/id");
+  captured_runtime_url.clear();
+  sink.CaptureRuntimeTypedArray(7, 8, "BLOB:http://host/worker.js", bytes, script);
+  assert(captured_runtime_url == "blob:http://host/worker.js");
   for (const std::string_view unsafe :
        {"DATA:text/javascript,secret", "JAVASCRIPT:secret", "//user:password@host/path",
-        "https:user:password@host/path", "data://source-code",
-        "blob:https://user:password@host/id"}) {
+        "https:user:password@host/path", "data://source-code", "blob:file://host/id",
+        "blob:blob:https://host/id", "script://source-text", "script://14/extra"}) {
     captured_runtime_url.clear();
     sink.CaptureRuntimeTypedArray(7, 8, unsafe, bytes, script);
     assert(captured_runtime_url.empty());
@@ -416,6 +423,62 @@ void RuntimeKeepList() {
                                                 Observation::kCapturedVmCandidate));
   std::cout << "PASS runtime keep-list three rows, floor, cap, exact scope, stale observations and "
                "sanitized URL\n";
+}
+
+reb::RuntimeBufferFrameFact Fact(const bool builtin,
+                                 const bool javascript,
+                                 const bool script,
+                                 const bool source_is_string,
+                                 const int script_id) {
+  return {builtin, javascript, script, source_is_string, script_id};
+}
+
+void RuntimeBufferFrameSelection() {
+  const auto authored = Fact(false, true, true, true, 9);
+  const auto builtin = Fact(true, true, true, true, 1);
+  const auto wasm = Fact(false, false, false, false, 0);
+  const auto bare = Fact(false, true, false, false, 4);
+  const auto empty_source = Fact(false, true, true, false, 5);
+  const auto zero_id = Fact(false, true, true, true, 0);
+
+  const reb::RuntimeBufferFrameFact constructor_then_caller[] = {builtin, authored};
+  const std::uint8_t two_frames[] = {1, 1};
+  const auto caller = reb::SelectRuntimeBufferFrame(constructor_then_caller, two_frames);
+  assert(caller.found() && caller.frame == 1 && caller.summary == 0);
+
+  const reb::RuntimeBufferFrameFact inlined[] = {builtin, authored};
+  const std::uint8_t one_frame[] = {2};
+  const auto outer = reb::SelectRuntimeBufferFrame(inlined, one_frame);
+  assert(outer.found() && outer.frame == 0 && outer.summary == 1);
+
+  const reb::RuntimeBufferFrameFact skipped[] = {wasm, bare, empty_source, zero_id, authored};
+  const std::uint8_t five[] = {1, 1, 1, 1, 1};
+  const auto fifth = reb::SelectRuntimeBufferFrame(skipped, five);
+  assert(fifth.found() && fifth.frame == 4 && fifth.summary == 0);
+
+  std::array<reb::RuntimeBufferFrameFact, 33> deep{};
+  std::array<std::uint8_t, 33> counts{};
+  counts.fill(1);
+  deep[31] = authored;
+  const auto at_limit =
+      reb::SelectRuntimeBufferFrame(deep, std::span(counts).first(reb::kRuntimeBufferFrameLimit));
+  assert(at_limit.found() && at_limit.frame == 31 && at_limit.summary == 0);
+  deep[31] = {};
+  deep[32] = authored;
+  const auto past_limit = reb::SelectRuntimeBufferFrame(deep, counts);
+  assert(!past_limit.found());
+
+  std::array<reb::RuntimeBufferFrameFact, 33> inlines{};
+  inlines[32] = authored;
+  const std::uint8_t wide[] = {33};
+  const auto outermost = reb::SelectRuntimeBufferFrame(inlines, wide);
+  assert(outermost.found() && outermost.frame == 0 && outermost.summary == 32);
+
+  const reb::RuntimeBufferFrameFact one[] = {authored};
+  const std::uint8_t broken[] = {2};
+  assert(!reb::SelectRuntimeBufferFrame(one, broken).found());
+  std::cout << "PASS runtime buffer frame selection for builtins, outer summaries and the 32-frame "
+               "limit\n";
 }
 
 void RuntimeSourceFeed() {
@@ -747,6 +810,7 @@ int main() {
   CanvasCreatorAdmission();
   RuntimeScriptProvenance();
   RuntimeKeepList();
+  RuntimeBufferFrameSelection();
   RuntimeSourceFeed();
   RuntimeCheckpointQueue();
   std::cout << "Renderer ring admission only; no full Chromium/Mojo/runtime validation.\n";

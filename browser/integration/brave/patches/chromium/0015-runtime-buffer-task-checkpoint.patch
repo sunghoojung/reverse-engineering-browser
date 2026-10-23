@@ -15,7 +15,7 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
  #include <algorithm>
  #include <bit>
  #include <cstdint>
-@@ -252,64 +258,238 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+@@ -252,64 +258,266 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                           UNSAFE_BUFFERS(base::span(bytes, size)));
  }
  
@@ -80,9 +80,12 @@ index ecf090c2f7aaeeb82d599a731117e8237a42adfe..cb2623f4b97b18e72b69461b51504bc2
 +                                        "runtime_buffer_checkpoint_limit");
 +      return;
 +    }
-+    if (allocator.name.IsEmpty() ||
-+        allocator.name->Length() > static_cast<int>(reb::kNativeArtifactMaxUrlBytes) ||
-+        allocator.name->Utf8Length(isolate_) > reb::kNativeArtifactMaxUrlBytes) {
++    // An empty name is an eval or a script with no source URL. The sink stores
++    // script://<id> for that case. An overlong name can carry source text, so
++    // it still drops the buffer.
++    if (!allocator.name.IsEmpty() &&
++        (allocator.name->Length() > static_cast<int>(reb::kNativeArtifactMaxUrlBytes) ||
++         allocator.name->Utf8Length(isolate_) > reb::kNativeArtifactMaxUrlBytes)) {
 +      sink.RecordRuntimeBufferOmission(generation, frame_id,
 +                                        "allocating_script_url_unavailable");
 +      return;

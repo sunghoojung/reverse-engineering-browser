@@ -5588,8 +5588,10 @@
       function prefillHookFromSource(source) {
         const hooks = runtimeHooksState();
         const targetId = state.debuggerSession?.target?.id;
-        const disposable = Boolean(requestInterception()?.isolated && hooks?.isolated && hooks.target_id === targetId);
-        const capturedPage = !requestInterception()?.isolated
+        const interception = state.debuggerSession?.request_interception;
+        const isolatedExperiment = interception ? Boolean(interception.isolated) : Boolean(hooks?.isolated);
+        const disposable = isolatedExperiment && Boolean(hooks?.isolated) && hooks?.target_id === targetId;
+        const capturedPage = !isolatedExperiment
           && ['running', 'paused'].includes(state.debuggerSession?.state)
           && source?.target_type !== 'worker'
           && (source?.target_id ?? targetId) === targetId;

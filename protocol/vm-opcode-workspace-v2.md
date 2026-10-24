@@ -50,11 +50,21 @@ dropped step.
 ## Native browser capability boundary
 
 The `vm_finding` and `vm_dispatch_sample` ABIs, a caller-fed bounded writer,
-and an automatic guest-interpreter sampler are separate capabilities. No
-production sampler supplies guest invocation markers and dispatch observations
-from captured JavaScript or Wasm interpreters. A writer can transport observations
-provided by a caller; it cannot derive guest PCs or supply the missing interpreter
-semantics. Runtime source and typed-array checkpoint capture are not a guest
+and an automatic guest-interpreter sampler are separate capabilities. The owned
+register interpreter is the one opt-in sampler. It stays disabled until
+`EnableOwnedRegisterSampling` accepts the active VM capture session and nonzero
+finding, investigation, interpreter, and bytecode identities. Reconfigure clears
+that opt-in. While enabled, `SampleOwnedRegisterInvocation` runs the compiled
+`owned-register-v1` program and is the observation path that calls
+`RecordVmDispatchSample`. Each invocation emits one dynamic `vm_finding` labeled
+`owned-register-v1`, then one sample per committed instruction. The program
+counter is that fixture's instruction index. The handler index copies the
+fixture opcode. Operand values are not copied. Further steps past the 16-sample
+budget stay on the dispatch-loss counter and publish as one vm gap. A full
+probe queue counts those steps on `DroppedCount` and returns the budget slot.
+Captured JavaScript and Wasm interpreters still have no sampler. A writer can
+transport observations provided by a caller; it cannot derive guest PCs or
+supply the missing interpreter semantics for those runtimes. Runtime source and typed-array checkpoint capture are not a guest
 instruction trace. Canvas observations, a detected dispatch loop, a high static
 score, a Wasm dispatch instruction and a retained buffer
 cannot establish which guest opcode ran or its program counter. More of those
@@ -67,10 +77,11 @@ A budget gap records that observations were dropped after the writer admitted
 its 16-sample cap. That omission is present when the capped trace still holds
 some samples, and it replaces `sampler-unavailable` when every observation was
 dropped. The host-links report keeps `guest_position` null and
-`dispatch-samples-unavailable`. The owned fixture
-below demonstrates the transport/consumer contract only, not support for a
-captured JavaScript or Wasm interpreter. Rebuilding an overlay with a caller-fed
-writer alone will not add the missing sampler.
+`dispatch-samples-unavailable`. The stdout fixture export below demonstrates
+the transport/consumer contract. The probe opt-in runs the same register
+program into the renderer queue. Neither path samples a captured JavaScript or
+Wasm interpreter. Rebuilding an overlay does not attach this sampler to page
+code.
 
 A future native adapter must first establish exact captured interpreter and
 bytecode identities, invocation boundaries, PC units and the observed dispatch
@@ -81,13 +92,16 @@ case, host call, shared frame, request ID, URL or time proximity. The arbitrary
 JavaScript/Wasm runtime does not expose a universal guest PC; interpreter-specific
 semantics require a separately reviewed implementation, not enabling a flag.
 
-Acceptance requires pinned native patch replay and compilation, disabled,
-expired, full-queue and teardown regressions, and a rebuilt-browser run against
-an owned known interpreter with expected PC/opcode/invocation sequences and
-exact host-parent links. The fixture differential tests and a static component
-compile are necessary but cannot substitute for this browser-runtime evidence.
-Until that adapter and acceptance exist, missing live guest positions remain
-an open capability gap, not a successful empty trace.
+The owned-register probe opt-in is accepted by the admission harness: disabled
+by default, one invocation marker, instruction-index program counters, a visible
+16-sample gap, and a full-queue drop that returns the budget slot. Acceptance
+for a captured JavaScript or Wasm interpreter still requires pinned native patch
+replay and compilation, disabled, expired, full-queue and teardown regressions,
+and a rebuilt-browser run with expected PC/opcode/invocation sequences and exact
+host-parent links. The fixture differential tests and a static component compile
+cannot substitute for that browser-runtime evidence. Until that adapter and
+acceptance exist, missing live guest positions for page code remain an open
+capability gap, not a successful empty trace.
 
 ## Owned producer and instruction units
 

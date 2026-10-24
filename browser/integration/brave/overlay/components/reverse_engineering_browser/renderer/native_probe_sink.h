@@ -33,6 +33,15 @@ enum class NativeRuntimeScriptObservation : std::uint8_t {
   kStaticDispatchLoop,
 };
 
+// Identities for the owned-register opt-in. Zero is rejected. These are
+// researcher-selected reference claims, not proof that a page supplied them.
+struct OwnedRegisterSamplePolicy final {
+  std::uint64_t finding_id = 0;
+  std::uint64_t investigation_id = 0;
+  std::uint64_t interpreter_artifact_id = 0;
+  std::uint64_t bytecode_artifact_id = 0;
+};
+
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
  public:
   static NativeProbeSink& Get();
@@ -125,6 +134,20 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // covers budget overflow and emits rejected before the queue. Safe to call
   // when capture is inactive or the counter is caught up.
   void PublishVmDispatchBudgetGap() noexcept;
+  // Owned-register sampler. Disabled until EnableOwnedRegisterSampling accepts
+  // a VM capture session and nonzero identities. The sample policy is one
+  // invocation finding plus every committed instruction of owned-register-v1.
+  // Program counters are that fixture's instruction indices. Handler index
+  // copies the fixture opcode. The 16-sample budget and a full probe queue
+  // both stay visible through the existing dispatch-loss and drop counters.
+  // Reconfigure clears the opt-in. This path does not read V8 or Wasm.
+  [[nodiscard]] bool EnableOwnedRegisterSampling(const OwnedRegisterSamplePolicy& policy) noexcept;
+  void DisableOwnedRegisterSampling() noexcept;
+  void IngestOwnedRegisterInvocation(std::uint64_t invocation_id) noexcept;
+  void IngestOwnedRegisterStep(std::uint32_t instruction_pointer,
+                               std::uint32_t opcode,
+                               std::uint8_t operand_count,
+                               std::uint32_t sample_index) noexcept;
 
  private:
   NativeProbeSink() noexcept;
@@ -139,6 +162,16 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       NativeProbeType type,
       std::string_view operation,
       std::atomic<std::uint64_t>* observed_generation = nullptr) noexcept;
+
+  struct VmAdmission final {
+    std::uint64_t generation = 0;
+    std::uint64_t session_id = 0;
+    std::uint64_t monotonic_time_ns = 0;
+    std::uint64_t frame_id = 0;
+    std::uint32_t process_id = 0;
+    std::uint32_t thread_id = 0;
+  };
+  [[nodiscard]] bool SnapshotVmAdmission(VmAdmission& admission) const noexcept;
 
   void NoteVmDispatchLoss(std::uint64_t generation,
                           std::uint64_t session_id,
@@ -174,7 +207,23 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> dispatch_loss_frame_id_{0};
   std::atomic<std::uint32_t> dispatch_loss_process_id_{0};
   std::atomic<std::uint32_t> dispatch_loss_thread_id_{0};
+  // Release-published with the enabled flag. Inactive reads return before
+  // these fields are consulted.
+  std::atomic<std::uint8_t> owned_register_sampling_{0};
+  std::atomic<std::uint64_t> owned_register_finding_id_{0};
+  std::atomic<std::uint64_t> owned_register_investigation_id_{0};
+  std::atomic<std::uint64_t> owned_register_interpreter_id_{0};
+  std::atomic<std::uint64_t> owned_register_bytecode_id_{0};
 };
+
+// Function-pointer entries for the owned-register runner. They call the sink
+// methods above and do not invent a program counter.
+void IngestOwnedRegisterInvocationThunk(std::uint64_t invocation_id, void* sink) noexcept;
+void IngestOwnedRegisterStepThunk(std::uint32_t instruction_pointer,
+                                  std::uint32_t opcode,
+                                  std::uint8_t operand_count,
+                                  std::uint32_t sample_index,
+                                  void* sink) noexcept;
 
 }  // namespace reb
 

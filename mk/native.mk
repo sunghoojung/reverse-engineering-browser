@@ -25,8 +25,9 @@ NATIVE_PROXY_POLICY_TEST := $(BUILD_DIR)/check-native-proxy-policy
 EVENT_TEST_BINARY := $(BUILD_DIR)/tests/event-test
 EVENT_BROKER_TEST_BINARY := $(BUILD_DIR)/tests/event-broker-test
 VM_DISPATCH_TEST_BINARY := $(BUILD_DIR)/tests/vm-dispatch-test
+OWNED_REGISTER_SAMPLER_TEST := $(BUILD_DIR)/tests/owned-register-sampler-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -62,6 +63,10 @@ $(ARTIFACT_TEST_BINARY): $(BUILD_DIR)/tests/artifact_test.o \
 $(VM_DISPATCH_TEST_BINARY): $(BUILD_DIR)/tests/vm_dispatch_test.o \
 	$(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/capture/vm_dispatch.o
+$(OWNED_REGISTER_SAMPLER_TEST): $(BUILD_DIR)/tests/owned_vm_guest_sampler_test.o \
+	$(BUILD_DIR)/src/analysis/owned_vm_guest_sampler.o \
+	$(BUILD_DIR)/src/analysis/owned_vm_fixture.o \
+	$(BUILD_DIR)/src/analysis/native_vm_recorder.o
 $(BROKER_BINARY): $(BUILD_DIR)/services/event-broker/main.o \
 	$(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/evidence/event_broker.o \

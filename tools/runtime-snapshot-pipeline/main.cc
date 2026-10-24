@@ -13,6 +13,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
 namespace {
 constexpr std::uint64_t kSession = 42;
@@ -71,6 +72,14 @@ void Write(std::ofstream& output, const void* data, std::size_t size) {
   assert(output.good());
 }
 }  // namespace
+
+// The production transport is not linked: its Mojo queue and shared-memory
+// mapping stay in the browser. Dispatch samples that reach EmitStatus are
+// rejected instead of reported as admitted.
+reb::NativeProbeEmitStatus reb::NativeProbeTransport::EmitStatus(const reb::NativeProbeEvent&,
+                                                                 std::uint64_t) noexcept {
+  return reb::NativeProbeEmitStatus::kRejected;
+}
 
 int main(int argc, char* argv[]) {
   assert(argc == 4);  // OUTPUT SOURCE MODE

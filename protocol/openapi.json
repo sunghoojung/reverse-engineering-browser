@@ -13428,7 +13428,7 @@
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
-            "description": "url is required but may be empty; nonempty url or nonempty script_id is required. Empty script_id is accepted only with nonempty url. kind defaults to conditional if condition is a nonempty string, otherwise line. expression falls back to condition or empty string and must be text; non-line kind requires nonempty expression. Logpoint wrapping must also fit 4096 UTF-8 bytes.",
+            "description": "url is required but may be empty; nonempty url or nonempty script_id is required. A script_id that names one current JavaScript page script on the attached target uses Debugger.setBreakpoint for that script, including when url is also set, so a shared document URL cannot select a different script. A script_id that is no longer current falls back to a nonempty url for reconnect rebinding. Empty script_id is accepted only with nonempty url. Worker, WebAssembly, other-target, and out-of-range scripts are rejected instead of using the URL. kind defaults to conditional if condition is a nonempty string, otherwise line. expression falls back to condition or empty string and must be text; non-line kind requires nonempty expression. Logpoint wrapping must also fit 4096 UTF-8 bytes.",
             "x-schema-completeness": "partial",
             "x-unmodeled-constraints": [
               "Legacy kind/condition/expression fallback and logpoint-wrapped byte ceiling remain runtime validation."

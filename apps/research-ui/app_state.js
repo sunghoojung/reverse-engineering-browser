@@ -539,6 +539,7 @@
         hooksReturnValueField: document.querySelector('#hooks-return-value-field'),
         hooksReturnValue: document.querySelector('#hooks-return-value'),
         hooksAdd: document.querySelector('#hooks-add'),
+        hooksPauseLine: document.querySelector('#hooks-pause-line'),
         hooksDefinitionBadge: document.querySelector('#hooks-definition-badge'),
         hooksDefinitions: document.querySelector('#hooks-definitions'),
         hooksHitMeta: document.querySelector('#hooks-hit-meta'),

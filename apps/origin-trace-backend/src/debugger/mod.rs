@@ -832,24 +832,38 @@ impl Debugger {
         if condition.len() > 4096 {
             return Err(Error::bad("Breakpoint condition is oversized"));
         }
-        let result = if url.is_empty() {
-            self.command("Debugger.setBreakpoint",json!({"location":{"scriptId":script,"lineNumber":line,"columnNumber":column},"condition":condition})).await?
-        } else {
-            self.command(
-                "Debugger.setBreakpointByUrl",
-                json!({"url":url,"lineNumber":line,"columnNumber":column,"condition":condition}),
-            )
-            .await?
+        let snapshot = self.snapshot();
+        let binding = page_breakpoint_binding(
+            &snapshot["scripts"],
+            snapshot["target"]["id"].as_str().unwrap_or(""),
+            script,
+            url,
+            line,
+        )?;
+        let result = match &binding {
+            PageBreakpoint::Script(id) => {
+                self.command(
+                    "Debugger.setBreakpoint",
+                    json!({"location":{"scriptId":id,"lineNumber":line,"columnNumber":column},"condition":condition}),
+                )
+                .await?
+            }
+            PageBreakpoint::Url => {
+                self.command(
+                    "Debugger.setBreakpointByUrl",
+                    json!({"url":url,"lineNumber":line,"columnNumber":column,"condition":condition}),
+                )
+                .await?
+            }
         };
         let id = validation::text(&result["breakpointId"], "Breakpoint ID", 4096, false, false)
             .map_err(|e| Error::protocol(e.message))?;
-        let locations = if url.is_empty() {
-            vec![result["actualLocation"].clone()]
-        } else {
-            result["locations"]
+        let locations = match binding {
+            PageBreakpoint::Script(_) => vec![result["actualLocation"].clone()],
+            PageBreakpoint::Url => result["locations"]
                 .as_array()
                 .ok_or_else(|| Error::protocol("Debugger returned malformed breakpoint locations"))?
-                .clone()
+                .clone(),
         };
         let truncated = locations.len() > 256;
         let record = json!({"id":id,"url":url,"script_id":script,"line":line,"column":column,"condition":condition,"kind":kind,"expression":expression,"locations":locations.iter().take(256).filter_map(parse::location).collect::<Vec<_>>(),"locations_truncated":truncated});
@@ -1112,6 +1126,80 @@ fn public_target(value: &Value) -> Value {
     json!({"id":value["id"],"type":value["type"],"title":value["title"],"url":value["url"]})
 }
 
+#[derive(Debug)]
+enum PageBreakpoint {
+    Script(String),
+    Url,
+}
+
+// A current page script wins over a shared document URL. A named script that
+// is gone may still use a nonempty URL so reconnect can rebind future loads.
+// Worker, WebAssembly, and other-target scripts never fall through to that URL.
+fn page_breakpoint_binding(
+    scripts: &Value,
+    target_id: &str,
+    script_id: &str,
+    url: &str,
+    line: u64,
+) -> Result<PageBreakpoint> {
+    if script_id.is_empty() {
+        return if url.is_empty() {
+            Err(Error::conflict(
+                "Breakpoint source, expression, or capacity is invalid",
+            ))
+        } else {
+            Ok(PageBreakpoint::Url)
+        };
+    }
+    let matches = scripts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|script| script["script_id"] == script_id)
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(Error::conflict(
+            "That script id is not unique on the attached page",
+        ));
+    }
+    let Some(script) = matches.first() else {
+        return if url.is_empty() {
+            Err(Error::conflict(
+                "That script is not a current JavaScript source on the attached page",
+            ))
+        } else {
+            Ok(PageBreakpoint::Url)
+        };
+    };
+    if script["language"] != "JavaScript" || script["target_type"] == "worker" {
+        return Err(Error::bad(
+            "Page breakpoints pause a JavaScript script on the attached page",
+        ));
+    }
+    if script
+        .get("target_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty() && id != target_id)
+    {
+        return Err(Error::conflict(
+            "That script belongs to another debugger target",
+        ));
+    }
+    let start = script["start_line"].as_u64().unwrap_or(0);
+    let end = script["end_line"].as_u64().unwrap_or(line);
+    if line < start || line > end {
+        return Err(Error::bad(
+            "Breakpoint line is outside the attached page script",
+        ));
+    }
+    let cdp = script
+        .get("cdp_script_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(script_id);
+    Ok(PageBreakpoint::Script(cdp.to_owned()))
+}
+
 fn check_action_owner(action: &str, s: &Value) -> Result<()> {
     if s["request_interception"]["state"] == "running" {
         return Err(Error::conflict(
@@ -1134,6 +1222,14 @@ fn check_action_owner(action: &str, s: &Value) -> Result<()> {
         .contains(&s["runtime_hooks"]["state"].as_str().unwrap_or(""))
         && action != "disarm_runtime_hooks"
         && action != "dispose_request_interception_experiment"
+        && ![
+            "set_breakpoint",
+            "remove_breakpoint",
+            "update_breakpoint",
+            "pause",
+            "resume",
+        ]
+        .contains(&action)
     {
         return Err(Error::conflict(
             "Runtime Hooks controls the isolated target until it is disarmed",
@@ -1168,4 +1264,92 @@ fn check_action_owner(action: &str, s: &Value) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod breakpoint_binding_tests {
+    use super::*;
+
+    fn script(id: &str, extra: Value) -> Value {
+        let mut value = json!({
+            "script_id": id,
+            "language": "JavaScript",
+            "url": "https://captured.example/page",
+            "start_line": 0,
+            "end_line": 4
+        });
+        let fields = extra.as_object().cloned().unwrap_or_default();
+        value.as_object_mut().unwrap().extend(fields);
+        value
+    }
+
+    fn armed_hooks() -> Value {
+        json!({
+            "request_interception": {"state": "idle"},
+            "repeater": {"active_execution": null},
+            "object_experiment": {"state": "idle"},
+            "runtime_hooks": {"state": "armed"},
+            "automation_recipes": {"active_run": null, "state": "idle", "auto_armed": false}
+        })
+    }
+
+    #[test]
+    fn current_page_script_pins_ahead_of_a_shared_document_url() {
+        let scripts = json!([script("live", json!({"cdp_script_id": "cdp-7"}))]);
+        match page_breakpoint_binding(&scripts, "page", "live", "https://captured.example/page", 2)
+            .unwrap()
+        {
+            PageBreakpoint::Script(id) => assert_eq!(id, "cdp-7"),
+            PageBreakpoint::Url => panic!("document URL must not replace the current script"),
+        }
+    }
+
+    #[test]
+    fn stale_script_keeps_url_rebind_and_exact_script_without_url_fails() {
+        let scripts = json!([]);
+        assert!(matches!(
+            page_breakpoint_binding(&scripts, "page", "gone", "https://captured.example/page", 0)
+                .unwrap(),
+            PageBreakpoint::Url
+        ));
+        let error = page_breakpoint_binding(&scripts, "page", "gone", "", 0).unwrap_err();
+        assert!(error.message.contains("not a current JavaScript source"));
+    }
+
+    #[test]
+    fn worker_other_target_and_out_of_range_do_not_use_the_document_url() {
+        let url = "https://captured.example/page";
+        let worker = json!([script(
+            "worker",
+            json!({"target_type": "worker", "target_id": "worker"})
+        )]);
+        assert!(page_breakpoint_binding(&worker, "page", "worker", url, 0).is_err());
+        let other = json!([script("other", json!({"target_id": "other-page"}))]);
+        assert!(
+            page_breakpoint_binding(&other, "page", "other", url, 0)
+                .unwrap_err()
+                .message
+                .contains("another debugger target")
+        );
+        let page = json!([script("live", json!({}))]);
+        assert!(
+            page_breakpoint_binding(&page, "page", "live", "", 9)
+                .unwrap_err()
+                .message
+                .contains("outside the attached page script")
+        );
+        let wasm = json!([script("wasm", json!({"language": "WebAssembly"}))]);
+        assert!(page_breakpoint_binding(&wasm, "page", "wasm", url, 0).is_err());
+    }
+
+    #[test]
+    fn armed_hooks_still_accept_a_page_breakpoint_and_pause() {
+        let state = armed_hooks();
+        assert!(check_action_owner("set_breakpoint", &state).is_ok());
+        assert!(check_action_owner("pause", &state).is_ok());
+        assert!(check_action_owner("remove_breakpoint", &state).is_ok());
+        assert!(check_action_owner("resume", &state).is_ok());
+        assert!(check_action_owner("update_breakpoint", &state).is_ok());
+        assert!(check_action_owner("navigate_object_experiment", &state).is_err());
+    }
 }

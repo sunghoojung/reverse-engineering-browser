@@ -950,7 +950,11 @@
                       </details>
                       <label>Return replacement<select id="hooks-return-mode"><option value="none">Keep original</option><option value="json">Typed JSON value</option><option value="expression">Frame expression</option></select></label>
                       <label id="hooks-return-value-field" hidden>Replacement JSON or expression<textarea id="hooks-return-value" maxlength="8192" spellcheck="false" placeholder='{"allowed":true}'></textarea></label>
-                      <button id="hooks-add" class="secondary-button" type="submit" disabled>Add hook</button>
+                      <div class="hook-control-actions">
+                        <button id="hooks-add" class="secondary-button" type="submit" disabled>Add hook</button>
+                        <button id="hooks-pause-line" class="secondary-button" type="button" disabled>Pause at this line</button>
+                      </div>
+                      <p class="experiment-privacy">Pause at this line sets a debugger breakpoint on the exact attached page script and leaves that page paused. It is not a hook and does not resume on its own.</p>
                     </form>
                   </div>
                 </article>

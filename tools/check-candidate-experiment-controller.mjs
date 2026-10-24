@@ -280,13 +280,20 @@ async function checkCapturedDocumentHookControls(root) {
     objectExperimentState: () => state.debuggerSession.object_experiment, runtimeHooksState: () => state.debuggerSession.runtime_hooks,
     repeaterState: () => null, automationRecipesState: () => null, sourceName: item => item.url, textElement: () => node(),
     renderRuntimeHookDefinitions() {}, renderRuntimeHookHits() {}, renderRuntimeFieldTest() {}, setExperimentNotice() {}};
-  const api = runInNewContext(hooksCode + '\n;({render:renderRuntimeHooks,consent:hookConfirmationKey})', context);
+  const api = runInNewContext(hooksCode + '\n;({render:renderRuntimeHooks,consent:hookConfirmationKey,pause:capturedPauseRequest})', context);
   elements.hooksScript.replaceChildren = function(...children) { this.children = children; this.value = children[0]?.value ?? ''; };
   elements.hooksLabel.value = 'Captured';
   elements.hooksScript.value = script.script_id;
+  elements.hooksLine.value = '1';
+  elements.hooksColumn.value = '1';
   elements.hooksEntryEnabled.checked = true;
   elements.hooksConfirm.checked = false;
   api.render();
+  assert.equal(elements.hooksPauseLine.disabled, false, 'Captured page line can pause before an isolated context exists');
+  assert.deepEqual(JSON.parse(JSON.stringify(api.pause())), {action:'set_breakpoint', url:'', script_id:script.script_id, line:0, column:0, kind:'line', condition:''});
+  elements.hooksLine.value = '9'; api.render();
+  assert.equal(elements.hooksPauseLine.disabled, true, 'A line outside the attached script cannot pause');
+  elements.hooksLine.value = '1';
   const optionText = elements.hooksScript.children.map(option => option.textContent);
   assert(optionText.some(text => text.includes('http://127.0.0.1/captured.js')), 'Captured document source must be listed');
   assert(!optionText.every(text => text === 'No live JavaScript sources'));
@@ -301,6 +308,7 @@ async function checkCapturedDocumentHookControls(root) {
   api.render();
   assert.equal(elements.hooksContextBadge.textContent, 'Captured demo');
   assert.equal(elements.hooksDisarm.disabled, false);
+  assert.equal(elements.hooksPauseLine.disabled, false, 'An armed hook does not remove the captured-page pause control');
   assert.equal(elements.hooksDispose.disabled, false);
   assert.equal(elements.hooksArm.disabled, true);
   assert.equal(elements.hooksConfirm.checked, false);
@@ -320,6 +328,7 @@ async function checkCapturedDocumentHookControls(root) {
   api.render();
   assert.equal(elements.hooksDispose.disabled, false, 'Closed or replaced captured target still permits erase');
   assert.equal(elements.hooksDisarm.disabled, false);
+  assert.equal(elements.hooksPauseLine.disabled, true, 'A replaced target has no page script to pause');
   assert.equal(elements.hooksArm.disabled, true);
   assert.equal(elements.hooksAdd.disabled, true);
   Object.assign(hooks, {isolated:false, target_id:null, captured_owner:null, state:'disposed', definitions:[]});

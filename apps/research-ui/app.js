@@ -272,6 +272,8 @@
 
       // Both refresh paths project the same status so neither can erase the other's gaps.
       // Summaries describe the scanned store/tail, independently of either rendered window.
+      // A healthy capture leaves this line hidden. Window, target-mode, and
+      // Network.enable explanations stay in the README; only gaps and failures show here.
       function renderNetworkNotice() {
         const contentCapture = networkContentCaptureEnabled();
         const active = networkContentCaptureActive();
@@ -290,8 +292,7 @@
           if (kind === 'empty') kind = 'gap';
           messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
         }
-        if (state.networkEventsAvailable) messages.push('Traffic uses a separate newest-network window, independent of canvas and other activity.');
-        if (state.networkEventsLimited) messages.push('The network event window is also capped; older request lifecycle evidence may be incomplete.');
+        if (state.networkEventsLimited) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
           if (kind === 'empty') kind = 'gap';
           messages.push('Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
@@ -307,7 +308,6 @@
         if (contentCapture) {
           if (active) {
             if (kind === 'empty') kind = 'active';
-            messages.push('Recording live requests and responses · raw values, including credentials · 128 KiB body limit');
           } else {
             if (kind !== 'malformed') kind = 'disconnected';
             messages.push(state.debuggerRefreshFailed ? 'The live debugger is disconnected.'
@@ -318,10 +318,7 @@
           const coverage = state.debuggerSession.network.capture_status;
           if (coverage) {
             if (kind === 'active' && (coverage.state !== 'ready' || coverage.gaps > 0 || (coverage.document_navigation_gaps ?? 0) > 0 || coverage.catalog_incomplete)) kind = 'gap';
-            const earlyTargets = coverage.scope === 'http-browser-targets';
-            const targetKind = earlyTargets ? 'browser targets' : 'page targets';
-            messages.push(`HTTP capture: ${coverage.attached_targets} of ${coverage.eligible_targets} eligible ${targetKind} attached (limit ${coverage.target_limit}).`);
-            messages.push(earlyTargets ? 'Mode: passive browser target discovery.' : 'Mode: page-target polling fallback; worker and out-of-process iframe targets are not attached.');
+            const targetKind = coverage.scope === 'http-browser-targets' ? 'browser targets' : 'page targets';
             if (coverage.catalog_incomplete) messages.push('Target catalog is incomplete; counts cover only known targets while recovery is pending.');
             if (coverage.discovery_stale) messages.push('Target discovery is unavailable; counts are last known and new tabs may not attach.');
             if (coverage.target_overflow > 0) messages.push(`${coverage.target_overflow} ${targetKind} exceed the capture limit and are not attached.`);
@@ -342,8 +339,6 @@
               if (kind === 'active') kind = 'gap';
               messages.push('The selected debugger page is not attached for HTTP capture; its new requests are not being recorded here.');
             }
-            if (earlyTargets) messages.push('Supported page, worker and out-of-process iframe targets are attached without requesting startup pauses. Initial requests can still precede Network.enable; first-request capture is not guaranteed. Attaching worker targets can affect their lifecycle and timeout behavior.');
-            messages.push('Requests before attachment, including short-lived targets, are unavailable. Requests observed only by native probes stay in Traffic as separate rows and are not copied into this CDP list. WebSockets remain scoped to the selected debugger target.');
           }
           const dropped = state.debuggerSession.network.dropped;
           if (dropped) {
@@ -365,7 +360,10 @@
         const failedNotice = trafficFailedRequestNotice(state.requests);
         if (failedNotice) messages.push(failedNotice);
         if (messages.length) setNetworkNotice(kind, messages.join(' '));
-        else elements.networkNotice.hidden = true;
+        else {
+          elements.networkNotice.hidden = true;
+          if (elements.networkNotice.textContent) elements.networkNotice.textContent = '';
+        }
       }
 
       function textElement(tag, className, value) {

@@ -1,0 +1,14 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -258,6 +258,10 @@ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+       : origin == v8::WasmModuleBytesOrigin::kModule
+           ? reb::NativeArtifactCaptureOrigin::kWebAssemblyModule
+           : reb::NativeArtifactCaptureOrigin::kWebAssemblyInstantiate;
++  if (bytes != nullptr && size > 0) {
++    reb::NativeProbeSink::Get().ObserveCapturedWasmModule(
++        UNSAFE_BUFFERS(base::span<const std::uint8_t>(bytes, size)));
++  }
+   CaptureGeneratedSource(context, reb::NativeArtifactKind::kWasm, capture_origin,
+                          UNSAFE_BUFFERS(base::span(bytes, size)));
+ }

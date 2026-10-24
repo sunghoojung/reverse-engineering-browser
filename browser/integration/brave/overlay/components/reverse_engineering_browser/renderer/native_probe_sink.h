@@ -15,6 +15,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
+#include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
 
 namespace reb {
 
@@ -31,6 +32,15 @@ enum class NativeRuntimeScriptObservation : std::uint8_t {
   kCapturedVmCandidate,
   kCapturedLikelyVm,
   kStaticDispatchLoop,
+};
+
+// Identities for one opt-in guest shape. Zero is rejected. These are
+// researcher-selected reference claims, not proof that a page supplied them.
+struct PageGuestSamplePolicy final {
+  std::uint64_t finding_id = 0;
+  std::uint64_t investigation_id = 0;
+  std::uint64_t interpreter_artifact_id = 0;
+  std::uint64_t bytecode_artifact_id = 0;
 };
 
 // Identities for the owned-register opt-in. Zero is rejected. These are
@@ -148,6 +158,20 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                std::uint32_t opcode,
                                std::uint8_t operand_count,
                                std::uint32_t sample_index) noexcept;
+  // Page guest shapes. Disabled until the matching Enable accepts a VM capture
+  // session and nonzero identities. Reconfigure clears both. javascript-switch-
+  // dispatch-v1 steps a captured byte program (opcodes 16-19); its program
+  // counter is the opcode's byte index. wasm-br-table-dispatch-v1 steps the
+  // first function of a captured Wasm module when that body contains br_table
+  // and stays inside the supported opcode subset; its program counter is the
+  // module byte offset. Neither shape reads Ignition, Liftoff, or TurboFan.
+  // The handler index copies the opcode. The 16-sample budget, a full probe
+  // queue, and the 32-step walk cap all stay visible.
+  [[nodiscard]] bool EnableJavaScriptSwitchSampling(const PageGuestSamplePolicy& policy) noexcept;
+  [[nodiscard]] bool EnableWasmBrTableSampling(const PageGuestSamplePolicy& policy) noexcept;
+  void DisablePageGuestSampling() noexcept;
+  void ObserveCapturedJavaScriptSwitchProgram(std::span<const std::uint8_t> program) noexcept;
+  void ObserveCapturedWasmModule(std::span<const std::uint8_t> module) noexcept;
 
  private:
   NativeProbeSink() noexcept;
@@ -214,6 +238,38 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> owned_register_investigation_id_{0};
   std::atomic<std::uint64_t> owned_register_interpreter_id_{0};
   std::atomic<std::uint64_t> owned_register_bytecode_id_{0};
+  // Release-published with each shape's enabled flag. Inactive reads return
+  // before the identity fields are consulted. The invocation counter is not a
+  // guest program counter.
+  std::atomic<std::uint8_t> javascript_switch_sampling_{0};
+  std::atomic<std::uint64_t> javascript_switch_finding_id_{0};
+  std::atomic<std::uint64_t> javascript_switch_investigation_id_{0};
+  std::atomic<std::uint64_t> javascript_switch_interpreter_id_{0};
+  std::atomic<std::uint64_t> javascript_switch_bytecode_id_{0};
+  std::atomic<std::uint8_t> wasm_br_table_sampling_{0};
+  std::atomic<std::uint64_t> wasm_br_table_finding_id_{0};
+  std::atomic<std::uint64_t> wasm_br_table_investigation_id_{0};
+  std::atomic<std::uint64_t> wasm_br_table_interpreter_id_{0};
+  std::atomic<std::uint64_t> wasm_br_table_bytecode_id_{0};
+  std::atomic<std::uint64_t> page_guest_invocation_{1};
+
+  struct PageGuestIds final {
+    std::uint64_t finding_id = 0;
+    std::uint64_t investigation_id = 0;
+    std::uint64_t interpreter_artifact_id = 0;
+    std::uint64_t bytecode_artifact_id = 0;
+  };
+  void EmitPageGuestInvocation(std::string_view label,
+                               NativeVmHostRuntime host_runtime,
+                               PageGuestIds ids,
+                               std::uint64_t invocation_id,
+                               const VmAdmission& admission) noexcept;
+  void EmitPageGuestStep(PageGuestIds ids,
+                         std::uint32_t instruction_pointer,
+                         std::uint32_t opcode,
+                         std::uint8_t operand_count,
+                         std::uint32_t sample_index) noexcept;
+  void ObservePageGuest(bool javascript, std::span<const std::uint8_t> bytes) noexcept;
 };
 
 // Function-pointer entries for the owned-register runner. They call the sink

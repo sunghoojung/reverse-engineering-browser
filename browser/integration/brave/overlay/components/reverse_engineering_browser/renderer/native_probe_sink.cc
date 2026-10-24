@@ -6,7 +6,7 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
-#include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
+#include "brave/components/reverse_engineering_browser/common/page_guest_dispatch.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
 #include <algorithm>
@@ -872,6 +872,7 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   // the emitter and generation change. A replacement session must opt in again.
   PublishVmDispatchBudgetGap();
   DisableOwnedRegisterSampling();
+  DisablePageGuestSampling();
   // SetEmitters is serialized by NativeProbeTransport's bound sequence. Stop
   // new readers before marking the independently atomic configuration fields
   // unstable. The completed even generation release-publishes the relaxed
@@ -1078,6 +1079,7 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
                                                const std::string_view source_url,
                                                const std::span<const std::uint8_t> content,
                                                const NativeRuntimeScript& script) noexcept {
+  ObserveCapturedJavaScriptSwitchProgram(content);
   if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
     return;
   }
@@ -1661,6 +1663,160 @@ void NativeProbeSink::IngestOwnedRegisterStep(const std::uint32_t instruction_po
   sample.interpreter_artifact_id = owned_register_interpreter_id_.load(std::memory_order_relaxed);
   sample.bytecode_artifact_id = owned_register_bytecode_id_.load(std::memory_order_relaxed);
   RecordVmDispatchSample(sample);
+}
+
+void NativeProbeSink::DisablePageGuestSampling() noexcept {
+  javascript_switch_sampling_.store(0, std::memory_order_release);
+  wasm_br_table_sampling_.store(0, std::memory_order_release);
+}
+
+bool NativeProbeSink::EnableJavaScriptSwitchSampling(const PageGuestSamplePolicy& policy) noexcept {
+  if (policy.finding_id == 0 || policy.investigation_id == 0 ||
+      policy.interpreter_artifact_id == 0 || policy.bytecode_artifact_id == 0) {
+    return false;
+  }
+  VmAdmission admission;
+  if (!SnapshotVmAdmission(admission)) {
+    return false;
+  }
+  javascript_switch_finding_id_.store(policy.finding_id, std::memory_order_relaxed);
+  javascript_switch_investigation_id_.store(policy.investigation_id, std::memory_order_relaxed);
+  javascript_switch_interpreter_id_.store(policy.interpreter_artifact_id,
+                                          std::memory_order_relaxed);
+  javascript_switch_bytecode_id_.store(policy.bytecode_artifact_id, std::memory_order_relaxed);
+  javascript_switch_sampling_.store(1, std::memory_order_release);
+  return true;
+}
+
+bool NativeProbeSink::EnableWasmBrTableSampling(const PageGuestSamplePolicy& policy) noexcept {
+  if (policy.finding_id == 0 || policy.investigation_id == 0 ||
+      policy.interpreter_artifact_id == 0 || policy.bytecode_artifact_id == 0) {
+    return false;
+  }
+  VmAdmission admission;
+  if (!SnapshotVmAdmission(admission)) {
+    return false;
+  }
+  wasm_br_table_finding_id_.store(policy.finding_id, std::memory_order_relaxed);
+  wasm_br_table_investigation_id_.store(policy.investigation_id, std::memory_order_relaxed);
+  wasm_br_table_interpreter_id_.store(policy.interpreter_artifact_id, std::memory_order_relaxed);
+  wasm_br_table_bytecode_id_.store(policy.bytecode_artifact_id, std::memory_order_relaxed);
+  wasm_br_table_sampling_.store(1, std::memory_order_release);
+  return true;
+}
+
+void NativeProbeSink::EmitPageGuestInvocation(const std::string_view label,
+                                              const NativeVmHostRuntime host_runtime,
+                                              const PageGuestIds ids,
+                                              const std::uint64_t invocation_id,
+                                              const VmAdmission& admission) noexcept {
+  NativeVmFindingPayload payload{};
+  payload.kind = NativeVmFindingKind::kInvocation;
+  payload.host_runtime = host_runtime;
+  payload.confidence = NativeVmFindingConfidence::kObserved;
+  payload.flags = static_cast<std::uint8_t>(NativeVmFindingFlag::kDynamic);
+  payload.label_size = static_cast<std::uint16_t>(label.size());
+  payload.finding_id = ids.finding_id;
+  payload.investigation_id = ids.investigation_id;
+  payload.subject_id = invocation_id;
+  payload.related_subject_id = ids.bytecode_artifact_id;
+  for (std::size_t index = 0; index < label.size(); ++index) {
+    payload.label[index] = label[index];
+  }
+  NativeProbeEvent event{};
+  event.header.protocol_version = kNativeProbeProtocolVersion;
+  event.header.header_size = sizeof(NativeProbeHeader);
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kVmFinding;
+  event.header.payload_size = sizeof(NativeVmFindingPayload);
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.monotonic_time_ns = admission.monotonic_time_ns;
+  event.header.session_id = admission.session_id;
+  event.header.process_id = admission.process_id;
+  event.header.thread_id = admission.thread_id;
+  event.header.frame_id = admission.frame_id;
+  event.header.artifact_id = ids.interpreter_artifact_id;
+  static_assert(sizeof(payload) <= kNativeProbeInlinePayloadSize);
+  const auto payload_bytes = std::bit_cast<std::array<std::byte, sizeof(payload)>>(payload);
+  std::ranges::copy(payload_bytes, event.inline_payload.begin());
+  static_cast<void>(NativeProbeTransport::EmitStatus(event, admission.generation));
+}
+
+void NativeProbeSink::EmitPageGuestStep(const PageGuestIds ids,
+                                        const std::uint32_t instruction_pointer,
+                                        const std::uint32_t opcode,
+                                        const std::uint8_t operand_count,
+                                        const std::uint32_t sample_index) noexcept {
+  NativeVmDispatchSamplePayload sample{};
+  sample.instruction_pointer = instruction_pointer;
+  sample.opcode = opcode;
+  sample.handler_index = opcode;
+  sample.sample_index = sample_index;
+  sample.operand_count = operand_count;
+  sample.finding_id = ids.finding_id;
+  sample.investigation_id = ids.investigation_id;
+  sample.interpreter_artifact_id = ids.interpreter_artifact_id;
+  sample.bytecode_artifact_id = ids.bytecode_artifact_id;
+  RecordVmDispatchSample(sample);
+}
+
+void NativeProbeSink::ObservePageGuest(const bool javascript,
+                                       const std::span<const std::uint8_t> bytes) noexcept {
+  const std::uint8_t enabled = (javascript ? javascript_switch_sampling_ : wasm_br_table_sampling_)
+                                   .load(std::memory_order_acquire);
+  if (enabled == 0) {
+    return;
+  }
+  VmAdmission admission;
+  if (!SnapshotVmAdmission(admission)) {
+    return;
+  }
+  const PageGuestWalk walk =
+      javascript ? WalkJavaScriptSwitchDispatch(bytes) : WalkWasmBrTableDispatch(bytes);
+  if (walk.submitted == 0) {
+    return;
+  }
+  const std::uint64_t invocation_id =
+      page_guest_invocation_.fetch_add(1, std::memory_order_relaxed);
+  if (invocation_id == 0) {
+    return;
+  }
+  const PageGuestIds ids =
+      javascript ? PageGuestIds{javascript_switch_finding_id_.load(std::memory_order_relaxed),
+                                javascript_switch_investigation_id_.load(std::memory_order_relaxed),
+                                javascript_switch_interpreter_id_.load(std::memory_order_relaxed),
+                                javascript_switch_bytecode_id_.load(std::memory_order_relaxed)}
+                 : PageGuestIds{wasm_br_table_finding_id_.load(std::memory_order_relaxed),
+                                wasm_br_table_investigation_id_.load(std::memory_order_relaxed),
+                                wasm_br_table_interpreter_id_.load(std::memory_order_relaxed),
+                                wasm_br_table_bytecode_id_.load(std::memory_order_relaxed)};
+  constexpr std::string_view kJavaScriptLabel = "javascript-switch-dispatch-v1";
+  constexpr std::string_view kWasmLabel = "wasm-br-table-dispatch-v1";
+  static_assert(kJavaScriptLabel.size() <= kNativeVmFindingLabelCapacity);
+  static_assert(kWasmLabel.size() <= kNativeVmFindingLabelCapacity);
+  EmitPageGuestInvocation(
+      javascript ? kJavaScriptLabel : kWasmLabel,
+      javascript ? NativeVmHostRuntime::kJavaScript : NativeVmHostRuntime::kWebAssembly, ids,
+      invocation_id, admission);
+  for (std::uint32_t index = 0; index < walk.submitted; ++index) {
+    const PageGuestStep& step = walk.steps[index];
+    EmitPageGuestStep(ids, step.instruction_pointer, step.opcode, step.operand_count, index);
+  }
+  if (walk.truncated) {
+    NoteVmDispatchLoss(admission.generation, admission.session_id, admission.monotonic_time_ns,
+                       admission.frame_id, admission.process_id, admission.thread_id,
+                       ids.interpreter_artifact_id);
+  }
+}
+
+void NativeProbeSink::ObserveCapturedJavaScriptSwitchProgram(
+    const std::span<const std::uint8_t> program) noexcept {
+  ObservePageGuest(true, program);
+}
+
+void NativeProbeSink::ObserveCapturedWasmModule(
+    const std::span<const std::uint8_t> module) noexcept {
+  ObservePageGuest(false, module);
 }
 
 void IngestOwnedRegisterInvocationThunk(const std::uint64_t invocation_id,

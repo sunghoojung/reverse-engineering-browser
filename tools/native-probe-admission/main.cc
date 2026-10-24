@@ -2,6 +2,7 @@
 // frame lookup, mapping and Mojo notification boundaries are narrow test stubs.
 #include "chromium_stubs.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cassert>
@@ -21,8 +22,9 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 #include "reb/owned_vm_guest_sampler.hpp"
 // clang-format off
-// Leave this header outside the sorted common-header block above.
+// Leave these headers outside the sorted common-header block above.
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
+#include "brave/components/reverse_engineering_browser/common/page_guest_dispatch.h"
 // clang-format on
 
 std::atomic<std::uint64_t> allocations{0};
@@ -812,12 +814,169 @@ void OwnedRegisterSamplerAdmission() {
                "drops\n";
 }
 
+std::vector<std::uint8_t> JavaScriptSwitchProgram() {
+  std::vector<std::uint8_t> program;
+  for (int step = 0; step < 17; ++step) {
+    program.insert(program.end(), {16, 0, static_cast<std::uint8_t>(step)});
+  }
+  program.push_back(19);
+  return program;
+}
+
+std::vector<std::uint8_t> WasmBrTableModule() {
+  std::vector<std::uint8_t> body{0x00};
+  body.insert(body.end(), 16, 0x01);
+  body.insert(body.end(), {0x41, 0x00, 0x0E, 0x00, 0x00, 0x0B});
+  std::vector<std::uint8_t> module{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04,
+                                   0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x0A};
+  module.push_back(static_cast<std::uint8_t>(body.size() + 2));
+  module.push_back(0x01);
+  module.push_back(static_cast<std::uint8_t>(body.size()));
+  module.insert(module.end(), body.begin(), body.end());
+  return module;
+}
+
+void ExpectGuestTrace(NativeProbeQueue& queue,
+                      const reb::PageGuestSamplePolicy& policy,
+                      const reb::PageGuestWalk& walk,
+                      const std::string_view label,
+                      const reb::NativeVmHostRuntime host) {
+  sink.PublishVmDispatchBudgetGap();
+  std::size_t findings = 0;
+  std::size_t samples = 0;
+  std::size_t gaps = 0;
+  std::uint64_t gap_weight = 0;
+  NativeProbeEvent event;
+  while (queue.TryPop(event)) {
+    assert(event.header.category == reb::NativeProbeCategory::kVm);
+    assert(event.header.session_id != 0);
+    assert(event.header.artifact_id == policy.interpreter_artifact_id);
+    if (event.header.type == reb::NativeProbeType::kVmFinding) {
+      const auto finding = std::bit_cast<reb::NativeVmFindingPayload>(event.inline_payload);
+      assert(finding.kind == reb::NativeVmFindingKind::kInvocation);
+      assert(finding.host_runtime == host);
+      assert(finding.confidence == reb::NativeVmFindingConfidence::kObserved);
+      assert(finding.flags == static_cast<std::uint8_t>(reb::NativeVmFindingFlag::kDynamic));
+      assert(finding.finding_id == policy.finding_id);
+      assert(finding.investigation_id == policy.investigation_id);
+      assert(finding.related_subject_id == policy.bytecode_artifact_id);
+      assert(finding.subject_id != 0);
+      assert(finding.label_size == label.size());
+      assert(std::memcmp(finding.label.data(), label.data(), label.size()) == 0);
+      ++findings;
+    } else if (event.header.type == reb::NativeProbeType::kVmDispatchSample) {
+      const auto sample = std::bit_cast<reb::NativeVmDispatchSamplePayload>(event.inline_payload);
+      assert(samples < reb::kNativeVmDispatchSampleBudget);
+      assert(sample.instruction_pointer == walk.steps[samples].instruction_pointer);
+      assert(sample.opcode == walk.steps[samples].opcode);
+      assert(sample.handler_index == walk.steps[samples].opcode);
+      assert(sample.operand_count == walk.steps[samples].operand_count);
+      assert(sample.sample_index == static_cast<std::uint32_t>(samples));
+      assert(sample.interpreter_artifact_id == policy.interpreter_artifact_id);
+      assert(sample.bytecode_artifact_id == policy.bytecode_artifact_id);
+      ++samples;
+    } else if (event.header.type == reb::NativeProbeType::kGap) {
+      ++gaps;
+      gap_weight += reb::NativeProbeDropWeight(event);
+    } else {
+      assert(false);
+    }
+  }
+  const auto retained = std::min(walk.submitted, reb::kNativeVmDispatchSampleBudget);
+  const std::uint32_t omitted = walk.submitted - retained + (walk.truncated ? 1U : 0U);
+  assert(findings == 1);
+  assert(samples == retained);
+  assert(gaps == (omitted == 0 ? 0U : 1U));
+  assert(gap_weight == omitted);
+}
+
+void PageGuestSamplerAdmission() {
+  NativeProbeQueue queue;
+  Configure(queue, 92);
+  const auto before = allocations.load();
+  const std::array<std::uint8_t, 4> short_program{16, 0, 1, 19};
+  sink.ObserveCapturedJavaScriptSwitchProgram(short_program);
+  sink.ObserveCapturedWasmModule({});
+  sink.CaptureRuntimeTypedArray(1, 1, "https://owned.example/guest", short_program, {});
+  assert(allocations == before);
+  assert(Drain(queue) == 0);
+  reb::PageGuestSamplePolicy missing{};
+  assert(!sink.EnableJavaScriptSwitchSampling(missing));
+  assert(!sink.EnableWasmBrTableSampling(missing));
+  Configure(queue, 92, kForever, reb::NativeProbeCategoryMask(kRuntime));
+  const reb::PageGuestSamplePolicy javascript_policy{211, 212, 213, 214};
+  const reb::PageGuestSamplePolicy wasm_policy{311, 312, 313, 314};
+  assert(!sink.EnableJavaScriptSwitchSampling(javascript_policy));
+  assert(!sink.EnableWasmBrTableSampling(wasm_policy));
+
+  Configure(queue, 92);
+  assert(sink.EnableJavaScriptSwitchSampling(javascript_policy));
+  Configure(queue, 92);
+  const auto program = JavaScriptSwitchProgram();
+  sink.ObserveCapturedJavaScriptSwitchProgram(program);
+  assert(Drain(queue) == 0);
+  assert(sink.EnableJavaScriptSwitchSampling(javascript_policy));
+  const std::array<std::uint8_t, 1> unsupported{0x02};
+  sink.ObserveCapturedJavaScriptSwitchProgram(unsupported);
+  assert(Drain(queue) == 0);
+  const auto short_walk = reb::WalkJavaScriptSwitchDispatch(short_program);
+  sink.CaptureRuntimeTypedArray(7, 8, "https://owned.example/switch", short_program, {});
+  ExpectGuestTrace(queue, javascript_policy, short_walk, "javascript-switch-dispatch-v1",
+                   reb::NativeVmHostRuntime::kJavaScript);
+  Configure(queue, 92);
+  assert(sink.EnableJavaScriptSwitchSampling(javascript_policy));
+  const auto javascript = reb::WalkJavaScriptSwitchDispatch(program);
+  sink.ObserveCapturedJavaScriptSwitchProgram(program);
+  ExpectGuestTrace(queue, javascript_policy, javascript, "javascript-switch-dispatch-v1",
+                   reb::NativeVmHostRuntime::kJavaScript);
+
+  Configure(queue, 93);
+  assert(sink.EnableJavaScriptSwitchSampling(javascript_policy));
+  Fill(queue);
+  sink.ObserveCapturedJavaScriptSwitchProgram(program);
+  assert(queue.DroppedCount() == javascript.submitted + 1);
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  sink.ObserveCapturedJavaScriptSwitchProgram(program);
+  std::size_t recovered_findings = 0;
+  std::size_t recovered_samples = 0;
+  NativeProbeEvent event;
+  while (queue.TryPop(event)) {
+    if (event.header.type == reb::NativeProbeType::kVmFinding) {
+      ++recovered_findings;
+    } else if (event.header.type == reb::NativeProbeType::kVmDispatchSample) {
+      const auto sample = std::bit_cast<reb::NativeVmDispatchSamplePayload>(event.inline_payload);
+      assert(sample.instruction_pointer == javascript.steps[recovered_samples].instruction_pointer);
+      assert(sample.opcode == javascript.steps[recovered_samples].opcode);
+      ++recovered_samples;
+    }
+  }
+  assert(recovered_findings == 1);
+  assert(recovered_samples == reb::kNativeVmDispatchSampleBudget);
+  assert(queue.DroppedCount() == javascript.submitted + 1);
+  sink.PublishVmDispatchBudgetGap();
+  assert(Drain(queue) == 1);
+
+  Configure(queue, 94);
+  assert(sink.EnableWasmBrTableSampling(wasm_policy));
+  const std::array<std::uint8_t, 4> not_wasm{0x00, 0x61, 0x73, 0x6D};
+  sink.ObserveCapturedWasmModule(not_wasm);
+  assert(Drain(queue) == 0);
+  const auto module = WasmBrTableModule();
+  const auto wasm = reb::WalkWasmBrTableDispatch(module);
+  sink.ObserveCapturedWasmModule(module);
+  ExpectGuestTrace(queue, wasm_policy, wasm, "wasm-br-table-dispatch-v1",
+                   reb::NativeVmHostRuntime::kWebAssembly);
+  std::cout
+      << "PASS page javascript and wasm opt-in, program counters, budget gap and queue drops\n";
+}
+
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
   DispatchSampleAdmission();
   DispatchEmitFailureReleasesBudget();
   OwnedRegisterSamplerAdmission();
+  PageGuestSamplerAdmission();
   QueueMappingAndCanvasBurst();
   RecoveryAndSaturation();
   ConcurrentSameSite();

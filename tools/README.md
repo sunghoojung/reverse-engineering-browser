@@ -107,10 +107,14 @@ History and ExtraInfo identity-limit fixtures use bounded batches with public
 state barriers so they do not accidentally test transport queue overflow.
 Intentional transport-pressure cases retain their unpaced bursts.
 
-The opcode, program and full-shell VM UI checks allow a bounded 30 seconds for
-sandboxed Chromium startup on shared CI hosts. UI readiness and CDP requests keep
-their separate 10-second deadlines. A browser exit fails immediately; there is
-no launch retry or sandbox-policy override.
+The opcode, program, and full-shell VM UI checks, the API catalog check, and
+the owned-debugger UI check share
+[`sandboxed-chromium-startup.mjs`](sandboxed-chromium-startup.mjs). It allows
+60 seconds for sandboxed Chromium to write `DevToolsActivePort` on a shared CI
+host. `--disable-dev-shm-usage` keeps a small `/dev/shm` from stalling that
+start. UI readiness and CDP requests keep their separate 10-second deadlines.
+A browser exit fails immediately; there is no launch retry or sandbox-policy
+override.
 
 ## Integrated browser inputs
 

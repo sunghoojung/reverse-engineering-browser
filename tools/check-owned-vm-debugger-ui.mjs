@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {readFile, writeFile, mkdtemp, mkdir, rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
-import {spawn} from 'node:child_process';
+import {startSandboxedChromium} from './sandboxed-chromium-startup.mjs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -452,10 +452,10 @@ async function checkAuthoredBrowser() {
   const screenshot = async name => { const result = await send('Page.captureScreenshot', {format: 'png'}); await writeFile(join(output, name), Buffer.from(result.data, 'base64')); };
   try {
     await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
-    browser = spawn(process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update', '--disable-sync', 'about:blank'], {detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe']});
-    browser.once('close', () => { closed = true; }); browser.on('error', error => { diagnostics += String(error); }); browser.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8192); });
-    let port;
-    await until(async () => { if (browser.exitCode !== null || browser.signalCode !== null) throw Error(`Sandboxed Chromium startup failed (${browser.exitCode ?? browser.signalCode}): ${diagnostics}`); try { port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; return !!port; } catch { return false; } }, 'sandboxed Chromium startup');
+    const chromium = startSandboxedChromium(process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', profile, text => { diagnostics = text; });
+    browser = chromium.browser;
+    browser.once('close', () => { closed = true; });
+    const port = await chromium.ready();
     const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(); socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
     await new Promise((ready, reject) => { socket.addEventListener('open', ready, {once: true}); socket.addEventListener('error', reject, {once: true}); });
     socket.addEventListener('message', event => { const message = JSON.parse(event.data); if (message.method === 'Runtime.exceptionThrown') errors.push(message.params); const waiting = commands.get(message.id); if (waiting) { clearTimeout(waiting.timer); commands.delete(message.id); if (message.error) waiting.reject(Error(message.error.message)); else waiting.resolve(message.result); } });

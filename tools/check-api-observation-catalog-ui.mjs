@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {trafficBrowserDownloadObserver} from './browser-download-observer.mjs';
 import {readFile, writeFile, mkdtemp, mkdir, rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
-import {spawn} from 'node:child_process';
+import {startSandboxedChromium} from './sandboxed-chromium-startup.mjs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {runInNewContext} from 'node:vm';
@@ -310,11 +310,10 @@ async function checkBrowser() {
       await new Promise(done => {process.once('SIGINT',done);process.once('SIGTERM',done);});
       return;
     }
-    const executable=process.env.REB_UI_CHROMIUM || '/usr/bin/chromium';
-    browser=spawn(executable,['--headless=new','--remote-debugging-port=0',`--user-data-dir=${directory}`,'--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--disable-sync','about:blank'],{detached:grouped,stdio:['ignore','ignore','pipe']});
+    const chromium=startSandboxedChromium(process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', directory, text=>{diagnostics=text;});
+    browser=chromium.browser;
     browser.once('close',()=>{browserClosed=true;});
-    browser.stderr.on('data',chunk=>{diagnostics=(diagnostics+chunk).slice(-8192);}); browser.on('error',error=>{diagnostics=(diagnostics+error.message).slice(-8192);});
-    const port=await until(async()=>{if(browser.exitCode!==null||browser.signalCode!==null)throw new Error(`Browser startup failed (${browser.exitCode ?? browser.signalCode}): ${diagnostics}`);try{return (await readFile(join(directory,'DevToolsActivePort'),'utf8')).split('\n')[0];}catch{return null;}},'sandboxed Chromium startup');
+    const port=await chromium.ready();
     const pages=await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     socket=new WebSocket(pages.find(page=>page.type==='page').webSocketDebuggerUrl);
     await new Promise((ready,reject)=>{socket.addEventListener('open',ready,{once:true});socket.addEventListener('error',reject,{once:true});});

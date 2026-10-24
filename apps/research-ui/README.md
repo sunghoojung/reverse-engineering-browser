@@ -2191,9 +2191,16 @@ before exporting. See [ledger v1](../../protocol/vm-opcode-ledger-v1.md).
 
 ## VM findings workbench
 
-Effects, Reachability, Host links, byte attributions and selected retained samples
-page through all retained data in groups of 32. The Bytes view offers every
-retained snapshot; the compact handler listing keeps its four-sample preview.
+Effects, Reachability, Host links, session sources, byte attributions and selected
+retained samples page through all retained data in groups of 32. The Bytes view
+offers every retained snapshot; the compact handler listing keeps its four-sample
+preview. A workspace with `sampler-unavailable` says static-only: host links keep
+`dispatch-samples-unavailable` and `guest_position` null, and that is the missing
+sampler rather than an empty workspace. Session sources lists same-session stored
+artifacts and, for the live evidence window only, CDP JavaScript scripts.
+`chrome://` rows are browser-UI noise. Live scripts are not artifact records
+and are not guest positions. Shared session or target is correlation, not loader
+provenance.
 Operand width zero means unknown, matching the producer contract. Source locations
 show exact retained byte ranges without guessing a source line number.
 

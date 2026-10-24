@@ -194,6 +194,19 @@ tree remains immutable and never becomes a debugger source of truth. During an
 authorized live session, a separate Page tree reads Chromium debugger scripts
 and provides runtime pause, stack, scope, watch, breakpoint, and console state.
 No runtime value is copied back into the immutable artifact store.
+`GET /api/artifacts` therefore does not list the live Debugger script catalog.
+
+A response body becomes a stored JavaScript artifact only when the network tee
+classifies it as a script resource or a JavaScript MIME type. `application/wasm`
+and the compile, module, and instantiate hooks store Wasm, often under a
+synthetic `wasm://` URL, without copying the surrounding loader script. Fetch
+or XHR bodies with another MIME type, and generated source that misses the
+allocating-script hook, are absent from the manifest. `chrome://` script
+responses can still be stored; they are browser-UI noise, not a challenge
+loader. VM Lab's session-sources panel lists stored same-session artifacts and,
+only when that session is in the current live evidence window, joins CDP
+JavaScript scripts as correlation. It does not write those scripts into the
+artifact store and does not supply a guest position.
 
 ## Failure and recovery behavior
 

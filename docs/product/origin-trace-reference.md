@@ -431,7 +431,9 @@ shows every inferred, observed, correlated, or unknown handler, bounded
 runtime-typed-array bytecode hex, digest and truncation facts, characterized
 opcode coverage against snapshot bytes, named omissions such as
 `sampler-unavailable`, and residual unknowns. It does not infer handler meaning
-from an opcode number or from a missing sample.
+from an opcode number or from a missing sample. A missing sampler leaves host
+links at `dispatch-samples-unavailable` with a null guest position; VM Lab
+states that limitation instead of presenting an empty workspace.
 
 The VM Lab header reports `Native stealth` when a live native capture is active
 without an attached debugger, or when the launcher provides an explicit stealth

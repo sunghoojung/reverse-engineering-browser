@@ -83,11 +83,16 @@ A budget gap records that observations were dropped after the writer admitted
 its 16-sample cap. That omission is present when the capped trace still holds
 some samples, and it replaces `sampler-unavailable` when every observation was
 dropped. The host-links report keeps `guest_position` null and
-`dispatch-samples-unavailable`. The stdout fixture export below demonstrates
+`dispatch-samples-unavailable`. VM Lab labels that report static-only so a
+list of unknown network edges is not mistaken for an empty workspace or a
+recovered guest PC. The stdout fixture export below demonstrates
 the transport/consumer contract. The owned-register opt-in runs that register
 program into the renderer queue. The page shapes run only when their opt-in is
 enabled and a captured buffer matches. Rebuilding the browser does not sample
-Ignition or compiled Wasm.
+Ignition or compiled Wasm. `reb-native-vm-fixture --emit-dispatch-events-v1`
+is the offline way to prove this consumer with real samples and no browser.
+`javascript-switch-dispatch-v1` and `wasm-br-table-dispatch-v1` are separate
+probe opt-ins; that CLI does not emit them.
 
 A future native adapter must first establish exact captured interpreter and
 bytecode identities, invocation boundaries, PC units and the observed dispatch

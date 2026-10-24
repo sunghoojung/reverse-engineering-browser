@@ -53,7 +53,8 @@ class TestElement {
   click() { if (!this.disabled) this.events.click?.(); }
 }
 const testDocument = {createElement: tag => new TestElement(tag), createTextNode: text => { const node = new TestElement('#text'); node.textContent = text; return node; }, querySelector: () => null};
-const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,vmOpcodeRows})`, {document: testDocument, state: {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'}, TextEncoder});
+const renderApiState = {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'};
+const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder});
 const descendants = element => [element, ...element.children.flatMap(descendants)];
 const findButton = (root, label) => descendants(root).find(node => node.tagName === 'button' && node.textContent === label);
 const many = structuredClone(hostSource);
@@ -107,7 +108,25 @@ assert(capturedAlongsideRuntime.textContent.includes('0e 01'));
 assert(capturedAlongsideRuntime.textContent.includes('module byte offset45'));
 assert.equal(many.snapshots.length,2,'Rendering must not mutate runtime snapshots');
 const originalLinks=hostLinks.workspaces[0].links;hostLinks.workspaces[0].links=Array.from({length:65},(_,index)=>({...originalLinks[0],host_event:{...originalLinks[0].host_event,sequence_number:String(50+index)}}));
-const hostView=renderApi.renderVmHostLinks(hostSource);findButton(hostView,'Next host links').click();findButton(hostView,'Next host links').click();assert(hostView.textContent.includes('event 1:1:114'));assert(findButton(hostView,'Next host links').disabled);hostLinks.workspaces[0].links=originalLinks;
+const hostView=renderApi.renderVmHostLinks(hostSource);findButton(hostView,'Next host links').click();findButton(hostView,'Next host links').click();assert(hostView.textContent.includes('event 1:1:114'));assert(hostView.textContent.includes('guest_position PC'));assert(findButton(hostView,'Next host links').disabled);hostLinks.workspaces[0].links=originalLinks;
+const staticLinks=structuredClone(hostLinks);
+staticLinks.workspaces[0].omissions=['dispatch-samples-unavailable'];
+staticLinks.workspaces[0].links=[{host_event:{...sample.event,sequence_number:'50'},category:'network',type:'request_initiated',state:'unknown',reason:'dispatch-samples-unavailable',guest_position:null}];
+renderApiState.vmHostLinks=staticLinks;
+const staticHost=renderApi.renderVmHostLinks(hostSource);
+assert(staticHost.textContent.includes('Static only'));
+assert(staticHost.textContent.includes('dispatch-samples-unavailable'));
+assert(staticHost.textContent.includes('guest_position null'));
+assert(staticHost.textContent.includes('not an empty workspace'));
+assert(staticHost.textContent.includes('correlation'));
+assert(!staticHost.textContent.includes('guest_position PC'));
+renderApiState.vmHostLinks={...hostLinks, workspace_document_digest:'f'.repeat(64)};
+const staleHost=renderApi.renderVmHostLinks(hostSource);
+assert(staleHost.textContent.includes('Guest position unknown'));
+renderApiState.vmHostLinks=hostLinks;
+const unscopedSources=renderApi.renderVmSessionSources(hostSource);
+assert(unscopedSources.textContent.includes('not in the retained catalog'));
+assert(!unscopedSources.textContent.includes('guest_position PC'));
 const sampleWorkspace={...hostSource,samples:Array.from({length:65},(_,index)=>({...sample,sample_index:index})),handlers:[{...hostSource.handlers.find(handler=>handler.opcode===sample.opcode),sample_count:65}]};
 const sampleRow=renderApi.vmOpcodeRows(sampleWorkspace)[0];assert.equal(sampleRow.positions.length,4);assert.equal(sampleRow.retainedSamples.length,65);assert.equal(sampleRow.operandWidth,sampleWorkspace.handlers[0].operand_width);
 const authoredSpans = workspace.handlers.map(handler => `${handler.source.byte_offset}:${handler.source.byte_size}`);
@@ -292,7 +311,7 @@ render();`;
       assert((await evaluate("document.querySelector('.vm-selection-inspector').textContent")).includes('50 + 3 bytes'));
       assert.equal(await evaluate("document.querySelectorAll('.vm-selection-inspector img').length"), 0);
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      for (const panel of ['bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'effects']) {
+      for (const panel of ['bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'sources', 'effects']) {
         await evaluate(`document.querySelector('[data-vm-panel="${panel}"]').click()`);
         assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
         assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
@@ -322,6 +341,9 @@ render();`;
       await evaluate("state.vmAnalysisDocument={document_digest:fixture.analysis_digest,capture_mode:'unknown'};renderVmSessionStatus()");
 
     }
+    await evaluate("fixture.workspaces[0].coverage.omissions.push({reason:'sampler-unavailable',detail:'No runtime dispatch samples were retained.'});state.vmOpcodeWorkspace=fixture;state.vmWorkspacePanel='host-links';render()");
+    assert((await evaluate('document.body.textContent')).includes('Static only. sampler-unavailable'));
+    assert((await evaluate('document.body.textContent')).includes('--emit-dispatch-events-v1'));
     await evaluate("state.vmOpcodeWorkspace=hostWorkspace;state.vmHostLinks=hostLinks;state.vmHostLinksStatus='ready';state.vmWorkspacePanel='host-links';render()");
     assert.equal(await evaluate("document.querySelector('[data-vm-panel-content=\"host-links\"]').hidden"), false);
     assert((await evaluate('document.body.textContent')).includes('event 1:1:50'));
@@ -331,6 +353,34 @@ render();`;
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
       const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
       await writeFile(join(output, `host-links-${width}.png`), Buffer.from(data, 'base64'));
+    }
+    await evaluate(`hostLinks.workspaces[0].omissions=['dispatch-samples-unavailable']; hostLinks.workspaces[0].links=[{host_event:hostLinks.workspaces[0].links[0].host_event, category:'network', type:'request_initiated', state:'unknown', reason:'dispatch-samples-unavailable', guest_position:null}]; state.vmHostLinks=hostLinks; state.artifacts=[{artifact_id:'302', session_id:'1', kind:'wasm', url:'wasm://wasm/003c0d96', capture_origin:'webassembly_compile', sha256:hostWorkspace.workspaces[0].source_artifact_sha256, byte_size:8},{artifact_id:'1', session_id:'1', kind:'javascript', url:'chrome://newtab/strings.js', capture_origin:'network_response', sha256:'${'b'.repeat(64)}', byte_size:12}]; state.events=[{session_id:'1'}]; state.sessionMode='live'; state.debuggerSession={scripts:[{script_id:'32', url:'https://newassets.hcaptcha.com/captcha/v1/hsw.js', language:'JavaScript'},{script_id:'25', url:'wasm://module', language:'WebAssembly'}]}; state.vmFindings=[{findingId:selected.findingId, sourceArtifactId:'302'}]; state.selectedVmFindingId=selected.findingId; state.vmAnalysisSelection=null; state.vmWorkspacePanel='host-links'; render();`);
+    const staticText = await evaluate("document.querySelector('[data-vm-panel-content=\"host-links\"]').textContent");
+    assert(staticText.includes('Static only'));
+    assert(staticText.includes('dispatch-samples-unavailable'));
+    assert(staticText.includes('guest_position null'));
+    assert(staticText.includes('correlation'));
+    assert(!staticText.includes('guest_position PC'));
+    await evaluate("document.querySelector('[data-vm-panel=\"sources\"]').focus(); document.querySelector('[data-vm-panel=\"sources\"]').click()");
+    const sourceText = await evaluate("document.querySelector('[data-vm-panel-content=\"sources\"]').textContent");
+    assert(sourceText.includes('chrome://newtab/strings.js'));
+    assert(sourceText.includes('hsw.js'));
+    assert(sourceText.includes('No page or challenge JavaScript artifact'));
+    assert(sourceText.includes('guest_position stays null'));
+    assert(!sourceText.includes('wasm://module'));
+    for (const width of [1440, 390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      await evaluate("document.querySelector('[data-vm-panel=\"host-links\"]').click()");
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      const hostShot = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `static-host-links-${width}.png`), Buffer.from(hostShot.data, 'base64'));
+      await evaluate("document.querySelector('[data-vm-panel=\"sources\"]').click()");
+      const open = await evaluate("(()=>{const button=[...document.querySelectorAll('[data-vm-panel-content=\"sources\"] button')].find(item=>item.textContent==='Open stored artifact'); button.scrollIntoView({block:'center'}); button.focus(); const b=button.getBoundingClientRect(); return {x:b.x, y:b.y, w:b.width, h:b.height, focused:document.activeElement===button};})()");
+      assert.equal(open.focused, true);
+      assert.equal(open.w > 0 && open.h > 0 && open.x >= 0 && open.y >= 0, true);
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      const sourceShot = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `session-sources-${width}.png`), Buffer.from(sourceShot.data, 'base64'));
     }
     await evaluate("hostLinks.workspace_document_digest='stale';render()");
     assert((await evaluate('document.body.textContent')).includes('Guest position unknown'));

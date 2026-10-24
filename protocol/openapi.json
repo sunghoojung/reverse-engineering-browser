@@ -5014,7 +5014,7 @@
       "get": {
         "operationId": "get_vm_host_links",
         "summary": "Read bounded host-event links to retained guest dispatch positions",
-        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis.",
+        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis. state=unknown, reason=dispatch-samples-unavailable, and guest_position null means no dispatch samples were retained. That is static-only correlation for the shared session, navigation, and frame, not an empty workspace and not a guest program counter.",
         "tags": [
           "analysis"
         ],

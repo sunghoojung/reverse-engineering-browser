@@ -2731,3 +2731,151 @@
         }
         return total <= 4096;
       }
+
+      function vmBrowserInternalSourceUrl(url) {
+        return typeof url === 'string' && /^(?:about|brave|chrome|chrome-extension|chrome-search|chrome-untrusted|devtools|edge):/i.test(url);
+      }
+
+      function vmBoundedSourceUrl(url) {
+        return typeof url === 'string' ? url.slice(0, 2048) : '';
+      }
+
+      function vmHostLinkOmissionText(reason) {
+        return {
+          'dispatch-samples-unavailable': 'No retained dispatch samples. guest_position stays null. Static handlers can still be listed. This is the missing sampler, not an empty workspace.',
+          'dispatch-sample-retention-limit': 'Accepted samples were dropped from the retained set, so those samples cannot prove a guest position.',
+          'host-link-limit': 'Host-link retention reached its cap. Further same-scope events are omitted.',
+          'host-events-unavailable': 'No host event shared this interpreter session, navigation, and frame.'
+        }[reason] ?? String(reason ?? '');
+      }
+
+      function vmHostLinkLine(link) {
+        const event = link?.host_event ?? {};
+        const position = link?.guest_position;
+        const positionText = position && typeof position === 'object' && Number.isInteger(position.instruction_pointer)
+          ? `guest_position PC ${position.instruction_pointer} (${position.instruction_pointer_units})`
+          : 'guest_position null';
+        return `${link?.category}/${link?.type} · event ${event.session_id}:${event.process_id}:${event.sequence_number} · state ${link?.state} · reason ${link?.reason} · ${positionText}`;
+      }
+
+      function vmHostLinksView(row) {
+        if (!row) {
+          return {
+            bound: false,
+            staticOnly: false,
+            headline: 'Guest position unknown: no proven host-to-dispatch link is available.',
+            omissionLines: [],
+            lines: []
+          };
+        }
+        const omissions = Array.isArray(row.omissions) ? row.omissions : [];
+        const links = Array.isArray(row.links) ? row.links : [];
+        const staticOnly = omissions.includes('dispatch-samples-unavailable') && links.every(link =>
+          link?.state === 'unknown' && link?.reason === 'dispatch-samples-unavailable' &&
+          (link.guest_position === null || link.guest_position === undefined));
+        let headline;
+        if (staticOnly && links.length > 0) {
+          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null on every row. Same session, navigation, and frame is correlation, not a proven Wasm loader and not request-value provenance. Static handlers stay listed. This is the missing sampler, not an empty workspace. Session sources lists stored JavaScript and any joined live CDP scripts separately.';
+        } else if (staticOnly) {
+          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null because no dispatch samples were retained, and no host event shared this session, navigation, and frame (host-events-unavailable). This is not an empty workspace.';
+        } else if (links.length === 0) {
+          headline = 'Guest position unknown: no proven host-to-dispatch link is available.';
+        } else {
+          headline = 'A guest position is shown only for an exact retained dispatch parent. Other rows stay guest_position null. Shared scope is correlation, not request-value provenance.';
+        }
+        return {
+          bound: true,
+          staticOnly,
+          headline,
+          omissionLines: omissions.map(reason => ({reason, detail: vmHostLinkOmissionText(reason)})),
+          lines: links.map(vmHostLinkLine)
+        };
+      }
+
+      function vmStaticSampleNoticeText(workspace) {
+        if (!workspace || workspace.sample_count !== 0 || !Array.isArray(workspace.coverage?.omissions)) return null;
+        if (!workspace.coverage.omissions.some(row => row?.reason === 'sampler-unavailable')) return null;
+        return 'Static only. sampler-unavailable. No dispatch samples were retained, so host links stay reason dispatch-samples-unavailable and guest_position null. Static handlers remain listed. This is the missing sampler, not an empty workspace. Real samples without rebuilding the browser come from reb-native-vm-fixture --emit-dispatch-events-v1.';
+      }
+
+      function vmLiveCatalogMatchesSession(events, sessionId, sessionMode) {
+        if (sessionMode !== 'live' || sessionId === undefined || sessionId === null || String(sessionId).length === 0) return false;
+        const wanted = String(sessionId);
+        return Array.isArray(events) && events.some(event => event && String(event.session_id) === wanted);
+      }
+
+      function vmLiveScriptRank(script) {
+        const url = typeof script?.url === 'string' ? script.url : '';
+        if (vmBrowserInternalSourceUrl(url)) return 0;
+        if (/hsw|hcaptcha|captcha|challenge/i.test(url)) return 3;
+        if (url.length === 0 || /^(?:blob|data):/i.test(url)) return 2;
+        return 1;
+      }
+
+      function vmSessionSourceGapText() {
+        return 'No page or challenge JavaScript artifact is stored for this session. /api/artifacts lists receiver blobs only. A response is stored as JavaScript when the network tee sees a script resource type or a JavaScript MIME type. application/wasm and compile, module, or instantiate hooks store Wasm, often at a synthetic wasm:// URL, without copying the loader script. Fetch or XHR bodies with another MIME type, and generated source that misses the allocating-script hook, stay out of the store. chrome:// and other browser-UI scripts are noise, not the challenge loader. Live Debugger.scriptParsed entries are not written into the artifact store.';
+      }
+
+      function vmSessionSourceJoin({artifacts, scripts, interpreterArtifactId, sessionId, liveSessionJoined} = {}) {
+        const scoped = sessionId !== undefined && sessionId !== null && String(sessionId).length > 0;
+        const wanted = String(sessionId ?? '');
+        const stored = [];
+        if (scoped && Array.isArray(artifacts)) {
+          for (const artifact of artifacts) {
+            if (!artifact || String(artifact.session_id) !== wanted || typeof artifact.artifact_id !== 'string' || artifact.artifact_id.length === 0) continue;
+            const url = vmBoundedSourceUrl(artifact.url);
+            const kind = typeof artifact.kind === 'string' ? artifact.kind : 'unknown';
+            const internal = kind === 'javascript' && vmBrowserInternalSourceUrl(url);
+            const role = artifact.artifact_id === interpreterArtifactId ? 'interpreter'
+              : kind === 'wasm' ? 'wasm'
+              : kind === 'javascript' && !internal ? 'page-javascript'
+              : internal ? 'browser-noise'
+              : 'other';
+            stored.push({
+              record: 'artifact',
+              role,
+              artifact_id: artifact.artifact_id,
+              kind,
+              url,
+              capture_origin: typeof artifact.capture_origin === 'string' ? artifact.capture_origin.slice(0, 64) : 'unknown',
+              byte_size: artifact.byte_size,
+              relation: role === 'interpreter'
+                ? 'Selected interpreter module. Stored artifact bytes. Not a guest position.'
+                : 'Same evidence session. Shared session is correlation, not proof this file loaded or called the interpreter, and not a guest position.'
+            });
+          }
+        }
+        const ranked = [];
+        if (scoped && liveSessionJoined && Array.isArray(scripts)) {
+          scripts.forEach((script, index) => {
+            if (!script || script.language === 'WebAssembly' || typeof script.script_id !== 'string' ||
+              script.script_id.length === 0 || script.script_id.length > 4096) return;
+            ranked.push({script, index});
+          });
+          ranked.sort((left, right) => vmLiveScriptRank(right.script) - vmLiveScriptRank(left.script) || left.index - right.index);
+        }
+        const live = ranked.slice(0, 32).map(({script}) => {
+          const url = vmBoundedSourceUrl(script.url);
+          const internal = vmBrowserInternalSourceUrl(url);
+          return {
+            record: 'cdp-script',
+            role: internal ? 'browser-noise' : url.length === 0 || /^(?:blob|data):/i.test(url) ? 'generated-javascript' : 'page-javascript',
+            script_id: script.script_id,
+            url,
+            language: 'JavaScript',
+            relation: 'Live Debugger.scriptParsed catalog for the attached target. Not an /api/artifacts record. Same-target presence is correlation, not loader provenance, and guest_position stays null.'
+          };
+        });
+        const pageJavaScriptCount = stored.filter(row => row.role === 'page-javascript' ||
+          (row.role === 'interpreter' && row.kind === 'javascript' && !vmBrowserInternalSourceUrl(row.url))).length;
+        return {
+          scoped,
+          stored,
+          live,
+          liveOmitted: Math.max(0, ranked.length - live.length),
+          pageJavaScriptCount,
+          omission: scoped && pageJavaScriptCount === 0 ? 'no-page-javascript-artifact' : null,
+          gapText: scoped && pageJavaScriptCount === 0 ? vmSessionSourceGapText() : null,
+          liveJoined: Boolean(scoped && liveSessionJoined)
+        };
+      }

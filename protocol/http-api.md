@@ -682,6 +682,15 @@ described below. First full URLs remain best-effort, and this change does not
 establish lossless early navigation capture. Traffic keeps an unmatched native
 row as host-only metadata when the debugger never recorded that request.
 
+`document_navigation_gaps` counts main-frame `http`/`https` navigations whose
+loader was already committed when `Network.enable` finished. CDP does not
+replay that document request. The counter stays separate from owner-loss
+`gaps`, is charged once per target and loader, and moves capture state from
+`ready` to `partial`. A later Document event for the same loader is not a miss.
+`about:blank` and non-HTTP frames are not charged. A redirect hop that shares
+a loader with a later captured Document request is not separately visible.
+Unmatched native rows remain in Traffic as host-only metadata.
+
 `catalog_incomplete` is true when the 512-target catalog omitted discovered
 candidates. Counts then cover known targets only, and coverage cannot report
 ready. Bounded reconciliation scans at most 4096 target descriptions per reply,

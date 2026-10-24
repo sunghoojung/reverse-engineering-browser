@@ -287,7 +287,7 @@
           }
           const coverage = state.debuggerSession.network.capture_status;
           if (coverage) {
-            if (kind === 'active' && (coverage.state !== 'ready' || coverage.gaps > 0 || coverage.catalog_incomplete)) kind = 'gap';
+            if (kind === 'active' && (coverage.state !== 'ready' || coverage.gaps > 0 || (coverage.document_navigation_gaps ?? 0) > 0 || coverage.catalog_incomplete)) kind = 'gap';
             const earlyTargets = coverage.scope === 'http-browser-targets';
             const targetKind = earlyTargets ? 'browser targets' : 'page targets';
             messages.push(`HTTP capture: ${coverage.attached_targets} of ${coverage.eligible_targets} eligible ${targetKind} attached (limit ${coverage.target_limit}).`);
@@ -297,6 +297,10 @@
             if (coverage.target_overflow > 0) messages.push(`${coverage.target_overflow} ${targetKind} exceed the capture limit and are not attached.`);
             if (coverage.failed_targets > 0) messages.push(`${coverage.failed_targets} target attachments failed; retry is pending.`);
             if (coverage.gaps > 0) messages.push(`${coverage.gaps} HTTP capture owner losses or retirements recorded; coverage may be incomplete.`);
+            const documentGaps = coverage.document_navigation_gaps ?? 0;
+            if (documentGaps > 0) {
+              messages.push(`${documentGaps} document ${documentGaps === 1 ? 'navigation was' : 'navigations were'} already committed when Network capture attached. ${documentGaps === 1 ? 'That document request is' : 'Those document requests are'} absent from the CDP list; later requests on the tab are still recorded. An unmatched native row may still show the host.`);
+            }
             const unattached = coverage.unattached_targets ?? [];
             if (unattached.length) {
               const labels = unattached.slice(0, 3).map(target => `${target.title || 'Untitled target'} [${target.id.length > 48 ? target.id.slice(0, 48) + '…' : target.id}]`);
@@ -309,7 +313,7 @@
               messages.push('The selected debugger page is not attached for HTTP capture; its new requests are not being recorded here.');
             }
             if (earlyTargets) messages.push('Supported page, worker and out-of-process iframe targets are attached without requesting startup pauses. Initial requests can still precede Network.enable; first-request capture is not guaranteed. Attaching worker targets can affect their lifecycle and timeout behavior.');
-            messages.push('Requests before attachment, including short-lived targets, are unavailable. Requests observed only by native probes are not included in this CDP list. WebSockets remain scoped to the selected debugger target.');
+            messages.push('Requests before attachment, including short-lived targets, are unavailable. Requests observed only by native probes stay in Traffic as separate rows and are not copied into this CDP list. WebSockets remain scoped to the selected debugger target.');
           }
           const dropped = state.debuggerSession.network.dropped;
           if (dropped) {

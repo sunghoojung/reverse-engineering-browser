@@ -110,6 +110,28 @@ pub(super) struct BrowserCapture {
     cleanup: Arc<tokio::sync::Semaphore>,
     cleanup_queue: Mutex<CleanupQueue>,
     cleanup_closing: AtomicBool,
+    // Document loaders and URLs observed after Network.enable. A committed
+    // main frame that is absent here raced attachment and is not replayed.
+    seen_documents: Mutex<SeenDocuments>,
+    document_navigation_gaps: AtomicU64,
+}
+struct SeenDocuments {
+    loaders: BTreeSet<(String, String)>,
+    urls: BTreeSet<(String, String)>,
+    charged: BTreeSet<(String, String)>,
+}
+impl SeenDocuments {
+    const MAX: usize = 4096;
+    fn insert(set: &mut BTreeSet<(String, String)>, key: (String, String)) -> bool {
+        if set.contains(&key) {
+            return true;
+        }
+        if set.len() >= Self::MAX {
+            return false;
+        }
+        set.insert(key);
+        true
+    }
 }
 impl BrowserCapture {
     pub fn new() -> Self {
@@ -129,6 +151,12 @@ impl BrowserCapture {
             cleanup: Arc::new(tokio::sync::Semaphore::new(4)),
             cleanup_queue: Mutex::new(CleanupQueue::default()),
             cleanup_closing: AtomicBool::new(false),
+            seen_documents: Mutex::new(SeenDocuments {
+                loaders: BTreeSet::new(),
+                urls: BTreeSet::new(),
+                charged: BTreeSet::new(),
+            }),
+            document_navigation_gaps: AtomicU64::new(0),
         }
     }
     pub(super) fn current(&self, c: &Arc<Connection>) -> bool {
@@ -174,6 +202,41 @@ fn fill_empty_target_titles(state: &mut Value, target_id: &str, title: &str) {
 }
 fn auto_attach() -> Value {
     json!({"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true,"filter":[{"type":"page"},{"type":"iframe"},{"type":"worker"},{"type":"shared_worker"},{"type":"service_worker"},{"exclude":true}]})
+}
+fn http_document_url(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://")) && url.len() <= 65536
+}
+/// The frame tree root is the target's main frame. Network.enable does not
+/// replay a navigation that already committed, so a loader we never observed
+/// is a real document miss. A seen loader means at least one Document event
+/// for that navigation arrived. Without a loader id, an identical Document URL
+/// is the only available proof.
+pub(super) fn unobserved_committed_document(
+    frame_tree: &Value,
+    seen_loaders: &BTreeSet<String>,
+    seen_urls: &BTreeSet<String>,
+) -> Option<String> {
+    let frame = frame_tree.get("frameTree")?.get("frame")?;
+    let url = frame.get("url")?.as_str()?;
+    if !http_document_url(url) {
+        return None;
+    }
+    match frame.get("loaderId").and_then(Value::as_str) {
+        Some(loader) if !loader.is_empty() && loader.len() <= 4096 => {
+            if seen_loaders.contains(loader) {
+                None
+            } else {
+                Some(loader.to_owned())
+            }
+        }
+        _ => {
+            if seen_urls.contains(url) {
+                None
+            } else {
+                Some(format!("url:{url}"))
+            }
+        }
+    }
 }
 impl Debugger {
     pub(super) async fn close_browser_capture(&self) {
@@ -224,6 +287,11 @@ impl Debugger {
         let count = targets.values().filter(|t| eligible(t)).count();
         let limit = self.options.capture_target_limit as usize;
         let list_limited = self.list_discovery_limited();
+        let document_gaps = self
+            .capture
+            .browser
+            .document_navigation_gaps
+            .load(Ordering::Acquire);
         self.update(|s| {
             let v = &mut s["network"]["capture_status"];
             v["scope"] = json!("http-browser-targets");
@@ -250,13 +318,20 @@ impl Debugger {
                 v["message"] = json!("Passive browser target events remain enabled. List-only discovery is disabled because retired target history reached its bound; capture reconnection resets it. Requests before Network.enable remain unavailable.");
             }
             v["catalog_incomplete"] = json!(incomplete);
-            v["state"] = json!(if incomplete { "partial" } else if count == 0 {
-                "waiting"
-            } else if missing.is_empty() {
-                "ready"
-            } else {
-                "partial"
-            });
+            v["document_navigation_gaps"] = json!(document_gaps);
+            // A committed document that raced Network.enable is coverage loss
+            // even when every known target is attached. ready/gaps:0 hid it.
+            v["state"] = json!(
+                if incomplete || document_gaps > 0 {
+                    if count == 0 && !incomplete { "waiting" } else { "partial" }
+                } else if count == 0 {
+                    "waiting"
+                } else if missing.is_empty() {
+                    "ready"
+                } else {
+                    "partial"
+                }
+            );
             v["discovery_stale"] = json!(false);
         });
     }
@@ -732,6 +807,21 @@ impl Debugger {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        {
+            let mut seen = self
+                .capture
+                .browser
+                .seen_documents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            seen.loaders.clear();
+            seen.urls.clear();
+            seen.charged.clear();
+        }
+        self.capture
+            .browser
+            .document_navigation_gaps
+            .store(0, Ordering::Release);
         self.capture
             .browser
             .destroyed
@@ -1421,6 +1511,108 @@ impl Debugger {
             _ => {}
         }
     }
+    pub(super) fn note_document_request(&self, target_id: &str, loader_id: &str, url: &str) {
+        if target_id.is_empty() || target_id.len() > 4096 {
+            return;
+        }
+        let mut seen = self
+            .capture
+            .browser
+            .seen_documents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !loader_id.is_empty() && loader_id.len() <= 4096 {
+            SeenDocuments::insert(
+                &mut seen.loaders,
+                (target_id.to_owned(), loader_id.to_owned()),
+            );
+        }
+        if http_document_url(url) {
+            SeenDocuments::insert(&mut seen.urls, (target_id.to_owned(), url.to_owned()));
+        }
+    }
+    fn note_committed_document(&self, owner: &Owner, frame_tree: &Value) {
+        let Some(target_id) = owner.target["id"].as_str().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let token = {
+            let seen = self
+                .capture
+                .browser
+                .seen_documents
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let loaders = seen
+                .loaders
+                .iter()
+                .filter(|(target, _)| target == target_id)
+                .map(|(_, loader)| loader.clone())
+                .collect::<BTreeSet<_>>();
+            let urls = seen
+                .urls
+                .iter()
+                .filter(|(target, _)| target == target_id)
+                .map(|(_, url)| url.clone())
+                .collect::<BTreeSet<_>>();
+            unobserved_committed_document(frame_tree, &loaders, &urls)
+        };
+        let Some(token) = token else {
+            return;
+        };
+        {
+            let mut seen = self
+                .capture
+                .browser
+                .seen_documents
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let key = (target_id.to_owned(), token);
+            if seen.charged.contains(&key) || seen.charged.len() >= SeenDocuments::MAX {
+                return;
+            }
+            seen.charged.insert(key);
+        }
+        let gaps = self
+            .capture
+            .browser
+            .document_navigation_gaps
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        self.update(|state| {
+            let status = &mut state["network"]["capture_status"];
+            status["document_navigation_gaps"] = json!(gaps);
+            status["last_error"] = json!("A page target was already navigated when Network capture attached; its document request was not replayed.");
+            if status["state"] == "ready" {
+                status["state"] = json!("partial");
+            }
+        });
+    }
+    async fn observe_attached_document(self: &Arc<Self>, c: &Arc<Connection>, owner: &Arc<Owner>) {
+        let kind = owner.target["type"].as_str().unwrap_or("");
+        if kind != "page" && kind != "iframe" {
+            return;
+        }
+        // Flush Network events that arrived while enable was in flight, then
+        // snapshot the frame that already committed. A second barrier covers
+        // a document event queued during the snapshot itself.
+        if c.barrier().await.is_err() {
+            return;
+        }
+        let tree = c
+            .command_session(
+                "Page.getFrameTree",
+                json!({}),
+                Duration::from_secs(2),
+                owner.session.as_deref(),
+            )
+            .await;
+        if c.barrier().await.is_err() {
+            return;
+        }
+        if let Ok(tree) = tree {
+            self.note_committed_document(owner, &tree);
+        }
+    }
     async fn initialize_browser_owner(self: &Arc<Self>, c: Arc<Connection>, owner: Arc<Owner>) {
         let session = owner.session.as_deref();
         let budget = 134217728u64 / u64::from(self.options.capture_target_limit);
@@ -1437,6 +1629,13 @@ impl Debugger {
         }
         match result {
             Ok(()) => {
+                self.observe_attached_document(&c, &owner).await;
+                if self.stopping.load(Ordering::Acquire)
+                    || !self.capture.browser.current(&c)
+                    || owner.retired.load(Ordering::Acquire)
+                {
+                    return;
+                }
                 self.capture
                     .browser
                     .failures
@@ -1805,5 +2004,98 @@ mod tests {
         assert_eq!(d.capture.browser.waiting.lock().unwrap().len(), 512);
         assert_eq!(d.snapshot()["network"]["capture_status"]["gaps"], 1);
         assert!(d.capture.browser.catalog_incomplete.load(Ordering::Acquire));
+    }
+    #[test]
+    fn committed_http_document_without_a_seen_loader_is_a_navigation_gap() {
+        let tree = json!({"frameTree":{"frame":{
+            "id":"main","loaderId":"navigation","url":"https://accounts.example/demo"
+        }}});
+        let missed = unobserved_committed_document(&tree, &BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(missed.as_deref(), Some("navigation"));
+        let mut loaders = BTreeSet::from(["navigation".to_owned()]);
+        assert_eq!(
+            unobserved_committed_document(&tree, &loaders, &BTreeSet::new()),
+            None
+        );
+        loaders.clear();
+        assert_eq!(
+            unobserved_committed_document(
+                &json!({"frameTree":{"frame":{"url":"about:blank","loaderId":"blank"}}}),
+                &loaders,
+                &BTreeSet::new()
+            ),
+            None
+        );
+        let url_only = json!({"frameTree":{"frame":{"url":"https://accounts.example/demo"}}});
+        assert_eq!(
+            unobserved_committed_document(&url_only, &BTreeSet::new(), &BTreeSet::new()).as_deref(),
+            Some("url:https://accounts.example/demo")
+        );
+        let mut urls = BTreeSet::from(["https://accounts.example/demo".to_owned()]);
+        assert_eq!(
+            unobserved_committed_document(&url_only, &BTreeSet::new(), &urls),
+            None
+        );
+        // A later favicon does not count as the document loader.
+        loaders.insert("favicon".to_owned());
+        urls.clear();
+        assert_eq!(
+            unobserved_committed_document(&tree, &loaders, &urls).as_deref(),
+            Some("navigation")
+        );
+        let debugger = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        let owner = Owner::fixture(
+            "owner",
+            json!({"id":"tab","type":"page","title":"","url":""}),
+        );
+        debugger.note_document_request("tab", "favicon", "https://accounts.example/favicon.ico");
+        debugger.note_committed_document(&owner, &tree);
+        debugger.note_committed_document(&owner, &tree);
+        let status = debugger.snapshot()["network"]["capture_status"].clone();
+        // Capture starts disabled until a session is enabled. The miss is still
+        // counted, and only an already-ready session is downgraded to partial.
+        assert_eq!(status["document_navigation_gaps"], 1);
+        assert_eq!(status["state"], "disabled");
+        assert_eq!(status["gaps"], 0);
+        assert_eq!(
+            status["last_error"],
+            "A page target was already navigated when Network capture attached; its document request was not replayed."
+        );
+        debugger.update(|state| {
+            state["network"]["capture_status"]["state"] = json!("ready");
+        });
+        debugger.note_committed_document(
+            &Owner::fixture(
+                "owner-ready",
+                json!({"id":"tab-ready","type":"page","title":"","url":""}),
+            ),
+            &tree,
+        );
+        assert_eq!(
+            debugger.snapshot()["network"]["capture_status"]["state"],
+            "partial"
+        );
+        assert_eq!(
+            debugger.snapshot()["network"]["capture_status"]["document_navigation_gaps"],
+            2
+        );
+        assert_eq!(debugger.snapshot()["network"]["capture_status"]["gaps"], 0);
+        debugger.note_document_request("tab", "navigation", "https://accounts.example/demo");
+        let owner_seen = Owner::fixture(
+            "owner-2",
+            json!({"id":"tab-2","type":"page","title":"","url":""}),
+        );
+        debugger.note_document_request("tab-2", "navigation", "https://accounts.example/demo");
+        debugger.note_committed_document(
+            &owner_seen,
+            &json!({"frameTree":{"frame":{
+                "loaderId":"navigation","url":"https://accounts.example/demo"
+            }}}),
+        );
+        assert_eq!(
+            debugger.snapshot()["network"]["capture_status"]["document_navigation_gaps"],
+            2,
+            "a loader already seen on Document requestWillBeSent is not another miss"
+        );
     }
 }

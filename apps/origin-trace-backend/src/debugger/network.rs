@@ -197,6 +197,13 @@ impl Debugger {
                 if url.is_empty() || method.is_empty() {
                     return;
                 }
+                if p["type"].as_str() == Some("Document") {
+                    self.note_document_request(
+                        owner.target["id"].as_str().unwrap_or(""),
+                        p["loaderId"].as_str().unwrap_or(""),
+                        &url,
+                    );
+                }
                 let (headers, headers_truncated) = headers(&request["headers"]);
                 let (document_url, document_url_truncated) = captured_url(&p["documentURL"]);
                 let mime = mime(&headers, "text/plain");

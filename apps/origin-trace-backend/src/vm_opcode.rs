@@ -14,13 +14,21 @@ use std::{
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.2.0";
+const PRODUCER_VERSION: &str = "2.3.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_WORKSPACES: usize = 256;
 const MAX_UNKNOWNS: usize = 256;
 const SNAPSHOT_PREVIEW_BYTES: usize = 4096;
+
+fn count_label(count: u32, singular: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {singular}s")
+    }
+}
 
 static FUNCTION_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:\bfunction\b[^{}]{0,1024}|\([^(){}]{0,1024}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)\s*\{")
@@ -853,7 +861,7 @@ pub(crate) fn workspace(
         return None;
     }
     let runtime = result["runtime"].as_str()?;
-    let (mut handlers, model, mut unknowns, mut omissions) = match runtime {
+    let (mut handlers, model, mut unknowns, mut omissions, module_dispatch) = match runtime {
         "javascript" => {
             let source = std::str::from_utf8(bytes).ok()?;
             let region = result["observations"]
@@ -872,11 +880,18 @@ pub(crate) fn workspace(
             {
                 return None;
             }
-            static_handlers(source, region.0, end)
+            let (handlers, model, unknowns, omissions) = static_handlers(source, region.0, end);
+            (handlers, model, unknowns, omissions, None)
         }
         "webassembly" => {
-            let (handlers, unknowns, omissions) = wasm::handlers(bytes, result)?;
-            (handlers, "unknown".into(), unknowns, omissions)
+            let extracted = wasm::handlers(bytes, result)?;
+            (
+                extracted.handlers,
+                "unknown".into(),
+                extracted.unknowns,
+                extracted.omissions,
+                Some(extracted.dispatch),
+            )
         }
         _ => return None,
     };
@@ -928,14 +943,34 @@ pub(crate) fn workspace(
             "The 16-sample dispatch budget omitted {budget_dropped} observations for this interpreter. Retained samples are a capped trace, not a complete guest dispatch."
         )}));
     }
+    let mut opcode_sites = BTreeMap::<u32, usize>::new();
+    for handler in &handlers {
+        if let Some(opcode) = handler["opcode"].as_u64() {
+            *opcode_sites.entry(opcode as u32).or_default() += 1;
+        }
+    }
     for handler in &mut handlers {
         let Some(opcode) = handler["opcode"].as_u64().map(|value| value as u32) else {
             continue;
         };
+        // A repeated selector is local to its br_table. One sample must not
+        // mark every site observed or the handler counts exceed the samples.
+        if opcode_sites.get(&opcode).copied().unwrap_or(0) > 1 {
+            continue;
+        }
         if let Some(count) = samples.get(&opcode) {
             handler["sample_count"] = json!(count);
             handler["state"] = json!("observed");
         }
+    }
+    if opcode_sites
+        .iter()
+        .any(|(opcode, count)| *count > 1 && samples.contains_key(opcode))
+    {
+        unknowns.push(
+            "An observed opcode matches more than one static dispatch site, so it stays unbound."
+                .into(),
+        );
     }
     for opcode in samples.keys() {
         if !handlers
@@ -1001,8 +1036,34 @@ pub(crate) fn workspace(
             frontier.push(json!({"artifact_id":null,"byte_offset":null,"reason":"snapshot-gap"}));
         }
     }
+    // Module bytes are not a guest snapshot. Name that static-only stop
+    // instead of an empty snapshot frontier when the dispatch sites exist.
+    let static_module = runtime == "webassembly" && snapshots.is_empty() && !handlers.is_empty();
+    if static_module {
+        traversal["entry_offsets"] = json!([]);
+        traversal["instructions"] = json!([]);
+        traversal["edges"] = json!([]);
+        traversal["frontier"] = json!([{
+            "artifact_id": null,
+            "byte_offset": null,
+            "reason": "static-module-only"
+        }]);
+        traversal["complete"] = json!(false);
+    }
     if traversal["complete"] != true {
-        omissions.push(json!({"reason":"reachable-frontier","detail":"The bounded instruction walk has unresolved entries or edges."}));
+        if static_module {
+            let dispatch = module_dispatch.expect("wasm dispatch summary");
+            omissions.push(json!({
+                "reason": "static-module-dispatch",
+                "detail": format!(
+                    "Static module walk kept {} across {}. Guest-byte traversal has no runtime snapshot and does not infer a guest PC.",
+                    count_label(dispatch.sites, "dispatch site"),
+                    count_label(dispatch.functions, "function")
+                ),
+            }));
+        } else {
+            omissions.push(json!({"reason":"reachable-frontier","detail":"The bounded instruction walk has unresolved entries or edges."}));
+        }
     }
     let attributions = crate::vm_reachability::attributions(&traversal, &handlers);
     let coverage = crate::vm_byte_coverage::coverage(
@@ -1314,13 +1375,32 @@ mod tests {
             assert!(workspace.get("bytecode_artifact_id").is_none());
             assert_eq!(workspace["coverage"]["retained_snapshot_bytes"], 0);
             assert_eq!(workspace["coverage"]["characterized_bytes"], 0);
+            assert_eq!(workspace["sample_count"], 0);
             assert_eq!(workspace["traversal"]["entry_offsets"], json!([]));
             assert_eq!(workspace["traversal"]["instructions"], json!([]));
+            assert_eq!(workspace["traversal"]["edges"], json!([]));
             assert_eq!(
                 workspace["traversal"]["frontier"],
                 json!([{
-                    "artifact_id": null, "byte_offset": null, "reason": "snapshot-unavailable"
+                    "artifact_id": null, "byte_offset": null, "reason": "static-module-only"
                 }])
+            );
+            let static_walk = workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|omission| omission["reason"] == "static-module-dispatch")
+                .expect("static module walk");
+            assert_eq!(
+                static_walk["detail"],
+                "Static module walk kept 1 dispatch site across 1 function. Guest-byte traversal has no runtime snapshot and does not infer a guest PC."
+            );
+            assert!(
+                workspace["coverage"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|omission| omission["reason"] != "reachable-frontier")
             );
             assert_eq!(document["summary"]["snapshot_count"], 0);
             assert_eq!(workspace["coverage"]["complete"], false);
@@ -1484,6 +1564,303 @@ mod tests {
         assert_eq!(handlers[0]["opcode"], 0);
         assert_eq!(handlers[3]["opcode"], 0);
         assert_ne!(handlers[0]["source"], handlers[3]["source"]);
+        assert_schema(&document);
+    }
+
+    fn leb(mut value: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+            if value == 0 {
+                return bytes;
+            }
+        }
+    }
+
+    fn wasm_section(id: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![id];
+        out.extend(leb(body.len() as u32));
+        out.extend(body);
+        out
+    }
+
+    /// Authored module. `element_funcs` installs those function indexes in table 0.
+    fn wasm_module(bodies: &[&[u8]], element_funcs: Option<&[u32]>) -> Vec<u8> {
+        let mut module = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        module.extend(wasm_section(1, &[0x01, 0x60, 0x00, 0x00]));
+        let mut functions = vec![bodies.len() as u8];
+        functions.extend(std::iter::repeat_n(0u8, bodies.len()));
+        module.extend(wasm_section(3, &functions));
+        if let Some(funcs) = element_funcs {
+            let mut table = vec![0x01, 0x70, 0x00];
+            table.extend(leb(funcs.len() as u32));
+            module.extend(wasm_section(4, &table));
+        }
+        module.extend(wasm_section(5, &[0x01, 0x00, 0x01]));
+        if let Some(funcs) = element_funcs {
+            let mut element = vec![0x01, 0x00, 0x41, 0x00, 0x0b];
+            element.extend(leb(funcs.len() as u32));
+            for func in funcs {
+                element.extend(leb(*func));
+            }
+            module.extend(wasm_section(9, &element));
+        }
+        let mut code = leb(bodies.len() as u32);
+        for body in bodies {
+            code.extend(leb(body.len() as u32));
+            code.extend(*body);
+        }
+        module.extend(wasm_section(10, &code));
+        module
+    }
+
+    fn br_table(selectors: u8) -> Vec<u8> {
+        let mut bytes = vec![0x0e, selectors];
+        bytes.extend(std::iter::repeat_n(0u8, usize::from(selectors) + 1));
+        bytes
+    }
+
+    #[test]
+    fn wasm_related_br_tables_join_the_workspace_and_unrelated_ones_stay_out() {
+        // f0 is the ranked interpreter: loop, advancing local, memory read, call.
+        let selected = [
+            0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x41, 0x00,
+            0x2d, 0x00, 0x00, 0x1a, 0x10, 0x01, 0x41, 0x00,
+        ]
+        .into_iter()
+        .chain(br_table(2))
+        .chain([0x0b, 0x0b])
+        .collect::<Vec<_>>();
+        // f1 has no dispatch site. It only reaches f2.
+        let wrapper = vec![0x00, 0x10, 0x02, 0x0b];
+        let related = [0x00, 0x03, 0x40, 0x41, 0x00]
+            .into_iter()
+            .chain(br_table(4))
+            .chain([0x0b, 0x0b])
+            .collect::<Vec<_>>();
+        let unrelated = [0x00, 0x03, 0x40, 0x41, 0x00]
+            .into_iter()
+            .chain(br_table(2))
+            .chain([0x0b, 0x0b])
+            .collect::<Vec<_>>();
+        let bytes = wasm_module(&[&selected, &wrapper, &related, &unrelated], None);
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        let workspace = &document["workspaces"][0];
+        let handlers = workspace["handlers"].as_array().unwrap();
+        assert_eq!(handlers.len(), 8);
+        let sources = handlers
+            .iter()
+            .map(|handler| {
+                (
+                    handler["source"]["byte_offset"].as_u64().unwrap(),
+                    handler["source"]["byte_size"].as_u64().unwrap(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(sources.len(), 2);
+        for (offset, _) in &sources {
+            assert_eq!(bytes[*offset as usize], 0x0e);
+        }
+        assert!(
+            handlers
+                .iter()
+                .filter(|handler| handler["label"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("br_table selector"))
+                .count()
+                >= 2
+        );
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["label"] == "br_table f2 selector 0")
+        );
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["label"] == "br_table f2 selector 3")
+        );
+        assert!(handlers.iter().all(|handler| {
+            handler["notes"].as_str().unwrap().contains("unproven")
+                && handler["state"] != "observed"
+                && handler["sample_count"] == 0
+                && handler["effects"] == json!([])
+        }));
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["opcode"].is_null() && handler["state"] == "unknown")
+        );
+        let preview = &workspace["captured_module_preview"];
+        let related_source = handlers
+            .iter()
+            .find(|handler| handler["label"] == "br_table f2 selector 0")
+            .unwrap()["source"]
+            .clone();
+        assert_eq!(preview["artifact_id"], workspace["interpreter_artifact_id"]);
+        assert_eq!(preview["byte_offset"], related_source["byte_offset"]);
+        assert_eq!(preview["byte_count"], related_source["byte_size"]);
+        assert!(preview.get("origin").is_none());
+        assert!(preview.get("sha256").is_none());
+        let start = preview["byte_offset"].as_u64().unwrap() as usize;
+        let size = preview["byte_count"].as_u64().unwrap() as usize;
+        assert_eq!(
+            preview["preview_hex"],
+            hex::encode(&bytes[start..start + size])
+        );
+        assert_eq!(preview["truncated"], false);
+        assert_eq!(workspace["snapshots"], json!([]));
+        assert_eq!(workspace["coverage"]["characterized_bytes"], 0);
+        assert_eq!(workspace["coverage"]["retained_snapshot_bytes"], 0);
+        assert_eq!(workspace["sample_count"], 0);
+        assert!(workspace.get("bytecode_artifact_id").is_none());
+        let reasons = workspace["coverage"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|omission| omission["reason"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(reasons.contains(&"sampler-unavailable"));
+        assert!(reasons.contains(&"runtime-snapshot-unavailable"));
+        assert!(reasons.contains(&"snapshot-bytes-unavailable"));
+        assert!(reasons.contains(&"static-module-dispatch"));
+        assert!(reasons.contains(&"dispatch-neighborhood"));
+        assert!(!reasons.contains(&"reachable-frontier"));
+        assert_eq!(
+            workspace["traversal"]["frontier"][0]["reason"],
+            "static-module-only"
+        );
+        assert!(workspace["traversal"]["frontier"][0]["byte_offset"].is_null());
+        let static_walk = workspace["coverage"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|omission| omission["reason"] == "static-module-dispatch")
+            .unwrap();
+        assert_eq!(
+            static_walk["detail"],
+            "Static module walk kept 2 dispatch sites across 2 functions. Guest-byte traversal has no runtime snapshot and does not infer a guest PC."
+        );
+        let neighborhood = workspace["coverage"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|omission| omission["reason"] == "dispatch-neighborhood")
+            .unwrap();
+        assert!(
+            neighborhood["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("1 in-loop")
+        );
+        assert!(neighborhood["detail"].as_str().unwrap().len() <= 240);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn wasm_call_indirect_table_functions_contribute_br_tables() {
+        let selected = [
+            0x01, 0x01, 0x7f, 0x03, 0x40, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x41, 0x00,
+            0x2d, 0x00, 0x00, 0x1a, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, 0x0b,
+        ];
+        let related = [0x00, 0x03, 0x40, 0x41, 0x00]
+            .into_iter()
+            .chain(br_table(3))
+            .chain([0x0b, 0x0b])
+            .collect::<Vec<_>>();
+        let unrelated = [0x00, 0x03, 0x40, 0x41, 0x00]
+            .into_iter()
+            .chain(br_table(2))
+            .chain([0x0b, 0x0b])
+            .collect::<Vec<_>>();
+        let bytes = wasm_module(&[&selected, &related, &unrelated], Some(&[1]));
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        let workspace = &document["workspaces"][0];
+        let handlers = workspace["handlers"].as_array().unwrap();
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["label"] == "call_indirect target"
+                    && handler["opcode"].is_null()
+                    && handler["state"] == "unknown")
+        );
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["label"] == "br_table f1 selector 0"
+                    && handler["state"] == "inferred"
+                    && handler["opcode"] == 0)
+        );
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["label"] == "br_table f1 selector 2")
+        );
+        assert!(
+            !handlers
+                .iter()
+                .any(|handler| handler["label"].as_str().unwrap().contains("f2"))
+        );
+        let cited = handlers
+            .iter()
+            .map(|handler| handler["source"]["byte_offset"].as_u64().unwrap() as usize)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            cited
+                .iter()
+                .all(|offset| bytes[*offset] == 0x0e || bytes[*offset] == 0x11)
+        );
+        assert_eq!(workspace["coverage"]["characterized_bytes"], 0);
+        assert_eq!(workspace["sample_count"], 0);
+        assert_eq!(
+            workspace["traversal"]["frontier"][0]["reason"],
+            "static-module-only"
+        );
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn repeated_wasm_selectors_do_not_absorb_one_dispatch_sample() {
+        let bytes = wasm_fixture("two_br_tables");
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[event(0)]);
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["sample_count"], 1);
+        assert_eq!(workspace["samples"][0]["opcode"], 0);
+        assert!(
+            workspace["handlers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|handler| { handler["state"] != "observed" && handler["sample_count"] == 0 })
+        );
+        assert!(
+            workspace["unknowns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|unknown| unknown
+                    .as_str()
+                    .unwrap()
+                    .contains("more than one static dispatch site"))
+        );
+        assert!(
+            workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|omission| omission["reason"] != "sampler-unavailable")
+        );
+        assert_eq!(workspace["coverage"]["characterized_bytes"], 0);
         assert_schema(&document);
     }
 

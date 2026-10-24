@@ -87,6 +87,23 @@ for (const changes of [
   Object.assign(malformed.workspaces[0].captured_module_preview, changes);
   assert(!validateModule(malformed), JSON.stringify(changes));
 }
+const staticFrontier = structuredClone(moduleDocument);
+staticFrontier.workspaces[0].traversal = {
+  entry_offsets: [], instructions: [], edges: [], complete: false,
+  frontier: [{artifact_id: null, byte_offset: null, reason: 'static-module-only'}]
+};
+assert(validateModule(staticFrontier), 'static module bytes are not a guest snapshot frontier');
+const repeatedSample = structuredClone(moduleDocument);
+const unbound = structuredClone(sample);
+unbound.opcode = 0;
+unbound.interpreter_artifact_id = repeatedSample.workspaces[0].interpreter_artifact_id;
+repeatedSample.workspaces[0].samples = [unbound];
+repeatedSample.workspaces[0].sample_count = 1;
+repeatedSample.summary.sample_count = 1;
+assert(validateModule(repeatedSample), 'repeated selectors stay unbound when one sample exists');
+repeatedSample.workspaces[0].handlers[0].sample_count = 1;
+repeatedSample.workspaces[0].handlers[0].state = 'observed';
+assert(!validateModule(repeatedSample), 'one sample cannot mark every repeated selector observed');
 const wrongRuntime = structuredClone(hostWorkspace);
 wrongRuntime.workspaces[0].captured_module_preview = modulePreview;
 assert(!validateModule(wrongRuntime));

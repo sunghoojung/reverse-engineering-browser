@@ -2398,7 +2398,7 @@
           pending.push(...(outgoing.get(current) ?? []));
         }
         if ([...instructions.keys()].some(instruction => !reachable.has(instruction))) return false;
-        const reasons = ['snapshot-unavailable', 'entry-unavailable', 'effect-unavailable', 'effect-contradiction',
+        const reasons = ['snapshot-unavailable', 'static-module-only', 'entry-unavailable', 'effect-unavailable', 'effect-contradiction',
           'unknown-opcode', 'unknown-target', 'snapshot-gap', 'past-snapshot', 'truncated-instruction',
           'overlapping-instruction', 'instruction-limit', 'frontier-limit', 'unsupported-layout'];
         if (!traversal.frontier.every(row => vmWorkspaceExact(row, ['artifact_id', 'byte_offset', 'reason']) &&
@@ -2501,13 +2501,23 @@
         const truncated = workspace.sample_count > workspace.samples.length;
         if (truncated !== workspace.coverage.omissions.some(row => row.reason === 'sample-limit') ||
           (truncated && workspace.samples.length !== 4096)) return false;
+        const opcodeUses = new Map();
+        for (const handler of workspace.handlers) {
+          if (handler.opcode !== null) opcodeUses.set(handler.opcode, (opcodeUses.get(handler.opcode) ?? 0) + 1);
+        }
         const opcodes = new Set();
         let total = 0;
         for (const handler of workspace.handlers) {
           if (workspace.runtime === 'javascript' && handler.opcode !== null && opcodes.has(handler.opcode)) return false;
-          opcodes.add(handler.opcode);
+          if (handler.opcode !== null) opcodes.add(handler.opcode);
           const retained = workspace.samples.filter(sample => sample.opcode === handler.opcode).length;
-          if (handler.sample_count < retained || (!truncated && handler.sample_count !== retained)) return false;
+          const repeatedSelector = workspace.runtime === 'webassembly' && handler.opcode !== null &&
+            opcodeUses.get(handler.opcode) > 1;
+          // A br_table selector index is local to that instruction. One sample does not
+          // prove that every site with the same number handled the guest opcode.
+          if (repeatedSelector) {
+            if (handler.sample_count !== 0 || handler.state === 'observed') return false;
+          } else if (handler.sample_count < retained || (!truncated && handler.sample_count !== retained)) return false;
           total += handler.sample_count;
         }
         return total <= workspace.sample_count;

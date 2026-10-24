@@ -20,3 +20,5 @@ labels stay `runtime-typed-array` in `vm-opcode-workspace-v2`.
 These are decoded statically, never instantiated. Dispatch source ranges identify
 the instruction, not a recovered guest handler body. Dynamic/default arms retain
 unknown opcodes. Repeated selectors remain scoped to their dispatch source site.
+Functions reached by a direct call or by a `call_indirect` table element can
+contribute more sites. Unrelated functions do not.

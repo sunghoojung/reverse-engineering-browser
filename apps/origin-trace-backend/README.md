@@ -150,7 +150,12 @@ The API CLI embeds the versioned OpenAPI document and requires an explicit
 loopback URL or endpoint file. The VM analyzer reads bounded input prefixes,
 reports omissions, and writes private analysis documents. The base detector is
 served at `/api/analysis/vm`; the inspector-free opcode workspace is served at
-`/api/analysis/vm/opcodes`. A workspace failure does not hide a valid detector
+`/api/analysis/vm/opcodes`. A Wasm likely-vm workspace lists static `br_table`
+and `call_indirect` arms from the selected function and a bounded call/table
+neighborhood. Without dispatch samples it keeps `sampler-unavailable`. Without
+a runtime snapshot it keeps `snapshot-bytes-unavailable` and names the guest-byte
+walk `static-module-only` instead of inventing a program counter. A workspace
+failure does not hide a valid detector
 document. Its executable is
 `origin-trace-vm --artifacts DIR --events FILE`.
 Static guest-byte previews recognize a conservative subset of complete numeric `Uint8Array.of(...)` and

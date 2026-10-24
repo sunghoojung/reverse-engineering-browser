@@ -960,6 +960,7 @@
         "reason": {
           "enum": [
             "snapshot-unavailable",
+            "static-module-only",
             "entry-unavailable",
             "effect-unavailable",
             "effect-contradiction",

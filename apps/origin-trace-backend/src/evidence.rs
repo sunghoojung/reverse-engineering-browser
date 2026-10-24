@@ -425,6 +425,28 @@ pub fn find_artifact_bounded(
     max_records: usize,
     max_bytes: u64,
 ) -> Result<Value> {
+    find_artifact_with_deadline(
+        root,
+        id,
+        max_records,
+        max_bytes,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+}
+pub(crate) fn find_artifact_until(
+    root: &Path,
+    id: &str,
+    deadline: std::time::Instant,
+) -> Result<Value> {
+    find_artifact_with_deadline(root, id, usize::MAX, u64::MAX, deadline)
+}
+fn find_artifact_with_deadline(
+    root: &Path,
+    id: &str,
+    max_records: usize,
+    max_bytes: u64,
+    deadline: std::time::Instant,
+) -> Result<Value> {
     use std::io::BufRead;
     let path = root.join("manifest.jsonl");
     let file = match regular_file(&path) {
@@ -439,9 +461,8 @@ pub fn find_artifact_bounded(
     let mut seen = BTreeSet::new();
     let mut scanned = 0u64;
     let mut records = 0usize;
-    let started = std::time::Instant::now();
     loop {
-        if started.elapsed() > std::time::Duration::from_secs(5) {
+        if std::time::Instant::now() >= deadline {
             return Err(Error::new(
                 408,
                 "Artifact manifest read exceeded its deadline",

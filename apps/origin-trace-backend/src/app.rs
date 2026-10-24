@@ -1,6 +1,7 @@
 use crate::{
     analysis_catalog,
     analyst::Analyst,
+    artifact_lookup::ArtifactLookupCache,
     config::Options,
     debugger::{Debugger, NetworkRequestSelection},
     decoder::Decoder,
@@ -30,7 +31,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 const UI_ASSETS: [&str; 36] = [
     "index.html",
@@ -102,7 +103,25 @@ pub struct App {
     package_io: Arc<Semaphore>,
     analysis: Mutex<Option<VmDocumentsCache>>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
+    artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
 }
+fn cached_artifact_lookup(
+    mut cache: OwnedMutexGuard<ArtifactLookupCache>,
+    root: &Path,
+    id: &str,
+    stream: impl FnOnce(std::time::Instant) -> Result<Value>,
+) -> Result<Value> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let indexed = cache.find_until(root, id, deadline);
+    // Noncacheable full scans retain their reader permit and deadline,
+    // but must not serialize unrelated lookups behind this cache guard.
+    drop(cache);
+    match indexed? {
+        Some(value) => Ok(value),
+        None => stream(deadline),
+    }
+}
+
 impl App {
     pub async fn stop(&self) {
         self.analyst.stop();
@@ -153,6 +172,7 @@ impl App {
             package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
+            artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
         });
         app.native_console.arm_live_bridge().await;
         app.debugger.start().await;
@@ -740,8 +760,14 @@ impl App {
         }
         let root = self.options.artifacts.clone();
         let id = id.to_owned();
-        self.blocking(move || evidence::find_artifact(&root, &id))
-            .await
+        // Wait for the cache before taking a shared reader permit.
+        let cache = self.artifact_lookup.clone().lock_owned().await;
+        self.blocking(move || {
+            cached_artifact_lookup(cache, &root, &id, |deadline| {
+                evidence::find_artifact_until(&root, &id, deadline)
+            })
+        })
+        .await
     }
     async fn post(&self, path: &str, value: &Value) -> Result<Value> {
         match path {
@@ -1189,6 +1215,82 @@ mod tests {
         for task in tasks {
             assert!(task.await.unwrap().unwrap().events.is_empty());
         }
+        app.stop().await;
+    }
+
+    #[tokio::test]
+    async fn artifact_streaming_fallback_releases_cache_but_retains_reader_permit() {
+        let root = tempfile::tempdir().unwrap();
+        // A sparse over-byte-cap manifest selects fallback without expensive reads.
+        std::fs::File::create(root.path().join("manifest.jsonl"))
+            .unwrap()
+            .set_len(64 * 1024 * 1024 + 1)
+            .unwrap();
+        let cache = Arc::new(Mutex::new(ArtifactLookupCache::default()));
+        let guard = cache.clone().lock_owned().await;
+        let io = Arc::new(Semaphore::new(1));
+        let permit = io.clone().acquire_owned().await.unwrap();
+        let started = std::time::Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            cached_artifact_lookup(guard, root.path(), "1", |deadline| {
+                assert!(
+                    cache.try_lock().is_ok(),
+                    "streaming cannot hold the cache guard"
+                );
+                assert_eq!(
+                    io.available_permits(),
+                    0,
+                    "streaming must retain reader admission"
+                );
+                assert!(deadline >= started + Duration::from_secs(5));
+                assert!(deadline <= std::time::Instant::now() + Duration::from_secs(5));
+                Ok(json!("streamed"))
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, "streamed");
+    }
+
+    #[tokio::test]
+    async fn artifact_cache_waiters_and_cancellation_preserve_reader_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let mut options = Options::parse_from(["origin-trace-backend"]);
+        options.store = root.path().join("events.jsonl");
+        options.trace_store = root.path().join("trace.jsonl");
+        options.signal_store = root.path().join("signals.jsonl");
+        options.artifacts = root.path().join("artifacts");
+        options.api_collection = root.path().join("collection.json");
+        options.local_analyst = root.path().join("analyst.json");
+        options.analyst_runner = Some(std::env::current_exe().unwrap());
+        let app = App::new(options, 0).await;
+        let held = app.artifact_lookup.lock().await;
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let app = app.clone();
+            tasks.push(tokio::spawn(async move { app.find_artifact("1").await }));
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(app.io.available_permits(), 4);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), app.blocking(|| Ok(7)))
+                .await
+                .unwrap()
+                .unwrap(),
+            7
+        );
+        for task in tasks.drain(..4) {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        drop(held);
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap_err().status, 404);
+        }
+        assert_eq!(app.io.available_permits(), 4);
+        assert_eq!(app.find_artifact("1").await.unwrap_err().status, 404);
         app.stop().await;
     }
 

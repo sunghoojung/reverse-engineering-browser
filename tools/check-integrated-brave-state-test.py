@@ -312,6 +312,18 @@ class StateGuards(unittest.TestCase):
         (self.brave / "ignored").symlink_to(self.root, target_is_directory=True)
         self.assertNotEqual(self.call().returncode, 0)
 
+    def stage_bundled_service_gate(self):
+        """Copy the integrated wrapper's service gate into the fixture checkout."""
+        tools = self.repo / "tools"
+        tools.mkdir(exist_ok=True)
+        script = HELPER.with_name("check-brave-services.py")
+        shutil.copyfile(script, tools / script.name)
+        patch_name = "0014-disable-bundled-consumer-services.patch"
+        patch = HELPER.parent.parent / "browser/integration/brave/patches" / patch_name
+        destination = self.repo / "browser/integration/brave/patches" / patch_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(patch, destination)
+
     def wrapper(self, overrides=None, initialize=False, expect_bootstrap=False):
         scripts = self.repo / "scripts"
         scripts.mkdir(exist_ok=True)
@@ -325,7 +337,8 @@ class StateGuards(unittest.TestCase):
         shutil.copyfile(HELPER, helper_dir / HELPER.name)
         shutil.copyfile(HELPER.with_name("brave_patch_contract.py"), helper_dir / "brave_patch_contract.py")
         shutil.copyfile(HELPER.with_name("brave_patch_advance.py"), helper_dir / "brave_patch_advance.py")
-        git(self.repo, "add", "scripts", "tools")
+        self.stage_bundled_service_gate()
+        git(self.repo, "add", "scripts", "tools", "browser")
         git(self.repo, "commit", "-qm", "wrapper fixture")
         mocks = self.root / "bin"
         mocks.mkdir(exist_ok=True)
@@ -483,6 +496,7 @@ class StateGuards(unittest.TestCase):
         shutil.copyfile(HELPER, helper_dir / HELPER.name)
         shutil.copyfile(HELPER.with_name("brave_patch_contract.py"), helper_dir / "brave_patch_contract.py")
         shutil.copyfile(HELPER.with_name("brave_patch_advance.py"), helper_dir / "brave_patch_advance.py")
+        self.stage_bundled_service_gate()
         output = self.chromium / "out/Component_arm64"
         executable = output / "Brave Browser.app/Contents/MacOS/Brave Browser"
         phases = self.root / "phases"
@@ -507,7 +521,7 @@ class StateGuards(unittest.TestCase):
         demo.parent.mkdir()
         demo.write_text("#!/bin/sh\nexit 0\n")
         demo.chmod(0o755)
-        git(self.repo, "add", "scripts", "tools")
+        git(self.repo, "add", "scripts", "tools", "browser")
         git(self.repo, "commit", "-qm", "build preparation fixture")
         mocks = self.root / "bin"
         mocks.mkdir()

@@ -117,11 +117,15 @@ decimal payload is the exact unreported count and whose artifact id is the
 interpreter. A full probe queue still counts its own drops and returns the
 budget slot so a later observation can be retained. The writer does not
 read V8, Wasm, canvas calls, or static `br_table` selectors, and it does not
-call `Debug::SetBreakPoint`. No production caller supplies an observation yet,
-so a rebuilt browser still records zero guest steps until a sampler does.
-The ABI and caller-fed writer are separate from an automatic guest-interpreter
-sampler. Static classifications and buffer snapshots cannot supply a runtime
-guest PC. See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
+call `Debug::SetBreakPoint`. The one opt-in caller is the owned register
+interpreter. `EnableOwnedRegisterSampling` arms it for the active VM capture
+session; reconfigure clears that opt-in. `SampleOwnedRegisterInvocation` then
+runs `owned-register-v1` and submits each committed instruction-index program
+counter through `RecordVmDispatchSample`, after one `owned-register-v1`
+invocation finding. The 16-sample budget becomes one vm gap, and a full probe
+queue keeps its own drop count. Captured JavaScript and Wasm still have no
+sampler, so a rebuilt browser records zero guest steps from page code.
+See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
 The VM category also permits 32-byte through 16-MiB snapshots of runtime-created
 `ArrayBuffer`, `Uint8Array`, `Uint16Array`, and `Uint32Array` data. The V8 hook
 uses an embedder callback and never wraps JavaScript constructors. At most 16

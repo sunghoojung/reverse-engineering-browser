@@ -3,8 +3,10 @@
 #include "chromium_stubs.h"
 
 #include <array>
+#include <bit>
 #include <cassert>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <span>
@@ -17,6 +19,11 @@
 #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+#include "reb/owned_vm_guest_sampler.hpp"
+// clang-format off
+// Leave this header outside the sorted common-header block above.
+#include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
+// clang-format on
 
 std::atomic<std::uint64_t> allocations{0};
 void* operator new(std::size_t size) {
@@ -689,11 +696,128 @@ void DispatchEmitFailureReleasesBudget() {
   std::cout << "PASS failed dispatch emit returns the budget slot and keeps the queue drop\n";
 }
 
+void OwnedRegisterSamplerAdmission() {
+  NativeProbeQueue queue;
+  Configure(queue, 90);
+  const auto before = allocations.load();
+  sink.IngestOwnedRegisterInvocation(1);
+  sink.IngestOwnedRegisterStep(0, 1, 1, 0);
+  const auto disabled = reb::SampleOwnedRegisterInvocation(1, nullptr);
+  assert(disabled.halted && disabled.executed == 9 && disabled.submitted == 0);
+  assert(allocations == before);
+  assert(Drain(queue) == 0);
+  reb::OwnedRegisterSamplePolicy missing{};
+  assert(!sink.EnableOwnedRegisterSampling(missing));
+  Configure(queue, 90, kForever, reb::NativeProbeCategoryMask(kRuntime));
+  reb::OwnedRegisterSamplePolicy policy{105, 106, 107, 108};
+  assert(!sink.EnableOwnedRegisterSampling(policy));
+  Configure(queue, 90);
+  assert(sink.EnableOwnedRegisterSampling(policy));
+  Configure(queue, 90);
+  const reb::OwnedRegisterSamplerBinding binding{&reb::IngestOwnedRegisterInvocationThunk,
+                                                 &reb::IngestOwnedRegisterStepThunk, &sink};
+  const auto cleared = reb::SampleOwnedRegisterInvocation(201, &binding);
+  assert(cleared.halted && cleared.submitted == 9);
+  assert(Drain(queue) == 0);
+
+  assert(sink.EnableOwnedRegisterSampling(policy));
+  constexpr std::uint32_t kPcs[] = {0, 1, 2, 3, 4, 5, 6, 8, 10};
+  constexpr std::uint32_t kOpcodes[] = {1, 1, 2, 3, 4, 5, 6, 7, 8};
+  for (const std::uint64_t invocation : {201U, 202U}) {
+    const auto run = reb::SampleOwnedRegisterInvocation(invocation, &binding);
+    assert(run.halted && run.executed == 9 && run.submitted == 9);
+  }
+  sink.PublishVmDispatchBudgetGap();
+  constexpr std::uint32_t kProgramSteps = 9;
+  constexpr std::uint32_t kRetained = reb::kNativeVmDispatchSampleBudget;
+  std::uint32_t samples = 0;
+  std::uint32_t findings = 0;
+  std::uint32_t gaps = 0;
+  std::uint64_t omitted = 0;
+  std::uint64_t invocations[2]{};
+  NativeProbeEvent event;
+  while (queue.TryPop(event)) {
+    assert(event.header.session_id == 90);
+    assert(event.header.category == reb::NativeProbeCategory::kVm);
+    assert(event.header.artifact_id == policy.interpreter_artifact_id);
+    if (event.header.type == reb::NativeProbeType::kVmFinding) {
+      const auto finding = std::bit_cast<reb::NativeVmFindingPayload>(event.inline_payload);
+      assert(finding.kind == reb::NativeVmFindingKind::kInvocation);
+      assert(finding.confidence == reb::NativeVmFindingConfidence::kObserved);
+      assert(finding.flags == static_cast<std::uint8_t>(reb::NativeVmFindingFlag::kDynamic));
+      assert(finding.finding_id == policy.finding_id);
+      assert(finding.investigation_id == policy.investigation_id);
+      assert(finding.related_subject_id == policy.bytecode_artifact_id);
+      constexpr char kLabel[] = "owned-register-v1";
+      assert(finding.label_size == sizeof(kLabel) - 1);
+      assert(std::memcmp(finding.label.data(), kLabel, finding.label_size) == 0);
+      assert(findings < 2);
+      invocations[findings] = finding.subject_id;
+      ++findings;
+      continue;
+    }
+    if (event.header.type == reb::NativeProbeType::kGap) {
+      omitted += reb::NativeProbeDropWeight(event);
+      ++gaps;
+      continue;
+    }
+    assert(event.header.type == reb::NativeProbeType::kVmDispatchSample);
+    const auto sample = std::bit_cast<reb::NativeVmDispatchSamplePayload>(event.inline_payload);
+    const std::uint32_t program_index = samples < kProgramSteps ? samples : samples - kProgramSteps;
+    assert(program_index < kProgramSteps);
+    assert(sample.instruction_pointer == kPcs[program_index]);
+    assert(sample.opcode == kOpcodes[program_index]);
+    assert(sample.handler_index == kOpcodes[program_index]);
+    assert(sample.sample_index == program_index);
+    assert(sample.interpreter_artifact_id == policy.interpreter_artifact_id);
+    assert(sample.bytecode_artifact_id == policy.bytecode_artifact_id);
+    ++samples;
+  }
+  assert(findings == 2);
+  assert(invocations[0] == 201 && invocations[1] == 202);
+  assert(samples == kRetained);
+  assert(gaps == 1);
+  assert(omitted == (2 * kProgramSteps) - kRetained);
+
+  Configure(queue, 91);
+  assert(sink.EnableOwnedRegisterSampling(policy));
+  Fill(queue);
+  const auto dropped = reb::SampleOwnedRegisterInvocation(301, &binding);
+  assert(dropped.submitted == kProgramSteps);
+  assert(queue.DroppedCount() == kProgramSteps + 1);
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  const auto recovered = reb::SampleOwnedRegisterInvocation(302, &binding);
+  assert(recovered.submitted == kProgramSteps);
+  std::uint32_t recovered_samples = 0;
+  std::uint32_t recovered_findings = 0;
+  while (queue.TryPop(event)) {
+    if (event.header.type == reb::NativeProbeType::kVmFinding) {
+      const auto finding = std::bit_cast<reb::NativeVmFindingPayload>(event.inline_payload);
+      assert(finding.subject_id == 302);
+      ++recovered_findings;
+      continue;
+    }
+    assert(event.header.type == reb::NativeProbeType::kVmDispatchSample);
+    const auto sample = std::bit_cast<reb::NativeVmDispatchSamplePayload>(event.inline_payload);
+    assert(sample.instruction_pointer == kPcs[recovered_samples]);
+    assert(sample.opcode == kOpcodes[recovered_samples]);
+    ++recovered_samples;
+  }
+  assert(recovered_findings == 1);
+  assert(recovered_samples == kProgramSteps);
+  assert(queue.DroppedCount() == kProgramSteps + 1);
+  sink.PublishVmDispatchBudgetGap();
+  assert(Drain(queue) == 0);
+  std::cout << "PASS owned register sampler opt-in, invocation markers, budget gap and queue "
+               "drops\n";
+}
+
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
   DispatchSampleAdmission();
   DispatchEmitFailureReleasesBudget();
+  OwnedRegisterSamplerAdmission();
   QueueMappingAndCanvasBurst();
   RecoveryAndSaturation();
   ConcurrentSameSite();

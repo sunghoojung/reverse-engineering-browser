@@ -80,7 +80,7 @@ final class StoredEventWindowCache {
     do {
       guard var tail = try readTail(path) else {
         var records: [Record] = []
-        return summarize(records: &records, start: 0, end: 0, bytes: [], limit: limit).window
+        return try summarize(records: &records, start: 0, end: 0, bytes: [], limit: limit).window
       }
       let skip: Int
       if tail.start == 0 || tail.predecessor == 0x0a {

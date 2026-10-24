@@ -176,7 +176,9 @@ Integer switch cases and statically visible numeric handler tables are
 `observed` for both JavaScript and Wasm artifacts. Absent sampling remains the
 named `sampler-unavailable` omission. A vm gap that names the interpreter and
 carries a decimal drop count adds `dispatch-sample-budget` so a capped trace
-stays incomplete.
+stays incomplete. The owned register interpreter can produce those samples and
+that gap when its probe opt-in is enabled. Captured JavaScript and Wasm
+interpreters remain unsampled.
 
 The `vm_dispatch_sample` v1 payload is the fixed 128-byte little-endian
 `VmDispatchSamplePayload`. Validators require protocol version `1`, payload

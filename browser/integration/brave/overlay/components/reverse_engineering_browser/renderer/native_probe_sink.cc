@@ -6,10 +6,12 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -867,8 +869,9 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   const bool capture_canvas_images,
                                   const NativeProbeFrameIdProvider frame_id_provider) noexcept {
   // Flush dispatch losses into the configuration that observed them before
-  // the emitter and generation change.
+  // the emitter and generation change. A replacement session must opt in again.
   PublishVmDispatchBudgetGap();
+  DisableOwnedRegisterSampling();
   // SetEmitters is serialized by NativeProbeTransport's bound sequence. Stop
   // new readers before marking the independently atomic configuration fields
   // unstable. The completed even generation release-publishes the relaxed
@@ -1544,6 +1547,140 @@ void NativeProbeSink::RecordVmDispatchSample(const NativeVmDispatchSamplePayload
       note_loss();
       return;
   }
+}
+
+bool NativeProbeSink::SnapshotVmAdmission(VmAdmission& admission) const noexcept {
+  admission = {};
+  const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
+  if (generation == 0 || (generation & 1U) != 0 || !emitter_.load(std::memory_order_acquire)) {
+    return false;
+  }
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at_monotonic_ns =
+      expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != generation || emitter == nullptr ||
+      session_id == 0 || (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns) {
+    return false;
+  }
+  const NativeProbeFrameIdProvider frame_id_provider =
+      frame_id_provider_.load(std::memory_order_relaxed);
+  admission.generation = generation;
+  admission.session_id = session_id;
+  admission.monotonic_time_ns = monotonic_time_ns;
+  admission.frame_id = frame_id_provider ? frame_id_provider() : 0;
+  admission.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  admission.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  return true;
+}
+
+void NativeProbeSink::DisableOwnedRegisterSampling() noexcept {
+  owned_register_sampling_.store(0, std::memory_order_release);
+}
+
+bool NativeProbeSink::EnableOwnedRegisterSampling(
+    const OwnedRegisterSamplePolicy& policy) noexcept {
+  if (policy.finding_id == 0 || policy.investigation_id == 0 ||
+      policy.interpreter_artifact_id == 0 || policy.bytecode_artifact_id == 0) {
+    return false;
+  }
+  VmAdmission admission;
+  if (!SnapshotVmAdmission(admission)) {
+    return false;
+  }
+  owned_register_finding_id_.store(policy.finding_id, std::memory_order_relaxed);
+  owned_register_investigation_id_.store(policy.investigation_id, std::memory_order_relaxed);
+  owned_register_interpreter_id_.store(policy.interpreter_artifact_id, std::memory_order_relaxed);
+  owned_register_bytecode_id_.store(policy.bytecode_artifact_id, std::memory_order_relaxed);
+  owned_register_sampling_.store(1, std::memory_order_release);
+  return true;
+}
+
+void NativeProbeSink::IngestOwnedRegisterInvocation(const std::uint64_t invocation_id) noexcept {
+  if (owned_register_sampling_.load(std::memory_order_acquire) == 0 || invocation_id == 0) {
+    return;
+  }
+  VmAdmission admission;
+  if (!SnapshotVmAdmission(admission)) {
+    return;
+  }
+  constexpr char kLabel[] = "owned-register-v1";
+  constexpr std::uint16_t kLabelSize = sizeof(kLabel) - 1;
+  static_assert(kLabelSize <= kNativeVmFindingLabelCapacity);
+  NativeVmFindingPayload payload{};
+  payload.kind = NativeVmFindingKind::kInvocation;
+  payload.host_runtime = NativeVmHostRuntime::kUnknown;
+  payload.confidence = NativeVmFindingConfidence::kObserved;
+  payload.flags = static_cast<std::uint8_t>(NativeVmFindingFlag::kDynamic);
+  payload.label_size = kLabelSize;
+  payload.finding_id = owned_register_finding_id_.load(std::memory_order_relaxed);
+  payload.investigation_id = owned_register_investigation_id_.load(std::memory_order_relaxed);
+  payload.subject_id = invocation_id;
+  payload.related_subject_id = owned_register_bytecode_id_.load(std::memory_order_relaxed);
+  for (std::uint16_t index = 0; index < kLabelSize; ++index) {
+    payload.label[index] = kLabel[index];
+  }
+  NativeProbeEvent event{};
+  event.header.protocol_version = kNativeProbeProtocolVersion;
+  event.header.header_size = sizeof(NativeProbeHeader);
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kVmFinding;
+  event.header.payload_size = sizeof(NativeVmFindingPayload);
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.monotonic_time_ns = admission.monotonic_time_ns;
+  event.header.session_id = admission.session_id;
+  event.header.process_id = admission.process_id;
+  event.header.thread_id = admission.thread_id;
+  event.header.frame_id = admission.frame_id;
+  event.header.artifact_id = owned_register_interpreter_id_.load(std::memory_order_relaxed);
+  static_assert(sizeof(payload) <= kNativeProbeInlinePayloadSize);
+  const auto payload_bytes = std::bit_cast<std::array<std::byte, sizeof(payload)>>(payload);
+  std::ranges::copy(payload_bytes, event.inline_payload.begin());
+  static_cast<void>(NativeProbeTransport::EmitStatus(event, admission.generation));
+}
+
+void NativeProbeSink::IngestOwnedRegisterStep(const std::uint32_t instruction_pointer,
+                                              const std::uint32_t opcode,
+                                              const std::uint8_t operand_count,
+                                              const std::uint32_t sample_index) noexcept {
+  if (owned_register_sampling_.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  NativeVmDispatchSamplePayload sample{};
+  sample.instruction_pointer = instruction_pointer;
+  sample.opcode = opcode;
+  sample.handler_index = opcode;
+  sample.sample_index = sample_index;
+  sample.operand_count = operand_count;
+  sample.finding_id = owned_register_finding_id_.load(std::memory_order_relaxed);
+  sample.investigation_id = owned_register_investigation_id_.load(std::memory_order_relaxed);
+  sample.interpreter_artifact_id = owned_register_interpreter_id_.load(std::memory_order_relaxed);
+  sample.bytecode_artifact_id = owned_register_bytecode_id_.load(std::memory_order_relaxed);
+  RecordVmDispatchSample(sample);
+}
+
+void IngestOwnedRegisterInvocationThunk(const std::uint64_t invocation_id,
+                                        void* const sink) noexcept {
+  if (sink == nullptr) {
+    return;
+  }
+  static_cast<NativeProbeSink*>(sink)->IngestOwnedRegisterInvocation(invocation_id);
+}
+
+void IngestOwnedRegisterStepThunk(const std::uint32_t instruction_pointer,
+                                  const std::uint32_t opcode,
+                                  const std::uint8_t operand_count,
+                                  const std::uint32_t sample_index,
+                                  void* const sink) noexcept {
+  if (sink == nullptr) {
+    return;
+  }
+  static_cast<NativeProbeSink*>(sink)->IngestOwnedRegisterStep(instruction_pointer, opcode,
+                                                               operand_count, sample_index);
 }
 
 }  // namespace reb

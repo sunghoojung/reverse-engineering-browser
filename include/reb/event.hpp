@@ -152,6 +152,11 @@ void SetInlinePayloadPrefix(EventRecord& event, std::string_view payload) noexce
 [[nodiscard]] std::span<const std::byte> InlinePayload(const EventRecord& event) noexcept;
 
 [[nodiscard]] bool IsValidEvent(const EventRecord& event) noexcept;
+// The fixed fields, widest numeric values, and bounded hex payload fit this
+// serialization budget. This is not a wire-record size or an admission rule.
+inline constexpr std::size_t kMaxEventJsonBytes = 1280;
+// Replace the output while retaining its capacity for the next record.
+void WriteEventJson(const EventRecord& event, std::string& output);
 [[nodiscard]] std::string EventToJson(const EventRecord& event);
 
 [[nodiscard]] std::string_view EventCategoryName(EventCategory category) noexcept;

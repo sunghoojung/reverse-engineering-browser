@@ -33,7 +33,12 @@ captures use bounded reads of up to 256 records and flush after every received
 batch. This keeps low-volume evidence visible promptly while reducing socket
 and storage calls on high-volume captures. JSON encoding appends integers and
 payload hex directly into one reserved output string instead of constructing a
-locale-aware stream and an intermediate payload string for every event.
+locale-aware stream and an intermediate payload string for every event. Each
+input stream reuses a dedicated output string reserved for a 1,280-byte encoding
+budget, so event encoding
+does not allocate again after the first accepted record. The output is replaced
+for every record, including a shorter or empty payload; buffering and flush
+boundaries are unchanged.
 When the tracker reaches capacity, it evicts streams in deterministic insertion
 order so repeated evidence replays produce the same gap accounting.
 If combined gap counts exceed 64-bit range, the count saturates at its maximum

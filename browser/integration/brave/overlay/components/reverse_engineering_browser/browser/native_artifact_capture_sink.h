@@ -87,11 +87,16 @@ class NativeArtifactCaptureSink final {
     std::size_t reservation_bytes = 0;
     std::uint64_t request_id = 0;
     std::uint64_t frame_id = 0;
+    std::uint64_t generation = 0;
   };
 
   struct PendingContext final {
     std::uint64_t request_id = 0;
     std::uint64_t frame_id = 0;
+    std::uint64_t session_id = 0;
+    std::uint64_t generation = 0;
+    // Only network creators share the browser event's sequence namespace.
+    std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
   };
 
@@ -107,11 +112,17 @@ class NativeArtifactCaptureSink final {
                   std::uint64_t request_id,
                   std::uint64_t frame_id,
                   const std::string& detail,
-                  NativeProbeCategory category = NativeProbeCategory::kArtifact) noexcept;
+                  NativeProbeCategory category = NativeProbeCategory::kArtifact,
+                  std::uint64_t parent_event_id = 0) noexcept;
   [[nodiscard]] bool IsEnabledFor(NativeProbeCategory category) const noexcept;
+  [[nodiscard]] bool IsCurrentCapture(std::uint64_t session_id,
+                                      std::uint64_t generation) const noexcept;
   [[nodiscard]] bool Reserve(std::size_t bytes) noexcept;
   void Release(std::size_t bytes) noexcept;
 
+  // Configuration, body completions and posted transfer ACKs run on the browser
+  // sequence. A new generation retires admitted work even if session ID is reused.
+  std::atomic<std::uint64_t> generation_{0};
   std::atomic<NativeProbeEmitter> emitter_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};
   std::atomic<std::uint64_t> category_mask_{0};

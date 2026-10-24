@@ -12,7 +12,7 @@ magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decode
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
 
-check: all native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
+check: all native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
@@ -32,6 +32,9 @@ native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 
 native-probe-admission-check:
 	CXX="$(CXX)" ./tools/check-native-probe-admission.sh
+
+native-artifact-capture-check: $(ARTIFACT_RECEIVER_BINARY) $(BROKER_BINARY) origin-trace-backend
+	CXX="$(CXX)" python3 tools/check-native-artifact-capture.py --receiver $(ARTIFACT_RECEIVER_BINARY) --broker $(BROKER_BINARY) --analyzer $(abspath $(or $(CARGO_TARGET_DIR),apps/origin-trace-backend/target))/debug/origin-trace-vm --backend $(abspath $(or $(CARGO_TARGET_DIR),apps/origin-trace-backend/target))/debug/origin-trace-backend
 
 native-network-capture-check:
 	CXX="$(CXX)" ./tools/check-native-network-capture.sh
@@ -62,6 +65,7 @@ sanitize:
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
 		all native-request-identity-check wire-decoder-check magic-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check native-tests
 	REB_PROBE_TEST_SANITIZERS="$(SANITIZERS)" CXX="$(CXX)" ./tools/check-native-network-capture.sh
+	REB_PROBE_TEST_SANITIZERS="$(SANITIZERS)" CXX="$(CXX)" python3 tools/check-native-artifact-capture.py --receiver $(SANITIZE_BUILD_DIR)/reb-artifact-receiver --broker $(SANITIZE_BUILD_DIR)/reb-event-broker
 
 format:
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
@@ -111,6 +115,7 @@ clean:
 javascript-check: capture-completeness-check
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
+	node tools/check-vm-request-linkage-ui.mjs
 	node tools/check-traffic-capture.mjs
 	node tools/check-traffic-selection-work.mjs
 	node tools/check-event-window.mjs
@@ -171,3 +176,5 @@ capture-completeness-check:
 # Exact browser version must be explicitly selected with REB_REFERENCE_BROWSER_VERSION.
 capture-completeness-browser-check: capture-completeness-check origin-trace-backend debugger-transport
 	node tools/check-capture-completeness-browser.mjs .
+
+.PHONY: native-artifact-capture-check

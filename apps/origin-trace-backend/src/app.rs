@@ -616,33 +616,45 @@ impl App {
             }
             "/api/analysis/vm" => {
                 let request = q.one("request_id")?;
-                if request.is_some() {
-                    q.number("request_id", None, 64, false)?;
-                }
-                let (mut value, _) = self.vm_documents().await?;
-                if let Some(request) = request {
-                    value["selection"] = json!({"kind":"request","request_id":request,"edge_semantics":"correlated-not-causal"});
-                    value["results"].as_array_mut().unwrap().retain(|r| {
-                        r["related_request_ids"]
-                            .as_array()
-                            .is_some_and(|a| a.contains(&json!(request)))
-                    });
-                    let ids = value["results"]
-                        .as_array()
-                        .unwrap()
+                let session = q.one("session_id")?;
+                let process = q.one("root_process_id")?;
+                let sequence = q.one("root_sequence_number")?;
+                let selected = [request, session, process, sequence]
+                    .iter()
+                    .any(Option::is_some);
+                let process_id = if selected {
+                    if [request, session, process, sequence]
                         .iter()
-                        .map(|r| r["artifact_id"].clone())
-                        .collect::<Vec<_>>();
-                    value["mixed_findings"].as_array_mut().unwrap().retain(|f| {
-                        f["artifact_ids"]
-                            .as_array()
-                            .is_some_and(|a| a.iter().any(|id| ids.contains(id)))
-                    });
+                        .any(Option::is_none)
+                    {
+                        return Err(Error::bad(
+                            "Exact VM request selection requires request_id, session_id, root_process_id and root_sequence_number",
+                        ));
+                    }
+                    q.number("request_id", None, 64, true)?;
+                    q.number("session_id", None, 64, true)?;
+                    q.number("root_sequence_number", None, 64, true)?;
+                    q.number("root_process_id", None, 32, true)?
+                } else {
+                    0
+                };
+                let (mut value, _) = self.vm_documents().await?;
+                if selected {
+                    crate::vm_request_links::select(
+                        &mut value,
+                        request.unwrap(),
+                        session.unwrap(),
+                        process_id,
+                        sequence.unwrap(),
+                    );
                 }
                 etag = Some(format!(
-                    "\"{}-{}\"",
+                    "\"{}-{}-{}-{}-{}\"",
                     value["document_digest"].as_str().unwrap(),
-                    request.unwrap_or("all")
+                    request.unwrap_or("all"),
+                    session.unwrap_or("all"),
+                    process.unwrap_or("all"),
+                    sequence.unwrap_or("all")
                 ));
                 value
             }

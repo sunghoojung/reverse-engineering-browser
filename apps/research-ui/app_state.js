@@ -180,6 +180,8 @@
         vmAnalysisDocument: null,
         vmAnalysisError: null,
         vmAnalysisRequestId: null,
+        vmAnalysisSelection: null,
+        vmAnalysisGeneration: 0,
         vmAnalysisEtag: null,
         vmOpcodeWorkspace: null,
         lastValidVmOpcodeWorkspace: null,

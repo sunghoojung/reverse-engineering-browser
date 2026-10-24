@@ -1996,6 +1996,89 @@
         return { findings, malformedCount };
       }
 
+      function isVmExactEventReference(reference) {
+        return vmWorkspaceExact(reference, ['session_id', 'process_id', 'sequence_number']) &&
+          isCanonicalInteger(reference.session_id, 1n, uint64Max) &&
+          isSafeIntegerInRange(reference.process_id, 1, 0xffffffff) &&
+          isCanonicalInteger(reference.sequence_number, 1n, uint64Max);
+      }
+
+      function isVmRequestSelection(selection) {
+        return vmWorkspaceExact(selection, ['kind', 'request_id', 'root_event', 'edge_semantics']) &&
+          selection.kind === 'request' && selection.edge_semantics === 'exact-captured-response-body' &&
+          isCanonicalInteger(selection.request_id, 1n, uint64Max) && isVmExactEventReference(selection.root_event);
+      }
+
+      function vmRequestSelectionKey(selection) {
+        return selection ? JSON.stringify([selection.request_id, selection.root_event.session_id,
+          selection.root_event.process_id, selection.root_event.sequence_number]) : null;
+      }
+
+      // A DevTools join names the renderer request_initiated id. That id is not
+      // the browser request_started id. The joined row may still carry the native
+      // request's events, and one valid start on those events is an exact root.
+      function devtoolsJoinedNativeEvents(request) {
+        const link = request?.nativeLink;
+        if (link?.kind !== 'devtools-request-id' || !isCanonicalInteger(link.requestId, 1n, uint64Max)) return false;
+        const initiated = (request.events ?? []).filter(event =>
+          event?.type === 'request_initiated' && [2, 3].includes(event.protocol_version) &&
+          event.category === 'network' && integerText(event, 'request_id') === link.requestId);
+        return initiated.length === 1;
+      }
+
+      function vmRequestSelection(requests, selectedId) {
+        const candidates = requests.filter(request => request.id === selectedId);
+        const request = candidates.length === 1 ? candidates[0] : null;
+        if (request?.origin !== 'live') return null;
+        const debuggerRow = Boolean(request.protocolRequestId) || String(request.operation).startsWith('cdp_');
+        if (debuggerRow && !devtoolsJoinedNativeEvents(request)) return null;
+        // Only the actual retained row's unique native start establishes a root.
+        // Latest lifecycle events, bare row IDs and debugger correlations do not.
+        const roots = (request.events ?? []).filter(event => event.type === 'request_started');
+        if (roots.length !== 1) return null;
+        const root = roots[0];
+        if (![2, 3].includes(root.protocol_version) || root.category !== 'network') return null;
+        const selection = {kind: 'request', request_id: root.request_id,
+          root_event: {session_id: root.session_id, process_id: root.process_id, sequence_number: root.sequence_number},
+          edge_semantics: 'exact-captured-response-body'};
+        return isVmRequestSelection(selection) ? selection : null;
+      }
+
+      function isVmExactRequestLink(link) {
+        if (!vmWorkspaceExact(link, ['request_id', 'root_event', 'response_event', 'capture_event', 'relation']) ||
+            link.relation !== 'captured-response-body' || !isCanonicalInteger(link.request_id, 1n, uint64Max) ||
+            ![link.root_event, link.response_event, link.capture_event].every(isVmExactEventReference)) return false;
+        return [link.response_event, link.capture_event].every(event =>
+          event.session_id === link.root_event.session_id && event.process_id === link.root_event.process_id) &&
+          BigInt(link.root_event.sequence_number) < BigInt(link.response_event.sequence_number) &&
+          BigInt(link.response_event.sequence_number) < BigInt(link.capture_event.sequence_number);
+      }
+
+      function vmAnalysisMatchesSelection(document, selection) {
+        if (!selection) return document.selection === undefined;
+        if (!isVmRequestSelection(document.selection) ||
+            vmRequestSelectionKey(document.selection) !== vmRequestSelectionKey(selection)) return false;
+        // Mixed-runtime conclusions cannot inherit an exact join from one constituent.
+        return document.mixed_findings.length === 0 && document.results.every(result =>
+          vmWorkspaceDigest(result.artifact_sha256) && result.exact_request_links?.some(link => link.request_id === selection.request_id &&
+            vmRequestSelectionKey({request_id: link.request_id, root_event: link.root_event}) === vmRequestSelectionKey(selection)));
+      }
+
+      function vmSourceArtifactForFinding(artifacts, finding, selection = null) {
+        if (!finding) return null;
+        // Sources navigation resolves by artifact ID, so an ID collision must
+        // fail before filtering by session/hash could hide the other record.
+        const candidates = artifacts.filter(artifact => artifact.artifact_id === finding.sourceArtifactId);
+        const artifact = candidates.length === 1 ? candidates[0] : null;
+        return artifact && (!selection || (artifact.session_id === selection.root_event.session_id &&
+          artifact.sha256 === finding.analysis?.artifact_sha256)) ? artifact : null;
+      }
+
+      function vmVisibleFindings(targetState) {
+        return [...targetState.lastValidAnalysisFindings,
+          ...(targetState.vmAnalysisSelection ? [] : targetState.eventVmFindings)];
+      }
+
       function isVmAnalysisObservation(observation) {
         return isPlainObject(observation) &&
           typeof observation.rule_id === 'string' && observation.rule_id.length > 0 &&
@@ -2010,6 +2093,8 @@
       function isVmAnalysisResult(result) {
         if (!isPlainObject(result) || !isCanonicalInteger(result.artifact_id, 0n, uint64Max) ||
             (result.artifact_sha256 !== undefined && !vmWorkspaceDigest(result.artifact_sha256)) ||
+            (result.exact_request_links !== undefined && (!Array.isArray(result.exact_request_links) ||
+              result.exact_request_links.length > 1 || !result.exact_request_links.every(isVmExactRequestLink))) ||
             !['javascript', 'webassembly', 'unknown'].includes(result.runtime) ||
             !['complete', 'partial', 'failed'].includes(result.status)) return false;
         if (result.status === 'failed') {
@@ -2030,6 +2115,7 @@
       function isVmAnalysisDocument(document) {
         return isPlainObject(document) && document.contract_version === 1 &&
           document.document_kind === 'vm-analysis' &&
+          (document.selection === undefined || isVmRequestSelection(document.selection)) &&
           (document.capture_mode === undefined || vmWorkspaceMode(document.capture_mode)) &&
           (document.inputs?.capture_provenance_digest === undefined ||
             document.inputs.capture_provenance_digest === null ||
@@ -2558,10 +2644,7 @@
       function retainVmAnalysisOnFailure(targetState, status, errorMessage) {
         targetState.vmAnalysisStatus = status;
         targetState.vmAnalysisError = errorMessage;
-        targetState.vmFindings = [
-          ...targetState.lastValidAnalysisFindings,
-          ...targetState.eventVmFindings
-        ];
+        targetState.vmFindings = vmVisibleFindings(targetState);
       }
 
       function isVmOwnedExperimentRecord(row) {

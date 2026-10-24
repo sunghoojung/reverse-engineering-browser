@@ -801,3 +801,40 @@ contract, including the separate network window, scan coverage, and saturated
 gap and drop totals. A response that omits the fields is still accepted, and
 the UI then resets old summaries and labels fallback counts as
 visible-window-only.
+
+## Exact native Traffic to VM selection
+
+`GET /api/analysis/vm` without selectors remains session analysis. A request
+selection must supply all four nonzero canonical fields: `request_id`,
+`session_id`, `root_process_id` (32-bit), and `root_sequence_number` (64-bit).
+Incomplete, malformed, or repeated selectors return 400. The selector and ETag
+include the complete native root, never just a reused numeric request ID.
+
+Selected results require `exact_request_links`: a unique native
+`request_started` root, a same-process/session `response_started`, and a retained
+successful `artifact_captured` event whose `parent_event_id` equals the
+manifest's `creator_event_id`. Request/frame/navigation metadata must agree;
+root and response browser-context tokens must agree. The response sequence is
+producer-owned, not a URL, timing, same-frame, or content-hash match. Identical
+redelivery is idempotent, conflicting identities and multiple roots/captures
+remain unlinked, and arrival order is not interpreted as causal order. Network
+artifacts have no JavaScript execution-context or trustworthy document-generation
+identity; neither is inferred. The exact request and creator event instances
+bound this narrower body-capture relation.
+
+The response labels selection semantics `exact-captured-response-body` and keeps
+the evidence references. This proves that the analyzed bytes were captured from
+that native response, not that the source ran, dispatched a guest VM, or caused
+an outgoing request. Native redirects are one chain-level request, not an exact
+CDP redirect-hop claim. Mixed hypotheses, generated source, allocating-script
+snapshots, missing ACK/creator records, and historical captures without the new
+parent link are excluded from exact selection. `related_request_ids` remains
+legacy correlated context for unfiltered analysis and is never an exact filter.
+
+A DevTools request-id join identifies one native `request_initiated` event. That
+renderer id is not the browser `request_started` id used above. Related VM on
+the joined CDP row uses the joined native events only when they also contain
+one valid `request_started` root. Unjoined CDP rows, host/method/time
+correlations, and incomplete roots stay in Traffic with an explanation. Use the
+VM workspace navigation explicitly for unfiltered session analysis. A rebuilt,
+matched Brave is required to produce the new capture-parent link.

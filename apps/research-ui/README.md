@@ -1248,10 +1248,13 @@ source metadata and connection status; attached sessions show debugger controls
 by default. The toggle remains available at narrow window sizes.
 
 VM analysis is a secondary Traffic view, reached through Related VM candidates
-for a selected request. A content-capture row has no native request id, so that
-button opens the session analysis instead of a request-scoped join. An exact
-native request id still opens request-scoped analysis. It has a Back to traffic
-control and no primary tab.
+for a selected native request with a complete root identity. A CDP row joined
+by DevTools request id can use the same pivot when the joined native events
+contain one exact request start; the renderer id is not that start. Other CDP
+and incomplete native rows stay in Traffic with an unlinked notice; they never
+silently open session-wide analysis. The request-scoped view uses only acknowledged response
+creator chains and has a Back to traffic control. Use workspace navigation
+explicitly to inspect unfiltered session analysis.
 When the selected finding has a validated opcode workspace, VM Lab adds the
 handler mapping, runtime typed-array bytecode preview, characterized coverage,
 named omissions, and residual unknowns beneath the unchanged detection detail.
@@ -2242,3 +2245,23 @@ opens the ledger editor for deliberate authoring. Coverage separates opcode,
 evidence status, asserted meaning and supplied test outcome; definition hashes
 remain available under **Definition identity**. These presentation changes do
 not alter schema checks, research assertions, cancellation or export boundaries.
+
+
+### Exact request VM candidates
+
+Related VM candidates on a native Traffic row sends the complete request root
+(session, process, request ID and sequence). Only findings whose response body
+has an acknowledged producer-backed creator chain are shown. Same-frame request
+IDs remain labeled correlated context, never exact linkage. Empty or conflicting
+chains produce no request findings; a new selection cannot retain findings from
+an older request, and late responses cannot replace a newer selection.
+
+A CDP row reaches that same exact root only through a DevTools request-id join
+whose retained events include one valid native start. The renderer request id
+is not substituted for the browser start id. Other CDP and incomplete-root rows
+remain in Traffic with an explicit unlinked notice.
+Use the VM workspace navigation for session-wide analysis. Existing captures
+without the new browser artifact-parent event remain unlinked. Generated/runtime
+allocating-source artifacts do not gain network ancestry from equal URLs or bytes.
+This relation identifies captured source, not executed guest VM instructions.
+See [exact request selection](../../protocol/http-api.md#exact-native-traffic-to-vm-selection).

@@ -1962,7 +1962,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.3.0");
+        assert_eq!(document["producer"]["version"], "1.4.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -2615,7 +2615,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.3.0");
+    assert_eq!(document["producer"]["version"], "1.4.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 2);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -3647,7 +3647,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.3.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.4.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -7134,4 +7134,167 @@ async fn event_window_large_store_counts_only_the_declared_tail() {
     assert_eq!(body["network_events"][0]["type"], "request_failed");
     assert_eq!(body["queue_drops"], "0");
     assert_eq!(body["sequence_gaps"], "0");
+}
+
+#[tokio::test]
+async fn vm_exact_request_projection_requires_acknowledged_creator_chain_and_full_selector() {
+    let server = Server::start().await;
+    let root_dir = server.root.path().join("artifacts");
+    let mut artifact = vm_artifact(&root_dir, b"function run(code) { let pc=0, stack=[]; while (pc<code.length) { switch(code[pc++]) { case 1: stack.push(1); break; default: return; } } }", "3");
+    artifact["session_id"] = json!("9007199254740993");
+    artifact["capture_origin"] = json!("network_response");
+    artifact["execution_context_id"] = json!("0");
+    artifact["creator_event_id"] = json!("12");
+    let mut root = vm_event("network", 10, 12, "0");
+    root["session_id"] = artifact["session_id"].clone();
+    root["request_id"] = json!("9007199254740995");
+    let mut response = root.clone();
+    response["sequence_number"] = json!("12");
+    response["type"] = json!("response_started");
+    let mut capture = response.clone();
+    capture["sequence_number"] = json!("14");
+    capture["type"] = json!("artifact_captured");
+    capture["category"] = json!("artifact");
+    capture["artifact_id"] = json!("1");
+    capture["parent_event_id"] = json!("12");
+    let mut unrelated = root.clone();
+    unrelated["sequence_number"] = json!("9");
+    unrelated["request_id"] = json!("55");
+    // Arrival order is not causal order; an identical redelivery is harmless.
+    let events = vec![
+        capture.clone(),
+        unrelated,
+        response.clone(),
+        root.clone(),
+        response.clone(),
+    ];
+    server.file(
+        "artifacts/manifest.jsonl",
+        &jsonl(std::slice::from_ref(&artifact)),
+    );
+    server.file("events.jsonl", &jsonl(&events));
+    let query = "request_id=9007199254740995&session_id=9007199254740993&root_process_id=12&root_sequence_number=10";
+    let path = format!("/api/analysis/vm?{query}");
+    let response = server.get(&path).await;
+    let etag = response.headers()["etag"].clone();
+    let bytes = assert_contract_response(response, "get", "/api/analysis/vm", 200).await;
+    let document: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(document["results"].as_array().unwrap().len(), 1);
+    assert_eq!(document["summary"]["analyzed_artifacts"], 1);
+    assert_eq!(
+        document["results"][0]["exact_request_links"][0]["capture_event"]["sequence_number"],
+        "14"
+    );
+    assert_eq!(
+        document["selection"]["edge_semantics"],
+        "exact-captured-response-body"
+    );
+    for (from, to) in [
+        ("session_id=9007199254740993", "session_id=2"),
+        ("root_process_id=12", "root_process_id=13"),
+        ("root_sequence_number=10", "root_sequence_number=11"),
+        ("request_id=9007199254740995", "request_id=55"),
+    ] {
+        let other_path = format!("/api/analysis/vm?{}", query.replace(from, to));
+        let response = server
+            .client
+            .get(format!("{}{}", server.url, other_path))
+            .header("If-None-Match", &etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            200,
+            "Selection identity must be in the ETag"
+        );
+        let other: Value = response.json().await.unwrap();
+        assert_eq!(other["results"], json!([]));
+        assert_eq!(other["summary"]["analyzed_artifacts"], 0);
+    }
+    for bad in [
+        "request_id=9007199254740995".to_owned(),
+        format!("{query}&session_id=2"),
+        query.replace("root_process_id=12", "root_process_id=0"),
+        query.replace("root_sequence_number=10", "root_sequence_number=01"),
+    ] {
+        assert_contract_response(
+            server.get(&format!("/api/analysis/vm?{bad}")).await,
+            "get",
+            "/api/analysis/vm",
+            400,
+        )
+        .await;
+    }
+    // Explicit redirection remains a chain-level native request, not a CDP hop.
+    let mut redirect = root.clone();
+    redirect["sequence_number"] = json!("11");
+    redirect["type"] = json!("request_redirected");
+    let mut redirected = events.clone();
+    redirected.push(redirect);
+    server.file("events.jsonl", &jsonl(&redirected));
+    let document: Value = server.get(&path).await.json().await.unwrap();
+    assert_eq!(document["results"].as_array().unwrap().len(), 1);
+    let mut cases = Vec::new();
+    cases.push(
+        events
+            .iter()
+            .filter(|e| e["type"] != "artifact_captured")
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let mut conflict = response_event_for_vm_test(&root);
+    conflict["frame_id"] = json!("4");
+    let mut conflicting_response = events.clone();
+    conflicting_response.push(conflict);
+    cases.push(conflicting_response);
+    let mut foreign_capture = events.clone();
+    foreign_capture[0]["session_id"] = json!("2");
+    cases.push(foreign_capture);
+    let mut reused_root = root.clone();
+    reused_root["sequence_number"] = json!("8");
+    reused_root["navigation_id"] = json!("4");
+    let mut ambiguous = events.clone();
+    ambiguous.push(reused_root);
+    cases.push(ambiguous);
+    let mut duplicate_capture = capture.clone();
+    duplicate_capture["sequence_number"] = json!("15");
+    let mut ambiguous = events.clone();
+    ambiguous.push(duplicate_capture);
+    cases.push(ambiguous);
+    // A raw identity index must not promote records rejected by normalization.
+    for sequence in ["10", "12", "14"] {
+        let mut malformed = events.clone();
+        for event in &mut malformed {
+            if event["sequence_number"] == sequence {
+                event["artifact_id"] = json!("bogus");
+            }
+        }
+        cases.push(malformed);
+    }
+    for missing in cases {
+        server.file("events.jsonl", &jsonl(&missing));
+        let document: Value = server.get(&path).await.json().await.unwrap();
+        assert_eq!(document["results"], json!([]));
+    }
+    // A same-frame generated source or duplicate manifest never gets ancestry.
+    server.file("events.jsonl", &jsonl(&events));
+    let mut generated = artifact.clone();
+    generated["capture_origin"] = json!("runtime_allocating_script");
+    generated["execution_context_id"] = json!("7");
+    server.file("artifacts/manifest.jsonl", &jsonl(&[generated]));
+    let document: Value = server.get(&path).await.json().await.unwrap();
+    assert_eq!(document["results"], json!([]));
+    server.file(
+        "artifacts/manifest.jsonl",
+        &jsonl(&[artifact.clone(), artifact]),
+    );
+    let document: Value = server.get(&path).await.json().await.unwrap();
+    assert_eq!(document["results"], json!([]));
+}
+fn response_event_for_vm_test(root: &Value) -> Value {
+    let mut response = root.clone();
+    response["sequence_number"] = json!("12");
+    response["type"] = json!("response_started");
+    response
 }

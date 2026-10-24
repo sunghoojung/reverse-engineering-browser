@@ -283,11 +283,12 @@ Usage, authorization, capture, and privacy boundaries are defined in
 Use the repository's shared skill with Codex or Claude Code to inspect an
 explicitly selected Origin Trace backend, correlate exact evidence, and author
 client code with offline synthetic tests. The CLI offers machine-readable
-operation discovery and an opt-in read-only effect guard. Local transport does
-not prevent capture data from entering an agent provider's context; agree on
+operation discovery and an opt-in read-only effect guard. `scripts/reb-api-mcp.sh`
+connects that same loopback API to a same-machine stdio client. Local transport
+does not prevent capture data from entering an agent provider's context; agree on
 sharing scope before reading captures. See the
 [local coding-agent guide](docs/development/local-coding-agents.md) for setup,
-native-mode limits, and approval boundaries.
+MCP client configuration, native-mode limits, and approval boundaries.
 
 ## Development and validation
 

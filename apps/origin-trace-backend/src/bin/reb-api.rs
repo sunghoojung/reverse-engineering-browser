@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 use url::Url;
@@ -58,15 +58,29 @@ enum Action {
     },
     /// Serve the embedded OpenAPI document as a local stdio MCP server.
     /// Tools are operation IDs. There is no second HTTP API.
+    ///
+    /// Pass exactly one endpoint: `--base-url`, `--endpoint-file`, or
+    /// `--session-dir`. `--session-dir` reads `research-ui.endpoint` from that
+    /// directory and does not consider a newer session. `/api/health` must
+    /// report status ok before any tool is advertised. The health document is
+    /// not printed.
     Mcp {
         #[arg(
             long,
-            required_unless_present = "endpoint_file",
-            conflicts_with = "endpoint_file"
+            required_unless_present_any = ["endpoint_file", "session_dir"],
+            conflicts_with_all = ["endpoint_file", "session_dir"]
         )]
         base_url: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["base_url", "session_dir"])]
         endpoint_file: Option<PathBuf>,
+        /// Directory of one selected live session. Reads `research-ui.endpoint`
+        /// there and does not search for a newer session.
+        #[arg(
+            long,
+            value_name = "DIR",
+            conflicts_with_all = ["base_url", "endpoint_file"]
+        )]
+        session_dir: Option<PathBuf>,
         /// Also list operations that are not read-only. This is not authorization,
         /// capture redaction, or permission to send results to a model provider.
         #[arg(long)]
@@ -319,6 +333,171 @@ fn endpoint_text(
         .or_else(|| endpoint_file.and_then(|path| std::fs::read_to_string(path).ok()))
         .ok_or_else(|| "Cannot read endpoint file".into())
 }
+
+fn validated_loopback_root(text: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.lines().nth(1).is_some() {
+        return Err(
+            "Endpoint must be one HTTP loopback server root. No tools were advertised.".into(),
+        );
+    }
+    root_url(trimmed).map_err(|_| {
+        "Endpoint is not an HTTP loopback server root with a port. A native UI URL with a query is not the API root. Use the selected session's research-ui.endpoint. No tools were advertised."
+    })?;
+    Ok(trimmed.to_owned())
+}
+
+fn read_endpoint_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "Endpoint file does not exist: {}. Start the selected Origin Trace session, or pass that session's research-ui.endpoint. No tools were advertised.",
+                path.display()
+            )
+            .into());
+        }
+        Err(error) => {
+            return Err(format!("Cannot read endpoint file {}: {error}.", path.display()).into());
+        }
+    };
+    if bytes.len() > 1024 {
+        return Err(format!(
+            "Endpoint file {} is larger than 1024 bytes. No tools were advertised.",
+            path.display()
+        )
+        .into());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        format!(
+            "Endpoint file {} is not UTF-8. No tools were advertised.",
+            path.display()
+        )
+    })?;
+    validated_loopback_root(text)
+}
+
+fn read_session_endpoint(dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "Session directory is a symlink: {}. Pass the selected directory itself. No other session was selected.",
+                dir.display()
+            )
+            .into());
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!(
+                "Session path is not a directory: {}. No other session was selected.",
+                dir.display()
+            )
+            .into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "Session directory does not exist: {}. No other session was selected.",
+                dir.display()
+            )
+            .into());
+        }
+        Err(error) => {
+            return Err(format!(
+                "Cannot read session directory {}: {error}. No other session was selected.",
+                dir.display()
+            )
+            .into());
+        }
+    }
+    let path = dir.join("research-ui.endpoint");
+    read_endpoint_file(&path).map_err(|error| {
+        format!("{error} This directory was selected explicitly; no newer session was considered.")
+            .into()
+    })
+}
+
+fn resolve_mcp_endpoint(
+    base_url: Option<String>,
+    endpoint_file: Option<PathBuf>,
+    session_dir: Option<PathBuf>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match (base_url, endpoint_file, session_dir) {
+        (Some(base_url), None, None) => validated_loopback_root(&base_url),
+        (None, Some(path), None) => read_endpoint_file(&path),
+        (None, None, Some(dir)) => read_session_endpoint(&dir),
+        _ => Err(
+            "Pass exactly one of --base-url, --endpoint-file, or --session-dir. No session was selected.".into(),
+        ),
+    }
+}
+
+// Health runs before stdio so a client cannot list tools for a missing session.
+// The document names local evidence paths, so only `status` is checked and the
+// body is never written to either stream. `no_proxy` keeps the probe on loopback.
+async fn confirm_mcp_health(base: &str, timeout: f64) -> Result<(), Box<dyn std::error::Error>> {
+    let mut url = root_url(base)?;
+    url.set_path("/api/health");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs_f64(timeout))
+        .build()?;
+    let response = match client
+        .get(url)
+        .header("accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return Err(format!(
+                "Selected loopback API did not respond at /api/health ({error}). Start that session or choose its endpoint again. No tools were advertised."
+            )
+            .into());
+        }
+    };
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(format!(
+            "Selected loopback API /api/health returned HTTP {status}. No tools were advertised."
+        )
+        .into());
+    }
+    let bytes = read_capped_body(response, 64 * 1024).await?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(
+        |_| "Selected loopback API /api/health was not a JSON object. No tools were advertised.",
+    )?;
+    if value.get("status").and_then(Value::as_str) != Some("ok") {
+        return Err(
+            "Selected loopback API /api/health did not report status ok. No tools were advertised."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+async fn read_capped_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = response.chunk().await.map_err(
+            |_| "Selected loopback API /api/health could not be read. No tools were advertised.",
+        )?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(
+                "Selected loopback API /api/health exceeded 64 KiB. No tools were advertised."
+                    .into(),
+            );
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
 fn check_timeout(timeout: f64) -> Result<(), Box<dyn std::error::Error>> {
     if !timeout.is_finite() || timeout <= 0.0 || timeout > 3600.0 {
         return Err("Timeout must be finite and between 0 and 3600 seconds".into());
@@ -548,12 +727,13 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         Action::Mcp {
             base_url,
             endpoint_file,
+            session_dir,
             allow_effects,
             timeout,
         } => {
             check_timeout(timeout)?;
-            let base = endpoint_text(base_url, endpoint_file)?;
-            root_url(&base)?;
+            let base = resolve_mcp_endpoint(base_url, endpoint_file, session_dir)?;
+            confirm_mcp_health(&base, timeout).await?;
             mcp::serve(&spec, &ops, &base, allow_effects, timeout).await
         }
         Action::Describe {
@@ -1007,6 +1187,74 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            Options::try_parse_from(["reb-api", "mcp", "--session-dir", "/tmp/session"])
+                .unwrap()
+                .command,
+            Action::Mcp {
+                allow_effects: false,
+                session_dir: Some(_),
+                base_url: None,
+                endpoint_file: None,
+                ..
+            }
+        ));
+        for extra in [
+            vec!["--session-dir", "/tmp/session"],
+            vec!["--endpoint-file", "endpoint"],
+        ] {
+            let mut args = vec!["reb-api", "mcp", "--base-url", "http://127.0.0.1:7319"];
+            args.extend(extra);
+            assert!(Options::try_parse_from(args).is_err());
+        }
+        assert!(
+            Options::try_parse_from([
+                "reb-api",
+                "mcp",
+                "--endpoint-file",
+                "endpoint",
+                "--session-dir",
+                "/tmp/session",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn session_dir_reads_only_its_own_endpoint_file() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("7");
+        let newer = root.path().join("8");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::create_dir(&newer).unwrap();
+        std::fs::write(
+            selected.join("research-ui.endpoint"),
+            "http://127.0.0.1:9\n",
+        )
+        .unwrap();
+        std::fs::write(newer.join("research-ui.endpoint"), "http://127.0.0.1:10\n").unwrap();
+        assert_eq!(
+            read_session_endpoint(&selected).unwrap(),
+            "http://127.0.0.1:9"
+        );
+        let missing = root.path().join("9");
+        std::fs::create_dir(&missing).unwrap();
+        let error = read_session_endpoint(&missing).unwrap_err().to_string();
+        assert!(error.contains("research-ui.endpoint"), "{error}");
+        assert!(error.contains("no newer session"), "{error}");
+        let link = root.path().join("linked");
+        std::os::unix::fs::symlink(&newer, &link).unwrap();
+        let error = read_session_endpoint(&link).unwrap_err().to_string();
+        assert!(error.contains("symlink"), "{error}");
+        let handshake = root.path().join("handshake");
+        std::fs::write(&handshake, "http://127.0.0.1:9/?native=1\n").unwrap();
+        let error = read_endpoint_file(&handshake).unwrap_err().to_string();
+        assert!(error.contains("loopback"), "{error}");
+        assert!(!error.contains("native=1"), "{error}");
+        let absent = root.path().join("missing-endpoint");
+        let error = read_endpoint_file(&absent).unwrap_err().to_string();
+        assert!(error.contains("does not exist"), "{error}");
+        assert!(validated_loopback_root("https://example.test:443").is_err());
     }
 
     #[test]

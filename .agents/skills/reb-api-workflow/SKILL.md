@@ -10,11 +10,16 @@ Use [the local coding-agent guide](../../../docs/development/local-coding-agents
 for commands, native-mode differences and discovery. This is an instruction-only
 skill: loading it must not run shell commands, fetch captures, start services,
 change client settings, or grant permissions. The only MCP command is
-`reb-api mcp`, a stdio projection of the embedded OpenAPI document. Do not start
-it while loading this skill. Do not add a second MCP server. Pass
-`--allow-effects` only after the researcher approves those operations. Binary
-responses are not inlined. An oversized JSON result is a structural summary,
-not the response document, and is not source.
+`reb-api mcp`, a stdio projection of the embedded OpenAPI document.
+`scripts/reb-api-mcp.sh` execs that command after resolving one explicit
+endpoint; it is not a second server. Do not start either while loading this
+skill. Do not add a second MCP server. The default tool list is read-only.
+`--allow-effects` lists the other operations and is not authorization,
+redaction, or permission to send captured data to a provider. Pass it only
+after the researcher wants those operations exposed. Binary responses are not
+inlined. An oversized JSON result is a structural summary, not the response
+document, and is not source. Client snippets for Cursor, Codex, Claude Code,
+Grok Bot, and T3 Code are in the local coding-agent guide.
 
 ## Establish scope before evidence access
 

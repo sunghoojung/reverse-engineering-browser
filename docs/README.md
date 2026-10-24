@@ -28,8 +28,9 @@ skills under `.agents/skills/`.
 ## Development workflows
 
 - [Local Codex and Claude Code workflows](development/local-coding-agents.md):
-  explicit session selection, guarded CLI inspection, exact evidence correlation,
-  and offline client authoring with synthetic tests
+  explicit session selection, same-machine MCP client configuration, guarded
+  CLI inspection, exact evidence correlation, and offline client authoring
+  with synthetic tests
 - [Fast local Brave builds](development/fast-browser-builds.md)
 - [October 21, 2026 integrated development build](development/dev-build-2026-10-21.md):
   source revisions, available companion preview, validation results, and remaining

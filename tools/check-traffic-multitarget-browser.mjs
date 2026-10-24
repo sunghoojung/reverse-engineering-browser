@@ -79,20 +79,40 @@ function start(executable,args) {
   for(const pipe of [child.stdout,child.stderr])pipe.on('data',chunk=>diagnostics=(diagnostics+chunk).slice(-16384));
   children.push({child,closed});return child;
 }
-async function until(read,label) {
-  const deadline=Date.now()+15000;
+async function until(read,label,budgetMs=15000,detail=()=>'') {
+  const deadline=Date.now()+budgetMs;
   while(Date.now()<deadline) {
-    assert(children.every(({child})=>child.exitCode===null&&child.signalCode===null),`${label}: process exited: ${diagnostics}`);
+    assert(children.every(({child})=>child.exitCode===null&&child.signalCode===null),`${label}: process exited: ${diagnostics||'(no process output)'}`);
     try {const value=await read();if(value)return value;}catch(error){if(error instanceof assert.AssertionError)throw error;}
     await delay(50);
   }
-  assert.fail(`${label} timed out: ${diagnostics}\nLast capture snapshot: ${JSON.stringify(lastCaptureSnapshot)?.slice(0,16384)}\nLast capture read error: ${lastCaptureReadError}`);
+  const processes=children.map(({child})=>`${child.pid??'unknown'}:${child.exitCode===null&&child.signalCode===null?'alive':child.signalCode??child.exitCode}`).join(',');
+  assert.fail(`${label} timed out after ${budgetMs}ms: ${diagnostics||'(no process output)'}\nProcesses: ${processes}${detail()}\nLast capture snapshot: ${JSON.stringify(lastCaptureSnapshot)?.slice(0,16384)}\nLast capture read error: ${lastCaptureReadError}`);
+}
+// Installed Chrome's first headless start can pass the 15s evidence deadline
+// before DevToolsActivePort exists. The debugger harness allows 30s for that
+// same file. Capture assertions stay on the shorter deadline.
+const browserStartupBudgetMs=30000;
+async function devtoolsLines(profile,label) {
+  const active=join(profile,'DevToolsActivePort');
+  let portState='not checked';
+  const lines=await until(async()=>{
+    let text;
+    try {text=await readFile(active,'utf8');}
+    catch(error) {
+      portState=error?.code==='ENOENT'?'missing':String(error?.code??error?.message??error).slice(0,80);
+      return false;
+    }
+    const parsed=text.trim().split('\n');
+    portState=parsed.length>=2?'ready':`incomplete (${Buffer.byteLength(text)} bytes)`;
+    return parsed.length>=2&&parsed;
+  },label,browserStartupBudgetMs,()=>`\nDevToolsActivePort: ${portState}`);
+  return {active,lines};
 }
 try {
   start(browser,['--headless=new','--disable-dev-shm-usage','--site-per-process','--disable-popup-blocking','--disable-background-networking','--no-first-run',
     '--remote-debugging-port=0',`--user-data-dir=${directory}/profile`,`${origin}/page-a`]);
-  const active=join(directory,'profile/DevToolsActivePort');
-  const lines=await until(async()=>{const lines=(await readFile(active,'utf8')).trim().split('\n');return lines.length>=2&&lines;},'Browser startup');
+  const {active,lines}=await devtoolsLines(join(directory,'profile'),'Browser startup');
   socket=new WebSocket(`ws://127.0.0.1:${lines[0]}${lines[1]}`);
   await new Promise((resolveOpen,reject)=>{const timer=setTimeout(()=>reject(Error('Browser socket startup timeout')),5000);socket.onopen=()=>{clearTimeout(timer);resolveOpen();};socket.onerror=error=>{clearTimeout(timer);reject(error);};});
   socket.onmessage=event=>{
@@ -167,7 +187,7 @@ try {
   // and recursively grow snapshots or displace authored requests from the UI.
   start(browser,['--headless=new','--disable-dev-shm-usage','--disable-background-networking','--no-first-run',
     '--remote-debugging-port=0',`--user-data-dir=${directory}/ui-profile`,'about:blank']);
-  const uiLines=await until(async()=>{const lines=(await readFile(join(directory,'ui-profile/DevToolsActivePort'),'utf8')).trim().split('\n');return lines.length>=2&&lines;},'Viewer browser startup');
+  const {lines:uiLines}=await devtoolsLines(join(directory,'ui-profile'),'Viewer browser startup');
   uiSocket=new WebSocket(`ws://127.0.0.1:${uiLines[0]}${uiLines[1]}`);
   await new Promise((resolveOpen,reject)=>{const timer=setTimeout(()=>reject(Error('Viewer socket startup timeout')),5000);uiSocket.onopen=()=>{clearTimeout(timer);resolveOpen();};uiSocket.onerror=error=>{clearTimeout(timer);reject(error);};});
   uiSocket.onmessage=event=>{

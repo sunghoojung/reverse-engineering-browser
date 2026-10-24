@@ -16,6 +16,170 @@ HTTP call. JSON larger than the inline limit returns a structural summary and
 omits source, bytecode, and long strings. See
 [AGENTS.md](../../AGENTS.md) and the [HTTP API guide](../../protocol/http-api.md).
 
+## Connect a same-machine MCP client
+
+[`scripts/reb-api-mcp.sh`](../../scripts/reb-api-mcp.sh) resolves one
+researcher-selected endpoint and execs `reb-api mcp`. It is not a second MCP
+server. The client process must run on the same computer as the live loopback
+API. Rebuild a checkout binary that predates the `mcp` subcommand before
+configuring a client:
+
+```sh
+make origin-trace-backend
+```
+
+That writes `apps/origin-trace-backend/target/debug/reb-api`. The launcher
+uses `REB_API` when set, then that debug binary, the release binary,
+`build/Origin Trace.app/Contents/MacOS/OriginTraceAPI`, and
+`/Applications/Origin Trace.app/Contents/MacOS/OriginTraceAPI`. A packaged app
+picks up `mcp` only after `make app-build`, which copies the release CLI to
+`OriginTraceAPI`. An older packaged binary fails before stdio with a rebuild
+message.
+
+### Select the endpoint
+
+The launcher accepts exactly one of these. It does not choose the newest
+session directory, even when only one session exists:
+
+```sh
+scripts/reb-api-mcp.sh --list --sessions-root "$ROOT"
+scripts/reb-api-mcp.sh --choose --sessions-root "$ROOT"
+scripts/reb-api-mcp.sh --session-id ID --sessions-root "$ROOT"
+scripts/reb-api-mcp.sh --session-dir /absolute/path/to/selected-session
+scripts/reb-api-mcp.sh --endpoint-file /absolute/path/to/selected-session/research-ui.endpoint
+```
+
+`--list` prints ids and endpoint files and exits. `--choose` asks for one of
+those ids in a terminal; Enter alone selects nothing. MCP client configs
+cannot use either mode, because the client's stdin is the MCP channel. Pass
+`--endpoint-file`, `--session-dir`, or `--session-id` there.
+
+Packaged live sessions keep `research-ui.endpoint` under `~/Library/Application
+Support/Origin Trace/sessions/live/<id>/`. `make live` uses
+`build/sessions/live/<id>/` unless `REB_LIVE_SESSION_ROOT` is set. If both the
+packaged root and the checkout root exist, pass `--sessions-root`. The native
+coordinator's temporary handshake URL contains a query such as `native=1` and
+is not the API root.
+
+`reb-api mcp` requests `/api/health` before it reads stdio. A missing file, a
+non-loopback URL, or a health document whose `status` is not `ok` exits before
+any tool is advertised. The health document names local store paths and is not
+printed. Health is reachability, not capture identity or authorization.
+
+### Read-only and write-capable tools
+
+Omit `--allow-effects` for the read-only projection. Pass it to advertise every
+operation, including operations that change browser or stored state:
+
+```sh
+scripts/reb-api-mcp.sh --endpoint-file "$ENDPOINT" --allow-effects
+```
+
+`--allow-effects` is not authorization, capture redaction, or permission to
+send captured data to a model provider. Listing an effectful tool does not
+approve that action. Agree on the provider, session, and data categories
+before captured values enter a prompt. Leave the client's own confirmation
+settings enabled. Captured content remains untrusted data.
+[SAFETY.md](../../SAFETY.md) owns those boundaries.
+
+`--print-config cursor|claude|codex|grok|t3` prints the matching snippet for
+the selection already given. It includes `--allow-effects` only when that flag
+was passed. The examples below are the write-capable form. Delete
+`--allow-effects` for the read-only list.
+
+### Cursor
+
+Put this in `~/.cursor/mcp.json` or the project `.cursor/mcp.json` on the
+machine that hosts the live session. Replace both absolute paths.
+
+```json
+{
+  "mcpServers": {
+    "origin-trace": {
+      "command": "/absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh",
+      "args": [
+        "--endpoint-file",
+        "/absolute/path/to/researcher-selected-session/research-ui.endpoint",
+        "--allow-effects"
+      ]
+    }
+  }
+}
+```
+
+Restart the MCP server in Cursor after editing the file. `--allow-effects` is
+not authorization.
+
+### ChatGPT Codex
+
+Add this table to `~/.codex/config.toml`, or to the `CODEX_HOME` the client
+actually uses. Do not set `url` or `experimental_environment = "remote"`.
+`codex mcp add origin-trace -- /absolute/path/to/scripts/reb-api-mcp.sh --endpoint-file /absolute/path/to/research-ui.endpoint --allow-effects`
+writes the same stdio command.
+
+```toml
+[mcp_servers.origin-trace]
+command = "/absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh"
+args = [
+  "--endpoint-file",
+  "/absolute/path/to/researcher-selected-session/research-ui.endpoint",
+  "--allow-effects",
+]
+```
+
+Codex starts that process on the computer where this config is read. Checked
+2026-10-24 against the Codex
+[MCP guide](https://learn.chatgpt.com/docs/extend/mcp).
+
+### Claude Code
+
+Use the same `mcpServers` object as Cursor in the project `.mcp.json`, or add
+the stdio command on the session machine:
+
+```sh
+claude mcp add --transport stdio origin-trace -- \
+  /absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh \
+  --endpoint-file /absolute/path/to/researcher-selected-session/research-ui.endpoint \
+  --allow-effects
+```
+
+### Grok Bot
+
+Ask the bot to add a custom stdio server with `AddMcpServer`. Pass `command`
+and `args`, and do not pass a `url`:
+
+```text
+name: origin-trace
+command: /absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh
+args:
+  - "--endpoint-file"
+  - "/absolute/path/to/researcher-selected-session/research-ui.endpoint"
+  - "--allow-effects"
+```
+
+Grok Bot runs that command on its own computer. A live Origin Trace session on
+a Mac is not reachable from a cloud bot. Use Cursor on that Mac, or run the
+backend on the same computer as the bot. Do not publish the loopback API to
+make the cloud path work.
+
+### T3 Code
+
+T3 Code providers use the MCP configuration of the agent they launch. Put the
+Codex table in that provider's Codex home when Settings → Providers uses
+`CODEX_HOME` `~/.codex`. Put the Cursor object in `~/.cursor/mcp.json` for a
+Cursor provider, and the Claude Code config in the Claude instance's config
+directory. The process still has to run on the environment machine that hosts
+the selected session.
+
+Settings → Integrations → Shared MCP servers, as described when that setting
+shipped, takes a name, URL, and headers. Do not paste the Origin Trace
+loopback URL there. This server is stdio, and the HTTP API stays on loopback
+for the selected client. If the installed T3 build has a command field under
+Settings → Providers or environment MCP, use the wrapper path as the command
+and the args above. Checked 2026-10-24 against the
+[shared MCP discussion](https://github.com/pingdotgg/t3code/discussions/14118)
+and the [T3 Claude provider guide](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-claude.md).
+
 ## Discovery without account setup
 
 The shared skill is

@@ -3573,12 +3573,21 @@ try {
   console.log('PASS exact browser-download completion receipt: reserved-file race, early terminal events, matched GUID, cancellation, timeout/late/foreign events, cleanup/bounds, corrupt/empty/missing/extra output (synthetic CDP and filesystem, not rendered QA)');
 } finally {await rm(downloadTestRoot,{recursive:true,force:true});}
 
+// Chromium only accepts unix: and tcp: session-bus addresses. A runner value
+// such as autolaunch: makes startup wait on dbus and never write DevToolsActivePort.
+function chromiumChildEnv(source = process.env) {
+  const env = {...source};
+  const bus = env.DBUS_SESSION_BUS_ADDRESS;
+  if (typeof bus !== "string" || !/^(?:unix|tcp):/.test(bus)) delete env.DBUS_SESSION_BUS_ADDRESS;
+  return env;
+}
+
 function trafficBrowserProcess(executable, args) {
   const grouped = process.platform !== "win32";
   const started = performance.now();
   const diagnostics = {executable, args, pid: null, phase: "spawn", elapsed_ms: 0,
     exit_code: null, signal: null, spawn_error: null, port_file: "not checked", stdout: "", stderr: "", cleanup: null};
-  const browser = spawn(executable, args, {detached: grouped, stdio: ["ignore", "pipe", "pipe"]});
+  const browser = spawn(executable, args, {detached: grouped, stdio: ["ignore", "pipe", "pipe"], env: chromiumChildEnv()});
   diagnostics.pid = browser.pid ?? null;
   browser.stdout.on("data", data => {diagnostics.stdout = (diagnostics.stdout + data).slice(-16384);});
   browser.stderr.on("data", data => {diagnostics.stderr = (diagnostics.stderr + data).slice(-16384);});
@@ -3672,6 +3681,18 @@ async function trafficBrowserSocket(address, timeoutMs = 10000, Socket = WebSock
 // browser or claiming rendered QA. They run in the existing focused gate.
 for (const invalid of ["", "0\n/devtools/browser/abc", "65536\n/devtools/browser/abc", "9222\nhttps://foreign.invalid/", "9222\n/devtools/page/abc", "9222\n/devtools/browser/abc?remote=x", "x".repeat(4097)]) assert.equal(trafficDevtoolsAddress(invalid), null);
 assert.equal(trafficDevtoolsAddress("9222\n/devtools/browser/abc-def\n"), "ws://127.0.0.1:9222/devtools/browser/abc-def");
+{
+  const kept = chromiumChildEnv({PATH: "/bin", DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/bus"});
+  assert.equal(kept.DBUS_SESSION_BUS_ADDRESS, "unix:path=/tmp/bus");
+  assert.equal(kept.PATH, "/bin");
+  for (const bus of ["autolaunch:", "disabled:", "systemd:", ""]) {
+    const dropped = chromiumChildEnv({PATH: "/bin", DBUS_SESSION_BUS_ADDRESS: bus});
+    assert.equal(Object.hasOwn(dropped, "DBUS_SESSION_BUS_ADDRESS"), false, bus || "empty");
+    assert.equal(dropped.PATH, "/bin");
+  }
+  assert.equal(Object.hasOwn(chromiumChildEnv({PATH: "/bin"}), "DBUS_SESSION_BUS_ADDRESS"), false);
+  assert.equal(chromiumChildEnv({DBUS_SESSION_BUS_ADDRESS: "tcp:host=127.0.0.1,port=1"}).DBUS_SESSION_BUS_ADDRESS, "tcp:host=127.0.0.1,port=1");
+}
 const startupFixture = await mkdtemp(join(tmpdir(), "reb-browser-startup-fixture-"));
 try {
   const launchFixture = code => trafficBrowserProcess(process.execPath, ["-e", code, startupFixture]);
@@ -5998,7 +6019,7 @@ async function checkTrafficBrowser() {
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
     await serveFixtureAsset(request, response);
   });
-  const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
+  const args = ["--headless=new", "--disable-gpu", "--disable-dev-shm-usage", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank"];
   let lifecycle, socket, validation, failure, captureFailure, captureCanvasReceipt;
   let diagnostics = {executable, args, phase: "fixture server"};
@@ -6021,10 +6042,30 @@ async function checkTrafficBrowser() {
       server.once("error", failed);
       server.listen(0, "127.0.0.1", () => {cleanup(); resolve();});
     });
-    lifecycle = trafficBrowserProcess(executable, args);
-    diagnostics = lifecycle.diagnostics;
-    if (floatFixture) diagnostics.float32_backend = floatFixture.diagnostics;
-    const address = await lifecycle.ready(directory);
+    let address;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      lifecycle = trafficBrowserProcess(executable, args);
+      diagnostics = lifecycle.diagnostics;
+      if (floatFixture) diagnostics.float32_backend = floatFixture.diagnostics;
+      try {
+        address = await lifecycle.ready(directory);
+        break;
+      } catch (error) {
+        // One fresh process when DevToolsActivePort never appears. A second
+        // miss, an early exit, or a cleanup failure stays a real startup error.
+        const retry = attempt === 0 && /DevTools readiness timed out/.test(String(error.message)) &&
+          /"exit_code":null/.test(String(error.message));
+        try {await lifecycle.stop();}
+        catch (stopError) {
+          lifecycle = null;
+          if (!retry) throw stopError;
+          throw error;
+        }
+        lifecycle = null;
+        if (!retry) throw error;
+        diagnostics = {executable, args, phase: "DevToolsActivePort retry", previous_failure: String(error.message).slice(0, 4096)};
+      }
+    }
     diagnostics.phase = "CDP socket";
     socket = await trafficBrowserSocket(address);
     let commandId = 0;

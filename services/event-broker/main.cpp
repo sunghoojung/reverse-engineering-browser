@@ -175,11 +175,13 @@ bool StoreEvent(reb::EventBroker& broker,
                 std::ostream* trace_store,
                 reb::RequestSignalProfileIndex* signal_index,
                 std::ostream* signal_store,
-                const reb::EventRecord& event) {
+                const reb::EventRecord& event,
+                std::string& event_json) {
   if (broker.Ingest(event) != reb::IngestStatus::kAccepted) {
     return true;
   }
-  store << reb::EventToJson(event) << '\n';
+  reb::WriteEventJson(event, event_json);
+  store << event_json << '\n';
   if (!store) {
     std::cerr << "Unable to write event store\n";
     return false;
@@ -237,8 +239,10 @@ bool IngestStandardInput(reb::EventBroker& broker,
                          reb::RequestSignalProfileIndex* signal_index,
                          std::ostream* signal_store) {
   reb::EventRecord event{};
+  std::string event_json;
   while (std::cin.read(reinterpret_cast<char*>(&event), sizeof(event))) {
-    if (!StoreEvent(broker, store, trace_index, trace_store, signal_index, signal_store, event)) {
+    if (!StoreEvent(broker, store, trace_index, trace_store, signal_index, signal_store, event,
+                    event_json)) {
       return false;
     }
   }
@@ -395,6 +399,7 @@ bool IngestSocket(const int descriptor,
   }
 
   SocketEventReader reader;
+  std::string event_json;
   std::array<reb::EventRecord, kSocketEventBatchCapacity> events{};
   for (;;) {
     std::size_t event_count = 0;
@@ -424,7 +429,8 @@ bool IngestSocket(const int descriptor,
         }
         return false;
       }
-      if (!StoreEvent(broker, store, trace_index, trace_store, signal_index, signal_store, event)) {
+      if (!StoreEvent(broker, store, trace_index, trace_store, signal_index, signal_store, event,
+                      event_json)) {
         return false;
       }
     }

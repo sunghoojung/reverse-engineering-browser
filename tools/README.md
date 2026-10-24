@@ -130,3 +130,40 @@ unchanged pins/overlays/patch inventory and ordered replay before changing the
 verified destination. Private before/after backups and an audit permit checked
 recovery; unknown edits and conflicting receipts are preserved. See
 [the integrated build guide](../docs/development/integrated-brave-build.md).
+
+## Native broker allocation benchmarks
+
+`benchmark-event-json.cpp` compares the allocating compatibility API with the
+caller-owned serialization buffer, including allocation counts, output-size
+checksums, and alternating run order. Build it with the same compiler and flags
+as the native broker:
+
+```sh
+c++ -std=c++20 -O2 -Iinclude tools/benchmark-event-json.cpp src/capture/event.cpp \
+  -o /tmp/reb-event-json-benchmark
+/tmp/reb-event-json-benchmark 2000000
+```
+
+Compare two real broker executables with:
+
+```sh
+python3 tools/benchmark-event-broker.py \
+  --baseline /path/to/old/reb-event-broker \
+  --candidate /path/to/new/reb-event-broker
+```
+
+The tool uses the same generated, bounded 200,000-record fixture. It alternates run order after
+one warmup per executable, verifies exact SHA-256 equality of every evidence
+store and all broker/index statistics, and reports both wall time and child
+CPU time. Each fixture group has four Canvas records followed by one renderer
+request and three exactly linked browser lifecycle records. Stream sequences
+remain contiguous. The default enables both sidecars; `--without-sidecars`
+measures the event store alone. `--transport socket` exercises authenticated
+local IPC and per-batch live flushes when the host permits Unix sockets.
+Temporary synthetic evidence is removed at exit.
+
+Build both revisions with the same compiler and flags on the same host. Keep
+competing builds stopped when comparing elapsed time; cloud-host scheduling and
+filesystem contention can dominate this small allocation change. These are
+component and real-broker measurements, not rebuilt-Brave performance or capture
+completeness evidence.

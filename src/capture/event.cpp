@@ -132,12 +132,12 @@ bool IsValidEvent(const EventRecord& event) noexcept {
                              [](const std::byte value) { return value == std::byte{0}; });
 }
 
-std::string EventToJson(const EventRecord& event) {
+void WriteEventJson(const EventRecord& event, std::string& output) {
   constexpr std::array<char, 16> kHex = {'0', '1', '2', '3', '4', '5', '6', '7',
                                          '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
   const std::span<const std::byte> payload = InlinePayload(event);
-  std::string output;
-  output.reserve(768 + payload.size() * 2);
+  output.clear();
+  output.reserve(kMaxEventJsonBytes);
   output.append("{\"protocol_version\":");
   AppendInteger(output, event.header.protocol_version);
   output.append(",\"session_id\":\"");
@@ -203,6 +203,11 @@ std::string EventToJson(const EventRecord& event) {
     output[payload_start + index * 2 + 1] = kHex[byte_value & 0x0fU];
   }
   output.append("\"}");
+}
+
+std::string EventToJson(const EventRecord& event) {
+  std::string output;
+  WriteEventJson(event, output);
   return output;
 }
 

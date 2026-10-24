@@ -652,7 +652,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Requests source through an existing page/worker debugger session; it does not evaluate that source.",
+          "notes": "Requests source through an existing page/worker debugger session; it does not evaluate that source. WebAssembly scriptSource is empty in CDP; non-empty bytecode, or Debugger.getWasmBytecode, is returned as standard base64 in source with encoding base64. Those bytes are also retained as a kind=wasm session artifact.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/debugger/mod.rs",
@@ -8518,6 +8518,17 @@
           },
           "truncated": {
             "type": "boolean"
+          },
+          "encoding": {
+            "type": "string",
+            "enum": [
+              "base64"
+            ],
+            "description": "Present when source is standard base64 for WebAssembly bytecode. JavaScript responses omit this field and return source text."
+          },
+          "byte_size": {
+            "type": "integer",
+            "description": "Decoded WebAssembly module size in bytes. Present together with encoding. The artifact store keeps the full module; source may be truncated to the 2 MiB viewer limit on a base64 boundary."
           }
         },
         "required": [

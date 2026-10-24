@@ -160,6 +160,11 @@ bounded, and loaded identifiers are kept in a bounded in-memory index for
 constant-time duplicate checks. Live stores use mode-0700 directories and
 mode-0600 evidence files.
 
+Debugger-observed in-memory WebAssembly is appended by the Origin Trace
+backend in this same manifest line format. Those artifact IDs are at or above
+2^32. The authenticated receiver accepts one browser connection at a time, so
+the backend does not open a second artifact socket.
+
 ## Sensitive content
 
 Project-wide authorization, capture, and privacy rules are in

@@ -952,6 +952,7 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
     let mut events = Vec::<Option<Value>>::new();
     let mut event_ids = BTreeMap::<EventReference, Option<usize>>::new();
     let mut capture_gaps = 0usize;
+    let mut dispatch_budget_losses = Vec::new();
     for (line, event) in event_records {
         let reference = event_reference(&event);
         if reference.is_none()
@@ -971,8 +972,14 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
         }
         // Transport gap markers intentionally reuse the preceding retained
         // event's sequence. They are coverage evidence, not conflicting events.
+        // A vm gap that names an interpreter artifact is also a dispatch-budget
+        // loss. The opcode workspace sums that weight so a capped trace stays
+        // incomplete. Other gaps stay capture-gap markers only.
         if event["type"] == "gap" {
             capture_gaps += 1;
+            if let Some(loss) = crate::vm_opcode::dispatch_budget_loss(&event) {
+                dispatch_budget_losses.push(loss);
+            }
             continue;
         }
         let reference = reference.unwrap();
@@ -1036,6 +1043,7 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 &result,
                 &snapshot_artifacts,
                 &events,
+                &dispatch_budget_losses,
             )
         {
             workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));

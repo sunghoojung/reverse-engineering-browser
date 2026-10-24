@@ -10,6 +10,17 @@ from ui_test_support import UI_DIRECTORY, read_ui_sources
 
 FIXTURE = Path(__file__).parent / "fixtures" / "vm-opcode-workspace-v2.json"
 
+# The shipped renderer pages through appendVmPagedRows. These lab slices call
+# that helper without copying its definition. Rendering every row preserves the
+# text assertions; tools/check-vm-opcode-workspace-ui.mjs covers real paging.
+PAGED_ROWS = """
+function appendVmPagedRows(target, items, label, renderRow) {
+  const rows = document.createElement('div');
+  items.forEach(item => rows.append(renderRow(item)));
+  target.append(rows);
+}
+"""
+
 
 class VmLabTests(unittest.TestCase):
     def run_evidence_model(self, exercise: str) -> dict:
@@ -277,7 +288,7 @@ class Element {
 const document = {createElement: tag => new Element(tag), createTextNode: text => ({textContent: text, children: []})};
 const textElement = (tag, cls, text) => { const node = new Element(tag); node.className = cls; node.textContent = text; return node; };
 const flatten = node => [node, ...node.children.flatMap(flatten)];
-""" + renderer + f"""
+""" + PAGED_ROWS + renderer + f"""
 const fixture = {json.dumps(fixture)};
 const rows = flatten(renderVmWorkspaceCoverage(fixture.workspaces[0]));
 const bar = rows.find(row => row.attributes?.role === 'progressbar');
@@ -314,7 +325,7 @@ const document = {createElement: tag => new Element(tag)};
 const textElement = (tag, cls, text) => { const node = new Element(tag); node.className = cls; node.textContent = text; return node; };
 const vmField = (key, value) => textElement('div', '', `${key}: ${value}`);
 const flatten = node => [node, ...node.children.flatMap(flatten)];
-""" + app[start:end] + f"""
+""" + PAGED_ROWS + app[start:end] + f"""
 const fixture = {json.dumps(fixture)};
 const copy = flatten(renderVmEffects(fixture.workspaces[0])).map(row => row.textContent).join(' ');
 const malicious = structuredClone(fixture);
@@ -331,7 +342,7 @@ process.stdout.write(JSON.stringify({{
         self.assertTrue(result["accepted"])
         self.assertFalse(result["malformedAccepted"])
         self.assertIsNone(result["selected"])
-        self.assertIn("conflicting effects", result["copy"])
+        self.assertIn("Conflicting declarations", result["copy"])
         self.assertIn("inferred", result["copy"])
         self.assertIn("contradicted", result["copy"])
         self.assertIn("little-endian", result["copy"])
@@ -354,7 +365,7 @@ class Element {
 const document = {createElement: tag => new Element(tag)};
 const textElement = (tag, cls, text) => { const node = new Element(tag); node.className = cls; node.textContent = text; return node; };
 const flatten = node => [node, ...node.children.flatMap(flatten)];
-""" + app[start:end] + f"""
+""" + PAGED_ROWS + app[start:end] + f"""
 const fixture = {json.dumps(fixture)};
 process.stdout.write(JSON.stringify({{
   accepted: isVmOpcodeWorkspaceDocument(fixture),

@@ -14,7 +14,7 @@ use std::{
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.1.0";
+const PRODUCER_VERSION: &str = "2.2.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -617,6 +617,46 @@ fn event_payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
     (payload[0..4] == [1, 0, 128, 0]).then_some(payload)
 }
 
+pub(crate) struct DispatchBudgetLoss {
+    pub artifact_id: String,
+    pub session_id: String,
+    pub navigation_id: String,
+    pub frame_id: String,
+    pub dropped: u64,
+}
+
+/// A vm gap names a dispatch-budget loss when its artifact id is the interpreter
+/// and its payload is the decimal observation count. Queue-full gaps leave the
+/// artifact id at zero and stay ordinary capture gaps.
+pub(crate) fn dispatch_budget_loss(event: &Value) -> Option<DispatchBudgetLoss> {
+    if event["category"] != "vm" || event["type"] != "gap" {
+        return None;
+    }
+    let artifact = event.get("artifact_id")?;
+    if !evidence::canonical(artifact, 64, true) {
+        return None;
+    }
+    let payload = hex::decode(event["payload"].as_str()?).ok()?;
+    if payload.is_empty()
+        || payload.len() > 20
+        || payload[0] == b'0'
+        || !payload.iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let dropped = std::str::from_utf8(&payload).ok()?.parse::<u64>().ok()?;
+    if dropped == 0 {
+        return None;
+    }
+    Some(DispatchBudgetLoss {
+        artifact_id: artifact.as_str()?.to_owned(),
+        session_id: event["session_id"].as_str()?.to_owned(),
+        navigation_id: event["navigation_id"].as_str()?.to_owned(),
+        frame_id: event["frame_id"].as_str()?.to_owned(),
+        dropped,
+    })
+}
+
 fn read_u64(payload: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(
         payload[offset..offset + 8]
@@ -807,6 +847,7 @@ pub(crate) fn workspace(
     result: &Value,
     snapshot_artifacts: &[Value],
     events: &[Value],
+    budget_losses: &[DispatchBudgetLoss],
 ) -> Option<Value> {
     if result["tier"] != "likely-vm" {
         return None;
@@ -858,9 +899,7 @@ pub(crate) fn workspace(
     let mut retained_samples = Vec::new();
     let mut sample_count = 0u64;
     for event in events {
-        if runtime == "javascript"
-            && let Some(value) = sample(event, artifact, &invocations)
-        {
+        if let Some(value) = sample(event, artifact, &invocations) {
             let opcode = value["opcode"].as_u64().expect("sample opcode") as u32;
             *samples.entry(opcode).or_default() += 1;
             sample_count += 1;
@@ -869,11 +908,25 @@ pub(crate) fn workspace(
             }
         }
     }
-    if sample_count == 0 {
+    let budget_dropped = budget_losses
+        .iter()
+        .filter(|loss| {
+            loss.artifact_id == artifact["artifact_id"].as_str().unwrap_or("")
+                && loss.session_id == artifact["session_id"].as_str().unwrap_or("")
+                && loss.navigation_id == artifact["navigation_id"].as_str().unwrap_or("")
+                && loss.frame_id == artifact["frame_id"].as_str().unwrap_or("")
+        })
+        .fold(0u64, |total, loss| total.saturating_add(loss.dropped));
+    if sample_count == 0 && budget_dropped == 0 {
         omissions.push(json!({"reason":"sampler-unavailable", "detail":
             "No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented. A caller-fed writer still needs a runtime producer. Static dispatch, Canvas calls and snapshots do not prove a guest PC."}));
     } else if sample_count > retained_samples.len() as u64 {
         omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
+    }
+    if budget_dropped > 0 {
+        omissions.push(json!({"reason":"dispatch-sample-budget", "detail": format!(
+            "The 16-sample dispatch budget omitted {budget_dropped} observations for this interpreter. Retained samples are a capped trace, not a complete guest dispatch."
+        )}));
     }
     for handler in &mut handlers {
         let Some(opcode) = handler["opcode"].as_u64().map(|value| value as u32) else {
@@ -1078,6 +1131,23 @@ mod tests {
         })
     }
 
+    fn budget_gap(sequence: u64, dropped: u64) -> Value {
+        json!({
+            "protocol_version":2,
+            "session_id":"1",
+            "sequence_number":sequence.to_string(),
+            "process_id":1,
+            "navigation_id":"1",
+            "frame_id":"1",
+            "artifact_id":"1",
+            "request_id":"0",
+            "category":"vm",
+            "type":"gap",
+            "payload_encoding":"hex",
+            "payload":hex::encode(dropped.to_string()),
+        })
+    }
+
     fn analyze(source: &str, events: &[Value]) -> (tempfile::TempDir, Value, Value) {
         analyze_artifact_with_snapshot(source.as_bytes(), "javascript", events, None)
     }
@@ -1254,6 +1324,13 @@ mod tests {
             );
             assert_eq!(document["summary"]["snapshot_count"], 0);
             assert_eq!(workspace["coverage"]["complete"], false);
+            assert!(
+                workspace["coverage"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|omission| omission["reason"] == "sampler-unavailable")
+            );
             let module_bytes = workspace["coverage"]["omissions"]
                 .as_array()
                 .unwrap()
@@ -1271,6 +1348,90 @@ mod tests {
         assert_eq!(analysis["summary"]["likely_vm_count"], 0);
         assert_eq!(document["summary"]["workspace_count"], 0);
         assert_schema(&document);
+    }
+
+    #[test]
+    fn wasm_workspace_keeps_dispatch_samples_for_its_module() {
+        let bytes = wasm_fixture("br_table");
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[event(0)]);
+        let workspace = &document["workspaces"][0];
+        assert_eq!(workspace["runtime"], "webassembly");
+        assert_eq!(workspace["sample_count"], 1);
+        assert_eq!(workspace["samples"][0]["opcode"], 0);
+        assert_eq!(workspace["samples"][0]["interpreter_artifact_id"], "1");
+        assert_eq!(
+            workspace["samples"][0]["instruction_pointer_units"],
+            "unknown"
+        );
+        assert!(
+            workspace["handlers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|handler| handler["opcode"] == 0 && handler["state"] == "observed")
+        );
+        assert!(
+            workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|omission| omission["reason"] != "sampler-unavailable")
+        );
+        assert_eq!(workspace["coverage"]["complete"], false);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn dispatch_budget_gap_keeps_a_capped_trace_incomplete() {
+        let source = fixture("stack-vm.js");
+        let (_, _, with_samples) = analyze(&source, &[event(80), budget_gap(9, 16)]);
+        let workspace = &with_samples["workspaces"][0];
+        assert_eq!(workspace["sample_count"], 1);
+        let omissions = workspace["coverage"]["omissions"].as_array().unwrap();
+        let budget = omissions
+            .iter()
+            .find(|omission| omission["reason"] == "dispatch-sample-budget")
+            .expect("budget omission");
+        assert!(budget["detail"].as_str().unwrap().contains("omitted 16"));
+        assert!(budget["detail"].as_str().unwrap().len() <= 240);
+        assert!(
+            omissions
+                .iter()
+                .all(|omission| omission["reason"] != "sampler-unavailable")
+        );
+        assert_eq!(workspace["coverage"]["complete"], false);
+        assert_schema(&with_samples);
+
+        let (_, _, dropped_only) = analyze(&source, &[budget_gap(4, 16)]);
+        let empty = &dropped_only["workspaces"][0];
+        assert_eq!(empty["sample_count"], 0);
+        assert!(
+            empty["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "dispatch-sample-budget")
+        );
+        assert!(
+            empty["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|omission| omission["reason"] != "sampler-unavailable")
+        );
+        assert_eq!(empty["coverage"]["complete"], false);
+        assert_schema(&dropped_only);
+
+        let mut other_artifact = budget_gap(4, 3);
+        other_artifact["artifact_id"] = json!("9");
+        let (_, _, unrelated) = analyze(&source, &[event(80), other_artifact]);
+        assert!(
+            unrelated["workspaces"][0]["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|omission| omission["reason"] != "dispatch-sample-budget")
+        );
     }
 
     #[test]
@@ -1404,6 +1565,7 @@ mod tests {
             &bytes,
             &analysis["results"][0],
             &snapshots,
+            &[],
             &[],
         )
         .unwrap();

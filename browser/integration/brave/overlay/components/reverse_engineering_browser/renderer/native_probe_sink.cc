@@ -5,6 +5,9 @@
 
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
+#include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -863,6 +866,9 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   const std::uint64_t expires_at_monotonic_ns,
                                   const bool capture_canvas_images,
                                   const NativeProbeFrameIdProvider frame_id_provider) noexcept {
+  // Flush dispatch losses into the configuration that observed them before
+  // the emitter and generation change.
+  PublishVmDispatchBudgetGap();
   // SetEmitters is serialized by NativeProbeTransport's bound sequence. Stop
   // new readers before marking the independently atomic configuration fields
   // unstable. The completed even generation release-publishes the relaxed
@@ -1394,6 +1400,89 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
   static_cast<void>(emitter(event, config_generation));
 }
 
+void NativeProbeSink::NoteVmDispatchLoss(const std::uint64_t generation,
+                                         const std::uint64_t session_id,
+                                         const std::uint64_t monotonic_time_ns,
+                                         const std::uint64_t frame_id,
+                                         const std::uint32_t process_id,
+                                         const std::uint32_t thread_id,
+                                         const std::uint64_t interpreter_artifact_id) noexcept {
+  const std::uint64_t previous_artifact =
+      dispatch_loss_artifact_id_.load(std::memory_order_relaxed);
+  if (previous_artifact != 0 && previous_artifact != interpreter_artifact_id &&
+      dispatch_loss_dropped_.load(std::memory_order_relaxed) >
+          dispatch_loss_reported_.load(std::memory_order_relaxed)) {
+    PublishVmDispatchBudgetGap();
+  }
+  dispatch_loss_generation_.store(generation, std::memory_order_relaxed);
+  dispatch_loss_session_id_.store(session_id, std::memory_order_relaxed);
+  dispatch_loss_time_ns_.store(monotonic_time_ns, std::memory_order_relaxed);
+  dispatch_loss_frame_id_.store(frame_id, std::memory_order_relaxed);
+  dispatch_loss_process_id_.store(process_id, std::memory_order_relaxed);
+  dispatch_loss_thread_id_.store(thread_id, std::memory_order_relaxed);
+  dispatch_loss_artifact_id_.store(interpreter_artifact_id, std::memory_order_relaxed);
+  std::uint64_t dropped = dispatch_loss_dropped_.load(std::memory_order_relaxed);
+  while (dropped != std::numeric_limits<std::uint64_t>::max() &&
+         !dispatch_loss_dropped_.compare_exchange_weak(dropped, dropped + 1,
+                                                       std::memory_order_relaxed)) {
+  }
+}
+
+void NativeProbeSink::PublishVmDispatchBudgetGap() noexcept {
+  // EmitEvent publishes pending losses before a normal event. The gap emit
+  // re-enters EmitEvent, which must not publish again on this thread.
+  thread_local bool publishing = false;
+  if (publishing) {
+    return;
+  }
+  if (!emitter_.load(std::memory_order_acquire)) {
+    return;
+  }
+  publishing = true;
+  struct ClearPublish {
+    bool& flag;
+    ~ClearPublish() { flag = false; }
+  } clear{publishing};
+
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    const std::uint64_t generation = dispatch_loss_generation_.load(std::memory_order_relaxed);
+    const std::uint64_t dropped = dispatch_loss_dropped_.load(std::memory_order_relaxed);
+    std::uint64_t reported = dispatch_loss_reported_.load(std::memory_order_relaxed);
+    if (generation == 0 || (generation & 1U) != 0 || dropped <= reported) {
+      return;
+    }
+    if (!dispatch_loss_reported_.compare_exchange_strong(reported, dropped,
+                                                         std::memory_order_relaxed)) {
+      continue;
+    }
+    const std::uint64_t weight = dropped - reported;
+    NativeProbeEvent reference{};
+    reference.header.category = NativeProbeCategory::kVm;
+    reference.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+    reference.header.monotonic_time_ns = dispatch_loss_time_ns_.load(std::memory_order_relaxed);
+    reference.header.session_id = dispatch_loss_session_id_.load(std::memory_order_relaxed);
+    reference.header.process_id = dispatch_loss_process_id_.load(std::memory_order_relaxed);
+    reference.header.thread_id = dispatch_loss_thread_id_.load(std::memory_order_relaxed);
+    reference.header.frame_id = dispatch_loss_frame_id_.load(std::memory_order_relaxed);
+    NativeProbeEvent gap = MakeNativeProbeGapEvent(reference, weight);
+    gap.header.frame_id = reference.header.frame_id;
+    gap.header.artifact_id = dispatch_loss_artifact_id_.load(std::memory_order_relaxed);
+    const NativeProbeEmitStatus status = NativeProbeTransport::EmitStatus(gap, generation);
+    if (status == NativeProbeEmitStatus::kAdmitted) {
+      continue;
+    }
+    if (status == NativeProbeEmitStatus::kQueueFull) {
+      // TryPush already added this weight to DroppedCount. Keeping the claim
+      // avoids a second budget gap for the same observations.
+      return;
+    }
+    std::uint64_t claimed = dropped;
+    static_cast<void>(dispatch_loss_reported_.compare_exchange_strong(claimed, reported,
+                                                                      std::memory_order_relaxed));
+    return;
+  }
+}
+
 void NativeProbeSink::RecordVmDispatchSample(const NativeVmDispatchSamplePayload& sample) noexcept {
   if (!IsEmittableVmDispatchSample(sample) || !emitter_.load(std::memory_order_acquire)) {
     return;
@@ -1415,23 +1504,46 @@ void NativeProbeSink::RecordVmDispatchSample(const NativeVmDispatchSamplePayload
     return;
   }
 
+  const NativeProbeFrameIdProvider frame_id_provider =
+      frame_id_provider_.load(std::memory_order_relaxed);
+  const std::uint64_t frame_id = frame_id_provider ? frame_id_provider() : 0;
+  const auto process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  const auto thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  const auto note_loss = [&]() {
+    NoteVmDispatchLoss(config_generation, session_id, monotonic_time_ns, frame_id, process_id,
+                       thread_id, sample.interpreter_artifact_id);
+  };
+
   const std::uint32_t recorded = dispatch_sample_budget_.TryReserve(config_generation);
   if (recorded >= kNativeVmDispatchSampleBudget) {
+    note_loss();
     return;
   }
 
-  const NativeProbeFrameIdProvider frame_id_provider =
-      frame_id_provider_.load(std::memory_order_relaxed);
   NativeProbeEvent event;
-  if (PrepareVmDispatchProbeEvent(
-          sample, recorded, next_sequence_.fetch_add(1, std::memory_order_relaxed),
-          monotonic_time_ns, session_id, static_cast<std::uint32_t>(base::GetCurrentProcId()),
-          static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw()),
-          frame_id_provider ? frame_id_provider() : 0,
-          event) != NativeVmDispatchPrepareStatus::kReady) {
+  if (PrepareVmDispatchProbeEvent(sample, recorded, 0, monotonic_time_ns, session_id, process_id,
+                                  thread_id, frame_id,
+                                  event) != NativeVmDispatchPrepareStatus::kReady) {
+    dispatch_sample_budget_.Release(recorded, config_generation);
     return;
   }
-  static_cast<void>(emitter(event, config_generation));
+  // Flush an earlier rejected emit before this sample takes a sequence, so the
+  // gap is queued first and its sequence stays below this sample.
+  PublishVmDispatchBudgetGap();
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  switch (NativeProbeTransport::EmitStatus(event, config_generation)) {
+    case NativeProbeEmitStatus::kAdmitted:
+      return;
+    case NativeProbeEmitStatus::kQueueFull:
+      // The ring counted this sample. Return the budget slot so a later
+      // observation can use it after the queue drains.
+      dispatch_sample_budget_.Release(recorded, config_generation);
+      return;
+    case NativeProbeEmitStatus::kRejected:
+      dispatch_sample_budget_.Release(recorded, config_generation);
+      note_loss();
+      return;
+  }
 }
 
 }  // namespace reb

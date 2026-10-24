@@ -634,23 +634,66 @@ void DispatchSampleAdmission() {
     for (std::uint32_t index = 0; index < 32; ++index) {
       sink.RecordVmDispatchSample(sample);
     }
+    sink.PublishVmDispatchBudgetGap();
     NativeProbeEvent event;
-    std::size_t count = 0;
+    std::size_t samples = 0;
+    std::size_t gaps = 0;
+    std::uint64_t omitted = 0;
     while (queue.TryPop(event)) {
-      assert(event.header.type == reb::NativeProbeType::kVmDispatchSample);
       assert(event.header.session_id == session);
-      ++count;
+      assert(event.header.category == reb::NativeProbeCategory::kVm);
+      if (event.header.type == reb::NativeProbeType::kVmDispatchSample) {
+        ++samples;
+        continue;
+      }
+      assert(event.header.type == reb::NativeProbeType::kGap);
+      assert(event.header.artifact_id == sample.interpreter_artifact_id);
+      omitted += reb::NativeProbeDropWeight(event);
+      ++gaps;
     }
-    assert(count == reb::kNativeVmDispatchSampleBudget);
+    assert(samples == reb::kNativeVmDispatchSampleBudget);
+    assert(gaps == 1);
+    assert(omitted == 32 - reb::kNativeVmDispatchSampleBudget);
   }
-  std::cout << "PASS dispatch sink/transport quota, category rejection, malformed rejection and "
-               "replacement configuration\n";
+  std::cout << "PASS dispatch sink/transport quota, category rejection, malformed rejection, "
+               "visible budget gap and replacement configuration\n";
+}
+
+void DispatchEmitFailureReleasesBudget() {
+  NativeProbeQueue queue;
+  Configure(queue, 73);
+  Fill(queue);
+  reb::NativeVmDispatchSamplePayload sample;
+  sample.finding_id = 1;
+  sample.investigation_id = 2;
+  sample.interpreter_artifact_id = 3;
+  for (std::uint32_t index = 0; index < reb::kNativeVmDispatchSampleBudget; ++index) {
+    sink.RecordVmDispatchSample(sample);
+  }
+  assert(queue.DroppedCount() == reb::kNativeVmDispatchSampleBudget);
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  for (std::uint32_t index = 0; index < reb::kNativeVmDispatchSampleBudget; ++index) {
+    sink.RecordVmDispatchSample(sample);
+  }
+  NativeProbeEvent event;
+  std::size_t samples = 0;
+  while (queue.TryPop(event)) {
+    assert(event.header.type == reb::NativeProbeType::kVmDispatchSample);
+    assert(event.header.session_id == 73);
+    ++samples;
+  }
+  assert(samples == reb::kNativeVmDispatchSampleBudget);
+  assert(queue.DroppedCount() == reb::kNativeVmDispatchSampleBudget);
+  sink.PublishVmDispatchBudgetGap();
+  assert(Drain(queue) == 0);
+  std::cout << "PASS failed dispatch emit returns the budget slot and keeps the queue drop\n";
 }
 
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
   DispatchSampleAdmission();
+  DispatchEmitFailureReleasesBudget();
   QueueMappingAndCanvasBurst();
   RecoveryAndSaturation();
   ConcurrentSameSite();

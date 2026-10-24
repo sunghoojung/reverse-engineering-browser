@@ -26,6 +26,14 @@ namespace reb {
 
 class NativeProbeQueue;
 
+// kAdmitted is in the renderer ring. kQueueFull was refused by that ring and
+// its drop weight is already in DroppedCount. kRejected never reached the ring.
+enum class NativeProbeEmitStatus : std::uint8_t {
+  kAdmitted = 0,
+  kRejected = 1,
+  kQueueFull = 2,
+};
+
 class NativeProbeTransport final : public mojom::NativeProbeClient {
  public:
   static NativeProbeTransport& Get();
@@ -44,6 +52,9 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  base::UnsafeSharedMemoryRegion queue_region) override;
   void Disable() override;
 
+  [[nodiscard]] static NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
+                                                        std::uint64_t config_generation) noexcept;
+
  private:
   friend class base::NoDestructor<NativeProbeTransport>;
 
@@ -51,6 +62,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   ~NativeProbeTransport() override;
 
   static bool Emit(const NativeProbeEvent& event, std::uint64_t config_generation) noexcept;
+  [[nodiscard]] NativeProbeEmitStatus EmitEvent(const NativeProbeEvent& event,
+                                                std::uint64_t config_generation) noexcept;
   static void EmitArtifact(NativeArtifactKind kind,
                            NativeArtifactCaptureOrigin capture_origin,
                            std::uint64_t creator_event_id,
@@ -59,7 +72,6 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                            std::string_view source_url,
                            std::span<const std::uint8_t> content,
                            const NativeRuntimeScript& script) noexcept;
-  bool EmitEvent(const NativeProbeEvent& event, std::uint64_t config_generation) noexcept;
   void EmitGeneratedArtifact(NativeArtifactKind kind,
                              NativeArtifactCaptureOrigin capture_origin,
                              std::uint64_t creator_event_id,

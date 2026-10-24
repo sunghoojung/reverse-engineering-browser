@@ -46,7 +46,8 @@ bool IsValidVmDispatchSample(const VmDispatchSamplePayload& sample) noexcept {
          (sample.flags & static_cast<std::uint8_t>(~kKnownFlags)) == 0 &&
          sample.reserved_alignment == 0 && sample.reserved0 == 0 && sample.reserved1 == 0 &&
          sample.reserved2 == 0 && sample.finding_id != 0 && sample.investigation_id != 0 &&
-         IsZero(sample.reserved) && IsZero(sample.reserved_tail);
+         sample.interpreter_artifact_id != 0 && IsZero(sample.reserved) &&
+         IsZero(sample.reserved_tail);
 }
 
 bool SetVmDispatchSamplePayload(EventRecord& event,

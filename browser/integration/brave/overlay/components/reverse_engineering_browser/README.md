@@ -110,7 +110,12 @@ findings distinct. Guest bytes remain in the artifact channel and are linked by
 artifact ID instead of being copied through the renderer queue.
 `NativeVmDispatchSamplePayload` adds a fixed 128-byte dispatch-sample ABI.
 `RecordVmDispatchSample` copies one caller-supplied observation into the probe
-queue and admits at most 16 samples per capture configuration. It does not
+queue and admits at most 16 samples per capture configuration. Observations
+past that budget, and samples whose emit is rejected before the queue, stay on
+a counter. `PublishVmDispatchBudgetGap` writes one `vm`/`gap` record whose
+decimal payload is the exact unreported count and whose artifact id is the
+interpreter. A full probe queue still counts its own drops and returns the
+budget slot so a later observation can be retained. The writer does not
 read V8, Wasm, canvas calls, or static `br_table` selectors, and it does not
 call `Debug::SetBreakPoint`. No production caller supplies an observation yet,
 so a rebuilt browser still records zero guest steps until a sampler does.

@@ -130,6 +130,8 @@ python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
 # Preparation/policy generation created component args. Compile the native
 # integration and run its separate proxy test before the aggregate browser.
 test -f "${brave_directory}/../out/Component_arm64/args.gn"
+python3 tools/check-brave-services.py \
+  --args "${brave_directory}/../out/Component_arm64/args.gn"
 make brave-foundation-check
 python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
 if [[ -n "${REB_BRAVE_JOBS:-}" ]]; then

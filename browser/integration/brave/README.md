@@ -12,7 +12,13 @@ Patch 0014 disables Brave Talk, Wallet, News, Rewards, Leo AI and both VPN
 architectures at build time using the pinned upstream's existing feature flags.
 The related VPN panels/helpers and Leo agent/tab-management features follow their
 parent flags. These are build defaults, not profile preferences or runtime UI
-hiding. Deliberate downstream GN overrides can opt a service back in.
+hiding. A generated `args.gn` can still override a default. The integrated
+build rejects that file when any of the seven flags is `true` unless it also
+sets `reb_enable_bundled_brave_services = true`. That marker is accepted only
+when at least one of those seven flags is `true`. Talk, Wallet, VPN, Leo,
+Rewards, and News remain
+in a browser that was already built; they leave the running UI only after a
+rebuild from these defaults.
 
 This does not remove all Brave/Chromium network traffic or provide an
 Ungoogled-Chromium privacy guarantee. Shields, browser security updates, Safe
@@ -20,7 +26,10 @@ Browsing, ordinary browsing and the REB observation controls are unchanged.
 Existing installed browsers are unchanged until rebuilt. No profile data,
 wallet, subscription or account is deleted or modified.
 
-`python3 tools/check-brave-services.py` checks the tracked patch contract. After
+`python3 tools/check-brave-services.py` checks the tracked patch contract and
+the args.gn samples. The integrated build also runs
+`python3 tools/check-brave-services.py --args out/Component_arm64/args.gn`
+after preparation creates that file. To evaluate the patched sources after
 synchronizing the pinned Brave checkout, run
 `python3 tools/check-brave-services.py --brave browser/worktree/src/brave --gn /path/to/gn`
 to evaluate the actual patched GN files across desktop/mobile and

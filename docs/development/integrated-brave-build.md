@@ -198,6 +198,12 @@ On the supported build host, also establish:
       present, and every patch preflights/applies through the supported sync.
 - [ ] `make brave-doctor`, GN formatting (`gn format --dry-run` on the changed
       overlay BUILD.gn), `make brave-foundation-check`, and full Brave build pass.
+- [ ] `python3 tools/check-brave-services.py --args browser/worktree/src/out/Component_arm64/args.gn`
+      passes before compile. The research build leaves Talk, Wallet, VPN, Leo,
+      Rewards, and News disabled. Re-enabling one requires
+      `reb_enable_bundled_brave_services = true` plus that service flag in
+      `args.gn`. Confirm those surfaces are absent only on the rebuilt browser;
+      an already installed browser is unchanged until that rebuild.
 - [ ] `make app-build`, native Console checks, and strict companion signature pass.
 - [ ] Start the matched apps in a fresh disposable live session. Verify baseline
       evidence, request/profile and Canvas flows, debugger/source extraction,

@@ -34,8 +34,12 @@ function fixture() {
   const a=state.requests[0];state.selectedRequestId=a.id;state.selectedCaptureIdentity=api.apiCatalogRequestIdentity(a);assert(api.pin(a));
   function refresh(change) {
     const previous=state.debuggerSession;
+    // No render follows this production rebuild: model hidden Traffic, whose
+    // former rendered-view guard must not retain evicted response bodies.
+    state.trafficRenderedView={requests:state.requests};
     state.debuggerSession=structuredClone(previous);state.debuggerSession.generation++;
     change?.(state.debuggerSession);api.rebuildTrafficRequests(previous);
+    assert.equal(state.trafficRenderedView,null,'Hidden refresh/clear/session change retires the old rendered snapshot');
   }
   return {state,api,refresh,resets:()=>resets,aborts:()=>aborts};
 }

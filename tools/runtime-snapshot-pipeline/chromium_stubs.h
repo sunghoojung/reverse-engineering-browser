@@ -54,6 +54,20 @@ template <class T>
 T* Unretained(T* value) {
   return value;
 }
+class WritableSharedMemoryMapping {
+ public:
+  bool IsValid() const { return false; }
+  std::size_t size() const { return 0; }
+  void* memory() const { return nullptr; }
+};
+class UnsafeSharedMemoryRegion {
+ public:
+  bool IsValid() const { return false; }
+  std::size_t GetSize() const { return 0; }
+  WritableSharedMemoryMapping Map() const { return {}; }
+};
+template <class T>
+class ThreadLocalOwnedPointer {};
 }  // namespace base
 
 namespace mojo_base {
@@ -72,6 +86,23 @@ class BigBuffer {
 namespace mojo {
 struct ScopedDataPipeConsumerHandle {
   bool is_valid() const { return false; }
+};
+template <class T>
+class PendingRemote {
+ public:
+  bool is_valid() const { return false; }
+};
+template <class T>
+class SharedRemote {
+ public:
+  bool is_bound() const { return false; }
+  explicit operator bool() const { return false; }
+};
+template <class T>
+class Receiver {
+ public:
+  explicit Receiver(T*) {}
+  PendingRemote<T> BindNewPipeAndPassRemote() { return {}; }
 };
 }  // namespace mojo
 
@@ -97,6 +128,19 @@ class URLResponseHead {
 }  // namespace network
 
 namespace reb {
+namespace mojom {
+class NativeProbeHost {};
+class NativeProbeClient {
+ public:
+  virtual ~NativeProbeClient() = default;
+  virtual void Configure(std::uint64_t,
+                         std::uint64_t,
+                         std::uint64_t,
+                         bool,
+                         base::UnsafeSharedMemoryRegion) = 0;
+  virtual void Disable() = 0;
+};
+}  // namespace mojom
 struct NativeArtifactTransfer final {
   NativeArtifactHeader header;
   std::string url;

@@ -39,19 +39,25 @@ CASES = (
 HEADERS = (
     "base/component_export.h",
     "base/compiler_specific.h",
+    "base/memory/shared_memory_mapping.h",
+    "base/memory/unsafe_shared_memory_region.h",
     "base/no_destructor.h",
     "base/process/process_handle.h",
     "base/threading/platform_thread.h",
+    "base/threading/thread_local.h",
     "base/time/time.h",
     "base/functional/bind.h",
     "url/gurl.h",
     "mojo/public/cpp/base/big_buffer.h",
+    "mojo/public/cpp/bindings/receiver.h",
+    "mojo/public/cpp/bindings/shared_remote.h",
     "mojo/public/cpp/system/data_pipe.h",
     "services/network/public/cpp/resource_request.h",
     "services/network/public/mojom/url_response_head.mojom.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h",
     "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
+    "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h",
 )
 
 

@@ -25,6 +25,10 @@ are instruction indices. Registers, stack slots, and sparse memory are
 fixture-owned unsigned 64-bit values; no host addresses or arbitrary process
 memory are accessed. Cleared stack slots are unknown, with zero bits.
 The CLI emits synthetic fixture values only, to stdout on explicit invocation.
+The probe opt-in is separate: `SampleOwnedRegisterInvocation` walks the register
+program, and `EnableOwnedRegisterSampling` is what lets that walk call
+`RecordVmDispatchSample`. It is off unless a VM capture session opts in.
+The stdout export does not enable it.
 
 The [local API and JSON contract](../../protocol/native-vm-fixture-v1.md)
 describe bounds and lifecycle. Run tests through Make: paired traced/untraced

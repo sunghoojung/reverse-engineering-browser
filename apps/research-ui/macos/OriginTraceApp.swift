@@ -2239,28 +2239,48 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     else {
       throw artifactError("The VM analysis store contains a malformed document")
     }
-    let requestID = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?
-      .queryItems?
-      .first(where: { $0.name == "request_id" })?
-      .value
-    if let requestID {
-      guard requestID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
-        UInt64(requestID) != nil
+    let items = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    let names = ["request_id", "session_id", "root_process_id", "root_sequence_number"]
+    for name in names {
+      let matches = items.filter { $0.name == name }
+      guard matches.count <= 1, matches.allSatisfy({ $0.value != nil }) else {
+        throw artifactError("Specify \(name) only once with a value")
+      }
+    }
+    if names.contains(where: { name in items.contains(where: { $0.name == name }) }) {
+      guard let requestID = items.first(where: { $0.name == "request_id" })?.value,
+        let sessionID = items.first(where: { $0.name == "session_id" })?.value,
+        let processText = items.first(where: { $0.name == "root_process_id" })?.value,
+        let sequence = items.first(where: { $0.name == "root_sequence_number" })?.value,
+        isCanonicalUInt64(requestID, nonzero: true),
+        isCanonicalUInt64(sessionID, nonzero: true),
+        isCanonicalUInt64(sequence, nonzero: true),
+        isCanonicalUInt64(processText, nonzero: true), let processID = UInt32(processText)
       else {
-        throw artifactError("Request ID must be a canonical unsigned 64-bit integer")
+        throw artifactError("Exact VM request selection requires request_id, session_id, root_process_id and root_sequence_number")
       }
       results = results.filter { result in
-        (result["related_request_ids"] as? [String])?.contains(requestID) == true
+        guard let links = result["exact_request_links"] as? [[String: Any]] else { return false }
+        return links.contains { link in
+          guard let root = link["root_event"] as? [String: Any] else { return false }
+          return link["request_id"] as? String == requestID
+            && root["session_id"] as? String == sessionID
+            && (root["process_id"] as? NSNumber)?.uint64Value == UInt64(processID)
+            && root["sequence_number"] as? String == sequence
+        }
       }
-      let visibleArtifactIDs = Set(results.compactMap { $0["artifact_id"] as? String })
-      mixedFindings = mixedFindings.filter { finding in
-        guard let artifactIDs = finding["artifact_ids"] as? [String] else { return false }
-        return !visibleArtifactIDs.isDisjoint(with: artifactIDs)
-      }
+      // A linked constituent does not establish a mixed-artifact request link.
+      mixedFindings = []
+      document["summary"] = [
+        "analyzed_artifacts": results.count,
+        "candidate_count": results.filter { $0["tier"] as? String == "candidate" }.count,
+        "likely_vm_count": results.filter { $0["tier"] as? String == "likely-vm" }.count,
+        "failed_count": 0, "mixed_count": 0,
+      ]
       document["selection"] = [
-        "kind": "request",
-        "request_id": requestID,
-        "edge_semantics": "correlated-not-causal",
+        "kind": "request", "request_id": requestID,
+        "root_event": ["session_id": sessionID, "process_id": processID, "sequence_number": sequence],
+        "edge_semantics": "exact-captured-response-body",
       ]
     }
     document["results"] = results

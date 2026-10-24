@@ -29,6 +29,7 @@ mod vm_host_links;
 mod vm_opcode;
 pub mod vm_pack;
 mod vm_reachability;
+mod vm_request_links;
 pub mod wasm;
 mod worker;
 mod workspace;

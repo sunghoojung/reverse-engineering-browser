@@ -126,7 +126,7 @@
         return true;
       }
 
-      async function refreshVmOpcodeWorkspace(analysisDocument, requestId) {
+      async function refreshVmOpcodeWorkspace(analysisDocument, requestId, current = () => true) {
         const embedded = analysisDocument?.opcode_workspace;
         if (embedded !== undefined) {
           state.vmOpcodeWorkspaceRequestId = requestId;
@@ -136,7 +136,6 @@
         }
         if (analysisDocument === null && requestId === state.vmOpcodeWorkspaceRequestId &&
             state.vmOpcodeWorkspaceEmbedded) return;
-        const query = requestId ? `?request_id=${encodeURIComponent(requestId)}` : '';
         const sameSelection = requestId === state.vmOpcodeWorkspaceRequestId;
         const headers = sameSelection && state.vmOpcodeWorkspaceEtag
           ? { 'If-None-Match': state.vmOpcodeWorkspaceEtag }
@@ -145,7 +144,8 @@
         state.vmOpcodeWorkspaceEmbedded = false;
         state.vmOpcodeWorkspaceStatus = 'loading';
         try {
-          const response = await fetch(`/api/analysis/vm/opcodes${query}`, { cache: 'no-store', headers });
+          const response = await fetch('/api/analysis/vm/opcodes', { cache: 'no-store', headers });
+          if (!current()) return;
           if (response.status === 304) {
             state.vmOpcodeWorkspaceStatus = 'ready';
             state.vmOpcodeWorkspaceError = null;
@@ -153,8 +153,10 @@
           }
           if (!response.ok) throw new Error(`Opcode workspace returned ${response.status}`);
           const document = await response.json();
+          if (!current()) return;
           acceptVmOpcodeWorkspace(document, requestId, response.headers.get('ETag'));
         } catch (error) {
+          if (!current()) return;
           retainVmOpcodeWorkspaceOnFailure(
             state,
             error instanceof SyntaxError ? 'malformed' : 'unavailable',
@@ -184,43 +186,71 @@
         }
       }
 
-      async function refreshVmAnalysis(requestId = state.vmAnalysisRequestId) {
+      async function refreshVmAnalysis(selection = state.vmAnalysisSelection ?? null) {
         if (location.protocol === 'file:') return;
-        const normalizedRequestId = requestId || null;
-        const query = normalizedRequestId ? `?request_id=${encodeURIComponent(normalizedRequestId)}` : '';
-        const sameSelection = normalizedRequestId === state.vmAnalysisRequestId;
-        const headers = sameSelection && state.vmAnalysisEtag ? { 'If-None-Match': state.vmAnalysisEtag } : {};
+        if (selection !== null && !isVmRequestSelection(selection)) return;
+        const key = vmRequestSelectionKey(selection);
+        const sameSelection = key === vmRequestSelectionKey(state.vmAnalysisSelection);
+        const generation = state.vmAnalysisGeneration = (state.vmAnalysisGeneration ?? 0) + 1;
+        const current = () => generation === state.vmAnalysisGeneration &&
+          key === vmRequestSelectionKey(state.vmAnalysisSelection);
+        state.vmAnalysisSelection = selection;
+        state.vmAnalysisRequestId = selection?.request_id ?? null;
+        if (!sameSelection) {
+          state.vmAnalysisEtag = null;
+          state.vmAnalysisDocument = null;
+          state.lastValidAnalysisFindings = [];
+          state.selectedVmFindingId = null;
+          state.vmFindings = vmVisibleFindings(state);
+          state.vmOpcodeWorkspace = state.lastValidVmOpcodeWorkspace = null;
+          state.vmOpcodeWorkspaceRequestId = null;
+          state.vmOpcodeWorkspaceEtag = null;
+          state.vmOpcodeWorkspaceEmbedded = false;
+          state.vmOpcodeWorkspaceStatus = 'loading';
+          state.vmOpcodeWorkspaceError = null;
+          state.vmHostLinks = null;
+          state.vmHostLinksStatus = 'loading';
+          state.vmHostLinksGeneration += 1;
+          state.selectedVmHandlerKey = null;
+        }
+        const query = selection ? `?${new URLSearchParams({request_id: selection.request_id,
+          session_id: selection.root_event.session_id, root_process_id: String(selection.root_event.process_id),
+          root_sequence_number: selection.root_event.sequence_number})}` : '';
+        const headers = state.vmAnalysisEtag ? {'If-None-Match': state.vmAnalysisEtag} : {};
         state.vmAnalysisStatus = 'loading';
+        state.vmAnalysisError = null;
+        if (!sameSelection) renderVmLab();
         try {
-          const response = await fetch(`/api/analysis/vm${query}`, { cache: 'no-store', headers });
+          const response = await fetch(`/api/analysis/vm${query}`, {cache: 'no-store', headers});
+          if (!current()) return;
           if (response.status === 304) {
+            if (selection && (!state.vmAnalysisDocument || !vmAnalysisMatchesSelection(state.vmAnalysisDocument, selection))) {
+              throw new TypeError('VM analysis cache has no matching selection');
+            }
             state.vmAnalysisStatus = 'ready';
-            state.vmAnalysisError = null;
-            await refreshVmOpcodeWorkspace(null, normalizedRequestId);
-            await refreshVmHostLinks();
-            renderVmLab();
-            return;
+            await refreshVmOpcodeWorkspace(null, key, current);
+          } else {
+            if (!response.ok) throw new Error(`Analyzer returned ${response.status}`);
+            const document = await response.json();
+            if (!current()) return;
+            if (!isVmAnalysisDocument(document) || !vmAnalysisMatchesSelection(document, selection)) {
+              throw new TypeError('Malformed or mismatched VM analysis response');
+            }
+            state.vmAnalysisEtag = response.headers.get('ETag');
+            state.vmAnalysisStatus = 'ready';
+            state.vmAnalysisDocument = document;
+            state.lastValidAnalysisFindings = vmFindingsFromAnalysis(document);
+            state.vmFindings = vmVisibleFindings(state);
+            await refreshVmOpcodeWorkspace(document, key, current);
           }
-          if (!response.ok) throw new Error(`Analyzer returned ${response.status}`);
-          const document = await response.json();
-          if (!isVmAnalysisDocument(document)) throw new TypeError('Malformed VM analysis response');
-          state.vmAnalysisEtag = response.headers.get('ETag');
-          state.vmAnalysisRequestId = normalizedRequestId;
-          state.vmAnalysisStatus = 'ready';
-          state.vmAnalysisError = null;
-          state.vmAnalysisDocument = document;
-          state.lastValidAnalysisFindings = vmFindingsFromAnalysis(document);
-          state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
-          await refreshVmOpcodeWorkspace(document, normalizedRequestId);
+          if (!current()) return;
           await refreshVmHostLinks();
         } catch (error) {
-          retainVmAnalysisOnFailure(
-            state,
-            error instanceof TypeError ? 'malformed' : 'unavailable',
-            error.message
-          );
+          if (!current()) return;
+          retainVmAnalysisOnFailure(state,
+            error instanceof TypeError || error instanceof SyntaxError ? 'malformed' : 'unavailable', error.message);
         }
-        renderVmLab();
+        if (current()) renderVmLab();
       }
 
       function setNetworkNotice(kind, message) {
@@ -2115,10 +2145,15 @@
           title.append(textElement('h2', '', 'VM patterns in source'), textElement('p', '', `${selected.hostRuntime} · code analysis · artifact ${selected.sourceArtifactId}`));
           const actions = document.createElement('div'); actions.className = 'vm-detail-actions';
           actions.append(textElement('span', 'vm-confidence', selected.confidence));
-          const sourceArtifact = state.artifacts.find(artifact => artifact.artifact_id === selected.sourceArtifactId);
+          const sourceArtifact = vmSourceArtifactForFinding(state.artifacts, selected, state.vmAnalysisSelection);
           if (sourceArtifact) {
             const openSource = textElement('button', 'secondary-button', 'Open in Sources'); openSource.type = 'button';
-            openSource.addEventListener('click', () => { showScreen('sources', openSource); selectArtifact(sourceArtifact.artifact_id); });
+            const identity = state.vmAnalysisSelection ? {type: 'captured-artifact', session: sourceArtifact.session_id,
+              artifact: sourceArtifact.artifact_id, sha256: sourceArtifact.sha256, bytes: sourceArtifact.byte_size} : null;
+            openSource.addEventListener('click', () => {
+              showScreen('sources', openSource);
+              selectArtifact(sourceArtifact.artifact_id, null, {identity});
+            });
             actions.append(openSource);
           }
           head.append(title, actions);
@@ -2126,7 +2161,9 @@
           fields.append(
             vmField('tier', selected.confidence),
             vmField('source artifact', selected.sourceArtifactId),
-            vmField('related requests', result.related_request_ids?.join(', ') || 'none observed'),
+            vmField('correlated requests (session context only)', result.related_request_ids?.join(', ') || 'none observed'),
+            vmField('exact response-body links', result.exact_request_links?.map(link =>
+              `${link.request_id} · session ${link.root_event.session_id} · process ${link.root_event.process_id} · root ${link.root_event.sequence_number} → response ${link.response_event.sequence_number} → capture ${link.capture_event.sequence_number}`).join('; ') || 'unlinked'),
             vmField('evidence families', result.evidence_families?.join(', ') || 'none'),
             vmField('bytecode snapshot', result.bytecode_snapshot?.snapshot_hex || result.bytecode_snapshot?.unavailable_reason || 'not applicable'),
             vmField('edge semantics', 'observed · inferred · correlated · unknown')
@@ -2191,7 +2228,7 @@
           vmField('source artifact', selected.sourceArtifactId === '0' ? 'not captured' : selected.sourceArtifactId),
           vmField('source range', selected.flags.includes('source range') ? `${selected.sourceOffset} + ${selected.sourceSize} bytes` : 'not captured')
         );
-        const sourceArtifact = state.artifacts.find(artifact => artifact.artifact_id === selected.sourceArtifactId);
+        const sourceArtifact = vmSourceArtifactForFinding(state.artifacts, selected, state.vmAnalysisSelection);
         if (sourceArtifact) {
           const openSource = textElement('button', 'secondary-button', 'Open in Sources');
           openSource.type = 'button';
@@ -2235,8 +2272,10 @@
         const gapCount = shownSequenceGaps();
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
+        } else if (state.vmAnalysisStatus === 'loading' && state.vmAnalysisSelection) {
+          setVmNotice('loading', 'Loading candidates for this exact captured response body. Session-wide findings are excluded.');
         } else if (state.vmAnalysisStatus === 'malformed') {
-          setVmNotice('malformed', 'Malformed VM analysis was rejected. Valid timeline summaries remain visible.');
+          setVmNotice('malformed', `Malformed or mismatched VM analysis was rejected. ${state.vmAnalysisSelection ? 'Only the last valid evidence for this exact request may remain visible.' : 'Valid timeline summaries remain visible.'}`);
         } else if (state.vmAnalysisStatus === 'unavailable') {
           setVmNotice('disconnected', `The cold analyzer is unavailable. ${state.vmFindings.length ? 'Last valid VM evidence remains visible.' : 'No VM evidence is available.'}`);
         } else if (state.broker === 'unavailable') {
@@ -2244,18 +2283,21 @@
         } else if (state.malformedVmFindings > 0) {
           setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
         } else if (state.vmFindings.length === 0) {
-          setVmNotice('empty', 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.');
+          setVmNotice('empty', state.vmAnalysisSelection ? 'No VM candidates are linked to this exact captured response body. Unlinked, legacy and session-wide findings are not shown.' : 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.');
         } else if (gapCount > 0n) {
           setVmNotice('gap', `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).`);
+        } else if (state.vmAnalysisSelection) {
+          const selection = state.vmAnalysisSelection;
+          setVmNotice('ready', `Exact captured response body · request ${selection.request_id} · session ${selection.root_event.session_id} · process ${selection.root_event.process_id} · root ${selection.root_event.sequence_number}. This link does not establish execution or guest semantics.`);
         } else {
           elements.vmNotice.hidden = true;
         }
         // Poll errors and identical snapshots change the notice, not the owned
         // finding DOM. Keep focus and scroll even when a poll settles in another
         // VM mode. Source availability is part of the selected detail's input.
-        const selectedSourceId = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId)?.sourceArtifactId;
+        const selectedFinding = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
         const renderKey = JSON.stringify([state.vmFindings, state.selectedVmFindingId,
-          state.artifacts.some(artifact => artifact.artifact_id === selectedSourceId)]);
+          Boolean(vmSourceArtifactForFinding(state.artifacts, selectedFinding, state.vmAnalysisSelection))]);
         const workspaceKey = JSON.stringify([
           state.vmOpcodeWorkspaceStatus, state.vmOpcodeWorkspace?.document_digest ?? null,
           state.vmHostLinksStatus, state.vmHostLinks?.document_digest ?? null
@@ -2760,8 +2802,8 @@
           empty.textContent = request?.origin === 'live'
             ? request.protocolRequestId
               ? linkedRoot
-                ? 'Structured fields were not captured. This debugger row joins one native request by its DevTools request id.'
-                : 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only. Related VM candidates opens session analysis, and Fingerprinting lists the session surfaces.'
+                ? 'Structured fields were not captured. This debugger row joins one native request by its DevTools request id. Related VM candidates uses that request only when its events contain one exact native start.'
+                : 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only. Related VM candidates requires an exact native start; use VM navigation separately for session-wide findings. Fingerprinting lists the session surfaces.'
               : 'Structured fields were not captured. Request-level origin evidence is still available.'
             : request?.origin === 'demo'
               ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
@@ -7306,6 +7348,7 @@
         const vmAnalysis = analystElements.includeVm.checked ? {
           status: state.vmAnalysisStatus,
           request_id: state.vmAnalysisRequestId,
+          selection: state.vmAnalysisSelection,
           findings: state.vmFindings.slice(0, 256),
           malformed_findings: state.malformedVmFindings
         } : null;
@@ -11950,7 +11993,7 @@
           acceptEventWindow(body);
           const vmModel = vmFindingsFromEvents(state.events);
           state.eventVmFindings = vmModel.findings;
-          state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
+          state.vmFindings = vmVisibleFindings(state);
           state.malformedVmFindings = vmModel.malformedCount;
           const eventOrigin = state.sessionMode === 'demo' ? 'demo' : 'live';
           state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
@@ -12304,22 +12347,18 @@
       });
       elements.requestVmCandidates.addEventListener('click', async () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        if (request?.nativeLink?.kind === 'devtools-request-id' && request.nativeLink.requestId) {
-          investigationNotice('This debugger row joins a native request by its DevTools request id. Related VM candidates uses that native request id.', 'ready');
-          const refresh = refreshVmAnalysis(request.nativeLink.requestId);
-          showScreen('vm', elements.requestVmCandidates);
-          await refresh;
+        const selection = vmRequestSelection(state.requests, state.selectedRequestId);
+        if (!selection) {
+          investigationNotice(request?.nativeLink?.kind === 'devtools-request-id'
+            ? 'This debugger row joins a native request by its DevTools request id, but that join is not a unique retained native request start. Related VM candidates needs the exact captured-response-body chain. Choose the native row, or use VM navigation separately for session-wide findings.'
+            : 'Unlinked: this Traffic row has no unique retained native request start with exact session, process and sequence identifiers. Debugger correlations and legacy rows cannot establish a captured-response-body link. Choose a native row, or use VM navigation separately for session-wide findings.',
+            'unavailable');
           return;
         }
-        if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
-          investigationNotice('This debugger row has no native request id, so Related VM candidates opens session analysis. Findings without a related request id stay visible. This is not a join to the selected request.', 'unavailable');
-          const refresh = refreshVmAnalysis(null);
-          showScreen('vm', elements.requestVmCandidates);
-          await refresh;
-          return;
+        if (request?.nativeLink?.kind === 'devtools-request-id') {
+          investigationNotice('This debugger row joins a native request by its DevTools request id. Related VM candidates uses that joined native start.', 'ready');
         }
-        const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;
-        const refresh = requestId ? refreshVmAnalysis(requestId) : null;
+        const refresh = refreshVmAnalysis(selection);
         showScreen('vm', elements.requestVmCandidates);
         await refresh;
       });

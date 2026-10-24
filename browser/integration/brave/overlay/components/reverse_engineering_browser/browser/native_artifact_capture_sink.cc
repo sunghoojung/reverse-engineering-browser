@@ -109,12 +109,11 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
                                            const std::uint64_t category_mask,
                                            const std::uint64_t expires_at_monotonic_ns) noexcept {
   emitter_.store(nullptr, std::memory_order_release);
+  generation_.fetch_add(1, std::memory_order_acq_rel);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
   category_mask_.store(emitter ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(emitter ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
-  if (!emitter) {
-    pending_.clear();
-  }
+  pending_.clear();
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
   emitter_.store(emitter, std::memory_order_release);
@@ -166,6 +165,7 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
   context->reservation_bytes = reservation;
   context->request_id = request_id;
   context->frame_id = frame_id;
+  context->generation = generation_.load(std::memory_order_acquire);
   if (context->url.empty() || context->url.size() > kNativeArtifactMaxUrlBytes ||
       context->mime_type.empty() || context->mime_type.size() > kNativeArtifactMaxMimeTypeBytes) {
     Release(reservation);
@@ -259,6 +259,8 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   if (!IsEnabledFor(result_category)) {
     return 0;
   }
+  const std::uint64_t capture_session_id = session_id_.load(std::memory_order_relaxed);
+  const std::uint64_t capture_generation = generation_.load(std::memory_order_acquire);
   const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
   const bool valid_kind_and_origin =
       (kind == NativeArtifactKind::kJavaScript &&
@@ -305,7 +307,7 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   const std::span<const std::uint8_t> received(content);
   auto transfer = std::make_unique<NativeArtifactTransfer>();
   transfer->header.kind = kind;
-  transfer->header.session_id = session_id_.load(std::memory_order_relaxed);
+  transfer->header.session_id = capture_session_id;
   transfer->header.frame_id = frame_id;
   transfer->header.artifact_id = artifact_id;
   transfer->header.creator_event_id = creator_event_id;
@@ -326,7 +328,10 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
                "transfer_queue_full_or_disconnected", result_category);
     return 0;
   }
-  pending_.emplace(artifact_id, PendingContext{0, frame_id, result_category});
+  pending_.emplace(artifact_id, PendingContext{.frame_id = frame_id,
+                                               .session_id = capture_session_id,
+                                               .generation = capture_generation,
+                                               .result_category = result_category});
   return artifact_id;
 }
 
@@ -334,6 +339,10 @@ void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> c
                                                const bool complete,
                                                std::vector<std::uint8_t> content) {
   Release(context->reservation_bytes);
+  if (!IsCurrentCapture(context->header.session_id, context->generation)) {
+    // Do not enqueue old bytes or relabel a failed old body under a new session.
+    return;
+  }
   if (!complete || !IsEnabled()) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, context->header.artifact_id,
                context->request_id, context->frame_id,
@@ -354,7 +363,11 @@ void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> c
     return;
   }
   pending_.emplace(context->header.artifact_id,
-                   PendingContext{context->request_id, context->frame_id});
+                   PendingContext{.request_id = context->request_id,
+                                  .frame_id = context->frame_id,
+                                  .session_id = context->header.session_id,
+                                  .generation = context->generation,
+                                  .parent_event_id = context->header.creator_event_id});
 }
 
 void NativeArtifactCaptureSink::TransferCompleted(
@@ -372,11 +385,14 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   }
   const PendingContext context = found->second;
   pending_.erase(found);
+  if (!IsCurrentCapture(context.session_id, context.generation)) {
+    return;
+  }
   EmitResult(status == NativeArtifactReceiveStatus::kAccepted
                  ? NativeProbeType::kArtifactCaptured
                  : NativeProbeType::kArtifactCaptureFailed,
              artifact_id, context.request_id, context.frame_id, StatusName(status),
-             context.result_category);
+             context.result_category, context.parent_event_id);
 }
 
 void NativeArtifactCaptureSink::EmitResult(const NativeProbeType type,
@@ -384,7 +400,8 @@ void NativeArtifactCaptureSink::EmitResult(const NativeProbeType type,
                                            const std::uint64_t request_id,
                                            const std::uint64_t frame_id,
                                            const std::string& detail,
-                                           const NativeProbeCategory category) noexcept {
+                                           const NativeProbeCategory category,
+                                           const std::uint64_t parent_event_id) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) {
     return;
@@ -405,6 +422,7 @@ void NativeArtifactCaptureSink::EmitResult(const NativeProbeType type,
   event.header.frame_id = frame_id;
   event.header.artifact_id = artifact_id;
   event.header.request_id = request_id;
+  event.header.parent_event_id = parent_event_id;
   const std::size_t size = std::min(detail.size(), event.inline_payload.size());
   std::transform(detail.begin(), detail.begin() + static_cast<std::ptrdiff_t>(size),
                  event.inline_payload.begin(), [](const char value) {
@@ -415,6 +433,12 @@ void NativeArtifactCaptureSink::EmitResult(const NativeProbeType type,
     event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kPayloadTruncated);
   }
   emitter(event);
+}
+
+bool NativeArtifactCaptureSink::IsCurrentCapture(const std::uint64_t session_id,
+                                                 const std::uint64_t generation) const noexcept {
+  return generation == generation_.load(std::memory_order_acquire) &&
+         session_id == session_id_.load(std::memory_order_relaxed);
 }
 
 bool NativeArtifactCaptureSink::Reserve(const std::size_t bytes) noexcept {

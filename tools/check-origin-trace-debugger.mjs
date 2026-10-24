@@ -1,4 +1,5 @@
 import {trafficBrowserDownloadObserver} from './browser-download-observer.mjs';
+import {checkVmRequestLinkageUI} from './check-vm-request-linkage-ui.mjs';
 import {checkMarkerFuzzIntegration} from './marker-fuzz-integration.mjs';
 import {createHash} from 'node:crypto';
 import {elementScreenshotFixtureRoute,checkElementScreenshotCapture} from './check-element-screenshot-capture.mjs';
@@ -1386,49 +1387,11 @@ console.log('PASS request signal profile late headers/bodies/errors, exact owner
   assert.match(fixture.calls.at(-1).url, /request_id=345/);
   assert.match(fixture.calls.at(-1).url, /root_process_id=19/);
 }
-{
-  let click; const queried = [], navigated = [], notices = [];
-  const state = {selectedRequestId:'cdp', requests:[{id:'cdp', protocolRequestId:'raw', operation:'cdp_complete', event:{request_id:'7'}}]};
-  const elements = {requestVmCandidates:{addEventListener(name, handler) {assert.equal(name,'click'); click=handler;}}};
-  runInNewContext(appSection("      elements.requestVmCandidates.addEventListener(", "      elements.sourceWindowPrevious.addEventListener("), {
-    state, elements, refreshVmAnalysis:async id => queried.push(id), showScreen:(...args) => navigated.push(args),
-    investigationNotice:(...args) => notices.push(args)
-  });
-  await click(); assert.deepEqual(queried,[null]); assert.equal(navigated.length,1); assert.equal(navigated[0][0],'vm');
-  assert.match(notices[0][0],/no native request id/); assert.match(notices[0][0],/session analysis/); assert.equal(notices[0][1],'unavailable');
-  delete state.requests[0].protocolRequestId; await click();
-  assert.deepEqual(queried,[null,null],'A cdp_ operation still cannot query the correlated native id');
-  assert.equal(navigated.length,2);
-  state.requests[0] = {id:'native', event:{request_id:'7'}}; state.selectedRequestId='native';
-  await click(); assert.deepEqual(queried,[null,null,'7']); assert.equal(navigated.length,3,'Native request pivot remains available');
-  state.requests[0] = {id:'cdp-joined', protocolRequestId:'12.345', operation:'cdp_complete', event:{request_id:'7'},
-    nativeLink:{kind:'devtools-request-id', nativeRequestId:'native-devtools', requestId:'345'}};
-  state.selectedRequestId = 'cdp-joined';
-  await click();
-  assert.deepEqual(queried,[null,null,'7','345']);
-  assert.match(notices.at(-1)[0], /DevTools request id/);
-  assert.equal(notices.at(-1)[1], 'ready');
-}
-// Related VM entry navigates synchronously; a late fetch cannot reopen the pane.
-for (const request of [
-  {id:'cdp',protocolRequestId:'raw',operation:'cdp_pending'},
-  {id:'cdp-marker',operation:'cdp_complete'},
-  {id:'native',event:{request_id:'7'}}
-]) {
-  let click, finish, screen='traffic'; const queries=[];
-  const pending = new Promise(resolve=>{finish=resolve;});
-  const state={selectedRequestId:request.id,requests:[request]};
-  const elements={requestVmCandidates:{addEventListener(_name,handler){click=handler;}}};
-  runInNewContext(appSection("      elements.requestVmCandidates.addEventListener(", "      elements.sourceWindowPrevious.addEventListener("), {
-    state,elements,refreshVmAnalysis:id=>{queries.push(id);return pending;},
-    showScreen:name=>{screen=name;},investigationNotice(){}
-  });
-  const reading=click();
-  assert.equal(screen,'vm','Related VM entry must not wait for a slow analysis');
-  assert.deepEqual(queries,[request.id==='native'?'7':null]);
-  screen='sources';finish();await reading;
-  assert.equal(screen,'sources','Late VM analysis cannot override newer navigation');
-}
+// Related VM uses an exact native request start. A DevTools request-id join
+// supplies that start only from the joined native events; the renderer id is
+// not the browser request_started id. Unlinked debugger rows stay in Traffic.
+// The production-controller suite covers the exact pivot, including the join.
+await checkVmRequestLinkageUI(root);
 console.log('PASS cross-tab heuristic candidates cannot become exact Signal/VM queries; native pivot and raw metadata preserved');
 
 

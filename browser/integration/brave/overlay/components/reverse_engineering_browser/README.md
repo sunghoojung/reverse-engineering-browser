@@ -149,3 +149,20 @@ shared/service workers, and the missing browser/IPC/API acceptance gates.
 
 The current event envelope does not yet carry a trustworthy origin identity,
 so origin allowlisting is intentionally not inferred from bounded payload text.
+
+### Network artifact creator identity
+
+Accepted network-body artifacts emit `artifact_captured.parent_event_id` naming
+the browser's actual `response_started` sequence, identical to the manifest's
+`creator_event_id`. The artifact sink keeps its admission session and generation
+across body completion and transfer acknowledgement. Reconfiguration, including
+reactivation with the same numeric session ID, retires old callbacks; they cannot
+enqueue late bodies or report an old ACK under the new session. Bytes already
+enqueued are not retractable, so downstream exact linkage requires the retained
+successful capture event as well as the manifest and response. Generated/runtime
+artifacts never inherit this network parent relation.
+
+`make native-artifact-capture-check` compiles the actual network/artifact sinks
+against narrow platform/Mojo adapters, then uses the production receiver, event
+broker and VM analyzer. This is component-pipeline evidence, not proof of Mojo
+forwarding, Chromium compilation, or a matched-browser end-to-end run.

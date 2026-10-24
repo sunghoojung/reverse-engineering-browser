@@ -1066,15 +1066,12 @@ impl Query {
 }
 fn analysis_input_signature(path: &Path) -> String {
     // Evidence can be restored or atomically replaced with the same length and
-    // mtime. Unix file identity and change time prevent reusing that old result.
-    // Other platforms recompute analysis rather than relying on a weaker key.
+    // mtime. Unix identity includes change time and a content hash so a
+    // same-size rewrite still misses the cache when ctime does not advance.
+    // The hash is not taken through a symlink. Other platforms recompute
+    // analysis rather than relying on a weaker key.
     #[cfg(unix)]
-    let identity = {
-        use std::os::unix::fs::MetadataExt;
-        path.symlink_metadata()
-            .map(|m| format!("{}:{}:{}:{}", m.dev(), m.ino(), m.ctime(), m.ctime_nsec()))
-            .unwrap_or_else(|error| format!("{:?}", error.kind()))
-    };
+    let identity = evidence::observed_identity(path, false);
     #[cfg(not(unix))]
     let identity = String::new();
     evidence::resource_etag(path, &identity)

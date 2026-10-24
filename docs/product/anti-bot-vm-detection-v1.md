@@ -54,9 +54,11 @@ while `related_request_ids` remains a legacy ID-only summary.
 Runtime evidence profile version `2`, introduced in producer `1.1.0`, binds the
 relevance weights and identity semantics. The HTTP analysis cache tracks changes to both
 the artifact manifest and event store, including event-only appends, replacement,
-and clearing. On Unix it includes file identity and change time, so same-size
-replacement or rewriting with a restored modification time cannot reuse stale
-analysis. Other platforms recompute before deciding whether to return 304. The same bounded analyzer powers the HTTP API and offline CLI.
+and clearing. On Unix the cache key includes file identity, change time, and a
+content hash, so a same-size replacement or rewrite with a restored modification
+time cannot reuse stale analysis when the filesystem does not advance change time.
+A symlink is identified as a link and is not hashed through. Other platforms
+recompute before deciding whether to return 304. The same bounded analyzer powers the HTTP API and offline CLI.
 This increment does not implement the broader stack, semantic VM, or exact value
 tracing promises below.
 

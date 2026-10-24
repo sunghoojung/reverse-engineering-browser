@@ -248,6 +248,75 @@ pub fn resource_etag(path: &Path, signature: &str) -> String {
     )
 }
 
+// Change time is not a reliable content clock: some filesystems leave it
+// unchanged for a same-size rewrite, and restoring mtime can make that rewrite
+// invisible to a metadata-only etag. The digest covers the bytes. Callers that
+// must not follow links pass `follow` false and keep the link identity instead
+// of the target's bytes.
+pub(crate) fn observed_identity(path: &Path, follow: bool) -> String {
+    let metadata = if follow {
+        path.metadata()
+    } else {
+        path.symlink_metadata()
+    };
+    let stat = match &metadata {
+        Ok(metadata) => metadata_identity(metadata),
+        Err(error) => format!("missing:{:?}", error.kind()),
+    };
+    let digest = match &metadata {
+        Ok(metadata) if !follow && metadata.file_type().is_symlink() => "symlink".to_owned(),
+        Ok(_) => content_digest(path),
+        Err(error) => format!("unreadable:{:?}", error.kind()),
+    };
+    format!("{stat}:{digest}")
+}
+
+fn metadata_identity(metadata: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!(
+            "{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        format!("{:?}", metadata.created())
+    }
+}
+
+fn content_digest(path: &Path) -> String {
+    // O_NONBLOCK so a FIFO substituted for the store cannot stall the cache key.
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) => return format!("unreadable:{:?}", error.kind()),
+    };
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return "unreadable:not-a-file".to_owned();
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => hasher.update(&buffer[..count]),
+            Err(error) => return format!("unreadable:{:?}", error.kind()),
+        }
+    }
+    hex::encode(hasher.finalize())
+}
+
 pub(crate) fn regular_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -429,7 +498,7 @@ pub(crate) mod frozen {
     use std::{
         ffi::{CString, OsStr},
         fs::{File, Metadata},
-        io::{BufRead, BufReader, Read},
+        io::{BufRead, BufReader, Read, Seek, SeekFrom},
         os::{
             fd::{AsRawFd, FromRawFd},
             unix::{ffi::OsStrExt, fs::MetadataExt},
@@ -643,38 +712,66 @@ pub(crate) mod frozen {
             if self.stamp.size > maximum {
                 return Err(limit());
             }
-            let mut reader = BufReader::with_capacity(64 * 1024, &mut self.file);
-            let mut line = Vec::with_capacity(max_line.min(8192));
+            let mut observed = Sha256::new();
             let (mut total, mut records) = (0u64, 0usize);
+            {
+                // Drop the buffer before the confirmation read so it cannot hide
+                // a rewrite that landed while the first line was being accepted.
+                let mut reader = BufReader::with_capacity(64 * 1024, &mut self.file);
+                let mut line = Vec::with_capacity(max_line.min(8192));
+                loop {
+                    check(deadline)?;
+                    line.clear();
+                    let count = reader
+                        .by_ref()
+                        .take(max_line as u64 + 1)
+                        .read_until(b'\n', &mut line)
+                        .map_err(|_| unavailable())?;
+                    if count == 0 {
+                        break;
+                    }
+                    observed.update(&line[..count]);
+                    total = total.checked_add(count as u64).ok_or_else(limit)?;
+                    if count > max_line || total > maximum {
+                        return Err(limit());
+                    }
+                    if total > self.stamp.size {
+                        return Err(changed());
+                    }
+                    if line.iter().all(u8::is_ascii_whitespace) {
+                        continue;
+                    }
+                    records = records.checked_add(1).ok_or_else(limit)?;
+                    if records > max_records {
+                        return Err(limit());
+                    }
+                    check(deadline)?;
+                    accept(&line)?;
+                }
+            }
+            if total != self.stamp.size {
+                return Err(changed());
+            }
+            check(deadline)?;
+            // Stamp change time does not move for every same-size rewrite. A
+            // second read catches bytes that no longer match what was consumed.
+            self.file.seek(SeekFrom::Start(0)).map_err(|_| changed())?;
+            let mut confirm = Sha256::new();
+            let mut buffer = [0u8; 64 * 1024];
+            let mut seen = 0u64;
             loop {
                 check(deadline)?;
-                line.clear();
-                let count = reader
-                    .by_ref()
-                    .take(max_line as u64 + 1)
-                    .read_until(b'\n', &mut line)
-                    .map_err(|_| unavailable())?;
+                let count = self.file.read(&mut buffer).map_err(|_| unavailable())?;
                 if count == 0 {
                     break;
                 }
-                total = total.checked_add(count as u64).ok_or_else(limit)?;
-                if count > max_line || total > maximum {
-                    return Err(limit());
-                }
-                if total > self.stamp.size {
+                seen = seen.checked_add(count as u64).ok_or_else(limit)?;
+                if seen > self.stamp.size {
                     return Err(changed());
                 }
-                if line.iter().all(u8::is_ascii_whitespace) {
-                    continue;
-                }
-                records = records.checked_add(1).ok_or_else(limit)?;
-                if records > max_records {
-                    return Err(limit());
-                }
-                check(deadline)?;
-                accept(&line)?;
+                confirm.update(&buffer[..count]);
             }
-            if total != self.stamp.size {
+            if seen != total || confirm.finalize() != observed.finalize() {
                 return Err(changed());
             }
             check(deadline)?;

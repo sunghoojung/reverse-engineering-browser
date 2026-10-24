@@ -59,27 +59,11 @@ impl Identity {
     }
 }
 
-// Include identity and change time, not just size/mtime: an atomic replacement
-// or same-size rewrite with a restored mtime must not produce a false 304.
+// Identity and change time are not enough. A same-size rewrite can restore
+// mtime without advancing ctime, and that must not produce a false 304.
 pub fn etag(path: &Path, signature: &str) -> String {
-    let identity = path.metadata().ok().map(|metadata| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            format!(
-                "{}:{}:{}:{}",
-                metadata.dev(),
-                metadata.ino(),
-                metadata.ctime(),
-                metadata.ctime_nsec()
-            )
-        }
-        #[cfg(not(unix))]
-        {
-            format!("{:?}", metadata.created())
-        }
-    });
-    evidence::resource_etag(path, &format!("{signature}:event-window-v3:{identity:?}"))
+    let identity = evidence::observed_identity(path, true);
+    evidence::resource_etag(path, &format!("{signature}:event-window-v4:{identity}"))
 }
 
 struct Record {

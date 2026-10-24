@@ -173,6 +173,8 @@ bytes remain uncharacterized, and coverage is partial. An instruction-index PC
 cannot characterize a byte without a separate verified mapping.
 `uncharacterized-bytecode` names this limitation when bytes are present.
 Traversal defaults to an `entry-unavailable` frontier and `complete:false`.
+A WebAssembly module with static dispatch arms and no runtime snapshot uses
+`static-module-only` instead of an empty `snapshot-unavailable` frontier.
 These fields never promote a handler to universally confirmed semantics.
 
 The UI shows sampled PC with units, selected handler index and bytecode artifact
@@ -207,6 +209,22 @@ This is source evidence, not a runtime memory or guest-bytecode snapshot. It doe
 not populate `snapshots`, `bytecode_artifact_id`, snapshot counts, byte coverage,
 or traversal inputs. Missing runtime bytes retain their explicit omission even
 when the module instruction preview is visible.
+
+A WebAssembly workspace keeps static arms from the detector-selected function
+and from a bounded neighborhood of that function: direct calls within three
+hops, either direction, and functions named by element segments of tables those
+functions use with in-loop `call_indirect`. At most 32 functions are retained.
+Further in-loop dispatch functions stay out under `dispatch-neighborhood`.
+Selector numbers remain `inferred` and local to one `br_table`. Default and
+`call_indirect` arms stay `unknown`. An observed sample binds an opcode only
+when that number appears on one static arm; a repeated selector stays unbound.
+
+`captured_module_preview` is still the one dispatch instruction shared by the
+most retained arms, then the lowest module offset. When no runtime snapshot was
+retained, guest-byte traversal does not start. The frontier reason is
+`static-module-only`, and coverage records `static-module-dispatch` beside
+`sampler-unavailable` and `snapshot-bytes-unavailable` when those absences
+apply. Module offsets are not a guest PC, and characterized bytes stay zero.
 
 ## Retained guest-byte coverage
 

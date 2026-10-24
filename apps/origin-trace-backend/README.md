@@ -150,7 +150,12 @@ The API CLI embeds the versioned OpenAPI document and requires an explicit
 loopback URL or endpoint file. The VM analyzer reads bounded input prefixes,
 reports omissions, and writes private analysis documents. The base detector is
 served at `/api/analysis/vm`; the inspector-free opcode workspace is served at
-`/api/analysis/vm/opcodes`. A workspace failure does not hide a valid detector
+`/api/analysis/vm/opcodes`. A Wasm likely-vm workspace lists static `br_table`
+and `call_indirect` arms from the selected function and a bounded call/table
+neighborhood. Without dispatch samples it keeps `sampler-unavailable`. Without
+a runtime snapshot it keeps `snapshot-bytes-unavailable` and names the guest-byte
+walk `static-module-only` instead of inventing a program counter. A workspace
+failure does not hide a valid detector
 document. Its executable is
 `origin-trace-vm --artifacts DIR --events FILE`.
 Static guest-byte previews recognize a conservative subset of complete numeric `Uint8Array.of(...)` and
@@ -225,6 +230,18 @@ only while selected-value capture is enabled. Request-time snapshots survive
 hook eviction; session and capture revision guards prevent late results from
 restoring erased observations. See the
 [feature design](../../docs/product/request-field-provenance-v1.md).
+
+Live `Debugger.scriptParsed` WebAssembly modules are copied from CDP bytecode
+into the session artifact store as `kind=wasm` and
+`capture_origin=webassembly_compile`. CDP `scriptSource` is empty for those
+scripts; non-empty `bytecode`, or `Debugger.getWasmBytecode`, is what gets
+decoded. `GET /api/debugger/source` returns that module as standard base64
+(`encoding` is `base64`, `byte_size` is the decoded length). The artifact keeps
+the raw bytes, capped at 16 MiB, with artifact IDs at or above 2^32. The
+backend appends the receiver manifest line directly because the browser already
+holds the receiver's one authenticated connection. Pass
+`--capture-session-id` for that manifest; otherwise the artifacts directory's
+parent name, then an existing manifest session, is used.
 
 Captured WASM inspection uses `src/wasm.rs` and the shared `origin-trace-wasm`
 helper. `GET /api/wasm?artifact_id=ID` verifies the complete artifact before

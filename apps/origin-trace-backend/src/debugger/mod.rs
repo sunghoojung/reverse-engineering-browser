@@ -21,6 +21,7 @@ mod objects;
 mod parse;
 mod repeater;
 mod requests;
+mod wasm_capture;
 mod websocket;
 mod workers;
 use crate::{
@@ -67,6 +68,7 @@ pub struct Debugger {
     workers: workers::Workers,
     hooks: hooks::Hooks,
     fields: fields::Fields,
+    wasm: wasm_capture::WasmCapture,
 }
 impl Debugger {
     pub fn new(options: &Options) -> Arc<Self> {
@@ -121,6 +123,7 @@ impl Debugger {
             workers: workers::Workers::new(),
             hooks: hooks::Hooks::new(),
             fields: fields::Fields::new(),
+            wasm: wasm_capture::WasmCapture::new(),
         })
     }
     pub fn snapshot(&self) -> Value {
@@ -509,6 +512,9 @@ impl Debugger {
             .ok_or_else(|| {
                 Error::conflict("Script is unavailable").with_code(Code::TargetUnavailable)
             })?;
+        if wasm_capture::is_wasm_script(&script) {
+            return self.wasm_source(id, &script).await;
+        }
         if script["length"].as_u64().unwrap_or(0) > 2097152 {
             return Err(Error::conflict(
                 "Live script exceeds the 2 MiB viewer limit",
@@ -530,10 +536,7 @@ impl Debugger {
                 Duration::from_secs(5),
             )
             .await?;
-        let source = result["scriptSource"]
-            .as_str()
-            .or_else(|| result["bytecode"].as_str())
-            .ok_or_else(|| Error::protocol("Debugger returned malformed script source"))?;
+        let source = wasm_capture::script_text(&result)?;
         let bounded = validation::truncate(source, 2097152);
         Ok(
             json!({"protocol_version":1,"script_id":id,"source":bounded,"truncated":bounded.len()!=source.len()}),
@@ -993,7 +996,7 @@ impl Debugger {
             drop(ownership.take());
         }
         match method {
-            "Debugger.scriptParsed"=>if let Some(script)=parse::script(p) {self.update(|s| {self.hooks.candidate_source_changed(s["target"]["id"].as_str().unwrap_or(""));let scripts=s["scripts"].as_array_mut().unwrap();scripts.retain(|v|v["script_id"]!=script["script_id"]);if scripts.len()>=5000 {self.hooks.candidate_catalog_incomplete.store(true,Ordering::Release);scripts.remove(0);}scripts.push(script);});}else{self.hooks.candidate_catalog_incomplete.store(true,Ordering::Release);self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);},
+            "Debugger.scriptParsed"=>self.on_script_parsed(p),
             "Runtime.executionContextDestroyed"|"Runtime.executionContextsCleared"=>{self.update(|s| {self.hooks.candidate_source_changed(s["target"]["id"].as_str().unwrap_or(""));let clear=method.ends_with("Cleared");s["scripts"].as_array_mut().unwrap().retain(|v|v["target_type"]=="worker" || (!clear && v["execution_context_id"]!=p["executionContextId"]));let ids=s["scripts"].as_array().unwrap().iter().map(|v|v["script_id"].clone()).collect::<Vec<_>>();for b in s["breakpoints"].as_array_mut().unwrap() {b["locations"].as_array_mut().unwrap().retain(|l|ids.contains(&l["script_id"]));}})},
             "Page.frameNavigated"=>{if !p["frame"]["parentId"].is_string() {self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);self.clear_object_search().await;self.hooks_navigated().await;}},
             "Debugger.paused"=>{let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();if owner.clone().is_some_and(|session| self.hook_pause(&target,session,p.clone())) {return;}let pause=parse::pause(p);self.update(|s| {s["state"]=json!("paused");s["error"]=Value::Null;s["paused"]=pause;});let generation=self.snapshot()["generation"].as_u64().unwrap();let weak=Arc::downgrade(self);tokio::spawn(async move {if let Some(debugger)=weak.upgrade() {if debugger.memory_active(debugger.snapshot()["memory_origin_trace"]["trace_id"].as_u64().unwrap()) {debugger.memory_pause(debugger.snapshot()["paused"].clone()).await;} else {debugger.enrich(generation).await;}}});},

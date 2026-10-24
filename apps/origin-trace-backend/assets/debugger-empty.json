@@ -282,6 +282,12 @@
       "timeout_ms": 30000
     }
   },
+  "wasm_capture": {
+    "attempted": 0,
+    "retained": 0,
+    "failed": 0,
+    "last_error": null
+  },
   "limits": {
     "scripts": 5000,
     "call_frames": 64,

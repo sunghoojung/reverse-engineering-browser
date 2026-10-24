@@ -319,17 +319,21 @@ provided separately below.
 
 ## WebAssembly dispatch workspaces
 
-A `likely-vm` WebAssembly finding gets one workspace for the same selected
-function as the detector. Decoding remains static and never instantiates the
-module. `runtime: webassembly` distinguishes this view from JavaScript handlers.
-`br_table` selector indices are inferred dispatch candidates; they do not prove
-an identity mapping to guest opcodes. Source byte ranges cite the dispatch
-instruction, not a recovered handler body. Default arms and dynamic
+A `likely-vm` WebAssembly finding gets one workspace. Decoding remains static
+and never instantiates the module. Handler arms come from the detector-selected
+function and from other functions in its bounded direct-call and in-loop
+`call_indirect` table neighborhood. Unrelated functions do not contribute
+candidates. `runtime: webassembly` distinguishes this view from JavaScript
+handlers. `br_table` selector indices are inferred dispatch candidates; they do
+not prove an identity mapping to guest opcodes. Source byte ranges cite the
+dispatch instruction, not a recovered handler body. Default arms and dynamic
 `call_indirect` targets have null opcode, unknown state and zero samples. Label
 depths and table identifiers are never presented as known handler indices.
 Guest semantics and the stack/register model remain explicit residual unknowns.
 The same 1024-candidate and 16-snapshot caps apply. Non-VM modules have no
-workspace, and unrelated functions cannot contribute candidates.
+workspace. Without a runtime snapshot, the guest-byte walk stops at
+`static-module-only` and does not invent a program counter or characterized
+bytes.
 
 ## Owned input-specific confirmation
 

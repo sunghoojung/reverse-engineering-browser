@@ -206,17 +206,21 @@ fn auto_attach() -> Value {
 fn http_document_url(url: &str) -> bool {
     (url.starts_with("https://") || url.starts_with("http://")) && url.len() <= 65536
 }
-/// The frame tree root is the target's main frame. Network.enable does not
-/// replay a navigation that already committed, so a loader we never observed
-/// is a real document miss. A seen loader means at least one Document event
-/// for that navigation arrived. Without a loader id, an identical Document URL
-/// is the only available proof.
+/// Network.enable does not replay a navigation that already committed.
+/// Passive capture reads `Target.getTargetInfo` rather than `Page.getFrameTree`:
+/// a Page command would leave the observational session. A loader id, when the
+/// snapshot has one, is the navigation identity. Otherwise the committed
+/// http(s) URL is the proof, and a seen Document request for that URL is not
+/// a miss.
 pub(super) fn unobserved_committed_document(
-    frame_tree: &Value,
+    snapshot: &Value,
     seen_loaders: &BTreeSet<String>,
     seen_urls: &BTreeSet<String>,
 ) -> Option<String> {
-    let frame = frame_tree.get("frameTree")?.get("frame")?;
+    let frame = snapshot
+        .get("frameTree")
+        .and_then(|tree| tree.get("frame"))
+        .or_else(|| snapshot.get("targetInfo"))?;
     let url = frame.get("url")?.as_str()?;
     if !http_document_url(url) {
         return None;
@@ -1531,7 +1535,7 @@ impl Debugger {
             SeenDocuments::insert(&mut seen.urls, (target_id.to_owned(), url.to_owned()));
         }
     }
-    fn note_committed_document(&self, owner: &Owner, frame_tree: &Value) {
+    fn note_committed_document(&self, owner: &Owner, snapshot: &Value) {
         let Some(target_id) = owner.target["id"].as_str().filter(|id| !id.is_empty()) else {
             return;
         };
@@ -1554,7 +1558,7 @@ impl Debugger {
                 .filter(|(target, _)| target == target_id)
                 .map(|(_, url)| url.clone())
                 .collect::<BTreeSet<_>>();
-            unobserved_committed_document(frame_tree, &loaders, &urls)
+            unobserved_committed_document(snapshot, &loaders, &urls)
         };
         let Some(token) = token else {
             return;
@@ -1593,14 +1597,15 @@ impl Debugger {
             return;
         }
         // Flush Network events that arrived while enable was in flight, then
-        // snapshot the frame that already committed. A second barrier covers
-        // a document event queued during the snapshot itself.
+        // read the target URL that already committed. A second barrier covers
+        // a document event queued during that read. Page domain commands stay
+        // unused so attachment remains passive.
         if c.barrier().await.is_err() {
             return;
         }
-        let tree = c
+        let info = c
             .command_session(
-                "Page.getFrameTree",
+                "Target.getTargetInfo",
                 json!({}),
                 Duration::from_secs(2),
                 owner.session.as_deref(),
@@ -1609,8 +1614,8 @@ impl Debugger {
         if c.barrier().await.is_err() {
             return;
         }
-        if let Ok(tree) = tree {
-            self.note_committed_document(owner, &tree);
+        if let Ok(info) = info {
+            self.note_committed_document(owner, &info);
         }
     }
     async fn initialize_browser_owner(self: &Arc<Self>, c: Arc<Connection>, owner: Arc<Owner>) {
@@ -2029,6 +2034,13 @@ mod tests {
         let url_only = json!({"frameTree":{"frame":{"url":"https://accounts.example/demo"}}});
         assert_eq!(
             unobserved_committed_document(&url_only, &BTreeSet::new(), &BTreeSet::new()).as_deref(),
+            Some("url:https://accounts.example/demo")
+        );
+        let target_info =
+            json!({"targetInfo":{"type":"page","url":"https://accounts.example/demo"}});
+        assert_eq!(
+            unobserved_committed_document(&target_info, &BTreeSet::new(), &BTreeSet::new())
+                .as_deref(),
             Some("url:https://accounts.example/demo")
         );
         let mut urls = BTreeSet::from(["https://accounts.example/demo".to_owned()]);

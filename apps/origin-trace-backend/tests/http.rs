@@ -1792,6 +1792,37 @@ async fn verified_range_from_large_artifact_and_corruption_rejection() {
     )
     .await;
 }
+#[tokio::test]
+async fn cached_artifact_content_revalidates_complete_manifest_and_selection() {
+    let server = Server::start().await;
+    let first = put_source_facts_artifact(&server, b"first", "javascript");
+    for _ in 0..2 {
+        let response = server.get("/api/artifacts/7/content").await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"first");
+    }
+    // A replacement manifest and blob must update the same selected public ID.
+    let second = put_source_facts_artifact(&server, b"other", "javascript");
+    let response = server.get("/api/artifacts/7/content").await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"other");
+    // An unrelated duplicate after the selected row still invalidates the lookup.
+    let mut unrelated = first.clone();
+    unrelated["artifact_id"] = json!("8");
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{second}\n{unrelated}\n{unrelated}\n").as_bytes(),
+    );
+    assert_eq!(server.get("/api/artifacts/7/content").await.status(), 500);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{second}\n{{").as_bytes(),
+    );
+    assert_eq!(server.get("/api/artifacts/7/content").await.status(), 500);
+    server.file("artifacts/manifest.jsonl", format!("{second}\n").as_bytes());
+    assert_eq!(server.get("/api/artifacts/7/content").await.status(), 200);
+}
+
 #[test]
 fn vm_reports_malformed_input_and_preserves_valid_evidence() {
     let root = tempfile::tempdir().unwrap();

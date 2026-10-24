@@ -80,6 +80,17 @@ restart, generation regression, or same-target reconnection expires the selectio
 This is a local viewer continuity check: old catalog links and pending details
 keep their original epoch guards; WebSocket and action ownership are unchanged.
 
+Traffic selection updates only the mounted rows and selection summary when the
+retained snapshot, filters, ordering and page are unchanged. Keyboard navigation
+does not repeat content search or sorting and does not rebuild rows or reset
+ledger scrolling. A changed snapshot, filter, page or explicit refresh still
+recomputes the whole bounded retained window; partial-content coverage remains
+visible. `node tools/check-traffic-selection-work.mjs` checks production
+controller work and selection invariants. Add `--baseline-ref=<commit>` for a
+reproducible authored 5,000-record/500-row before-and-after Node benchmark. Those
+timings are not rendered browser or native-app latency; the Requests browser
+gate separately exercises actual row keyboard selection.
+
 ## Connected investigations
 
 **Advanced** is a manually opened workspace chooser. Completed workspace

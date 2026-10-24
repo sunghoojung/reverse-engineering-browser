@@ -1375,6 +1375,8 @@
       }
 
       function rebuildTrafficRequests(previousSession = null) {
+        // Hidden Traffic must not keep the previous snapshot's bodies alive.
+        state.trafficRenderedView = null;
         const previousSelection = state.selectedCaptureIdentity
           ? apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record : null;
         const cdpRequests = requestsFromDebuggerNetwork(
@@ -1470,6 +1472,7 @@
       }
 
       function resetRequestSelection() {
+        state.trafficRenderedView = null;
         state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
         state.selectedRequestId = null;
@@ -2415,7 +2418,32 @@
         elements.requestDomain.value = state.requestDomain;
       }
 
-      function renderRequests() {
+      function trafficRequestFilterKey() {
+        return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType,
+          elements.requestFilter.value.trim().toLowerCase(), elements.requestSearchScope.value === 'content',
+          state.trafficSort, state.trafficSortDirection]);
+      }
+
+      function renderTrafficWindowStatus(start, rowCount, visibleCount) {
+        const selectedFiltered = state.selectedRequestId !== null && !state.trafficSearchMatches.has(state.selectedRequestId);
+        const message = `${visibleCount ? start + 1 : 0}–${start + rowCount} of ${visibleCount} matching · ${state.requests.length} retained${selectedFiltered ? ' · Selection outside filter' : ''}`;
+        const status = document.querySelector('#request-window-status');
+        if (status.textContent !== message) status.textContent = message;
+      }
+
+      function renderRequests(selectionOnly = false) {
+        const previous = state.trafficRenderedView;
+        // Producers replace the retained request array on refresh. Reuse only
+        // this exact rendered snapshot and filter/window; all other entry
+        // points (polls, search, sort, paging and history) take the full path.
+        if (selectionOnly === true && previous?.requests === state.requests && previous.retainedCount === state.requests.length &&
+            previous.filterKey === trafficRequestFilterKey() &&
+            previous.start === state.trafficWindowStart && previous.anchor === state.trafficWindowAnchor) {
+          renderTrafficRowSelection(elements.requestRows, state.selectedRequestId);
+          renderTrafficWindowStatus(previous.start, previous.rowCount, previous.visibleCount);
+          return;
+        }
+        state.trafficRenderedView = null;
         renderWebSocketInspector(document.querySelector('#websocket-inspector'),state.debuggerSession?.network,Boolean(state.debuggerError));
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
@@ -2429,7 +2457,7 @@
         const search = trafficSearchRequests(scoped, needle, includeContent);
         state.trafficSearchMatches = search.matches;
         const visible = trafficSortedRequests(scoped.filter(request => search.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
-        const filterKey = JSON.stringify([state.requestTabId, state.requestDomain, state.requestType, needle, includeContent, state.trafficSort, state.trafficSortDirection]);
+        const filterKey = trafficRequestFilterKey();
         const filterChanged = filterKey !== state.trafficFilterKey;
         if (filterChanged) { state.trafficNewIds.clear(); state.trafficWindowStart = 0; state.trafficWindowAnchor = null; }
         state.trafficFilterKey = filterKey;
@@ -2451,8 +2479,9 @@
         const window = trafficWindow(visible, state.trafficWindowStart, state.trafficWindowAnchor);
         state.trafficWindowStart = window.start;
         state.trafficWindowAnchor = window.rows[0]?.id ?? null;
-        const selectedFiltered = state.selectedRequestId !== null && !selectedIsVisible;
-        document.querySelector('#request-window-status').textContent = `${visible.length ? window.start + 1 : 0}–${window.start + window.rows.length} of ${visible.length} matching · ${state.requests.length} retained${selectedFiltered ? ' · Selection outside filter' : ''}`;
+        renderTrafficWindowStatus(window.start, window.rows.length, visible.length);
+        const renderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start: window.start, anchor: state.trafficWindowAnchor,
+          rowCount: window.rows.length, visibleCount: visible.length};
         document.querySelector('#request-window-prev').disabled = window.start === 0;
         document.querySelector('#request-window-next').disabled = window.start + TRAFFIC_ROW_LIMIT >= visible.length;
         document.querySelectorAll('[data-request-sort]').forEach(button => {
@@ -2478,6 +2507,7 @@
           state.trafficPendingCount = 0;
           elements.requestLatest.hidden = true;
           renderRequestCount(0, state.requests.length);
+          state.trafficRenderedView = renderedView;
           if (selectionCleared) {
             updateSelectionSummary(null);
             renderInspector();
@@ -2494,6 +2524,7 @@
         elements.requestLatest.hidden = state.trafficPendingCount === 0;
         elements.requestLatest.textContent = `${state.trafficPendingCount} new ${state.trafficPendingCount === 1 ? 'request' : 'requests'}`;
         renderRequestCount(visible.length, state.requests.length);
+        state.trafficRenderedView = renderedView;
         if (selectionCleared) {
           updateSelectionSummary(null);
           renderInspector();
@@ -2569,7 +2600,7 @@
               : 'This sample request has no trace target in the proof of concept.';
           state.selectedField = null;
         }
-        renderRequests();
+        renderRequests(true);
         renderInspector();
         renderEvidence();
         refreshRequestSignalProfile();
@@ -11932,6 +11963,7 @@
       }
 
       function useStandalonePreview() {
+        state.trafficRenderedView = null;
         state.broker = 'preview';
         state.eventFailureKind = null;
         state.sessionMode = 'preview';

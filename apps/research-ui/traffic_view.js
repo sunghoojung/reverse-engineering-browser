@@ -149,6 +149,20 @@ function trafficFailedRequestNotice(requests) {
   return count > 0 ? `Failed requests: ${count}.` : '';
 }
 
+// Selection does not change row content, order or geometry. Keep keyboard
+// movement independent of retained-body search and avoid layout reads/writes.
+function renderTrafficRowSelection(container, selectedId) {
+  const rows = [...container.querySelectorAll('.request-row')];
+  const selectedVisible = rows.some(row => row.dataset.requestId === selectedId);
+  rows.forEach((row, index) => {
+    const selected = row.dataset.requestId === selectedId;
+    const ariaSelected = String(selected);
+    if (row.getAttribute('aria-selected') !== ariaSelected) row.setAttribute('aria-selected', ariaSelected);
+    const tabIndex = selected || !selectedVisible && index === 0 ? 0 : -1;
+    if (row.tabIndex !== tabIndex) row.tabIndex = tabIndex;
+  });
+}
+
 function renderTrafficRows(container, requests, {selectedId, newIds, matches, onSelect, onKey}) {
   requests = requests.slice(0, TRAFFIC_ROW_LIMIT);
   const previousRows = new Map([...container.querySelectorAll('.request-row')].map(row => [row.dataset.requestId, row]));

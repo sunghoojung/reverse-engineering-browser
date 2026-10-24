@@ -56,7 +56,27 @@ enum Action {
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
     },
+    /// Serve the embedded OpenAPI document as a local stdio MCP server.
+    /// Tools are operation IDs. There is no second HTTP API.
+    Mcp {
+        #[arg(
+            long,
+            required_unless_present = "endpoint_file",
+            conflicts_with = "endpoint_file"
+        )]
+        base_url: Option<String>,
+        #[arg(long)]
+        endpoint_file: Option<PathBuf>,
+        /// Also list operations that are not read-only. This is not authorization,
+        /// capture redaction, or permission to send results to a model provider.
+        #[arg(long)]
+        allow_effects: bool,
+        #[arg(long, default_value_t = 30.0)]
+        timeout: f64,
+    },
 }
+#[path = "reb_api/mcp.rs"]
+mod mcp;
 fn specification() -> Result<Value, serde_json::Error> {
     serde_json::from_str(include_str!("../../../../protocol/openapi.json"))
 }
@@ -291,94 +311,73 @@ fn discovery(spec: &Value, ops: &BTreeMap<String, Operation>) -> Value {
     })
 }
 
-async fn run() -> Result<i32, Box<dyn std::error::Error>> {
-    let options = Options::parse();
-    let spec = specification()?;
-    let ops = operations(&spec)?;
-    let id = match &options.command {
-        Action::Spec => {
-            println!("{}", serde_json::to_string_pretty(&spec)?);
-            return Ok(0);
-        }
-        Action::List { json: machine } => {
-            if *machine {
-                println!("{}", serde_json::to_string_pretty(&discovery(&spec, &ops))?);
-            } else {
-                for (id, (method, path, _)) in &ops {
-                    println!("{id}\t{method}\t{path}");
-                }
-            }
-            return Ok(0);
-        }
-        Action::Describe { operation_id, .. } | Action::Call { operation_id, .. } => operation_id,
-    };
-    let operation = ops
-        .get(id)
-        .ok_or_else(|| format!("Unknown operation: {id}"))?;
-    if let Action::Describe { action, .. } = &options.command {
-        let detail = describe(&spec, operation, action.as_deref())?;
-        println!("{}", serde_json::to_string_pretty(&detail)?);
-        return Ok(0);
-    }
-    let (method, path, definition) = operation;
-    let Action::Call {
-        base_url,
-        endpoint_file,
-        params,
-        body_file,
-        output,
-        show_headers,
-        json_errors,
-        read_only,
-        timeout,
-        ..
-    } = options.command
-    else {
-        unreachable!()
-    };
-    if read_only && !read_only_eligible(&spec, definition) {
-        return Err(format!(
-            "--read-only rejects operation {}; inspect its execution metadata with describe. No request was sent",
-            definition["operationId"].as_str().unwrap_or("unknown")
-        ).into());
-    }
+fn endpoint_text(
+    base_url: Option<String>,
+    endpoint_file: Option<PathBuf>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    base_url
+        .or_else(|| endpoint_file.and_then(|path| std::fs::read_to_string(path).ok()))
+        .ok_or_else(|| "Cannot read endpoint file".into())
+}
+fn check_timeout(timeout: f64) -> Result<(), Box<dyn std::error::Error>> {
     if !timeout.is_finite() || timeout <= 0.0 || timeout > 3600.0 {
         return Err("Timeout must be finite and between 0 and 3600 seconds".into());
     }
-    let base = base_url
-        .or_else(|| endpoint_file.and_then(|p| std::fs::read_to_string(p).ok()))
-        .ok_or("Cannot read endpoint file")?;
-    let mut url = root_url(&base)?;
-    let mut route = path.clone();
-    let mut values = BTreeMap::new();
-    for param in params {
-        let (name, value) = param
-            .split_once('=')
-            .filter(|(n, _)| !n.is_empty())
-            .ok_or("--param must be NAME=VALUE")?;
-        if value.contains(['\r', '\n'])
-            || values.insert(name.to_owned(), value.to_owned()).is_some()
-        {
-            return Err("Duplicate parameter or line break in parameter".into());
-        }
-    }
+    Ok(())
+}
+struct CompletedExchange {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    bytes: Vec<u8>,
+    /// The body could not be read. `bytes` is a fixed diagnostic, not a partial response.
+    unreadable: bool,
+}
+struct ExchangeRequest<'a> {
+    method: &'a str,
+    path: &'a str,
+    definition: &'a Value,
+    base: &'a str,
+    params: &'a BTreeMap<String, String>,
+    body: Option<Vec<u8>>,
+    timeout: f64,
+    json_errors: bool,
+    missing_body: &'a str,
+}
+async fn exchange(
+    request: ExchangeRequest<'_>,
+) -> Result<CompletedExchange, Box<dyn std::error::Error>> {
+    let ExchangeRequest {
+        method,
+        path,
+        definition,
+        base,
+        params,
+        body,
+        timeout,
+        json_errors,
+        missing_body,
+    } = request;
+    let mut url = root_url(base)?;
+    let mut route = path.to_owned();
     let definitions = definition["parameters"]
         .as_array()
         .cloned()
         .unwrap_or_default();
-    for d in &definitions {
-        if d["required"] == true && !values.contains_key(d["name"].as_str().unwrap()) {
-            return Err(format!("Missing parameter: {}", d["name"]).into());
+    for parameter in &definitions {
+        if parameter["required"] == true
+            && !params.contains_key(parameter["name"].as_str().unwrap())
+        {
+            return Err(format!("Missing parameter: {}", parameter["name"]).into());
         }
     }
     let mut headers = Vec::new();
     let mut query = Vec::new();
-    for (name, value) in values {
-        let d = definitions
+    for (name, value) in params {
+        let parameter = definitions
             .iter()
-            .find(|d| d["name"] == name)
+            .find(|parameter| parameter["name"] == name.as_str())
             .ok_or_else(|| format!("Unknown parameter: {name}"))?;
-        match d["in"].as_str() {
+        match parameter["in"].as_str() {
             Some("path") => {
                 if value.is_empty() {
                     return Err("Path parameter cannot be empty".into());
@@ -388,8 +387,8 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                     .replace('+', "%20");
                 route = route.replace(&format!("{{{name}}}"), &encoded);
             }
-            Some("query") => query.push((name, value)),
-            Some("header") => headers.push((name, value)),
+            Some("query") => query.push((name.clone(), value.clone())),
+            Some("header") => headers.push((name.clone(), value.clone())),
             _ => return Err("Unsupported parameter location".into()),
         }
     }
@@ -400,9 +399,6 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let binary = definition["responses"]["200"]["content"]
         .get("application/octet-stream")
         .is_some();
-    if binary && output.is_none() {
-        return Err("Binary responses require --output PATH or --output -".into());
-    }
     let export_package = definition["operationId"] == "export_evidence_package";
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -421,18 +417,10 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         request = request.header(name, value);
     }
     if definition.get("requestBody").is_some() {
-        let path = body_file.ok_or("Operation requires --body-file PATH or --body-file -")?;
-        let mut raw = Vec::new();
+        let raw = body.ok_or(missing_body)?;
         let limit = definition["x-max-body-bytes"]
             .as_u64()
             .unwrap_or(2 * 1024 * 1024);
-        if path == "-" {
-            std::io::stdin().take(limit + 1).read_to_end(&mut raw)?;
-        } else {
-            std::fs::File::open(path)?
-                .take(limit + 1)
-                .read_to_end(&mut raw)?;
-        }
         if raw.len() as u64 > limit {
             return Err("Request body exceeds its byte limit".into());
         }
@@ -450,25 +438,34 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             }
             request = request.header("content-type", "application/json").body(raw);
         } else {
-            let body: Value = serde_json::from_slice(&raw)?;
-            if !body.is_object() {
+            let parsed: Value = serde_json::from_slice(&raw)?;
+            if !parsed.is_object() {
                 return Err("Request body must be a JSON object".into());
             }
-            request = request.json(&body);
+            request = request.json(&parsed);
         }
-    } else if body_file.is_some() {
+    } else if body.is_some() {
         return Err("Operation does not accept a body".into());
     }
     let mut response = request.send().await?;
     let status = response.status();
-    if show_headers {
-        eprintln!(
-            "{}",
-            json!({"status":status.as_u16(),"headers":response.headers().iter().map(|(k,v)|(k.as_str(),v.to_str().unwrap_or(""))).collect::<BTreeMap<_,_>>() })
-        );
-    }
+    let response_headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value.to_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     if status.as_u16() == 304 {
-        return Ok(0);
+        return Ok(CompletedExchange {
+            status: 304,
+            headers: response_headers,
+            bytes: Vec::new(),
+            unreadable: false,
+        });
     }
     let mut bytes = Vec::new();
     let response_limit = if export_package && status.is_success() {
@@ -482,15 +479,12 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         let chunk = match response.chunk().await {
             Ok(chunk) => chunk,
             Err(_) if json_errors && !status.is_success() => {
-                eprintln!(
-                    "{}",
-                    bounded_http_error(
-                        &spec,
-                        status.as_u16(),
-                        br#"{"error":"API error response could not be read"}"#
-                    )
-                );
-                return Ok(2);
+                return Ok(CompletedExchange {
+                    status: status.as_u16(),
+                    headers: response_headers,
+                    bytes: br#"{"error":"API error response could not be read"}"#.to_vec(),
+                    unreadable: true,
+                });
             }
             Err(error) => return Err(error.into()),
         };
@@ -499,15 +493,12 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         };
         if bytes.len().saturating_add(chunk.len()) > response_limit {
             if json_errors && !status.is_success() {
-                eprintln!(
-                    "{}",
-                    bounded_http_error(
-                        &spec,
-                        status.as_u16(),
-                        br#"{"error":"API response exceeds 64 MiB"}"#
-                    )
-                );
-                return Ok(2);
+                return Ok(CompletedExchange {
+                    status: status.as_u16(),
+                    headers: response_headers,
+                    bytes: br#"{"error":"API response exceeds 64 MiB"}"#.to_vec(),
+                    unreadable: true,
+                });
             }
             return Err(if export_package {
                 "Evidence package response exceeds its byte limit"
@@ -518,22 +509,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    if !status.is_success() {
-        if json_errors {
-            eprintln!("{}", bounded_http_error(&spec, status.as_u16(), &bytes));
-        } else {
-            eprintln!(
-                "HTTP {}: {}",
-                status.as_u16(),
-                String::from_utf8_lossy(&bytes)
-                    .chars()
-                    .take(500)
-                    .collect::<String>()
-            );
-        }
-        return Ok(1);
-    }
-    if !binary {
+    if status.is_success() && !binary {
         if export_package {
             let result = origin_trace_backend::evidence_package::validate_bytes(&bytes)?;
             if result["status"] != "valid" {
@@ -543,17 +519,182 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             let _: Value = serde_json::from_slice(&bytes)?;
         }
     }
-    if let Some(path) = output {
-        if path == "-" {
-            std::io::stdout().write_all(&bytes)?;
-        } else {
-            origin_trace_backend::write_private_noclobber(std::path::Path::new(&path), &bytes)?;
+    Ok(CompletedExchange {
+        status: status.as_u16(),
+        headers: response_headers,
+        bytes,
+        unreadable: false,
+    })
+}
+async fn run() -> Result<i32, Box<dyn std::error::Error>> {
+    let options = Options::parse();
+    let spec = specification()?;
+    let ops = operations(&spec)?;
+    match options.command {
+        Action::Spec => {
+            println!("{}", serde_json::to_string_pretty(&spec)?);
+            Ok(0)
         }
-    } else {
-        let value: Value = serde_json::from_slice(&bytes)?;
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        Action::List { json: machine } => {
+            if machine {
+                println!("{}", serde_json::to_string_pretty(&discovery(&spec, &ops))?);
+            } else {
+                for (id, (method, path, _)) in &ops {
+                    println!("{id}\t{method}\t{path}");
+                }
+            }
+            Ok(0)
+        }
+        Action::Mcp {
+            base_url,
+            endpoint_file,
+            allow_effects,
+            timeout,
+        } => {
+            check_timeout(timeout)?;
+            let base = endpoint_text(base_url, endpoint_file)?;
+            root_url(&base)?;
+            mcp::serve(&spec, &ops, &base, allow_effects, timeout).await
+        }
+        Action::Describe {
+            operation_id,
+            action,
+        } => {
+            let operation = ops
+                .get(&operation_id)
+                .ok_or_else(|| format!("Unknown operation: {operation_id}"))?;
+            let detail = describe(&spec, operation, action.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&detail)?);
+            Ok(0)
+        }
+        Action::Call {
+            operation_id,
+            base_url,
+            endpoint_file,
+            params,
+            body_file,
+            output,
+            show_headers,
+            json_errors,
+            read_only,
+            timeout,
+        } => {
+            let operation = ops
+                .get(&operation_id)
+                .ok_or_else(|| format!("Unknown operation: {operation_id}"))?;
+            let (method, path, definition) = operation;
+            if read_only && !read_only_eligible(&spec, definition) {
+                return Err(format!(
+                    "--read-only rejects operation {}; inspect its execution metadata with describe. No request was sent",
+                    definition["operationId"].as_str().unwrap_or("unknown")
+                )
+                .into());
+            }
+            check_timeout(timeout)?;
+            let binary = definition["responses"]["200"]["content"]
+                .get("application/octet-stream")
+                .is_some();
+            if binary && output.is_none() {
+                return Err("Binary responses require --output PATH or --output -".into());
+            }
+            let mut values = BTreeMap::new();
+            for param in params {
+                let (name, value) = param
+                    .split_once('=')
+                    .filter(|(name, _)| !name.is_empty())
+                    .ok_or("--param must be NAME=VALUE")?;
+                if value.contains(['\r', '\n'])
+                    || values.insert(name.to_owned(), value.to_owned()).is_some()
+                {
+                    return Err("Duplicate parameter or line break in parameter".into());
+                }
+            }
+            let body = if definition.get("requestBody").is_some() {
+                let path =
+                    body_file.ok_or("Operation requires --body-file PATH or --body-file -")?;
+                let mut raw = Vec::new();
+                let limit = definition["x-max-body-bytes"]
+                    .as_u64()
+                    .unwrap_or(2 * 1024 * 1024);
+                if path == "-" {
+                    std::io::stdin().take(limit + 1).read_to_end(&mut raw)?;
+                } else {
+                    std::fs::File::open(path)?
+                        .take(limit + 1)
+                        .read_to_end(&mut raw)?;
+                }
+                if raw.len() as u64 > limit {
+                    return Err("Request body exceeds its byte limit".into());
+                }
+                Some(raw)
+            } else if body_file.is_some() {
+                return Err("Operation does not accept a body".into());
+            } else {
+                None
+            };
+            let base = endpoint_text(base_url, endpoint_file)?;
+            let completed = exchange(ExchangeRequest {
+                method,
+                path,
+                definition,
+                base: &base,
+                params: &values,
+                body,
+                timeout,
+                json_errors,
+                missing_body: "Operation requires --body-file PATH or --body-file -",
+            })
+            .await?;
+            if show_headers {
+                eprintln!(
+                    "{}",
+                    json!({"status": completed.status, "headers": completed.headers})
+                );
+            }
+            if completed.unreadable {
+                eprintln!(
+                    "{}",
+                    bounded_http_error(&spec, completed.status, &completed.bytes)
+                );
+                return Ok(2);
+            }
+            if completed.status == 304 {
+                return Ok(0);
+            }
+            if !(200..300).contains(&completed.status) {
+                if json_errors {
+                    eprintln!(
+                        "{}",
+                        bounded_http_error(&spec, completed.status, &completed.bytes)
+                    );
+                } else {
+                    eprintln!(
+                        "HTTP {}: {}",
+                        completed.status,
+                        String::from_utf8_lossy(&completed.bytes)
+                            .chars()
+                            .take(500)
+                            .collect::<String>()
+                    );
+                }
+                return Ok(1);
+            }
+            if let Some(path) = output {
+                if path == "-" {
+                    std::io::stdout().write_all(&completed.bytes)?;
+                } else {
+                    origin_trace_backend::write_private_noclobber(
+                        std::path::Path::new(&path),
+                        &completed.bytes,
+                    )?;
+                }
+            } else {
+                let value: Value = serde_json::from_slice(&completed.bytes)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            }
+            Ok(0)
+        }
     }
-    Ok(0)
 }
 // This mode projects known fields only. A legacy or non-JSON response must
 // never turn into a raw body/header dump or a prose-derived reason.
@@ -837,6 +978,35 @@ mod tests {
             Options::try_parse_from(args.into_iter().chain(["--json-errors", "--show-headers"]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn mcp_requires_a_loopback_endpoint_and_hides_effects_by_default() {
+        assert!(Options::try_parse_from(["reb-api", "mcp"]).is_err());
+        assert!(matches!(
+            Options::try_parse_from(["reb-api", "mcp", "--base-url", "http://127.0.0.1:7319",])
+                .unwrap()
+                .command,
+            Action::Mcp {
+                allow_effects: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Options::try_parse_from([
+                "reb-api",
+                "mcp",
+                "--base-url",
+                "http://127.0.0.1:7319",
+                "--allow-effects",
+            ])
+            .unwrap()
+            .command,
+            Action::Mcp {
+                allow_effects: true,
+                ..
+            }
+        ));
     }
 
     #[test]

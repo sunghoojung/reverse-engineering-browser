@@ -9,7 +9,12 @@ Read [AGENTS.md](../../../AGENTS.md) and [SAFETY.md](../../../SAFETY.md).
 Use [the local coding-agent guide](../../../docs/development/local-coding-agents.md)
 for commands, native-mode differences and discovery. This is an instruction-only
 skill: loading it must not run shell commands, fetch captures, start services,
-change client settings, or grant permissions. MCP remains out of scope.
+change client settings, or grant permissions. The only MCP command is
+`reb-api mcp`, a stdio projection of the embedded OpenAPI document. Do not start
+it while loading this skill. Do not add a second MCP server. Pass
+`--allow-effects` only after the researcher approves those operations. Binary
+responses are not inlined. An oversized JSON result is a structural summary,
+not the response document, and is not source.
 
 ## Establish scope before evidence access
 

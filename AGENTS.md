@@ -47,8 +47,14 @@ Current project scope:
 4. Versioned contracts between probes, browser processes, services, and UI.
 5. Tracked Brave integration overlays, patches, pins, and bootstrap tooling.
 
-MCP is intentionally deferred. Do not create an MCP server, dependency, API, or
-documentation unless the user explicitly restores it to scope.
+The only MCP surface is `reb-api mcp`. It projects `protocol/openapi.json`
+operation IDs onto local stdio tools and calls the existing loopback HTTP API.
+It adds no route, dependency, or second API. Do not add another MCP server.
+Effectful tools stay hidden unless `--allow-effects` is set. That flag is not
+authorization, redaction, or permission to send captured data to a model.
+Binary responses are refused before a request. JSON larger than the inline
+limit returns a structural summary. It does not inline source, bytecode, or
+request bodies.
 
 ## Repository ownership
 

@@ -70,6 +70,59 @@ publication uses a synced mode-0600 temporary and atomic no-clobber persistence.
 Exported evidence packages must validate before publication. The CLI does not provide additional permissions
 on its own.
 
+## OpenAPI MCP projection
+
+`x-reb-mcp` in this specification is the only MCP contract. `reb-api mcp` reads
+that extension and serves operation IDs as stdio tools. It does not add an HTTP
+route. A client supplies the same loopback root as `call`, through `--base-url`
+or `--endpoint-file`.
+
+```sh
+reb-api mcp --endpoint-file /tmp/reb-api-endpoint
+```
+
+The default tool list is the read-only projection used by `list --json`.
+`--allow-effects` also lists the other operations. The flag does not authorize
+a target, redact a response, or permit sending captured data to a model
+provider. Binary success bodies are refused before a request, because the
+projection sets `binary_inline` to false. JSON whose raw bytes or pretty text
+exceed `inline_json_limit_bytes` is not inlined and is not truncated. The tool
+returns `mcp_projection: structural_summary`: short scalars, collection sizes,
+and low-cardinality histograms for object arrays longer than eight items.
+Strings longer than `summary_string_chars` are replaced with character and byte
+counts. Fields that carry source, bytecode, derived text, or disassembly
+(`original_source`, `representation`, `text`, `body`, `raw`, `value`, and the
+other content names in the adapter) are omitted even when short. The summary is
+not the OpenAPI response document.
+
+Each tool `inputSchema` is a closed JSON Schema. Component `$ref` values are
+inlined, and OpenAPI extension keywords are omitted, so a client does not need
+the components object. The server checks arguments against that schema before a
+request. A missing required parameter or object body is a tool error and sends
+no request. An unknown tool name, or a tool left out of the default list, is
+JSON-RPC error `-32602` and sends no request.
+
+A matching `If-None-Match` is a successful tool result,
+`{"http_status":304,"etag":"..."}`, not an error and not a response body. The
+`etag` is included only when that response header is non-empty, at most 256
+bytes, and free of control characters. Successful JSON still returns the
+response document itself, without response headers.
+
+The server speaks newline-delimited JSON-RPC 2.0 and rejects batches
+(`batching` is false). One message may not exceed `message_limit_bytes`
+(32 MiB); a longer line is a parse error and is not echoed. It accepts protocol
+versions `2024-11-05`, `2025-03-26`, and `2025-06-18`. `initialize` is required
+before other requests. `ping` may come first. A second `initialize` is
+rejected. The `notifications/initialized` notification is accepted and does not
+receive a response, because this server does not send requests. Logs stay on
+stderr. Captured content returned by a tool is untrusted data, not
+instructions.
+
+`readOnlyHint` follows the read-only projection. `destructiveHint` is true when
+the operation is not `kind: operation`, when `effects` is not an array, or when
+any direct or state-dependent effect is something other than `analysis`.
+`openWorldHint` is false: calls stay on the configured loopback root.
+
 ```sh
 REB_API=$(cat /tmp/reb-api-endpoint)
 curl --fail-with-body "$REB_API/api/health"

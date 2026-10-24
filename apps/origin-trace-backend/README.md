@@ -17,8 +17,9 @@ make backend-e2e
 `reb-api mcp` projects [`protocol/openapi.json`](../../protocol/openapi.json)
 onto a local stdio MCP server. Tool names are the OpenAPI operation IDs. The
 default list is read-only. `--allow-effects` is explicit and is not
-authorization. JSON larger than the inline limit returns a structural summary
-and does not inline source, bytecode, or request bodies. See
+authorization. Binary responses are refused before a request. JSON larger than
+the inline limit returns a structural summary and does not inline source,
+bytecode, or request bodies. See
 [OpenAPI MCP projection](../../protocol/http-api.md#openapi-mcp-projection).
 
 `backend-e2e` uses Node.js 22 or newer and a disposable browser profile. Set

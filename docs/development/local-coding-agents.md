@@ -10,9 +10,10 @@ or configure permissions.
 OpenAPI document, described by `x-reb-mcp`. Tool names are operation IDs. The
 default list is the read-only projection. `--allow-effects` lists the other
 operations; it is not authorization or capture redaction. The server calls only
-the selected loopback root. It does not inline binary artifact bodies. JSON
-larger than the inline limit returns a structural summary and omits source,
-bytecode, and long strings. See
+the selected loopback root. It does not inline binary artifact bodies. An
+unknown tool, or one hidden without `--allow-effects`, is rejected before any
+HTTP call. JSON larger than the inline limit returns a structural summary and
+omits source, bytecode, and long strings. See
 [AGENTS.md](../../AGENTS.md) and the [HTTP API guide](../../protocol/http-api.md).
 
 ## Discovery without account setup

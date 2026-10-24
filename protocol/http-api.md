@@ -92,13 +92,36 @@ and low-cardinality histograms for object arrays longer than eight items.
 Strings longer than `summary_string_chars` are replaced with character and byte
 counts. Fields that carry source, bytecode, derived text, or disassembly
 (`original_source`, `representation`, `text`, `body`, `raw`, `value`, and the
-other content names in the adapter) are omitted even when short. The summary is not the
-OpenAPI response document. A hidden or unknown operation returns a tool error
-and sends no request.
+other content names in the adapter) are omitted even when short. The summary is
+not the OpenAPI response document.
 
-The server speaks newline-delimited JSON-RPC. It accepts protocol versions
-`2024-11-05`, `2025-03-26`, and `2025-06-18`. Logs stay on stderr. Captured
-content returned by a tool is untrusted data, not instructions.
+Each tool `inputSchema` is a closed JSON Schema. Component `$ref` values are
+inlined, and OpenAPI extension keywords are omitted, so a client does not need
+the components object. The server checks arguments against that schema before a
+request. A missing required parameter or object body is a tool error and sends
+no request. An unknown tool name, or a tool left out of the default list, is
+JSON-RPC error `-32602` and sends no request.
+
+A matching `If-None-Match` is a successful tool result,
+`{"http_status":304,"etag":"..."}`, not an error and not a response body. The
+`etag` is included only when that response header is non-empty, at most 256
+bytes, and free of control characters. Successful JSON still returns the
+response document itself, without response headers.
+
+The server speaks newline-delimited JSON-RPC 2.0 and rejects batches
+(`batching` is false). One message may not exceed `message_limit_bytes`
+(32 MiB); a longer line is a parse error and is not echoed. It accepts protocol
+versions `2024-11-05`, `2025-03-26`, and `2025-06-18`. `initialize` is required
+before other requests. `ping` may come first. A second `initialize` is
+rejected. The `notifications/initialized` notification is accepted and does not
+receive a response, because this server does not send requests. Logs stay on
+stderr. Captured content returned by a tool is untrusted data, not
+instructions.
+
+`readOnlyHint` follows the read-only projection. `destructiveHint` is true when
+the operation is not `kind: operation`, when `effects` is not an array, or when
+any direct or state-dependent effect is something other than `analysis`.
+`openWorldHint` is false: calls stay on the configured loopback root.
 
 ```sh
 REB_API=$(cat /tmp/reb-api-endpoint)

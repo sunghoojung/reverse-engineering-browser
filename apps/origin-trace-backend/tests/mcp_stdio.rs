@@ -99,7 +99,7 @@ impl Mcp {
             json!({
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": {"name": "origin-trace-qa", "version": "0.3.2"}
+                "clientInfo": {"name": "reb-api-test", "version": "0.3.2"}
             }),
         );
         assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
@@ -209,6 +209,12 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
     assert_eq!(spec["x-reb-mcp"]["binary_inline"], false);
     assert_eq!(spec["x-reb-mcp"]["oversized_json"], "structural_summary");
     assert_eq!(spec["x-reb-mcp"]["summary_string_chars"], 160);
+    assert_eq!(spec["x-reb-mcp"]["batching"], false);
+    assert_eq!(spec["x-reb-mcp"]["message_limit_bytes"], 33_554_432);
+    assert_eq!(
+        spec["x-reb-mcp"]["protocols"],
+        json!(["2024-11-05", "2025-03-26", "2025-06-18"])
+    );
     let server = Server::start();
     let discovery: Value = serde_json::from_slice(
         &Command::new(env!("CARGO_BIN_EXE_reb-api"))
@@ -305,7 +311,7 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         );
         checked += 1;
     }
-    assert!(checked >= 10, "QA covered only {checked} tools");
+    assert!(checked >= 10, "checked only {checked} tools");
 
     let before = client
         .get(format!("{}/api/debugger", server.url.trim_end_matches('/')))
@@ -319,8 +325,14 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         "tools/call",
         json!({"name": "debugger_action", "arguments": {"body": {"action": "pause"}}}),
     );
-    assert_eq!(rejected["result"]["isError"], true);
-    assert!(tool_text(&rejected).contains("No request was sent"));
+    assert!(rejected.get("result").is_none(), "{rejected}");
+    assert_eq!(rejected["error"]["code"], -32602);
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No request was sent")
+    );
     let after = client
         .get(format!("{}/api/debugger", server.url.trim_end_matches('/')))
         .send()
@@ -332,8 +344,46 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
     assert_eq!(before, after, "rejected MCP action changed debugger state");
 
     let unknown = mcp.request("tools/call", json!({"name": "not_an_operation"}));
-    assert_eq!(unknown["result"]["isError"], true);
-    assert!(tool_text(&unknown).contains("Unknown OpenAPI operationId"));
+    assert!(unknown.get("result").is_none(), "{unknown}");
+    assert_eq!(unknown["error"]["code"], -32602);
+    assert!(
+        unknown["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown OpenAPI operationId")
+    );
+
+    let events = client
+        .get(format!("{}/api/events", server.url.trim_end_matches('/')))
+        .send()
+        .await
+        .unwrap();
+    assert!(events.status().is_success());
+    let etag = events
+        .headers()
+        .get("etag")
+        .expect("events etag")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    events.bytes().await.unwrap();
+    let conditional = mcp.request(
+        "tools/call",
+        json!({"name": "get_events", "arguments": {"If-None-Match": etag}}),
+    );
+    assert_eq!(
+        conditional["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&conditional)
+    );
+    assert_eq!(
+        conditional["result"]["structuredContent"]["http_status"],
+        304
+    );
+    assert_eq!(conditional["result"]["structuredContent"]["etag"], etag);
+    let conditional_body: Value = serde_json::from_str(tool_text(&conditional)).unwrap();
+    assert_eq!(conditional_body, conditional["result"]["structuredContent"]);
 
     let mut effects = Mcp::start(&server.url, true);
     let expanded = effects.request("tools/list", json!({}));
@@ -348,6 +398,85 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
     let health = effects.request("tools/call", json!({"name": "get_health"}));
     assert_eq!(health["result"]["isError"], false);
     assert_eq!(health["result"]["structuredContent"]["status"], "ok");
+}
+
+#[test]
+fn mcp_stdio_rejects_batches_and_requests_before_initialize() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["mcp", "--base-url", "http://127.0.0.1:1", "--timeout", "5"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let send = |stdin: &mut ChildStdin, message: &Value| {
+        serde_json::to_writer(&mut *stdin, message).unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+    };
+    let read = |stdout: &mut BufReader<std::process::ChildStdout>| {
+        let mut line = String::new();
+        let count = stdout.read_line(&mut line).unwrap();
+        assert!(count > 0, "MCP server closed stdout");
+        serde_json::from_str::<Value>(line.trim()).unwrap()
+    };
+    send(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    );
+    let early = read(&mut stdout);
+    assert_eq!(early["error"]["code"], -32600, "{early}");
+    assert!(
+        early["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No request was sent")
+    );
+    send(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": "ping-1", "method": "ping"}),
+    );
+    let ping = read(&mut stdout);
+    assert_eq!(ping["id"], "ping-1");
+    assert!(ping.get("result").is_some(), "{ping}");
+    send(
+        &mut stdin,
+        &json!([{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]),
+    );
+    let batch = read(&mut stdout);
+    assert_eq!(batch["id"], Value::Null);
+    assert_eq!(batch["error"]["code"], -32600, "{batch}");
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"}
+        }),
+    );
+    let initialized = read(&mut stdout);
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
+    send(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+    send(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}),
+    );
+    let listed = read(&mut stdout);
+    assert!(listed["result"]["tools"].as_array().unwrap().len() >= 10);
+    send(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": 5, "method": "initialize"}),
+    );
+    let duplicate = read(&mut stdout);
+    assert_eq!(duplicate["error"]["code"], -32600, "{duplicate}");
+    drop(stdin);
+    let _ = child.wait();
 }
 
 #[test]

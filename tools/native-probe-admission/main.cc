@@ -17,10 +17,13 @@
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
-#include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 #include "reb/owned_vm_guest_sampler.hpp"
+// clang-format off
+// Leave this header outside the sorted common-header block above.
+#include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
+// clang-format on
 
 std::atomic<std::uint64_t> allocations{0};
 void* operator new(std::size_t size) {

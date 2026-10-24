@@ -226,6 +226,18 @@ hook eviction; session and capture revision guards prevent late results from
 restoring erased observations. See the
 [feature design](../../docs/product/request-field-provenance-v1.md).
 
+Live `Debugger.scriptParsed` WebAssembly modules are copied from CDP bytecode
+into the session artifact store as `kind=wasm` and
+`capture_origin=webassembly_compile`. CDP `scriptSource` is empty for those
+scripts; non-empty `bytecode`, or `Debugger.getWasmBytecode`, is what gets
+decoded. `GET /api/debugger/source` returns that module as standard base64
+(`encoding` is `base64`, `byte_size` is the decoded length). The artifact keeps
+the raw bytes, capped at 16 MiB, with artifact IDs at or above 2^32. The
+backend appends the receiver manifest line directly because the browser already
+holds the receiver's one authenticated connection. Pass
+`--capture-session-id` for that manifest; otherwise the artifacts directory's
+parent name, then an existing manifest session, is used.
+
 Captured WASM inspection uses `src/wasm.rs` and the shared `origin-trace-wasm`
 helper. `GET /api/wasm?artifact_id=ID` verifies the complete artifact before
 bounded inert decoding. The native app bundles the same helper; see

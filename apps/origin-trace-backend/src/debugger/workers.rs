@@ -337,7 +337,7 @@ impl Debugger {
         }
         Ok(())
     }
-    fn worker_catalog_event(&self, target: &str, message: &Value) {
+    fn worker_catalog_event(&self, target: &str, message: &Value) -> Option<Value> {
         let p = &message["params"];
         match message["method"].as_str().unwrap_or("") {
             "Debugger.scriptParsed" => {
@@ -354,12 +354,13 @@ impl Debugger {
                         self.hooks
                             .candidate_epoch
                             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                        return;
+                        return None;
                     }
                     script["script_id"] = json!(public_id);
                     script["cdp_script_id"] = json!(id);
                     script["target_id"] = json!(target);
                     script["target_type"] = json!("worker");
+                    let wasm = super::wasm_capture::is_wasm_script(&script).then(|| script.clone());
                     self.update(|s| {
                         self.hooks.candidate_source_changed(target);
                         let scripts = s["scripts"].as_array_mut().unwrap();
@@ -372,6 +373,7 @@ impl Debugger {
                         }
                         scripts.push(script);
                     });
+                    wasm
                 } else {
                     self.hooks
                         .candidate_catalog_incomplete
@@ -379,6 +381,7 @@ impl Debugger {
                     self.hooks
                         .candidate_epoch
                         .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    None
                 }
             }
             "Runtime.executionContextDestroyed" | "Runtime.executionContextsCleared" => {
@@ -390,15 +393,17 @@ impl Debugger {
                                 && script["execution_context_id"] != p["executionContextId"])
                     });
                 });
+                None
             }
-            _ => (),
+            _ => None,
         }
     }
     async fn worker_event(self: &Arc<Self>, target: &str, owner: &Session, message: Value) {
         let method = message["method"].as_str().unwrap_or("");
-        {
-            // Keep session ownership locked through synchronous catalog edits.
-            // Removal cannot interleave and resurrect a retired target revision.
+        // Keep session ownership locked through synchronous catalog edits.
+        // Removal cannot interleave and resurrect a retired target revision.
+        // Drop the registry before Wasm capture. Fetching bytecode awaits CDP.
+        let (catalog, captured) = {
             let sessions = self
                 .workers
                 .sessions
@@ -409,16 +414,24 @@ impl Debugger {
             }) {
                 return;
             }
-            if [
+            let catalog = [
                 "Debugger.scriptParsed",
                 "Runtime.executionContextDestroyed",
                 "Runtime.executionContextsCleared",
             ]
-            .contains(&method)
-            {
-                self.worker_catalog_event(target, &message);
-                return;
-            }
+            .contains(&method);
+            let captured = if catalog {
+                self.worker_catalog_event(target, &message)
+            } else {
+                None
+            };
+            (catalog, captured)
+        };
+        if let Some(script) = captured {
+            self.schedule_wasm_capture(script);
+        }
+        if catalog {
+            return;
         }
         // Never hold the session registry across network or pause awaits.
         let p = &message["params"];

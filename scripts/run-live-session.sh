@@ -315,7 +315,8 @@ ui_arguments=(
   --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
   --api-collection "${api_collection_store}" --local-analyst "${local_analyst_store}" \
   --decoder "${decoder_binary}" --heap-snapshot "${heap_snapshot_binary}" \
-  --socket "${socket_path}" --artifact-socket "${artifact_socket_path}"
+  --socket "${socket_path}" --artifact-socket "${artifact_socket_path}" \
+  --capture-session-id "${session_id}"
   --broker-pid "${broker_pid}"
 )
 if [[ "${native_quiet_mode}" == 0 ]]; then

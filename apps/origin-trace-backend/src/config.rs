@@ -48,6 +48,9 @@ pub struct Options {
     pub broker_pid: Option<i32>,
     #[arg(long)]
     pub artifact_socket: Option<PathBuf>,
+    /// Live capture session whose artifact manifest receives debugger Wasm modules.
+    #[arg(long)]
+    pub capture_session_id: Option<u64>,
     #[arg(long)]
     pub devtools_active_port: Option<PathBuf>,
     /// Private directory where a live capture publishes the native-console binding.

@@ -51,7 +51,7 @@ dropped step.
 
 The `vm_finding` and `vm_dispatch_sample` ABIs, a caller-fed bounded writer,
 and an automatic guest-interpreter sampler are separate capabilities. The owned
-register interpreter is the one opt-in sampler. It stays disabled until
+register interpreter is one opt-in sampler. It stays disabled until
 `EnableOwnedRegisterSampling` accepts the active VM capture session and nonzero
 finding, investigation, interpreter, and bytecode identities. Reconfigure clears
 that opt-in. While enabled, `SampleOwnedRegisterInvocation` runs the compiled
@@ -62,13 +62,19 @@ counter is that fixture's instruction index. The handler index copies the
 fixture opcode. Operand values are not copied. Further steps past the 16-sample
 budget stay on the dispatch-loss counter and publish as one vm gap. A full
 probe queue counts those steps on `DroppedCount` and returns the budget slot.
-Captured JavaScript and Wasm interpreters still have no sampler. A writer can
-transport observations provided by a caller; it cannot derive guest PCs or
-supply the missing interpreter semantics for those runtimes. Runtime source and typed-array checkpoint capture are not a guest
-instruction trace. Canvas observations, a detected dispatch loop, a high static
-score, a Wasm dispatch instruction and a retained buffer
-cannot establish which guest opcode ran or its program counter. More of those
-records cannot fill the missing runtime channel.
+Two further opt-in shapes read captured bytes and call the same writer.
+`javascript-switch-dispatch-v1` steps a typed-array checkpoint whose bytes are
+opcodes 16–19. Its program counter is the opcode byte index.
+`wasm-br-table-dispatch-v1` steps the first function of a Wasm module when that
+body decodes inside a fixed opcode subset and contains `br_table`. Its program
+counter is the module byte offset. The handler index copies the opcode. A walk
+stops after 32 committed steps; if the program has not halted, one extra
+dispatch loss is counted. Both stay disabled until their Enable call accepts
+the VM session and nonzero finding, investigation, interpreter, and bytecode
+identities. Reconfigure clears them. Ignition, Liftoff, TurboFan, and every
+other interpreter shape still have no sampler. A detected dispatch loop, a high
+static score, or a retained buffer that does not match these shapes does not
+produce a program counter.
 
 A workspace with no admitted samples and no dispatch-budget loss retains static
 handlers and the explicit `sampler-unavailable` omission, leading with the
@@ -78,10 +84,10 @@ its 16-sample cap. That omission is present when the capped trace still holds
 some samples, and it replaces `sampler-unavailable` when every observation was
 dropped. The host-links report keeps `guest_position` null and
 `dispatch-samples-unavailable`. The stdout fixture export below demonstrates
-the transport/consumer contract. The probe opt-in runs the same register
-program into the renderer queue. Neither path samples a captured JavaScript or
-Wasm interpreter. Rebuilding an overlay does not attach this sampler to page
-code.
+the transport/consumer contract. The owned-register opt-in runs that register
+program into the renderer queue. The page shapes run only when their opt-in is
+enabled and a captured buffer matches. Rebuilding the browser does not sample
+Ignition or compiled Wasm.
 
 A future native adapter must first establish exact captured interpreter and
 bytecode identities, invocation boundaries, PC units and the observed dispatch
@@ -94,14 +100,15 @@ semantics require a separately reviewed implementation, not enabling a flag.
 
 The owned-register probe opt-in is accepted by the admission harness: disabled
 by default, one invocation marker, instruction-index program counters, a visible
-16-sample gap, and a full-queue drop that returns the budget slot. Acceptance
-for a captured JavaScript or Wasm interpreter still requires pinned native patch
-replay and compilation, disabled, expired, full-queue and teardown regressions,
-and a rebuilt-browser run with expected PC/opcode/invocation sequences and exact
-host-parent links. The fixture differential tests and a static component compile
-cannot substitute for that browser-runtime evidence. Until that adapter and
-acceptance exist, missing live guest positions for page code remain an open
-capability gap, not a successful empty trace.
+16-sample gap, and a full-queue drop that returns the budget slot. The two page
+shapes are accepted there the same way, including the typed-array entry for the
+JavaScript program and `ObserveCapturedWasmModule` for the Wasm module. The
+Wasm bytes reach that entry from Chromium patch
+`0016-sample-wasm-br-table-dispatch.patch`, which calls it before artifact
+capture is gated. That patch has not been replayed on the pinned Chromium
+checkout in this change. A Brave/Xcode build is still required to prove a live
+page typed array and a live `WebAssembly.compile` produce the same program
+counters. Ignition and Liftoff remain an open gap, not a successful empty trace.
 
 ## Owned producer and instruction units
 

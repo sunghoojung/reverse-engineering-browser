@@ -115,16 +115,21 @@ past that budget, and samples whose emit is rejected before the queue, stay on
 a counter. `PublishVmDispatchBudgetGap` writes one `vm`/`gap` record whose
 decimal payload is the exact unreported count and whose artifact id is the
 interpreter. A full probe queue still counts its own drops and returns the
-budget slot so a later observation can be retained. The writer does not
-read V8, Wasm, canvas calls, or static `br_table` selectors, and it does not
-call `Debug::SetBreakPoint`. The one opt-in caller is the owned register
-interpreter. `EnableOwnedRegisterSampling` arms it for the active VM capture
-session; reconfigure clears that opt-in. `SampleOwnedRegisterInvocation` then
-runs `owned-register-v1` and submits each committed instruction-index program
-counter through `RecordVmDispatchSample`, after one `owned-register-v1`
-invocation finding. The 16-sample budget becomes one vm gap, and a full probe
-queue keeps its own drop count. Captured JavaScript and Wasm still have no
-sampler, so a rebuilt browser records zero guest steps from page code.
+budget slot so a later observation can be retained. The dispatch writer copies
+the observation it is given and does not call `Debug::SetBreakPoint`. Opt-in
+callers are the owned register interpreter and two captured-byte shapes.
+`EnableOwnedRegisterSampling` arms `owned-register-v1`.
+`EnableJavaScriptSwitchSampling` arms `javascript-switch-dispatch-v1`, which
+`CaptureRuntimeTypedArray` runs on the checkpoint bytes before the artifact
+size gate. `EnableWasmBrTableSampling` arms `wasm-br-table-dispatch-v1`.
+Chromium patch `0016-sample-wasm-br-table-dispatch.patch` passes module bytes
+to `ObserveCapturedWasmModule` before artifact capture is gated. Each shape
+emits one invocation finding and then calls `RecordVmDispatchSample` for every
+committed step. The 16-sample budget becomes one vm gap, a full probe queue
+keeps its own drop count, and a 32-step walk that has not halted counts one
+extra loss. Reconfigure clears every opt-in. Ignition, Liftoff, and TurboFan
+are not sampled. A rebuilt browser still needs the Wasm patch applied and a
+live page run before those program counters are browser evidence.
 See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
 The VM category also permits 32-byte through 16-MiB snapshots of runtime-created
 `ArrayBuffer`, `Uint8Array`, `Uint16Array`, and `Uint32Array` data. The V8 hook

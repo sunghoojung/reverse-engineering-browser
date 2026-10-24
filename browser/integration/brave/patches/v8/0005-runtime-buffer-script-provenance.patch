@@ -38,7 +38,7 @@ diff --git a/src/api/api.cc b/src/api/api.cc
 index eaa9562..2202299 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -11010,6 +11010,41 @@ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
+@@ -11010,6 +11010,63 @@ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
  CALLBACK_SETTER(RuntimeBufferCallback, RuntimeBufferCallback,
                  runtime_buffer_callback)
  
@@ -48,14 +48,13 @@ index eaa9562..2202299 100644
 +  *result = {};
 +  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
 +  i::JavaScriptStackFrameIterator iterator(isolate);
-+  // TypedArray constructors are JavaScript-linkage builtins without an
-+  // authored script. Skip only that bounded builtin prefix, then inspect
-+  // exactly the innermost authored JavaScript frame (including inlining).
-+  for (int skipped = 0; skipped < 8 && !iterator.done(); ++skipped, iterator.Advance()) {
-+    if (iterator.frame()->function()->shared()->HasBuiltinId())
-+      continue;
-+    const i::FrameSummary summary = i::FrameSummary::GetInnermost(iterator.frame());
++  // Same predicate and order as reb::SelectRuntimeBufferFrame. This records
++  // script identity only. It does not read a guest instruction pointer or
++  // enable the inspector.
++  const auto usable = [&](const i::FrameSummary& summary) -> bool {
 +    if (!summary.IsJavaScript())
++      return false;
++    if (summary.AsJavaScript().function()->shared()->HasBuiltinId())
 +      return false;
 +    const auto script_object = summary.AsJavaScript().script();
 +    if (!i::IsScript(*script_object))
@@ -65,14 +64,37 @@ index eaa9562..2202299 100644
 +      return false;
 +    result->context = Utils::ToLocal(summary.AsJavaScript().native_context());
 +    result->script_id = script->id();
-+    result->is_eval = script->compilation_type() == i::Script::CompilationType::kEval;
-+    result->source =
-+        Utils::ToLocal(i::direct_handle(i::Cast<i::String>(script->source()), isolate));
++    result->is_eval =
++        script->compilation_type() == i::Script::CompilationType::kEval;
++    result->source = Utils::ToLocal(
++        i::direct_handle(i::Cast<i::String>(script->source()), isolate));
 +    const auto name = script->GetNameOrSourceURL();
 +    if (i::IsString(name)) {
-+      result->name = Utils::ToLocal(i::direct_handle(i::Cast<i::String>(name), isolate));
++      result->name =
++          Utils::ToLocal(i::direct_handle(i::Cast<i::String>(name), isolate));
 +    }
 +    return true;
++  };
++  // TypedArray constructors and wasm-to-JS stubs sit above the authored
++  // caller. Skip that bounded prefix. Summaries in one stack frame are
++  // bottom-to-top, so the innermost activation is last. An unusable innermost
++  // inline must not hide the authored function on that same frame.
++  for (int examined = 0; examined < 32 && !iterator.done();
++       ++examined, iterator.Advance()) {
++    if (iterator.frame()->function()->shared()->HasBuiltinId())
++      continue;
++    const i::FrameSummaries summaries = iterator.frame()->Summarize();
++    const int available = summaries.size();
++    if (available <= 0)
++      continue;
++    const int visit = available > 32 ? 32 : available;
++    for (int step = 0; step < visit; ++step) {
++      const int index = available - 1 - step;
++      if (usable(summaries.frames[static_cast<size_t>(index)]))
++        return true;
++    }
++    if (available > 32 && usable(summaries.frames[0]))
++      return true;
 +  }
 +  return false;
 +}

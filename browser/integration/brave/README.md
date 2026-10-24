@@ -294,6 +294,33 @@ The scanner uses bounded spans and fixed arrays over one checked allocation;
 token lengths come from string views, including `instructionPointer`. Allocation
 failure still declines classification. The registration API is not page-facing.
 
+The forward masking lexer retains operand and delimiter context while removing
+comments, quoted/template strings and regex literals. This distinguishes division
+after a literal or function expression from a regex after an operator, control
+condition or statement block. It is still a bounded heuristic, not a JavaScript
+parser; template interpolation is not classified independently.
+
+The 64-entry observation cache pins positive signals and rotates negative entries,
+so the first 64 ordinary allocating scripts do not starve a later VM. A retained
+entry is never rescanned. Evicted negatives may be reconsidered, but all source
+conversion/scan attempts, including failed conversions and allocation failures,
+share a 256-attempt budget per configuration generation and renderer thread.
+Each prefix is at most 256 KiB. Prefix conversion uses the constant-time UTF-16
+length and V8's processed-character count rather than a full-source UTF-8 length
+walk; truncation stays explicit even at a multibyte boundary. Cache and budget
+reset on configuration replacement, even for the same
+session ID. A full positive table or exhausted budget reports
+`runtime_script_classification_limit`; unavailable classification reports
+`runtime_script_classification_unavailable`, never a false no-VM conclusion.
+These omissions are separately coalesced and retried after ring rejection.
+The 16-snapshot cap is unchanged. Rejected creator metadata produces no runtime
+artifact and consumes neither snapshot quota nor an allocating-source cache slot.
+Snapshot reservations are owned by monotonically increasing generations, so a
+stale capture cannot consume or release a replacement configuration's quota.
+Generation checks reject stale work at admission boundaries, including after
+emitter callbacks; they do not wait for already-admitted in-flight transfers.
+
+
 
 ### Runtime buffer task-checkpoint timing
 

@@ -147,6 +147,10 @@ void NativeProbeTransport::EmitGeneratedArtifact(const NativeArtifactKind kind,
                                                  const std::string_view source_url,
                                                  const std::span<const std::uint8_t> content,
                                                  const NativeRuntimeScript& script) noexcept {
+  if (script.capture_generation != 0 &&
+      script.capture_generation != NativeProbeSink::Get().RuntimeCaptureGeneration()) {
+    return;
+  }
   auto* const thread_host = HostForCurrentSequence();
   if (*thread_host) {
     (*thread_host)

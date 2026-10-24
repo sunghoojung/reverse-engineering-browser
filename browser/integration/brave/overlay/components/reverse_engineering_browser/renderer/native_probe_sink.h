@@ -6,7 +6,9 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_PROBE_SINK_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_PROBE_SINK_H_
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -18,6 +20,11 @@
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
 
 namespace reb {
+
+// Maximum allocating-script source prefix scanned to admit a runtime buffer.
+// The same bound is the renderer classifier's window.
+inline constexpr std::size_t kRuntimeScriptNoteBytes = 256U * 1024U;
+inline constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 
 // True means admitted to the renderer ring, not delivered to the browser,
 // broker, or evidence store. The generation identifies the captured policy.
@@ -85,6 +92,32 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       std::uint64_t execution_context_id,
       std::uint64_t script_id,
       NativeRuntimeScriptObservation observation) noexcept;
+  // True while this script's source attempt is remembered in this generation,
+  // including a negative classification or an unavailable conversion.
+  [[nodiscard]] bool RuntimeScriptSourceNoted(std::uint64_t generation,
+                                              std::uint64_t execution_context_id,
+                                              std::uint64_t script_id) const noexcept;
+  // Check before UTF-8 conversion. Positive observations stay pinned; negative
+  // entries rotate within 64 slots. At most 256 attempts (including conversion
+  // misses and scan allocation failures) run per generation and thread.
+  [[nodiscard]] bool RuntimeScriptNoteAccepts(std::uint64_t generation,
+                                              std::uint64_t execution_context_id,
+                                              std::uint64_t script_id) const noexcept;
+  // Records a bounded structural classification, returning whether it found a
+  // signal. Cached entries are not rescanned. Evicted negatives can be retried
+  // only within the total attempt budget. Allocation failure is retryable within
+  // that budget; a full positive table or exhausted budget refuses the scan.
+  // source_truncated is true when source is a prefix of a longer script.
+  [[nodiscard]] bool NoteRuntimeScriptSource(std::uint64_t generation,
+                                             std::uint64_t execution_context_id,
+                                             std::uint64_t script_id,
+                                             std::span<const std::uint8_t> source,
+                                             bool source_truncated = false) noexcept;
+  // Remembers a conversion that produced no bytes, so the caller does not
+  // allocate the prefix again. Returns false.
+  [[nodiscard]] bool RememberRuntimeScriptMiss(std::uint64_t generation,
+                                               std::uint64_t execution_context_id,
+                                               std::uint64_t script_id) noexcept;
   [[nodiscard]] bool RuntimeBufferHasSignal(std::uint64_t generation,
                                             std::uint64_t execution_context_id,
                                             std::uint64_t frame_id,
@@ -216,7 +249,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
-  std::atomic<std::size_t> runtime_typed_array_count_{0};
+  // Monotonic generation claims are never reset: an old capture cannot spend
+  // or release a replacement configuration's snapshot quota.
+  std::array<std::atomic<std::uint64_t>, kRuntimeTypedArrayMaxSnapshots>
+      runtime_snapshot_generations_{};
   NativeVmDispatchBudget dispatch_sample_budget_;
   // Cumulative dispatch losses for the active capture. reported_ trails
   // dropped_ until a vm gap is admitted. Identity fields describe the losses

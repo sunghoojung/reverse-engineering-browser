@@ -179,7 +179,10 @@ carries a decimal drop count adds `dispatch-sample-budget` so a capped trace
 stays incomplete. The owned register interpreter, the `javascript-switch-dispatch-v1` byte
 program, and the `wasm-br-table-dispatch-v1` module can produce those samples
 and that gap when their probe opt-in is enabled. Other JavaScript and Wasm
-interpreters remain unsampled.
+interpreters remain unsampled. Without a browser,
+`reb-native-vm-fixture --emit-dispatch-events-v1` is the producer that proves
+the consumer with real owned-fixture samples. The two page shapes are not part
+of that CLI.
 
 The `vm_dispatch_sample` v1 payload is the fixed 128-byte little-endian
 `VmDispatchSamplePayload`. Validators require protocol version `1`, payload

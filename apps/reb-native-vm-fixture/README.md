@@ -100,10 +100,15 @@ capacity loss without introducing an arbitrary-input production interface.
 ## Explicit dispatch event export
 
 `--emit-dispatch-events-v1` is the separate opt-in native event-stream mode for
-the existing broker. It exports one typed invocation marker plus one dispatch
-sample for each of the nine executed instructions, using fixed bounded capture
-before any output. The [workspace v2 contract](../../protocol/vm-opcode-workspace-v2.md)
+the existing broker. It is the offline way to prove the workspace consumer with
+real dispatch samples and no browser. It exports one typed invocation marker
+plus one dispatch sample for each of the nine executed instructions, using
+fixed bounded capture before any output. The
+[workspace v2 contract](../../protocol/vm-opcode-workspace-v2.md)
 defines the required scope/artifact arguments, private disposable-store example,
 unit evidence and declared-reference limitations. It introduces no browser
-attachment or automatic code execution. Use `make native-vm-recorder-check` for
-actual producer-to-broker checks and `make e2e` for analyzer linkage.
+attachment or automatic code execution, and it does not invent a guest PC for a
+captured page module. `javascript-switch-dispatch-v1` and
+`wasm-br-table-dispatch-v1` are separate probe opt-ins for matching captured
+buffers; this CLI does not emit those shapes. Use `make native-vm-recorder-check`
+for actual producer-to-broker checks and `make e2e` for analyzer linkage.

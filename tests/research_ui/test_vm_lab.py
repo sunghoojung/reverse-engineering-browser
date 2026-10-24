@@ -573,6 +573,115 @@ process.stdout.write(JSON.stringify({accepted, javascriptRejected, zeroContextRe
         self.assertFalse(result["javascriptRejected"])
         self.assertFalse(result["zeroContextRejected"])
 
+    def test_static_host_links_name_the_missing_sampler_and_null_position(self) -> None:
+        result = self.run_evidence_model(
+            """
+const event = {session_id:'15158926864691407161', process_id:7, sequence_number:'40'};
+const absent = {omissions:['dispatch-samples-unavailable'], links:[{
+  host_event:event, category:'network', type:'request_initiated', state:'unknown',
+  reason:'dispatch-samples-unavailable', guest_position:null}]};
+const none = {omissions:['dispatch-samples-unavailable','host-events-unavailable'], links:[]};
+const correlated = {omissions:[], links:[{...absent.links[0], state:'correlated', reason:'guest-position-unproven'}]};
+const observed = {omissions:[], links:[{...absent.links[0], state:'observed', reason:'direct-dispatch-parent',
+  guest_position:{instruction_pointer:2, instruction_pointer_units:'instruction-index'}}]};
+const absentView = vmHostLinksView(absent);
+const staticNotice = vmStaticSampleNoticeText({sample_count:0, coverage:{omissions:[{reason:'sampler-unavailable'}]}});
+process.stdout.write(JSON.stringify({
+  absentStatic: absentView.staticOnly,
+  absentHeadline: absentView.headline,
+  absentLine: absentView.lines[0],
+  absentOmission: absentView.omissionLines[0],
+  emptyStatic: vmHostLinksView(none).headline,
+  unbound: vmHostLinksView(null).headline,
+  correlatedStatic: vmHostLinksView(correlated).staticOnly,
+  correlatedLine: vmHostLinksView(correlated).lines[0],
+  observedLine: vmHostLinksView(observed).lines[0],
+  notice: staticNotice,
+  quiet: vmStaticSampleNoticeText({sample_count:3, coverage:{omissions:[{reason:'sampler-unavailable'}]}})
+}));
+"""
+        )
+        self.assertTrue(result["absentStatic"])
+        self.assertIn("dispatch-samples-unavailable", result["absentHeadline"])
+        self.assertIn("guest_position is null", result["absentHeadline"])
+        self.assertIn("not an empty workspace", result["absentHeadline"])
+        self.assertIn("correlation", result["absentHeadline"])
+        self.assertIn("guest_position null", result["absentLine"])
+        self.assertNotIn("guest_position PC", result["absentLine"])
+        self.assertEqual(result["absentOmission"]["reason"], "dispatch-samples-unavailable")
+        self.assertIn("missing sampler", result["absentOmission"]["detail"])
+        self.assertIn("host-events-unavailable", result["emptyStatic"])
+        self.assertIn("Guest position unknown", result["unbound"])
+        self.assertFalse(result["correlatedStatic"])
+        self.assertIn("guest-position-unproven", result["correlatedLine"])
+        self.assertIn("guest_position null", result["correlatedLine"])
+        self.assertIn("guest_position PC 2 (instruction-index)", result["observedLine"])
+        self.assertIn("sampler-unavailable", result["notice"])
+        self.assertIn("--emit-dispatch-events-v1", result["notice"])
+        self.assertIsNone(result["quiet"])
+
+    def test_session_source_join_keeps_page_javascript_separate_from_guest_position(self) -> None:
+        result = self.run_evidence_model(
+            """
+const wasm = {artifact_id:'4294967296', session_id:'9', kind:'wasm', url:'wasm://wasm/003c0d96', capture_origin:'webassembly_compile', byte_size:983909};
+const noise = {artifact_id:'1', session_id:'9', kind:'javascript', url:'chrome://newtab/strings.js', capture_origin:'network_response'};
+const other = {artifact_id:'2', session_id:'8', kind:'javascript', url:'https://newassets.hcaptcha.com/hsw.js', capture_origin:'network_response'};
+const page = {artifact_id:'3', session_id:'9', kind:'javascript', url:'https://newassets.hcaptcha.com/captcha/v1/hsw.js', capture_origin:'network_response'};
+const scripts = [
+  {script_id:'1', url:'chrome://newtab/strings.js', language:'JavaScript'},
+  {script_id:'25', url:'wasm://wasm/003c0d96', language:'WebAssembly'},
+  {script_id:'30', url:'https://accounts.hcaptcha.com/demo', language:'JavaScript'},
+  {script_id:'31', url:'', language:'JavaScript'},
+  {script_id:'32', url:'https://newassets.hcaptcha.com/captcha/v1/hsw.js', language:'JavaScript'}
+];
+const gap = vmSessionSourceJoin({artifacts:[wasm, noise, other], scripts, interpreterArtifactId:wasm.artifact_id, sessionId:'9', liveSessionJoined:true});
+const joined = vmSessionSourceJoin({artifacts:[wasm, noise, page], scripts, interpreterArtifactId:wasm.artifact_id, sessionId:'9', liveSessionJoined:true});
+const foreign = vmSessionSourceJoin({artifacts:[wasm, page], scripts, interpreterArtifactId:wasm.artifact_id, sessionId:'9', liveSessionJoined:false});
+const live = vmLiveCatalogMatchesSession([{session_id:'9'}], '9', 'live');
+const stale = vmLiveCatalogMatchesSession([{session_id:'9'}], '9', 'demo');
+const otherSession = vmLiveCatalogMatchesSession([{session_id:'4'}], '9', 'live');
+process.stdout.write(JSON.stringify({
+  gap: gap.omission,
+  gapText: gap.gapText,
+  gapRoles: gap.stored.map(row => row.role),
+  gapIgnoredOtherSession: gap.stored.some(row => row.artifact_id === '2'),
+  liveIds: gap.live.map(row => row.script_id),
+  liveRoles: gap.live.map(row => row.role),
+  joinedCount: joined.pageJavaScriptCount,
+  joinedOmission: joined.omission,
+  foreignLive: foreign.live.length,
+  foreignJoined: foreign.liveJoined,
+  relation: gap.live[0].relation,
+  hasSource: gap.live.some(row => Object.hasOwn(row, 'source')),
+  live, stale, otherSession,
+  capped: (() => {
+    const many = Array.from({length:33}, (_, index) => ({script_id:String(index + 1), url:`https://example.test/${index}.js`, language:'JavaScript'}));
+    const result = vmSessionSourceJoin({artifacts:[wasm], scripts:many, interpreterArtifactId:wasm.artifact_id, sessionId:'9', liveSessionJoined:true});
+    return {shown:result.live.length, omitted:result.liveOmitted};
+  })()
+}));
+"""
+        )
+        self.assertEqual(result["gap"], "no-page-javascript-artifact")
+        self.assertIn("/api/artifacts", result["gapText"])
+        self.assertIn("not written into the artifact store", result["gapText"])
+        self.assertEqual(result["gapRoles"], ["interpreter", "browser-noise"])
+        self.assertFalse(result["gapIgnoredOtherSession"])
+        self.assertEqual(result["liveIds"], ["30", "32", "31", "1"])
+        self.assertEqual(result["liveRoles"], ["page-javascript", "page-javascript", "generated-javascript", "browser-noise"])
+        self.assertEqual(result["joinedCount"], 1)
+        self.assertIsNone(result["joinedOmission"])
+        self.assertEqual(result["foreignLive"], 0)
+        self.assertFalse(result["foreignJoined"])
+        self.assertIn("correlation", result["relation"])
+        self.assertIn("guest_position stays null", result["relation"])
+        self.assertNotIn("provenance", result["relation"].replace("not loader provenance", ""))
+        self.assertFalse(result["hasSource"])
+        self.assertTrue(result["live"])
+        self.assertFalse(result["stale"])
+        self.assertFalse(result["otherSession"])
+        self.assertEqual(result["capped"], {"shown": 32, "omitted": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

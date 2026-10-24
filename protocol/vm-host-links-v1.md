@@ -19,10 +19,16 @@ by the analyzer before this join. Unretained samples do not prove a link.
 Rows carry host category/type, original host event identity and a nullable guest
 position with sample/invocation event identities, invocation ID, PC and units.
 They never copy the host payload. A direct dispatch-parent link is `observed`;
-shared frame without that proof is `correlated`; absent samples are `unknown`.
-The UI prints unknown rather than guessing a PC. Request edges retain their
-existing correlated-not-causal semantics: even an exact dispatch link does not
-prove where request values originated.
+shared frame without that proof is `correlated`; absent samples are `unknown`
+with reason `dispatch-samples-unavailable` and `guest_position` null. That
+state is the static-only sampler gap. It is not an empty workspace and it is
+not a guest program counter. Same session, navigation, and frame admits a host
+event, including `network`/`request_initiated`, as correlation only. It does
+not identify the Wasm loader and does not prove request-value provenance.
+VM Lab prints the reason, the null guest position, and that limitation on the
+workspace and on each host-link row. It does not invent a PC. Request edges
+retain their existing correlated-not-causal semantics: even an exact dispatch
+link does not prove where request values originated.
 
 The report retains at most 256 rows per workspace and 4096 overall. Named
 omissions distinguish absent dispatch samples, truncated sample retention,

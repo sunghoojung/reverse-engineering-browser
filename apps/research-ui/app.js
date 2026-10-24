@@ -1968,18 +1968,91 @@
         if (state.vmHostLinksStatus === 'unavailable') {
           section.append(textElement('p', 'vm-workspace-empty', 'Host links unavailable. Any matching last valid links are retained.'));
         }
-        if (!row || row.links.length === 0) {
-          section.append(textElement('p', 'vm-workspace-empty', 'Guest position unknown: no proven host-to-dispatch link is available.'));
+        const view = vmHostLinksView(row || null);
+        const banner = document.createElement('p');
+        banner.className = view.staticOnly ? 'vm-workspace-notice' : 'vm-workspace-empty';
+        if (view.staticOnly) {
+          banner.dataset.kind = 'static-only';
+          banner.setAttribute('role', 'status');
         }
+        banner.textContent = view.headline;
+        section.append(banner);
         if (row) {
+          for (const omission of view.omissionLines) {
+            const item = document.createElement('p');
+            item.className = 'vm-workspace-empty';
+            item.append(textElement('strong', '', omission.reason), document.createTextNode(`: ${omission.detail}`));
+            section.append(item);
+          }
           appendVmPagedRows(section, row.links, 'host links', link => {
-            const event = link.host_event, position = link.guest_position;
-            const label = position ? `PC ${position.instruction_pointer} (${position.instruction_pointer_units})` : 'unknown';
             const item = textElement('details', 'vm-effect-row', '');
-            item.append(textElement('summary', '', `${link.category}/${link.type} · event ${event.session_id}:${event.process_id}:${event.sequence_number} · ${label} · ${link.state}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(link, null, 2)));
+            item.append(textElement('summary', '', vmHostLinkLine(link)), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(link, null, 2)));
             return item;
           });
-          for (const omission of row.omissions) section.append(textElement('p', 'vm-workspace-empty', omission));
+        }
+        return section;
+      }
+
+      function renderVmSessionSources(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.setAttribute('aria-label', 'Session sources');
+        section.append(textElement('h4', '', 'Session sources'));
+        section.append(textElement('p', '', 'Stored artifacts from this evidence session, plus live CDP scripts only when that session is in the current live evidence window. Shared session or target is correlation, not loader provenance and not a guest position.'));
+        const finding = (state.vmFindings ?? []).find(item => item.findingId === state.selectedVmFindingId);
+        const interpreter = vmSourceArtifactForFinding(state.artifacts ?? [], finding, state.vmAnalysisSelection);
+        const sessionId = interpreter?.session_id;
+        const joined = vmLiveCatalogMatchesSession(state.events, sessionId, state.sessionMode);
+        const join = vmSessionSourceJoin({
+          artifacts: state.artifacts,
+          scripts: state.debuggerSession?.scripts,
+          interpreterArtifactId: workspace.interpreter_artifact_id,
+          sessionId,
+          liveSessionJoined: joined
+        });
+        if (!join.scoped) {
+          section.append(textElement('p', 'vm-workspace-empty', 'Interpreter artifact is not in the retained catalog, so same-session JavaScript cannot be listed. /api/artifacts is unchanged.'));
+          return section;
+        }
+        if (join.gapText) {
+          const gap = document.createElement('p');
+          gap.className = 'vm-workspace-notice';
+          gap.dataset.kind = 'static-only';
+          gap.setAttribute('role', 'status');
+          gap.textContent = join.gapText;
+          section.append(gap);
+        }
+        section.append(textElement('h4', '', 'Stored artifacts'));
+        if (join.stored.length === 0) {
+          section.append(textElement('p', 'vm-workspace-empty', 'No stored artifact in this session matched the interpreter record.'));
+        } else {
+          appendVmPagedRows(section, join.stored, 'stored sources', entry => {
+            const item = document.createElement('div'); item.className = 'vm-effect-row';
+            item.append(textElement('p', 'vm-effect-detail', `${entry.role} · artifact ${entry.artifact_id} · ${entry.kind} · ${entry.capture_origin} · ${entry.url || '(no URL)'}`));
+            item.append(textElement('p', 'vm-effect-detail', entry.relation));
+            const open = textElement('button', 'secondary-button', 'Open stored artifact'); open.type = 'button';
+            open.addEventListener('click', () => { showScreen('sources', open); selectArtifact(entry.artifact_id); });
+            item.append(open);
+            return item;
+          });
+        }
+        section.append(textElement('h4', '', 'Live CDP scripts'));
+        if (!join.liveJoined) {
+          section.append(textElement('p', 'vm-workspace-empty', 'Live CDP scripts are not joined. They appear only when this interpreter session_id is in the current live evidence window and a debugger is attached. A catalog from another target is not treated as this module\'s loader.'));
+        } else if (join.live.length === 0) {
+          section.append(textElement('p', 'vm-workspace-empty', 'The attached debugger has no JavaScript scripts in its catalog. WebAssembly debugger scripts are omitted; module bytes stay on the stored Wasm artifact.'));
+        } else {
+          if (join.liveOmitted > 0) {
+            section.append(textElement('p', 'vm-workspace-empty', `Showing 32 of ${join.live.length + join.liveOmitted} live JavaScript scripts, preferring challenge-like URLs and generated scripts over browser UI. Omitted scripts remain in Sources.`));
+          }
+          appendVmPagedRows(section, join.live, 'live scripts', entry => {
+            const item = document.createElement('div'); item.className = 'vm-effect-row';
+            item.append(textElement('p', 'vm-effect-detail', `${entry.role} · live script ${entry.script_id} · CDP catalog · ${entry.url || '(anonymous)'}`));
+            item.append(textElement('p', 'vm-effect-detail', entry.relation));
+            const open = textElement('button', 'secondary-button', 'Open live script'); open.type = 'button';
+            open.addEventListener('click', () => { showScreen('sources', open); selectScript(entry.script_id); });
+            item.append(open);
+            return item;
+          });
         }
         return section;
       }
@@ -1990,6 +2063,15 @@
         container.setAttribute('aria-label', 'Opcode workspace');
         const notice = vmWorkspaceNotice(workspace);
         if (notice) container.append(notice);
+        const staticSampleText = vmStaticSampleNoticeText(workspace);
+        if (staticSampleText) {
+          const staticNotice = document.createElement('div');
+          staticNotice.className = 'vm-workspace-notice';
+          staticNotice.dataset.kind = 'static-only';
+          staticNotice.setAttribute('role', 'status');
+          staticNotice.textContent = staticSampleText;
+          container.append(staticNotice);
+        }
         if (!workspace) return container;
         const head = document.createElement('div'); head.className = 'vm-workspace-title';
         head.append(
@@ -2035,7 +2117,8 @@
           ['coverage', 'Coverage', renderVmWorkspaceCoverage],
           ['unknowns', 'Unknowns', renderVmWorkspaceUnknowns],
           ['experiment', 'Experiment', renderVmOwnedExperiment],
-          ['host-links', 'Host links', renderVmHostLinks]
+          ['host-links', 'Host links', renderVmHostLinks],
+          ['sources', 'Sources', renderVmSessionSources]
         ];
         const active = definitions.some(([key]) => key === state.vmWorkspacePanel) ? state.vmWorkspacePanel : 'effects';
         const entries = definitions.map(([key, label, renderPanel]) => {
@@ -2255,6 +2338,16 @@
 
       let renderedVmFindings = null;
       let renderedVmWorkspace = null;
+      function vmSessionSourceRefreshKey() {
+        const finding = (state.vmFindings ?? []).find(item => item.findingId === state.selectedVmFindingId);
+        const artifact = vmSourceArtifactForFinding(state.artifacts ?? [], finding, state.vmAnalysisSelection);
+        const sessionId = artifact?.session_id ?? '';
+        const stored = (state.artifacts ?? []).filter(item => String(item.session_id) === String(sessionId)).map(item => item.artifact_id);
+        const joined = vmLiveCatalogMatchesSession(state.events, sessionId, state.sessionMode);
+        const scripts = joined ? (state.debuggerSession?.scripts ?? []).filter(script => script?.language !== 'WebAssembly').slice(0, 32)
+          .map(script => `${script.script_id}\u0000${script.url ?? ''}`) : [];
+        return [sessionId, joined, stored.join(','), scripts.join('\n')];
+      }
       function renderVmLab() {
         const focusedFindingId = document.activeElement?.classList.contains('vm-row')
           ? document.activeElement.dataset.findingId
@@ -2298,7 +2391,8 @@
           Boolean(vmSourceArtifactForFinding(state.artifacts, selectedFinding, state.vmAnalysisSelection))]);
         const workspaceKey = JSON.stringify([
           state.vmOpcodeWorkspaceStatus, state.vmOpcodeWorkspace?.document_digest ?? null,
-          state.vmHostLinksStatus, state.vmHostLinks?.document_digest ?? null
+          state.vmHostLinksStatus, state.vmHostLinks?.document_digest ?? null,
+          vmSessionSourceRefreshKey()
         ]);
         if (renderKey === renderedVmFindings && workspaceKey === renderedVmWorkspace) return;
         if (renderKey !== renderedVmFindings) {

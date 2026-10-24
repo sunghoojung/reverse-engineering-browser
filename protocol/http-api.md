@@ -772,6 +772,8 @@ The respective `_saturated` flags distinguish clamping at u64 maximum.
 Malformed or incomplete JSON in the scanned records fails the refresh; the UI
 retains its last valid data. A complete final record without a newline is valid.
 The cache verifies exact overlap/boundary bytes and file identity before reuse.
-The Rust endpoint supports this contract; the older Swift stored-evidence URL
-scheme does not yet provide these fields. The UI accepts that legacy response
-but resets old summaries and labels fallback counts as visible-window-only.
+The Rust endpoint and the Swift stored-evidence reader both support this
+contract, including the separate network window, scan coverage, and saturated
+gap and drop totals. A response that omits the fields is still accepted, and
+the UI then resets old summaries and labels fallback counts as
+visible-window-only.

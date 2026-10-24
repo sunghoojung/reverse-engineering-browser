@@ -13,6 +13,7 @@ contents_path="${app_path}/Contents"
 macos_path="${contents_path}/MacOS"
 resources_path="${contents_path}/Resources"
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
+stored_event_window_source="${repo_root}/apps/research-ui/macos/StoredEventWindow.swift"
 trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
 workspace_lease_source="${repo_root}/apps/research-ui/macos/NativeWorkspaceLease.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
@@ -139,11 +140,16 @@ xcrun swiftc -parse-as-library -framework Cocoa -framework WebKit \
 "${repo_root}/build/check-client-project-export" \
   "${repo_root}/build/client-project-qa/authored-example.zip"
 
+xcrun swiftc -parse-as-library \
+  "${stored_event_window_source}" "${repo_root}/tools/check-stored-event-window.swift" \
+  -o "${repo_root}/build/check-stored-event-window"
+"${repo_root}/build/check-stored-event-window"
+
 xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_event_window_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

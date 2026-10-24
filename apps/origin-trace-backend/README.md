@@ -16,11 +16,18 @@ make backend-e2e
 
 `reb-api mcp` projects [`protocol/openapi.json`](../../protocol/openapi.json)
 onto a local stdio MCP server. Tool names are the OpenAPI operation IDs. The
-default list is read-only. `--allow-effects` is explicit and is not
-authorization. Binary responses are refused before a request. JSON larger than
+default list is read-only. `--allow-effects` also lists the other operations.
+That flag is explicit and is not authorization, capture redaction, or
+permission to send results to a model provider. `--session-dir` reads
+`research-ui.endpoint` from that directory only. `/api/health` must report
+`status: ok` before any tool is advertised, and the health document is not
+printed. Binary responses are refused before a request. JSON larger than
 the inline limit returns a structural summary and does not inline source,
-bytecode, or request bodies. See
-[OpenAPI MCP projection](../../protocol/http-api.md#openapi-mcp-projection).
+bytecode, or request bodies. [`scripts/reb-api-mcp.sh`](../../scripts/reb-api-mcp.sh)
+is the same-machine launcher for Cursor, Codex, Claude Code, Grok Bot, and
+T3 Code. See
+[OpenAPI MCP projection](../../protocol/http-api.md#openapi-mcp-projection)
+and [local coding agents](../../docs/development/local-coding-agents.md).
 
 `backend-e2e` uses Node.js 22 or newer and a disposable browser profile. Set
 `ORIGIN_TRACE_TEST_BROWSER` to a Chromium-compatible executable on other hosts.

@@ -79,7 +79,21 @@ or `--endpoint-file`.
 
 ```sh
 reb-api mcp --endpoint-file /tmp/reb-api-endpoint
+reb-api mcp --session-dir /absolute/path/to/one-selected-session
+reb-api mcp --endpoint-file /tmp/reb-api-endpoint --allow-effects
 ```
+
+Pass exactly one of `--base-url`, `--endpoint-file`, or `--session-dir`.
+`--session-dir` reads `research-ui.endpoint` from that directory and does not
+search for a newer session. A native UI URL that includes a query is rejected
+and is not echoed. Before the server reads stdio, it requests `/api/health` on
+the selected loopback root and exits unless the JSON `status` is `ok`. The
+health document names local store paths, so it is not printed. This check is
+reachability. It does not identify a capture or authorize a tool call.
+[`scripts/reb-api-mcp.sh`](../scripts/reb-api-mcp.sh) is the client launcher.
+It execs this command and does not add a server. Cursor, Codex, Claude Code,
+Grok Bot, and T3 Code settings are in the
+[local coding-agent guide](../docs/development/local-coding-agents.md).
 
 The default tool list is the read-only projection used by `list --json`.
 `--allow-effects` also lists the other operations. The flag does not authorize

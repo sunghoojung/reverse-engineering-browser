@@ -26,8 +26,9 @@ EVENT_TEST_BINARY := $(BUILD_DIR)/tests/event-test
 EVENT_BROKER_TEST_BINARY := $(BUILD_DIR)/tests/event-broker-test
 VM_DISPATCH_TEST_BINARY := $(BUILD_DIR)/tests/vm-dispatch-test
 OWNED_REGISTER_SAMPLER_TEST := $(BUILD_DIR)/tests/owned-register-sampler-test
+PAGE_GUEST_SAMPLER_TEST := $(BUILD_DIR)/tests/page-guest-sampler-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -67,6 +68,8 @@ $(OWNED_REGISTER_SAMPLER_TEST): $(BUILD_DIR)/tests/owned_vm_guest_sampler_test.o
 	$(BUILD_DIR)/src/analysis/owned_vm_guest_sampler.o \
 	$(BUILD_DIR)/src/analysis/owned_vm_fixture.o \
 	$(BUILD_DIR)/src/analysis/native_vm_recorder.o
+$(BUILD_DIR)/tests/page_guest_sampler_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(PAGE_GUEST_SAMPLER_TEST): $(BUILD_DIR)/tests/page_guest_sampler_test.o
 $(BROKER_BINARY): $(BUILD_DIR)/services/event-broker/main.o \
 	$(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/evidence/event_broker.o \

@@ -54,6 +54,9 @@ event emits at most three direct edges. Renderer and browser request IDs are
 separate namespaces: the exact bridge is the browser event's session ID plus
 `initiator_process_id` and `initiator_request_id`, matched only to a retained
 renderer `request_initiated` event, not to any equal-numbered request record.
+The producer fills those initiator fields only for renderer-issued subresource
+factories. Browser-issued loads leave them zero. The browser lifecycle request
+id stays in its own namespace.
 
 Independent process queues may deliver the browser lifecycle first. The index
 retains at most its configured capacity of pending exact-identity links and

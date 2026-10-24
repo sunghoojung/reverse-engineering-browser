@@ -187,6 +187,15 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   checks.renderNetworkNotice();
   assert.equal(notice.kind,'active');assert.match(notice.text,/12 of 12 eligible browser targets attached \(limit 32\)/);
   assert.match(notice.text,/Mode: passive browser target discovery/);
+  status.event_queue_drops = 4;
+  checks.renderNetworkNotice();
+  assert.equal(notice.kind, 'gap');
+  assert.match(notice.text, /4 debugger events were dropped/);
+  assert.match(notice.text, /browser connection stayed open/);
+  assert.match(notice.text, /page under test kept its capture owner/);
+  delete status.event_queue_drops;
+  assert.equal(checks.isDebuggerNetworkCaptureStatus({...status, event_queue_drops: -1}), false);
+  assert.equal(checks.isDebuggerNetworkCaptureStatus({...status, event_queue_drops: 4}), true);
   status.catalog_incomplete=true;checks.renderNetworkNotice();assert.match(notice.text,/counts cover only known targets/);assert.equal(notice.kind,'gap');delete status.catalog_incomplete;
   assert.match(notice.text,/without requesting startup pauses/);
   assert.match(notice.text,/Attaching worker targets can affect their lifecycle and timeout behavior/);

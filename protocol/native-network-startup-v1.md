@@ -56,8 +56,15 @@ The primary native key is session + full opaque BrowserContext token + Brave's
 context-global request ID. Missing tab/frame/renderer attribution stays unknown.
 The folded frame token is not collision-free and must not replace that primary
 key. Startup navigation may precede a live renderer and therefore have no
-renderer correlation. Shared/service workers can lack a frame; no parent tab is
-invented. IDs and paths are not queried again during destructor teardown.
+renderer correlation. Renderer-issued subresource factories (document, worker,
+and service-worker subresources) publish `initiator_process_id` as that render
+process's OS pid and `initiator_request_id` as the renderer's request id.
+Browser-issued factories, including navigation and worker or service-worker
+main scripts, publish zeros so they cannot join a renderer initiation. A
+document subresource falls back to the frame-token process only when the
+factory's render process does not resolve. Shared/service workers can lack a
+frame; no parent tab is invented. IDs and paths are not queried again during
+destructor teardown.
 
 One constant-size lifecycle value follows each real loader. No global request
 registry, TTL scan or unbounded capture-owned retention is introduced. Requests
@@ -84,7 +91,7 @@ queue drop prevents the terminal observation, completeness remains unknown.
 | Startup documents, frames, ordinary fetch/XHR through Brave's factory | Start before Shields, redirect, response, terminal observation |
 | Shields cancellation or synthetic stub | Start plus failure/stub provenance, including pre-network rejection |
 | Network-service HTTP cache through this proxy | Response/cache metadata when callbacks cross the proxy |
-| Dedicated/shared/service-worker requests through this proxy | Lifecycle metadata; frame/tab ownership may be unknown |
+| Dedicated/shared/service-worker requests through this proxy | Lifecycle metadata. Renderer-issued subresources carry the worker process id; the worker main script does not claim a renderer initiator. Frame/tab ownership may still be unknown |
 | Service-worker synthetic responses / CacheStorage interception | Not covered when Chromium uses a separate single-request/intercepting loader |
 | Renderer memory-cache reuse | Not covered when no browser URL loader is created |
 | WebSocket, WebTransport, other non-URLLoader traffic | Not added by this change |
@@ -95,7 +102,10 @@ MIME/protocol or synthetic provenance. No query, fragment, credentials, headers 
 request body is added. Existing explicitly authorized JS/Wasm artifact capture
 has its own sensitive-data limits and receiver acknowledgment.
 
-The browser queue holds 8,192 records. Full queues count drops; the existing writer
+The browser queue holds 8,192 records. That capacity is the source fix for a
+single page overflowing the previous 1,024-slot canvas and WebGL queue. A live
+page still needs a Brave built from this overlay; an unrebuilt browser keeps
+the old capacity. Full queues count drops; the existing writer
 reports weighted gaps when it can next drain records. The 128-byte payload cap
 sets truncation flags. Queue-wide gaps are unattributed and may overlap sequence
 discontinuities; never add them as independent losses. Disconnect/final-tail

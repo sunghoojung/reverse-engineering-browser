@@ -25948,6 +25948,10 @@
           "status_extra_info_overflow": {
             "type": "boolean",
             "description": "Sticky saturation of the bounded 2048-entry ExtraInfo identity history; disables ExtraInfo attribution without discarding HTTP rows or authoritative response status."
+          },
+          "event_queue_drops": {
+            "$ref": "#/components/schemas/SafeInteger",
+            "description": "Optional cumulative debugger events discarded because the capture event queue or its byte budget was full. The browser connection stays open. This is separate from owner-loss gaps."
           }
         },
         "description": "Bounded HTTP capture coverage. Passive browser sessions cover supported page, worker and out-of-process iframe targets; page polling is a compatibility fallback. Ready never promises first-navigation or pre-attachment completeness. WebSocket v1 remains selected-target scoped."

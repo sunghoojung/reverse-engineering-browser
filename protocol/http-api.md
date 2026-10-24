@@ -302,11 +302,17 @@ capture guarantee is added.
 `transport_mode: browser-sessions`, and `startup_mode: passive`. Standalone
 `--capture-target-limit` defaults to 32 and accepts 1–128; the limit counts both
 initializing and ready capture sessions across all supported target types.
-Existing owners retain their slots, and waiting targets are admitted oldest-first
-as slots become free. Selection does not silently evict another target.
+Existing owners retain their slots. Waiting admission takes the oldest page
+before any non-page, then the oldest remaining non-page. A page can replace a
+waiting non-page that is not an owner when the 512-target catalog is full.
+Selection does not evict an attached owner.
 A bounded 512-target catalog feeds `eligible_targets`; `attached_targets`,
 `target_limit`, `target_overflow`, `failed_targets`, cumulative `gaps`, bounded
-`last_error` and `message` describe current coverage. `state` is `disabled`,
+`last_error` and `message` describe current coverage. Optional
+`event_queue_drops` counts debugger events discarded because the capture event
+queue or byte budget was full. The browser socket stays open, and this counter
+is separate from owner-loss `gaps`. While it is nonzero, `state` stays
+`partial`. `state` is `disabled`,
 `waiting`, `ready` or `partial`. Ready means known eligible targets initialized
 capture, never first-navigation completeness. Failed target initialization
 retries after five seconds. `attached_target_ids` identifies ready owners;

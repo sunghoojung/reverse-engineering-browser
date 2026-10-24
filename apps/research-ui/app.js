@@ -320,6 +320,11 @@
             if (kind === 'active') kind = 'gap';
             messages.push(`${dropped} older requests evicted from the 1,000-request window.`);
           }
+          const queueDrops = state.debuggerSession.network.capture_status?.event_queue_drops ?? 0;
+          if (queueDrops > 0) {
+            if (kind === 'active') kind = 'gap';
+            messages.push(`${queueDrops} debugger events were dropped because the capture event queue was full. The browser connection stayed open, so the page under test kept its capture owner.`);
+          }
         } else if (kind === 'malformed' || kind === 'disconnected') {
           messages.push(state.events.length ? 'The last valid evidence remains visible.' : 'No live broker evidence is available.');
         } else if (!messages.length) {

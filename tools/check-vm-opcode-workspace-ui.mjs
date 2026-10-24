@@ -2,7 +2,7 @@
 // Authored fixtures and shipped rendering functions only. No captured WASM is executed.
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {spawn} from 'node:child_process';
+import {startSandboxedChromium} from './sandboxed-chromium-startup.mjs';
 import {mkdtemp, readFile, writeFile, rm, mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -252,18 +252,10 @@ render();`;
   await mkdir(output, {recursive: true});
   try {
     await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
-    browser = spawn(process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', ['--headless=new', '--remote-debugging-port=0',
-      `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
-      '--disable-component-update', '--disable-sync', 'about:blank'], {detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe']});
-    browser.once('close', () => { closed = true; }); browser.on('error', error => { diagnostics += String(error); });
-    browser.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8192); });
-    let port;
-    // Shared CI hosts can take longer to start a browser than to perform a UI action.
-    await until(async () => {
-      if (closed) throw Error(`Sandboxed Chromium startup failed: ${diagnostics}`);
-      try { port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; return !!port; }
-      catch { return false; }
-    }, 'sandboxed Chromium startup', 30000);
+    const chromium = startSandboxedChromium(process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', profile, text => { diagnostics = text; });
+    browser = chromium.browser;
+    browser.once('close', () => { closed = true; });
+    const port = await chromium.ready();
     const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
     await new Promise((ready, reject) => { socket.addEventListener('open', ready, {once: true}); socket.addEventListener('error', reject, {once: true}); });

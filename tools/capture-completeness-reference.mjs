@@ -719,6 +719,7 @@ export function compareCapture(reference, network, {include = () => true} = {}) 
     ['gaps', 'target_overflow', 'failed_targets', 'unattached_targets_omitted'].some(
       (k) => (coverage[k] ?? 0) > 0,
     ) ||
+    (coverage.document_navigation_gaps ?? 0) > 0 ||
     coverage.unattached_targets?.length ||
     network.dropped !== 0
   )

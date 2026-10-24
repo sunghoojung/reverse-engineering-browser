@@ -1365,6 +1365,26 @@ console.log('PASS request signal profile late headers/bodies/errors, exact owner
   assert.equal(fixture.state.signalProfile, null, 'Prior exact profile must not label the CDP request');
   delete cdp.protocolRequestId;
   assert.equal(fixture.selection(), null, 'CDP operation marker independently rejects the native root');
+  const linkedEvent = {session_id:'11', request_id:'345', process_id:19, sequence_number:'77', type:'request_initiated'};
+  const linked = {...cdp, id:'cdp-joined', protocolRequestId:'12.345', operation:'cdp_complete',
+    nativeLink:{kind:'devtools-request-id', nativeRequestId:'native-devtools', requestId:'345'},
+    events:[linkedEvent, {session_id:'11', request_id:'200', process_id:23, sequence_number:'78', type:'request_started'}]};
+  fixture.state.requests = [linked]; fixture.state.selectedRequestId = linked.id;
+  fixture.state.signalProfile = null; fixture.state.signalProfileKey = null; fixture.state.signalProfileEtag = null;
+  const linkedSelection = fixture.selection();
+  assert.equal(linkedSelection.requestID, '345');
+  assert.equal(linkedSelection.rootProcessID, 19);
+  assert.equal(linkedSelection.rootSequenceNumber, '77');
+  const linkedBody = signalProfileBody(1);
+  linkedBody.request_id = '345';
+  linkedBody.root_event = {process_id:19, sequence_number:'77'};
+  linkedBody.signals[0].first_event.process_id = 19;
+  linkedBody.signals[0].last_event.process_id = 19;
+  fixture.reply = () => signalProfileResponse(linkedBody);
+  await fixture.refresh();
+  assert.equal(fixture.state.signalProfileStatus, 'ready');
+  assert.match(fixture.calls.at(-1).url, /request_id=345/);
+  assert.match(fixture.calls.at(-1).url, /root_process_id=19/);
 }
 {
   let click; const queried = [], navigated = [], notices = [];
@@ -1381,6 +1401,13 @@ console.log('PASS request signal profile late headers/bodies/errors, exact owner
   assert.equal(navigated.length,2);
   state.requests[0] = {id:'native', event:{request_id:'7'}}; state.selectedRequestId='native';
   await click(); assert.deepEqual(queried,[null,null,'7']); assert.equal(navigated.length,3,'Native request pivot remains available');
+  state.requests[0] = {id:'cdp-joined', protocolRequestId:'12.345', operation:'cdp_complete', event:{request_id:'7'},
+    nativeLink:{kind:'devtools-request-id', nativeRequestId:'native-devtools', requestId:'345'}};
+  state.selectedRequestId = 'cdp-joined';
+  await click();
+  assert.deepEqual(queried,[null,null,'7','345']);
+  assert.match(notices.at(-1)[0], /DevTools request id/);
+  assert.equal(notices.at(-1)[1], 'ready');
 }
 // Related VM entry navigates synchronously; a late fetch cannot reopen the pane.
 for (const request of [

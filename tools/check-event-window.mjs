@@ -26,7 +26,7 @@ const state = {
 };
 let notice;
 const api = runInNewContext(
-  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice})`,
+  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,trafficRowsForLiveCapture,shownSequenceGaps,shownQueueDrops,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice})`,
   {
     state,
     TextEncoder,
@@ -188,6 +188,10 @@ assert.equal(state.nativeRequests.length, 1, 'production refresh uses independen
 assert.equal(state.nativeRequests[0].operation, 'request_completed');
 assert.equal(state.nativeRequests[0].rank, 5);
 assert.equal(state.events[0].category, 'canvas');
+const liveRows = api.trafficRowsForLiveCapture([], state.nativeRequests);
+assert.equal(liveRows.length, 1, 'A canvas-only general window still leaves the retained network request in Traffic');
+assert.equal(liveRows[0].operation, 'request_completed');
+assert.equal(liveRows[0].events.some(event => event.category === 'network'), true);
 for (const [type, status] of [['request_failed', 'failed'], ['response_completed', 200], ['request_redirected', 302]]) {
   refreshBody = {...bounded, count: 1, events: [{...request(999, 'api_call'), category: 'canvas'}],
     network_events: [{...request(200, type), status_code: typeof status === 'number' ? status : 0}]};

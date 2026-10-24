@@ -123,7 +123,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   }
 
   for (const invalid of [{startup_mode:'hold'},{transport_mode:'browser-sessions'},{discovery_stale:'true'},{catalog_incomplete:'true'},{unattached_targets:[{id:'page',title:'x'.repeat(129)}]},{unattached_targets_omitted:513},{attached_targets:129},{attached_target_ids:Array(129).fill('page')},{attached_target_ids:['x'.repeat(4097)]},{attached_target_ids:[1]},{eligible_targets:513},{target_limit:129},{target_limit:0},
-    {target_overflow:512},{failed_targets:-1},{gaps:NaN},{scope:'all-tabs'},
+    {target_overflow:512},{failed_targets:-1},{gaps:NaN},{document_navigation_gaps:-1},{document_navigation_gaps:1.5},{document_navigation_gaps:'1'},{scope:'all-tabs'},
     {state:'complete'},{last_error:'x'.repeat(513)},{message:'x'.repeat(1025)}]) {
     assert.equal(checks.isDebuggerNetworkCaptureStatus({...status,...invalid}),false);
   }
@@ -137,7 +137,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   assert.equal(notice.kind,'active'); assert.match(notice.text,/2 of 2 eligible page targets attached/);
   assert.match(notice.text,/Requests before attachment, including short-lived targets, are unavailable/);
   assert.match(notice.text,/worker and out-of-process iframe targets are not attached/);
-  assert.match(notice.text,/Requests observed only by native probes are not included in this CDP list/);
+  assert.match(notice.text,/Requests observed only by native probes stay in Traffic as separate rows and are not copied into this CDP list/);
   state.debuggerSession.target={id:'ninth-page'};status.attached_target_ids=['first-page','second-page'];
   checks.renderNetworkNotice();assert.equal(notice.kind,'gap');
   assert.match(notice.text,/selected debugger page is not attached for HTTP capture/);
@@ -157,6 +157,20 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   assert.match(notice.text,/1 target attachments failed; retry is pending/);
   assert.match(notice.text,/3 HTTP capture owner losses or retirements/);
   assert(!notice.text.includes(status.last_error),'Raw errors are not echoed into coverage notices');
+  const savedGaps = status.gaps, savedState = status.state;
+  Object.assign(status, {gaps: 0, state: 'partial', document_navigation_gaps: 1});
+  checks.renderNetworkNotice();
+  assert.equal(notice.kind, 'gap');
+  assert.match(notice.text, /1 document navigation was already committed when Network capture attached/);
+  assert.match(notice.text, /absent from the CDP list/);
+  assert.match(notice.text, /An unmatched native row may still show the host/);
+  assert.doesNotMatch(notice.text, /owner losses/);
+  status.document_navigation_gaps = 2;
+  checks.renderNetworkNotice();
+  assert.match(notice.text, /2 document navigations were already committed/);
+  delete status.document_navigation_gaps;
+  status.gaps = savedGaps;
+  status.state = savedState;
   status.discovery_stale=true;checks.renderNetworkNotice();
   assert.match(notice.text,/Target discovery is unavailable; counts are last known and new tabs may not attach/);
   assert.equal(checks.networkContentCaptureActive(),true,'Existing healthy owners remain active during discovery failure');

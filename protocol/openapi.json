@@ -25818,6 +25818,10 @@
           "gaps": {
             "$ref": "#/components/schemas/SafeInteger"
           },
+          "document_navigation_gaps": {
+            "$ref": "#/components/schemas/SafeInteger",
+            "description": "Optional count of main-frame http(s) navigations already committed when Network capture attached. CDP does not replay them. This is not an owner-loss gap and does not include later requests on that target. Counted once per target and committed URL, or once per target and loader when the snapshot includes a loader id."
+          },
           "last_error": {
             "type": [
               "string",

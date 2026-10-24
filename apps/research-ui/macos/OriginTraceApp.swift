@@ -78,6 +78,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let wasmService: NativeWasmService
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
+  private let storedEvents = StoredEventWindowCache()
   private let demoEvidenceEnabled: Bool
   private let analystRunnerLock = NSLock()
   private var activeAnalystProcess: Process?
@@ -1933,37 +1934,17 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       .flatMap(Int.init) ?? 500
     let limit = min(max(requestedLimit, 1), 5000)
 
-    guard FileManager.default.fileExists(atPath: eventStoreURL.path) else {
-      return try JSONSerialization.data(
-        withJSONObject: [
-          "count": 0,
-          "events": [],
-          "broker_connected": brokerConnected(),
-          "capture_mode": captureMode(),
-        ],
-        options: []
-      )
-    }
-
-    let contents = try String(contentsOf: eventStoreURL, encoding: .utf8)
-    let lines = contents.split(whereSeparator: \Character.isNewline).suffix(limit)
-    var events: [[String: Any]] = []
-    events.reserveCapacity(lines.count)
-    for line in lines {
-      let value = try JSONSerialization.jsonObject(with: Data(line.utf8), options: [])
-      guard let event = value as? [String: Any] else {
-        throw NSError(
-          domain: "OriginTrace",
-          code: 1,
-          userInfo: [NSLocalizedDescriptionKey: "The evidence store contains a malformed event"]
-        )
-      }
-      events.append(event)
-    }
+    let window = try storedEvents.read(path: eventStoreURL.path, limit: limit)
     return try JSONSerialization.data(
       withJSONObject: [
-        "count": events.count,
-        "events": events,
+        "count": window.events.count,
+        "events": window.events,
+        "network_events": window.networkEvents,
+        "sequence_gaps": String(window.sequenceGaps),
+        "sequence_gaps_saturated": window.sequenceGapsSaturated,
+        "queue_drops": String(window.queueDrops),
+        "queue_drops_saturated": window.queueDropsSaturated,
+        "event_window": window.coverage,
         "broker_connected": brokerConnected(),
         "capture_mode": captureMode(),
       ],

@@ -679,8 +679,10 @@ redirect, failed, and response-completed outcomes. Notices distinguish a capped
 window from the bounded tail and label summary counts by their actual scan scope.
 Sequence-gap counts are arrival-order high-water jumps, not a deduplicated count
 of still-missing IDs after late arrivals, and queue drops may overlap them.
-The separate Swift stored-evidence reader remains a legacy visible-window-only
-path pending native parity; no whole-capture count is inferred for it. Filtering
+The Swift stored-evidence reader uses the same newest-general and
+newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
+A response that omits those fields is still labeled visible-window-only, and
+no whole-capture count is inferred for it. Filtering
 and sorting cover the whole retained window. Rows and capture-tab controls are
 reused across refreshes. New arrivals briefly accent the row edge once; pending
 requests use a steady label. Reduced-motion disables animation and transitions.

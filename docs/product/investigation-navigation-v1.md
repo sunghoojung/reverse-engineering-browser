@@ -44,10 +44,15 @@ explanation. A return does not reload a missing capture from a target website.
 
 Debugger Requests can currently inherit native events through host, method and
 time correlation in `requestsFromDebuggerNetwork` (`evidence_models.js`). That
-is not an exact captured identity. `requestTraceRoot` excludes those projected
-rows from native trace pivots; their own debugger identity remains usable for
-returning to the retained Request. The existing Request signal correlation and
-other analysis labels remain their original contracts.
+is not an exact captured identity. A separate exact join exists only when one
+native `request_initiated` event carries the renderer id in the DevTools
+request id (`<process token>.<renderer id>`, or a single canonical decimal),
+and the method and host match. `requestTraceRoot` uses that join and still
+excludes heuristic rows from native trace, signal, and VM queries. The UI can
+select the correlated native Traffic row without treating it as the query.
+Their own debugger identity remains usable for returning to the retained
+Request. The existing Request signal correlation and other analysis labels
+remain their original contracts.
 
 ## Working path and provenance
 

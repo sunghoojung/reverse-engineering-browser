@@ -1704,6 +1704,7 @@
       .hook-confirm { display: flex !important; grid-template-columns: none !important; align-items: flex-start; gap: 7px !important; color: var(--text) !important; line-height: 1.45 !important; text-transform: none !important; }
       .hook-confirm input { width: auto; min-height: auto; margin-top: 1px; accent-color: var(--accent); }
       .hook-control-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      #hooks-pause-line { min-width: 0; padding-block: 6px; white-space: normal; line-height: 1.25; }
       .hook-phase-options { display: flex; flex-wrap: wrap; gap: 12px; }
       .hook-phase-options label { display: flex; grid-template-columns: none; align-items: center; gap: 6px; color: var(--text); text-transform: none; }
       .hook-phase-options input { width: auto; min-height: auto; accent-color: var(--accent); }

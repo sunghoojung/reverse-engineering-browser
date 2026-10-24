@@ -1163,6 +1163,10 @@ In a connected session, **Hooks** opens the shared Runtime Hooks workspace
 beside the Sources editor, with its ephemeral hit trail below the code. The
 panel creates and manages the same disposable Experiment context used by
 Experiments; its header labels the isolation and links back to Experiments.
+On the attached captured page, before an isolated context exists, the same
+panel lists that page's JavaScript and **Pause at this line** sets a debugger
+breakpoint on the selected script. The page stays paused when the line runs.
+That control is separate from an armed hook, which still resumes itself.
 Targeting guidance stays in the **Targeting help** disclosure, while armed
 status uses a compact hit count.
 Selecting a hit returns to the original live source location when that script

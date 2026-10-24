@@ -4629,6 +4629,11 @@
         elements.hooksAdd.disabled = !editable || !elements.hooksScript.value || !listedScripts.length || !elements.hooksLabel.value.trim() ||
           (!elements.hooksEntryEnabled.checked && !elements.hooksReturnEnabled.checked) ||
           (functionMode && !elements.hooksFunctionExpression.value.trim()) || state.debuggerActionPending;
+        const traceActive = typeof memoryOriginTraceActive === 'function' && memoryOriginTraceActive();
+        elements.hooksPauseLine.disabled = !capturedPauseRequest() || state.debuggerActionPending || traceActive;
+        elements.hooksPauseLine.title = elements.hooksPauseLine.disabled
+          ? 'Choose a current page script and a line inside it. Worker scripts are not paused from here.'
+          : 'Pause the attached page at this exact script. The pause stays until you resume.';
         elements.hooksConfirm.disabled = !editable || !hooks?.definitions.length || contextWorking;
         elements.hooksArm.disabled = !editable || !hooks?.definitions.length || !elements.hooksConfirm.checked || state.debuggerActionPending;
         elements.hooksDisarm.disabled = !(active || hooks?.active_points > 0) || state.debuggerActionPending;
@@ -4642,6 +4647,22 @@
           : elements.experimentNotice.textContent;
         elements.sourceHooksNotice.hidden = !state.sourceHooksOpen ||
           (contextReady && !active && !contextWorking && !state.experimentError && !hooks?.last_failure);
+      }
+
+      function capturedPauseRequest() {
+        const session = state.debuggerSession;
+        if (!['running', 'paused'].includes(session?.state)) return null;
+        const script = (session.scripts ?? []).find(candidate => candidate.script_id === elements.hooksScript.value);
+        if (!script || script.language !== 'JavaScript' || script.target_type === 'worker') return null;
+        if ((script.target_id ?? session.target?.id) !== session.target?.id) return null;
+        const line = Number(elements.hooksLine.value);
+        const column = Number(elements.hooksColumn.value);
+        if (!Number.isSafeInteger(line) || line < 1 || !Number.isSafeInteger(column) || column < 1) return null;
+        const runtimeLine = line - 1;
+        const runtimeColumn = column - 1;
+        if (Number.isInteger(script.start_line) && runtimeLine < script.start_line) return null;
+        if (Number.isInteger(script.end_line) && runtimeLine > script.end_line) return null;
+        return {action: 'set_breakpoint', url: '', script_id: script.script_id, line: runtimeLine, column: runtimeColumn, kind: 'line', condition: ''};
       }
 
       function parseAutomationVariables() {
@@ -5566,8 +5587,15 @@
 
       function prefillHookFromSource(source) {
         const hooks = runtimeHooksState();
-        if (source?.source_type !== 'script' || state.sourceDeobfuscated || state.sourceFormatted || !hooks?.isolated ||
-            hooks.target_id !== state.debuggerSession?.target?.id) return false;
+        const targetId = state.debuggerSession?.target?.id;
+        const interception = state.debuggerSession?.request_interception;
+        const isolatedExperiment = interception ? Boolean(interception.isolated) : Boolean(hooks?.isolated);
+        const disposable = isolatedExperiment && Boolean(hooks?.isolated) && hooks?.target_id === targetId;
+        const capturedPage = !isolatedExperiment
+          && ['running', 'paused'].includes(state.debuggerSession?.state)
+          && source?.target_type !== 'worker'
+          && (source?.target_id ?? targetId) === targetId;
+        if (source?.source_type !== 'script' || state.sourceDeobfuscated || state.sourceFormatted || !targetId || (!disposable && !capturedPage)) return false;
         const cursor = sourceCursorFor(source);
         const line = cursor?.line ?? source.start_line;
         elements.hooksScript.value = source.script_id;
@@ -9153,7 +9181,10 @@
           const transformed = state.sourceDeobfuscated || state.sourceFormatted;
           gutter.disabled = mappedLine === null && (source.source_type !== 'script' || source.target_type === 'worker' || transformed || !['running', 'paused'].includes(state.debuggerSession?.state) || memoryOriginTraceActive());
           gutter.title = mappedLine === null
-            ? transformed ? 'Show original source to edit breakpoints' : ''
+            ? transformed ? 'Show original source to edit breakpoints'
+              : source.source_type !== 'script' ? 'Captured evidence is not the live page. Select its Page script to pause that exact script.'
+              : source.target_type === 'worker' ? 'Worker scripts are not paused from the page gutter.'
+              : 'Pause this attached page script. The breakpoint stays until it is removed.'
             : `Show original source at line ${mappedLine + 1}`;
           gutter.setAttribute('aria-label', mappedLine === null
             ? `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`
@@ -10111,7 +10142,9 @@
       async function toggleLineBreakpoint(source, line, column, breakpoint) {
         if (state.debuggerActionPending) return;
         if (breakpoint) await debuggerAction({ action: 'remove_breakpoint', breakpoint_id: breakpoint.id });
-        else await debuggerAction({ action: 'set_breakpoint', url: source.url, script_id: source.script_id, line, column, condition: '' });
+        else if (source.source_type === 'script' && source.target_type !== 'worker') {
+          await debuggerAction({ action: 'set_breakpoint', url: '', script_id: source.script_id, line, column, kind: 'line', condition: '' });
+        } else await debuggerAction({ action: 'set_breakpoint', url: source.url || '', script_id: source.script_id || '', line, column, condition: '' });
       }
 
       function renderQuickOpen() {
@@ -12565,6 +12598,13 @@
       elements.hooksDefinitionForm.addEventListener('submit', event => {
         event.preventDefault();
         addRuntimeHook();
+      });
+      elements.hooksPauseLine.addEventListener('click', async () => {
+        const request = capturedPauseRequest();
+        if (!request) return;
+        state.experimentError = null;
+        const response = await debuggerAction(request);
+        if (response?.ok) setExperimentNotice('ready', 'Breakpoint set on the attached page script. The page stays paused when that line runs.');
       });
       elements.hooksScript.addEventListener('change', () => {
         state.hooksSelectedSource = null;

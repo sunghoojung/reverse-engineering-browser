@@ -44,6 +44,11 @@ isolation and retention limits.
   installed by that attempt is removed.
 - A hook pause is handled internally and always resumes. It never becomes an
   interactive debugger pause.
+- **Pause at this line**, and the page-script gutter, install an ordinary
+  debugger breakpoint on the exact current page script. That pause stays until
+  the researcher resumes it. A shared document URL does not choose a different
+  script. Worker scripts are rejected. These controls stay available while
+  hooks are armed; hook pauses and ordinary breakpoints remain distinct.
 - Navigation, worker detach, context disposal, bridge shutdown, and the hit
   limit disarm every hook and invalidate paused-frame and object references.
 - Hook definitions, captured values, and audit records are ephemeral. They do

@@ -421,7 +421,7 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
     const value=await evaluate(`(()=>{
       const box=node=>{const r=node.getBoundingClientRect();return {top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:r.height};};
       const pane=document.querySelector('#screen-traffic .request-pane'),tools=pane.querySelector('.network-tools'),notice=pane.querySelector('.network-notice'),searchStatus=pane.querySelector('.request-search-status'),scope=pane.querySelector('.request-scope'),consolePanel=document.querySelector('#native-console-panel');
-      return {label:${JSON.stringify(label)},viewport:{width:innerWidth,height:innerHeight},pane:{...box(pane),scrollTop:pane.scrollTop,clientHeight:pane.clientHeight,scrollHeight:pane.scrollHeight},tools:box(tools),filters:[...tools.querySelectorAll('.type-filter')].map(box),searchMode:document.querySelector('#request-search-scope').value,searchStatus:{...box(searchStatus),hidden:searchStatus.hidden},notice:box(notice),scope:box(scope),head:box(pane.querySelector('.request-head')),console:box(consolePanel),consoleHidden:consolePanel.hidden};
+      return {label:${JSON.stringify(label)},viewport:{width:innerWidth,height:innerHeight},pane:{...box(pane),scrollTop:pane.scrollTop,clientHeight:pane.clientHeight,scrollHeight:pane.scrollHeight},tools:box(tools),filters:[...tools.querySelectorAll('.type-filter')].map(box),searchMode:document.querySelector('#request-search-scope').value,searchStatus:{...box(searchStatus),hidden:searchStatus.hidden},notice:{...box(notice),hidden:notice.hidden},scope:box(scope),head:box(pane.querySelector('.request-head')),console:box(consolePanel),consoleHidden:consolePanel.hidden};
     })()`);
     upperPaneChecks.push(value);recordGeometry(value);
     assert(value.filters.every(filter=>filter.top>=value.tools.top-1&&filter.bottom<=value.tools.bottom+1),`${label}: resource filters must fit inside their intrinsic toolbar row`);
@@ -429,15 +429,25 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
       assert(value.searchStatus.top>=value.tools.bottom-1,`${label}: content-search status must remain below the toolbar`);
       assert(value.searchStatus.height>0,`${label}: selected content-search status must be visible`);
     }
-    assert(value.notice.top>=(value.searchStatus.hidden?value.tools.bottom:value.searchStatus.bottom)-1,`${label}: warning must remain below filters and any visible search status`);
-    assert(value.scope.top>=value.notice.bottom-1,`${label}: warning must retain its intrinsic wrapped height`);
+    const aboveScope=value.searchStatus.hidden?value.tools.bottom:value.searchStatus.bottom;
+    if(value.notice.hidden){
+      assert.equal(value.notice.height,0,`${label}: hidden Traffic status must occupy no space`);
+      assert(value.scope.top>=aboveScope-1,`${label}: target scope must follow the toolbar when status is hidden`);
+    }else{
+      assert(value.notice.top>=aboveScope-1,`${label}: warning must remain below filters and any visible search status`);
+      assert(value.notice.height>0,`${label}: a visible warning must keep its intrinsic height`);
+      assert(value.scope.top>=value.notice.bottom-1,`${label}: target scope must follow the warning`);
+    }
     assert(value.head.top>=value.scope.bottom-1,`${label}: request header must remain below scope controls`);
     if(!value.consoleHidden)assert(value.pane.bottom<=value.console.top+1,`${label}: upper pane must stay above Console`);
     return value;
   };
   const scrollUpperPane=async label=>{
     let before=await upperPane(label);
-    assert(before.pane.scrollHeight>before.pane.clientHeight+1,`${label}: short upper pane must intentionally scroll`);
+    if(before.pane.scrollHeight<=before.pane.clientHeight+1){
+      assert(before.notice.hidden,`${label}: a Requests pane that fits must be hiding the status line`);
+      return;
+    }
     if(before.pane.scrollTop>0){await wheel('#screen-traffic .request-pane',-Math.max(1000,before.pane.scrollHeight),'scrollbar');before=await upperPane(label+' prepared by wheel');assert(before.pane.scrollTop<=1,`${label}: genuine wheel must prepare the top boundary`);}
     const nestedBefore=await evaluate("({rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
     await wheel('#screen-traffic .request-pane',100,'scrollbar');

@@ -107,13 +107,24 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   const state = {sessionMode:'live',broker:'connected',events:[],requests:[],
     debuggerSession:{state:'waiting',network:{capture_enabled:true,capture_status:status,dropped:0}}};
   let notice;
+  const networkNotice = {hidden:false, textContent:'', dataset:{}};
+  const standingProse = /newest-network window|Recording live requests|eligible (?:page|browser) targets attached|Mode: passive browser target discovery|Mode: page-target polling fallback|without requesting startup pauses|first-request capture is not guaranteed|Requests before attachment|native probes stay in Traffic|WebSockets remain scoped/;
+  const assertQuiet = () => {
+    assert.equal(networkNotice.hidden, true, 'Healthy Traffic capture hides the status line');
+    assert.equal(networkNotice.textContent, '');
+  };
   const helperStart = source.indexOf('function trafficRequestFailed(');
   const helperEnd = source.indexOf('function renderTrafficRows(', helperStart);
   assert(helperStart >= 0 && helperEnd > helperStart, 'Failed-request notice helper must live with the Traffic row status');
   const checks = runInNewContext(source.slice(helperStart, helperEnd) + '\n' + models + '\n' + app.slice(start,end) +
     ';({isDebuggerNetworkCaptureStatus,isDebuggerNetwork,networkContentCaptureActive,renderNetworkNotice,trafficRequestFailed,trafficFailedRequestCount,trafficFailedRequestNotice})',
     {state, TextEncoder, countSequenceGaps:()=>0n, countReportedQueueDrops:()=>0n,
-      elements:{networkNotice:{hidden:false}},setNetworkNotice:(kind,text)=>{notice={kind,text};}});
+      elements:{networkNotice}, setNetworkNotice(kind, text) {
+        notice = {kind, text};
+        networkNotice.hidden = false;
+        networkNotice.textContent = text;
+        networkNotice.dataset.kind = kind;
+      }});
   assert.equal(checks.isDebuggerNetworkCaptureStatus(status),true);
   for (const limit of [1, 8, 32, 128]) {
     const expanded = {...status,scope:'http-browser-targets',transport_mode:'browser-sessions',startup_mode:'passive',target_limit:limit,
@@ -134,29 +145,28 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   assert.equal(checks.isDebuggerNetwork({...network,capture_status:{...status,attached_targets:129}}),false);
   assert.equal(checks.networkContentCaptureActive(),true,'Healthy HTTP owners do not depend on Sources attachment');
   checks.renderNetworkNotice();
-  assert.equal(notice.kind,'active'); assert.match(notice.text,/2 of 2 eligible page targets attached/);
-  assert.match(notice.text,/Requests before attachment, including short-lived targets, are unavailable/);
-  assert.match(notice.text,/worker and out-of-process iframe targets are not attached/);
-  assert.match(notice.text,/Requests observed only by native probes stay in Traffic as separate rows and are not copied into this CDP list/);
+  assertQuiet();
   state.debuggerSession.target={id:'ninth-page'};status.attached_target_ids=['first-page','second-page'];
   checks.renderNetworkNotice();assert.equal(notice.kind,'gap');
   assert.match(notice.text,/selected debugger page is not attached for HTTP capture/);
-  status.attached_target_ids.push('ninth-page');checks.renderNetworkNotice();assert.equal(notice.kind,'active');
-  assert(!notice.text.includes('selected debugger page is not attached'));
+  assert.doesNotMatch(notice.text, standingProse);
+  status.attached_target_ids.push('ninth-page');checks.renderNetworkNotice();
+  assertQuiet();
   delete status.attached_target_ids;
   status.unattached_targets=Array.from({length:5},(_,i)=>({id:'page-'+i,title:'Missing page '+i}));
   status.unattached_targets_omitted=2;checks.renderNetworkNotice();
   assert.match(notice.text,/Not attached: Missing page 0 \[page-0\]/);
   assert.match(notice.text,/4 more targets not listed here/);
   assert(!notice.text.includes('Missing page 3'),'Coverage labels stay bounded');
+  assert.doesNotMatch(notice.text, standingProse);
   delete status.unattached_targets;delete status.unattached_targets_omitted;
-  assert.match(notice.text,/WebSockets remain scoped to the selected debugger target/);
   Object.assign(status,{state:'partial',attached_targets:7,eligible_targets:10,target_overflow:2,failed_targets:1,gaps:3,last_error:'DO NOT ECHO RAW ERROR'});
   checks.renderNetworkNotice();
   assert.equal(notice.kind,'gap'); assert.match(notice.text,/2 page targets exceed the capture limit/);
   assert.match(notice.text,/1 target attachments failed; retry is pending/);
   assert.match(notice.text,/3 HTTP capture owner losses or retirements/);
   assert(!notice.text.includes(status.last_error),'Raw errors are not echoed into coverage notices');
+  assert.doesNotMatch(notice.text, standingProse);
   const savedGaps = status.gaps, savedState = status.state;
   Object.assign(status, {gaps: 0, state: 'partial', document_navigation_gaps: 1});
   checks.renderNetworkNotice();
@@ -173,6 +183,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   status.state = savedState;
   status.discovery_stale=true;checks.renderNetworkNotice();
   assert.match(notice.text,/Target discovery is unavailable; counts are last known and new tabs may not attach/);
+  assert.doesNotMatch(notice.text, standingProse);
   assert.equal(checks.networkContentCaptureActive(),true,'Existing healthy owners remain active during discovery failure');
   delete status.discovery_stale;
   Object.assign(status,{state:'waiting',attached_targets:0});
@@ -185,33 +196,30 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   Object.assign(status,{scope:'http-browser-targets',state:'ready',target_limit:32,
     attached_targets:12,eligible_targets:12,target_overflow:0,failed_targets:0,gaps:0});
   checks.renderNetworkNotice();
-  assert.equal(notice.kind,'active');assert.match(notice.text,/12 of 12 eligible browser targets attached \(limit 32\)/);
-  assert.match(notice.text,/Mode: passive browser target discovery/);
+  assertQuiet();
   status.event_queue_drops = 4;
   checks.renderNetworkNotice();
   assert.equal(notice.kind, 'gap');
   assert.match(notice.text, /4 debugger events were dropped/);
   assert.match(notice.text, /browser connection stayed open/);
   assert.match(notice.text, /page under test kept its capture owner/);
+  assert.doesNotMatch(notice.text, standingProse);
   delete status.event_queue_drops;
   assert.equal(checks.isDebuggerNetworkCaptureStatus({...status, event_queue_drops: -1}), false);
   assert.equal(checks.isDebuggerNetworkCaptureStatus({...status, event_queue_drops: 4}), true);
-  status.catalog_incomplete=true;checks.renderNetworkNotice();assert.match(notice.text,/counts cover only known targets/);assert.equal(notice.kind,'gap');delete status.catalog_incomplete;
-  assert.match(notice.text,/without requesting startup pauses/);
-  assert.match(notice.text,/Attaching worker targets can affect their lifecycle and timeout behavior/);
-  assert.match(notice.text,/first-request capture is not guaranteed/);
-  assert(!notice.text.includes('worker and out-of-process iframe targets are not attached'));
+  status.catalog_incomplete=true;checks.renderNetworkNotice();assert.match(notice.text,/counts cover only known targets/);assert.equal(notice.kind,'gap');
+  assert.doesNotMatch(notice.text, standingProse);
+  delete status.catalog_incomplete;
   Object.assign(status,{state:'partial',target_limit:128,attached_targets:128,eligible_targets:130,target_overflow:2});
   checks.renderNetworkNotice();assert.equal(notice.kind,'gap');
   assert.match(notice.text,/2 browser targets exceed the capture limit/);
   Object.assign(status,{scope:'http-page-targets',state:'ready',attached_targets:32,eligible_targets:32,target_limit:32,target_overflow:0});
-  checks.renderNetworkNotice();assert.match(notice.text,/Mode: page-target polling fallback/);
-  assert.match(notice.text,/worker and out-of-process iframe targets are not attached/);
-  assert(!notice.text.includes('Mode: passive browser target discovery'));
+  checks.renderNetworkNotice();
+  assertQuiet();
   delete state.debuggerSession.network.capture_status;
   state.debuggerSession.state='running';assert.equal(checks.networkContentCaptureActive(),true);
   state.debuggerSession.network.capture_enabled=false;assert.equal(checks.networkContentCaptureActive(),false);
-  console.log('PASS bounded HTTP coverage validation, independent owners, overflow/failure/gap notices, pre-attachment and WebSocket scope, old snapshots and disconnect handling (model; not rendered QA)');
+  console.log('PASS bounded HTTP coverage validation, independent owners, overflow/failure/gap notices, quiet healthy capture, old snapshots and disconnect handling (model; not rendered QA)');
 
   // A Failed row is not a queue drop or a capture-transport drop. error_code stays untouched.
   state.sessionMode='live';state.broker='connected';state.eventFailureKind=null;state.eventsLimited=false;state.debuggerRefreshFailed=false;
@@ -247,6 +255,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   assert.equal(notice.kind,'active','A failed HTTP row does not become a capture gap');
   assert.match(notice.text,/Failed requests: 1\./);
   assert.doesNotMatch(notice.text,/queue reports|Dropped:/);
+  assert.doesNotMatch(notice.text, standingProse);
   assert.equal(state.debuggerSession.network.dropped,0);
   assert.equal(state.debuggerSession.network.websockets.dropped_connections,0);
   assert.equal(state.debuggerSession.network.websockets.dropped_frames,0);
@@ -258,7 +267,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   assert.match(notice.text,/Failed requests: 2\./);
   state.requests=[ok,httpError];
   checks.renderNetworkNotice();
-  assert.doesNotMatch(notice.text,/Failed requests/);
+  assertQuiet();
   assert.equal(state.debuggerSession.network.dropped,0);
   console.log('PASS failed HTTP/CDP requests are counted in the network notice without changing queue drops, dropped_connections, or error_code (model; not rendered QA)');
 }

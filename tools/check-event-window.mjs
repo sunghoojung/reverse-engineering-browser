@@ -145,8 +145,8 @@ api.acceptEventWindow(bounded);
 api.renderNetworkNotice();
 assert.match(notice.text, /Only the newest 64 MiB/);
 assert.match(notice.text, /280 sequence-gap IDs were observed in the scanned tail/);
-assert.match(notice.text, /separate newest-network window/);
-assert.match(notice.text, /network event window is also capped/);
+assert.match(notice.text, /network event window is capped/);
+assert.doesNotMatch(notice.text, /separate newest-network window/);
 assert.match(api.eventGapLabel(api.shownSequenceGaps(), api.shownQueueDrops()), /the scanned tail/);
 for (const invalid of [
   {...bounded, network_events: [gap]},

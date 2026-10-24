@@ -174,8 +174,9 @@ export async function checkCapturedComparisonInteractions({evaluate,viewport,cli
     assert.equal(await evaluate("document.querySelectorAll('#traffic-comparison img').length"),0);
     const g=await evaluate("(()=>{const n=document.querySelector('#traffic-comparison'),r=n.getBoundingClientRect();return {left:r.left,right:r.right,bottom:r.bottom,height:r.height,page:document.documentElement.scrollWidth,width:innerWidth,heightWindow:innerHeight,scroll:n.scrollHeight,client:n.clientHeight};})()");
     assert(g.height>=80&&g.left>=0&&g.right<=g.width+1&&g.bottom<=g.heightWindow+1&&g.page<=g.width+1,'Comparison must fit the real narrow inspector');
-    const layout=await evaluate("(()=>{const filters=document.querySelector('.request-filters').getBoundingClientRect(),tools=document.querySelector('.network-tools').getBoundingClientRect(),notice=document.querySelector('#network-notice').getBoundingClientRect();return {filtersBottom:filters.bottom,toolsBottom:tools.bottom,noticeTop:notice.top};})()");
-    assert(layout.filtersBottom<=layout.toolsBottom+1&&layout.toolsBottom<=layout.noticeTop+1,'Wrapped filter controls and warnings must not overlap in short windows');
+    const layout=await evaluate("(()=>{const filters=document.querySelector('.request-filters').getBoundingClientRect(),tools=document.querySelector('.network-tools').getBoundingClientRect(),notice=document.querySelector('#network-notice'),scope=document.querySelector('.request-scope').getBoundingClientRect(),noticeBox=notice.getBoundingClientRect();return {filtersBottom:filters.bottom,toolsBottom:tools.bottom,noticeTop:noticeBox.top,noticeHidden:notice.hidden,scopeTop:scope.top};})()");
+    assert(layout.filtersBottom<=layout.toolsBottom+1,'Wrapped filter controls must stay inside the toolbar');
+    assert(layout.noticeHidden?layout.scopeTop>=layout.toolsBottom-1:layout.toolsBottom<=layout.noticeTop+1,'Status text must not overlap the toolbar');
     assert.match(await evaluate("document.querySelector('.traffic-comparison-identities > summary').textContent"),/Baseline: POST \/compare-0.*selected: POST \/compare-1/);
     await screenshot(`requests-comparison-${width}`);
     await wheel('#traffic-comparison',120);

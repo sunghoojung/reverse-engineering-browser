@@ -30,6 +30,9 @@ pub struct Connection {
     next: AtomicU64,
     closed: watch::Sender<bool>,
     events: mpsc::Sender<Event>,
+    // Events dropped because the consumer queue or byte budget was full.
+    // The socket stays open so a burst cannot stall the browser UI thread.
+    dropped_events: AtomicU64,
 }
 struct Pending<'a> {
     connection: &'a Connection,
@@ -96,6 +99,7 @@ impl Connection {
             next: AtomicU64::new(1),
             closed,
             events: sender.clone(),
+            dropped_events: AtomicU64::new(0),
         });
         let weak = Arc::downgrade(&connection);
         let diagnostics = Arc::new(StdMutex::new(Vec::new()));
@@ -138,24 +142,23 @@ impl Connection {
                         let _ = pending.send(Ok(value));
                     }
                 } else if value["method"].is_string() && value["params"].is_object() {
-                    let permit = match budget
+                    // A full queue used to close this socket. The browser UI
+                    // thread writes debugger messages; stopping the read stalls
+                    // that thread and drops every capture owner, including the
+                    // page under test. Command replies are handled above and
+                    // are never dropped. Excess events stay counted until the
+                    // consumer records them.
+                    let accepted = match budget
                         .clone()
                         .try_acquire_many_owned(message.len().min(u32::MAX as usize) as u32)
                     {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            break Error::conflict(
-                                "Debugger event byte capacity exceeded; reconnecting preserves a visible gap",
-                            );
-                        }
+                        Ok(permit) => sender
+                            .try_send(Event::Message(Ok(value), Some(permit)))
+                            .is_ok(),
+                        Err(_) => false,
                     };
-                    if sender
-                        .try_send(Event::Message(Ok(value), Some(permit)))
-                        .is_err()
-                    {
-                        break Error::conflict(
-                            "Debugger event queue capacity exceeded; reconnecting preserves a visible gap",
-                        );
+                    if !accepted {
+                        connection.dropped_events.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             };
@@ -203,6 +206,9 @@ impl Connection {
     }
     pub fn is_closed(&self) -> bool {
         *self.closed.borrow()
+    }
+    pub fn take_dropped_events(&self) -> u64 {
+        self.dropped_events.swap(0, Ordering::AcqRel)
     }
     pub async fn command(&self, method: &str, params: Value, deadline: Duration) -> Result<Value> {
         self.command_session(method, params, deadline, None).await

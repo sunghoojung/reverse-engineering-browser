@@ -57,6 +57,7 @@ const prefixErrors = [
   ['Browser target capture initialization failed: ', 'owner-initialization-failed'],
   ['Browser capture setup failed: ', 'browser-setup-failed'],
   ['Browser capture unavailable; page polling fallback: ', 'browser-fallback'],
+  ['Debugger event queue dropped ', 'event-queue-dropped'],
 ];
 export const lifecycleErrorCodes = Object.freeze([
   ...new Set([...exactErrors.values(), ...prefixErrors.map(([, code]) => code)]),

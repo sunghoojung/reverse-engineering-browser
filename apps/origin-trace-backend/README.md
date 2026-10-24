@@ -98,8 +98,10 @@ profile. HTTP Traffic uses a single browser-level CDP transport with flattened
 sessions, passive Target events, http(s) pages already published on the
 debugger target list, and recursive attachment for page, iframe and
 worker targets. `--capture-target-limit` defaults to 32 (range 1–128), covering
-initializing and ready targets with stable owners and oldest-waiting admission
-when slots free. The shared event budget is 64 MiB; requested browser Network
+initializing and ready targets with stable owners. Waiting admission prefers
+the oldest page, then the oldest non-page, when slots free. A full event queue
+drops debugger events and keeps the browser socket open; `event_queue_drops`
+records that loss separately from owner-loss gaps. The shared event budget is 64 MiB; requested browser Network
 buffers share a 128 MiB aggregate budget divided across the configured limit.
 The selected debugger remains separate, and the global ledger retains 1000 rows
 and eight body retrieval jobs. Exact owner/session-qualified bodies cannot cross

@@ -272,7 +272,10 @@ impl Debugger {
             state["network"]["capture_status"].clone()
         };
         let mut status = old.clone();
-        status["state"] = json!(if eligible_count == 0 {
+        let event_drops = old["event_queue_drops"].as_u64().unwrap_or(0) > 0;
+        status["state"] = json!(if event_drops {
+            "partial"
+        } else if eligible_count == 0 {
             "waiting"
         } else if attached == eligible_count {
             "ready"
@@ -338,6 +341,12 @@ impl Debugger {
                 };
                 if event_owner.retired.load(Ordering::Acquire) {
                     break;
+                }
+                if let Some(connection) = &event_owner.connection {
+                    let dropped = connection.take_dropped_events();
+                    if dropped > 0 {
+                        debugger.note_debugger_event_drops(dropped);
+                    }
                 }
                 match event {
                     Event::Barrier(sender) => {

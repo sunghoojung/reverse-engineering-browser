@@ -4,6 +4,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_lifecycle.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "brave/components/reverse_engineering_browser/common/native_request_namespace.h"
 #include "chromium_stubs.h"
 namespace {
 reb::NativeProbeEvent last;
@@ -98,6 +99,12 @@ int main() {
   const auto reads = base::test_clock_reads;
   start();
   assert(base::test_clock_reads == reads);
+  assert(reb::NativeRendererIssuedRequestId(2));
+  assert(reb::NativeRendererIssuedRequestId(4));
+  assert(reb::NativeRendererIssuedRequestId(6));
+  for (const int browser_issued : {0, 1, 3, 5, 7, 8, 9}) {
+    assert(!reb::NativeRendererIssuedRequestId(browser_issued));
+  }
   std::cout
       << "PASS native network sink: disabled/expiry/category, owned profile, stable identity, "
          "synthetic/abort provenance, terminal-once/session rollover, truncation/queue loss\n";

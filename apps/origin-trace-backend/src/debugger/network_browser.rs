@@ -255,6 +255,28 @@ impl Debugger {
             c.close().await;
         }
     }
+    pub(super) fn note_debugger_event_drops(&self, dropped: u64) {
+        if dropped == 0 {
+            return;
+        }
+        self.update(|state| {
+            let status = &mut state["network"]["capture_status"];
+            let total = status["event_queue_drops"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_add(dropped);
+            status["event_queue_drops"] = json!(total);
+            if status["state"] == "ready" || status["state"] == "waiting" {
+                status["state"] = json!("partial");
+            }
+            status["last_error"] = json!(crate::validation::truncate(
+                &format!(
+                    "Debugger event queue dropped {dropped} events; the browser connection stayed open."
+                ),
+                512
+            ));
+        });
+    }
     fn browser_status(&self) {
         if self
             .capture
@@ -323,10 +345,13 @@ impl Debugger {
             }
             v["catalog_incomplete"] = json!(incomplete);
             v["document_navigation_gaps"] = json!(document_gaps);
+            let event_drops = v["event_queue_drops"].as_u64().unwrap_or(0) > 0;
             // A committed document that raced Network.enable is coverage loss
             // even when every known target is attached. ready/gaps:0 hid it.
             v["state"] = json!(
-                if incomplete || document_gaps > 0 {
+                if event_drops {
+                    "partial"
+                } else if incomplete || document_gaps > 0 {
                     if count == 0 && !incomplete { "waiting" } else { "partial" }
                 } else if count == 0 {
                     "waiting"
@@ -390,20 +415,112 @@ impl Debugger {
             .browser
             .catalog_epoch
             .fetch_add(1, Ordering::AcqRel);
-        if !targets.contains_key(&id) && targets.len() >= 512 {
+        if !targets.contains_key(&id)
+            && targets.len() >= 512
+            && !self.make_catalog_room_for_page(targets, &t)
+        {
             self.mark_capture_catalog_incomplete();
             return false;
         }
-        if !targets.contains_key(&id) {
-            self.capture
+        let fresh = !targets.contains_key(&id);
+        targets.insert(id.clone(), t);
+        if fresh {
+            let mut waiting = self
+                .capture
                 .browser
                 .waiting
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push_back(id.clone());
+                .unwrap_or_else(|e| e.into_inner());
+            Self::admit_waiting_target(&mut waiting, targets, id);
         }
-        targets.insert(id, t);
         true
+    }
+    // A full catalog used to reject the page under test while workers occupied
+    // every slot. Only a waiting non-page that is not an owner can move aside.
+    fn make_catalog_room_for_page(
+        &self,
+        targets: &mut BTreeMap<String, Value>,
+        incoming: &Value,
+    ) -> bool {
+        if incoming["type"] != "page" {
+            return false;
+        }
+        let owners = self
+            .capture
+            .owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let pending = self
+            .capture
+            .browser
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut waiting = self
+            .capture
+            .browser
+            .waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let displace = waiting
+            .iter()
+            .rev()
+            .find(|queued| {
+                targets
+                    .get(queued.as_str())
+                    .is_some_and(|record| record["type"] != "page")
+                    && !owners.contains_key(queued.as_str())
+                    && !pending.contains_key(queued.as_str())
+            })
+            .cloned();
+        let Some(displace) = displace else {
+            return false;
+        };
+        waiting.retain(|queued| queued != &displace);
+        drop(waiting);
+        drop(pending);
+        drop(owners);
+        targets.remove(&displace);
+        self.mark_capture_catalog_incomplete();
+        true
+    }
+    fn admit_waiting_target(
+        waiting: &mut VecDeque<String>,
+        targets: &BTreeMap<String, Value>,
+        id: String,
+    ) {
+        if waiting.iter().any(|queued| queued == &id) {
+            return;
+        }
+        let page = targets
+            .get(&id)
+            .is_some_and(|target| target["type"] == "page");
+        if waiting.len() >= 512 {
+            if !page {
+                return;
+            }
+            let Some(evict) = waiting.iter().rposition(|queued| {
+                targets
+                    .get(queued)
+                    .is_none_or(|target| target["type"] != "page")
+            }) else {
+                return;
+            };
+            waiting.remove(evict);
+        }
+        if page {
+            let at = waiting
+                .iter()
+                .position(|queued| {
+                    targets
+                        .get(queued)
+                        .is_none_or(|target| target["type"] != "page")
+                })
+                .unwrap_or(waiting.len());
+            waiting.insert(at, id);
+        } else {
+            waiting.push_back(id);
+        }
     }
     fn mark_capture_catalog_incomplete(&self) {
         self.capture
@@ -502,9 +619,7 @@ impl Debugger {
             .waiting
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if waiting.len() < 512 && !waiting.contains(&id) {
-            waiting.push_back(id);
-        }
+        Self::admit_waiting_target(&mut waiting, &targets, id);
     }
     pub(super) fn capture_list_snapshot(&self) -> Option<(Arc<Connection>, u64)> {
         let connection = self
@@ -886,6 +1001,10 @@ impl Debugger {
                 };
                 if !d.capture.browser.current(&event_connection) {
                     break;
+                }
+                let dropped = event_connection.take_dropped_events();
+                if dropped > 0 {
+                    d.note_debugger_event_drops(dropped);
                 }
                 match event {
                     Event::Barrier(sender) => {
@@ -1783,9 +1902,7 @@ impl Debugger {
             .waiting
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if waiting.len() < 512 && !waiting.iter().any(|v| v == id) {
-            waiting.push_back(id.to_owned());
-        }
+        Self::admit_waiting_target(&mut waiting, &targets, id.to_owned());
         self.update(|s| {
             s["network"]["capture_status"]["last_error"] =
                 json!(crate::validation::truncate(reason, 512))
@@ -2009,6 +2126,95 @@ mod tests {
         assert_eq!(d.capture.browser.waiting.lock().unwrap().len(), 512);
         assert_eq!(d.snapshot()["network"]["capture_status"]["gaps"], 1);
         assert!(d.capture.browser.catalog_incomplete.load(Ordering::Acquire));
+        assert_eq!(
+            d.capture
+                .browser
+                .waiting
+                .lock()
+                .unwrap()
+                .front()
+                .map(String::as_str),
+            Some("target-0")
+        );
+        assert!(
+            !d.capture
+                .browser
+                .targets
+                .lock()
+                .unwrap()
+                .contains_key("target-599")
+        );
+    }
+    #[test]
+    fn page_targets_are_admitted_ahead_of_workers() {
+        let d = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        d.remember_capture_target(
+            &json!({"targetId":"worker","type":"worker","url":"http://localhost/w","title":"w"}),
+        );
+        d.remember_capture_target(&json!({
+            "targetId":"page",
+            "type":"page",
+            "url":"https://accounts.hcaptcha.com/demo",
+            "title":"hCaptcha Demo"
+        }));
+        let waiting = d.capture.browser.waiting.lock().unwrap().clone();
+        assert_eq!(waiting.front().map(String::as_str), Some("page"));
+        assert_eq!(waiting.get(1).map(String::as_str), Some("worker"));
+    }
+    #[test]
+    fn a_full_worker_catalog_admits_the_page_under_test() {
+        let d = Debugger::new(&crate::config::Options::parse_from(["test"]));
+        for index in 0..512 {
+            d.remember_capture_target(
+                &json!({"targetId":format!("worker-{index}"),"type":"worker","url":"http://localhost/w"}),
+            );
+        }
+        d.remember_capture_target(&json!({
+            "targetId":"page",
+            "type":"page",
+            "url":"https://accounts.hcaptcha.com/demo",
+            "title":"hCaptcha Demo"
+        }));
+        {
+            let targets = d.capture.browser.targets.lock().unwrap();
+            assert!(targets.contains_key("page"));
+            assert!(!targets.contains_key("worker-511"));
+            assert_eq!(targets.len(), 512);
+        }
+        let waiting = d.capture.browser.waiting.lock().unwrap().clone();
+        assert_eq!(waiting.front().map(String::as_str), Some("page"));
+        assert!(!waiting.iter().any(|id| id == "worker-511"));
+        assert!(d.capture.browser.catalog_incomplete.load(Ordering::Acquire));
+    }
+    #[test]
+    fn debugger_event_drops_stay_visible_without_closing_capture() {
+        let mut options = crate::config::Options::parse_from(["test"]);
+        options.capture_network_content = true;
+        let d = Debugger::new(&options);
+        assert_eq!(
+            d.snapshot()["network"]["capture_status"]["state"],
+            "waiting"
+        );
+        d.note_debugger_event_drops(0);
+        assert!(d.snapshot()["network"]["capture_status"]["event_queue_drops"].is_null());
+        d.note_debugger_event_drops(3);
+        d.note_debugger_event_drops(2);
+        let status = d.snapshot()["network"]["capture_status"].clone();
+        assert_eq!(status["event_queue_drops"], 5);
+        assert_eq!(status["state"], "partial");
+        assert_eq!(status["gaps"], 0);
+        assert!(
+            status["last_error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Debugger event queue dropped ")
+        );
+        assert!(
+            status["last_error"]
+                .as_str()
+                .unwrap()
+                .contains("stayed open")
+        );
     }
     #[test]
     fn committed_http_document_without_a_seen_loader_is_a_navigation_gap() {

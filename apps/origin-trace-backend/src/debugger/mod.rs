@@ -415,6 +415,10 @@ impl Debugger {
                 {
                     break;
                 }
+                let dropped = event_connection.take_dropped_events();
+                if dropped > 0 {
+                    debugger.note_debugger_event_drops(dropped);
+                }
                 match event {
                     Event::Barrier(sender) => {
                         let _ = sender.send(());

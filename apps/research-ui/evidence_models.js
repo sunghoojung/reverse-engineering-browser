@@ -507,6 +507,7 @@
           isSafeIntegerInRange(status.failed_targets, 0, 512) &&
           isSafeIntegerInRange(status.gaps, 0, Number.MAX_SAFE_INTEGER) &&
           (status.document_navigation_gaps === undefined || isSafeIntegerInRange(status.document_navigation_gaps, 0, Number.MAX_SAFE_INTEGER)) &&
+          (status.event_queue_drops === undefined || isSafeIntegerInRange(status.event_queue_drops, 0, Number.MAX_SAFE_INTEGER)) &&
           (status.last_error === null || isBoundedText(status.last_error, 512)) &&
           isBoundedText(status.message, 1024);
       }

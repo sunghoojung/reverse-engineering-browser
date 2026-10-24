@@ -1748,6 +1748,34 @@
         return record;
       }
 
+      // Chromium's DevTools request id is `<process token>.<renderer request id>`.
+      // The renderer probe records that renderer id on request_initiated. The
+      // browser request_started counter is a different sequence and is not a join.
+      function devtoolsRendererRequestId(protocolRequestId) {
+        if (typeof protocolRequestId !== 'string' || protocolRequestId.length === 0 ||
+            protocolRequestId.length > 4096) return null;
+        const match = /^(?:[1-9]\d{0,19}\.)?([1-9]\d{0,19})$/.exec(protocolRequestId);
+        if (!match) return null;
+        try {
+          const value = BigInt(match[1]);
+          if (value <= 0n || value > 18446744073709551615n) return null;
+        } catch {
+          return null;
+        }
+        return match[1];
+      }
+
+      function hostnameOf(host) {
+        if (typeof host !== 'string' || !host) return '';
+        if (host.startsWith('[')) {
+          const end = host.indexOf(']');
+          return end > 1 ? host.slice(1, end) : host;
+        }
+        const colon = host.lastIndexOf(':');
+        if (colon > 0 && /^\d{1,5}$/.test(host.slice(colon + 1))) return host.slice(0, colon);
+        return host;
+      }
+
       function requestsFromDebuggerNetwork(network, nativeRequests = [], bodyCache = null) {
         if (!network?.capture_enabled) {
           bodyCache?.clear();
@@ -1775,6 +1803,22 @@
         }
         const claimedNative = new Set();
         const retainedBodies = bodyCache ? new Map() : null;
+        const initiatedByIdentity = new Map();
+        for (const request of nativeRequests) {
+          for (const event of request?.events ?? []) {
+            if (event?.type !== 'request_initiated' || typeof event.payload !== 'string') continue;
+            const requestId = integerText(event, 'request_id');
+            if (!/^[1-9]\d{0,19}$/.test(requestId)) continue;
+            let target = null;
+            try { target = networkTargetFromPayload(decodePayload(event), event.type); }
+            catch { target = null; }
+            if (!target?.method || target.kind !== 'host') continue;
+            const key = `${requestId}\n${target.method}\n${target.value}`;
+            const matches = initiatedByIdentity.get(key);
+            if (!matches) initiatedByIdentity.set(key, [request]);
+            else if (!matches.includes(request)) matches.push(request);
+          }
+        }
         const requests = network.requests.map(record => {
           let host = '';
           try { host = new URL(record.url).host; } catch {}
@@ -1792,6 +1836,21 @@
             claimedNative.add(native.id);
           }
           const correlated = claimedNative.has(native?.id) ? native : null;
+          const rendererRequestId = devtoolsRendererRequestId(record.protocol_request_id);
+          const linkKey = rendererRequestId ? `${rendererRequestId}\n${record.method}\n${hostnameOf(host)}` : null;
+          const linkMatches = linkKey ? initiatedByIdentity.get(linkKey) ?? [] : [];
+          // One renderer request_initiated, same method and host. Anything else
+          // stays a heuristic candidate and must not be queried as native evidence.
+          const nativeLink = linkMatches.length === 1 ? {
+            kind: 'devtools-request-id',
+            nativeRequestId: linkMatches[0].id,
+            requestId: rendererRequestId
+          } : null;
+          const linkedEvents = nativeLink ? linkMatches[0].events ?? [] : null;
+          const exactEvent = nativeLink
+            ? linkedEvents.find(event => event?.type === 'request_initiated' &&
+                integerText(event, 'request_id') === rendererRequestId) ?? null
+            : null;
           const terminal = record.state !== 'pending';
           const previousBodies = bodyCache?.get(record.id);
           const exchange = {
@@ -1822,8 +1881,10 @@
             start: 8,
             mid: terminal ? 72 : 42,
             end: terminal ? 92 : 58,
-            event: correlated?.event ?? null,
-            events: correlated?.events ?? [],
+            event: nativeLink ? exactEvent : correlated?.event ?? null,
+            events: nativeLink ? linkedEvents : correlated?.events ?? [],
+            nativeLink,
+            nativeCandidateId: correlated?.id ?? null,
             failed: record.state === 'failed',
             rank: terminal ? 5 : 2,
             statusRank: terminal ? 5 : 2,

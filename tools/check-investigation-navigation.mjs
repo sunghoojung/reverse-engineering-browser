@@ -159,7 +159,45 @@ export async function checkNativeRequestBacktrace(root) {
   assert.equal(reads.length,1,'A CDP selection must not query the candidate native root');
   assert.equal(elements.traceContent.hidden,true,'Do not show the previous native trace as CDP evidence');
   assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),[cdp[0].id,native[0].id]);
-  console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; heuristic CDP root stays unavailable (production functions, not rendered QA)');
+  assert.equal(cdp[0].nativeLink,null,'A non-numeric DevTools id is not a renderer request join');
+  const rendererPayload=Buffer.from('POST fixture.invalid').toString('hex');
+  const initiatedExact={...fixture.event,type:'request_initiated',request_id:'345',sequence_number:'77',process_id:19,
+    payload:rendererPayload,payload_size:Buffer.byteLength('POST fixture.invalid')};
+  const exactNative={id:'native-devtools',method:'POST',path:'fixture.invalid',firstTimestamp:9_000_000_000n,
+    events:[initiatedExact,{...fixture.event,type:'request_started',request_id:'200',sequence_number:'78',process_id:23}],
+    event:initiatedExact};
+  const heuristicNative={id:'native-heuristic',method:'POST',path:'fixture.invalid',firstTimestamp:1_000_000n,
+    events:[{id:'heuristic-marker'}],event:{id:'heuristic-marker'}};
+  const joinedRecord={...record,id:'cdp-joined',protocol_request_id:'12.345'};
+  const joined=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[joinedRecord]},[heuristicNative,exactNative]);
+  assert.equal(joined[0].nativeCandidateId,'native-heuristic','Timing correlation stays a separate navigation');
+  assert.equal(joined[0].nativeLink.kind,'devtools-request-id');
+  assert.equal(joined[0].nativeLink.nativeRequestId,'native-devtools');
+  assert.equal(joined[0].nativeLink.requestId,'345');
+  assert.equal(api.requestTraceRoot(joined[0]),initiatedExact,'The join uses the renderer id, not the browser request_started id');
+  state.requests=api.trafficRowsForLiveCapture(joined,[heuristicNative,exactNative]);
+  state.selectedRequestId=joined[0].id;
+  state.originTrace=null;state.originTraceKey=null;state.originTraceStatus='idle';
+  api.renderBacktrace();
+  assert.equal(elements.traceLoad.disabled,false);
+  assert.match(elements.backtraceSubtitle.textContent,/DevTools request id join/);
+  await api.refreshOriginTrace();
+  assert.equal(reads.at(-1).searchParams.get('request_id'),'345');
+  assert.equal(reads.at(-1).searchParams.get('root_process_id'),'19');
+  assert.equal(reads.at(-1).searchParams.get('root_sequence_number'),'77');
+  const bare=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[{...joinedRecord,protocol_request_id:'345'}]},[exactNative]);
+  assert.equal(bare[0].nativeLink.requestId,'345');
+  const padded=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[{...joinedRecord,protocol_request_id:'12.0345'}]},[exactNative]);
+  assert.equal(padded[0].nativeLink,null,'A non-canonical renderer id is not a join');
+  const startedOnly={...exactNative,id:'browser-counter',events:[{...fixture.event,type:'request_started',request_id:'345'}]};
+  const browserCounter=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[joinedRecord]},[startedOnly]);
+  assert.equal(browserCounter[0].nativeLink,null,'request_started ids are not DevTools renderer ids');
+  assert.equal(api.requestTraceRoot(browserCounter[0]),null);
+  const duplicate={...exactNative,id:'native-devtools-2'};
+  const ambiguous=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[joinedRecord]},[exactNative,duplicate]);
+  assert.equal(ambiguous[0].nativeLink,null,'Two renderer rows with the same id are not an exact join');
+  assert.equal(api.requestTraceRoot(ambiguous[0]),null);
+  console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; heuristic CDP root stays unavailable; unique DevTools renderer id joins (production functions, not rendered QA)');
 }
 
 // Exercise the actual shared-shell switch, rather than a navigation stub. A

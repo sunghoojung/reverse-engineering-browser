@@ -463,7 +463,15 @@
       }
 
       function requestSignalRoot(request) {
+        // A DevTools request-id join is the renderer request_initiated id.
         // Host/method/time correlation cannot identify an exact native request.
+        if (request?.nativeLink?.kind === 'devtools-request-id') {
+          const requestId = request.nativeLink.requestId;
+          const matches = event => integerText(event, 'request_id') === requestId;
+          const candidates = request.events ?? [];
+          return candidates.find(event => event.type === 'request_started' && matches(event)) ??
+            candidates.find(event => event.type === 'request_initiated' && matches(event)) ?? null;
+        }
         if (!request || request.origin === 'sample' || request.protocolRequestId ||
             String(request.operation).startsWith('cdp_')) return null;
         const candidates = request.events ?? [];
@@ -948,7 +956,14 @@
 
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
-        if (selectedRequest?.protocolRequestId || String(selectedRequest?.operation).startsWith('cdp_')) {
+        // Same DevTools-id rule as requestSignalRoot. Kept local so this renderer
+        // can be exercised without pulling in the profile fetch.
+        const devtoolsLink = selectedRequest?.nativeLink?.kind === 'devtools-request-id' &&
+          (selectedRequest.events ?? []).some(event =>
+            (event.type === 'request_started' || event.type === 'request_initiated') &&
+            integerText(event, 'request_id') === selectedRequest.nativeLink.requestId);
+        if ((selectedRequest?.protocolRequestId || String(selectedRequest?.operation).startsWith('cdp_')) &&
+            !devtoolsLink) {
           const events = fingerprintEventsFromEvents(state.events ?? []);
           const tabs = new Set(events.map(signalTabKey));
           const summary = document.createElement('article');
@@ -965,6 +980,12 @@
             showScreen('signals', open);
           });
           summary.append(open);
+          if (selectedRequest.nativeCandidateId) {
+            const showNative = textElement('button', 'secondary-button', 'Show correlated native row');
+            showNative.type = 'button';
+            showNative.addEventListener('click', () => selectRequest(selectedRequest.nativeCandidateId));
+            summary.append(showNative);
+          }
           elements.signalRequestProfile.replaceChildren(summary);
           return;
         }
@@ -2572,6 +2593,13 @@
       }
 
       function requestTraceRoot(request) {
+        if (request?.nativeLink?.kind === 'devtools-request-id') {
+          const requestId = request.nativeLink.requestId;
+          const matches = event => integerText(event, 'request_id') === requestId;
+          const candidates = request.events ?? [];
+          return candidates.find(event => event.type === 'request_started' && matches(event)) ??
+            candidates.find(event => event.type === 'request_initiated' && matches(event)) ?? null;
+        }
         if (request?.origin !== 'live' || request.protocolRequestId || String(request.operation).startsWith('cdp_')) return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
@@ -2692,13 +2720,26 @@
         if (!request?.traceable) {
           const empty = document.createElement('div');
           empty.className = 'field-empty';
+          const linkedRoot = requestTraceRoot(request);
           empty.textContent = request?.origin === 'live'
-            ? request.protocolRequestId ? 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only. Related VM candidates opens session analysis, and Fingerprinting lists the session surfaces.' : 'Structured fields were not captured. Request-level origin evidence is still available.'
+            ? request.protocolRequestId
+              ? linkedRoot
+                ? 'Structured fields were not captured. This debugger row joins one native request by its DevTools request id.'
+                : 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only. Related VM candidates opens session analysis, and Fingerprinting lists the session surfaces.'
+              : 'Structured fields were not captured. Request-level origin evidence is still available.'
             : request?.origin === 'demo'
               ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
               : request
                 ? 'This sample request has no trace target in the proof of concept.'
                 : 'Select a request to inspect its fields.';
+          if (request?.nativeCandidateId) {
+            const showNative = document.createElement('button');
+            showNative.type = 'button';
+            showNative.className = 'secondary-button';
+            showNative.textContent = 'Show correlated native row';
+            showNative.addEventListener('click', () => selectRequest(request.nativeCandidateId));
+            empty.append(document.createElement('br'), showNative);
+          }
           elements.fieldTree.replaceChildren(empty);
           const root = requestTraceRoot(request);
           elements.traceTarget.textContent = root
@@ -2814,7 +2855,7 @@
           elements.prompt.textContent = 'Fingerprint activity before this request';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
-          if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
+          if ((request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) && !requestTraceRoot(request)) {
             const events = fingerprintEventsFromEvents(state.events ?? []);
             const tabs = new Set(events.map(signalTabKey));
             elements.prompt.textContent = 'Session fingerprint activity, not a request profile';
@@ -2832,6 +2873,14 @@
               showScreen('signals', open);
             });
             elements.fieldTree.append(open);
+            if (request?.nativeCandidateId) {
+              const showNative = document.createElement('button');
+              showNative.type = 'button';
+              showNative.className = 'secondary-button';
+              showNative.textContent = 'Show correlated native row';
+              showNative.addEventListener('click', () => selectRequest(request.nativeCandidateId));
+              elements.fieldTree.append(showNative);
+            }
             return;
           }
           if (state.signalProfileStatus === 'loading') {
@@ -3140,7 +3189,8 @@
         elements.traceLoad.disabled = !selection || state.originTraceStatus === 'loading';
         elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
         elements.backtraceSubtitle.textContent = selection
-          ? `${request.method} ${request.path}` : 'Request events and their recorded predecessors';
+          ? `${request.method} ${request.path}${request.nativeLink?.kind === 'devtools-request-id' ? ' · DevTools request id join' : ''}`
+          : 'Request events and their recorded predecessors';
         const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
         const hasSteps = Boolean(trace?.steps.length);
         elements.traceContent.hidden = !hasSteps;
@@ -12184,6 +12234,13 @@
       });
       elements.requestVmCandidates.addEventListener('click', async () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        if (request?.nativeLink?.kind === 'devtools-request-id' && request.nativeLink.requestId) {
+          investigationNotice('This debugger row joins a native request by its DevTools request id. Related VM candidates uses that native request id.', 'ready');
+          const refresh = refreshVmAnalysis(request.nativeLink.requestId);
+          showScreen('vm', elements.requestVmCandidates);
+          await refresh;
+          return;
+        }
         if (request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) {
           investigationNotice('This debugger row has no native request id, so Related VM candidates opens session analysis. Findings without a related request id stay visible. This is not a join to the selected request.', 'unavailable');
           const refresh = refreshVmAnalysis(null);

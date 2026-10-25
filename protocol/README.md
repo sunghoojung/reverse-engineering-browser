@@ -173,7 +173,9 @@ to `artifacts/analysis/vm-opcode-workspace-v2.json`. It is bound by digest to
 the detector profile, VM analysis document, artifact manifest, and event store.
 Integer switch cases and statically visible numeric handler tables are
 `inferred`. A matching `vm_dispatch_sample` event upgrades that opcode to
-`observed` for both JavaScript and Wasm artifacts. Absent sampling remains the
+`observed` for both JavaScript and Wasm artifacts. The separate
+[caller report writer](vm-dispatch-input-v1.md) retains unverified reports without
+that promotion or native host parentage. Absent native sampling remains the
 named `sampler-unavailable` omission. A vm gap that names the interpreter and
 carries a decimal drop count adds `dispatch-sample-budget` so a capped trace
 stays incomplete. The owned register interpreter, the `javascript-switch-dispatch-v1` byte

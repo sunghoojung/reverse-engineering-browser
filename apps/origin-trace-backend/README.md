@@ -191,6 +191,11 @@ walk `static-module-only` instead of inventing a program counter. A workspace
 failure does not hide a valid detector
 document. Its executable is
 `origin-trace-vm --artifacts DIR --events FILE`.
+The explicit `origin-trace-vm-dispatch-writer --artifacts DIR --input FILE --output NEW_FILE`
+retains bounded, digest/scope-checked caller reports without native proof. See
+[caller report v1](../../protocol/vm-dispatch-input-v1.md) for input, private output,
+analysis-only identity separation and the still-open live sampling boundary.
+Caller-only reports do not remove native sampler/host-link omissions.
 Static guest-byte previews recognize a conservative subset of complete numeric `Uint8Array.of(...)` and
 `new Uint8Array([...])` literals, `Uint8Array.from("...", c => c.charCodeAt(0))`,
 `Uint8Array.fromBase64("...")`, and

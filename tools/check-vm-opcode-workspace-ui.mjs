@@ -80,6 +80,37 @@ const moduleDocument = structuredClone(fixture);
 moduleDocument.workspaces[0].captured_module_preview = modulePreview;
 const validateModule = value => runInNewContext(`${model}\nisVmOpcodeWorkspaceDocument(value)`, {value, TextEncoder});
 assert(validateModule(moduleDocument));
+const callerDocument = structuredClone(hostWorkspace);
+const callerWorkspace = callerDocument.workspaces[0];
+for (const retained of callerWorkspace.samples) {
+  retained.provenance = {source: 'caller-supplied', source_artifact_sha256: callerWorkspace.source_artifact_sha256, input_sha256: 'a'.repeat(64)};
+  retained.event.process_id = 0;
+  retained.instruction_pointer_units = 'unknown'; retained.invocation_id = null; retained.invocation_event = null;
+  retained.bytecode_artifact_id = '0';
+}
+for (const handler of callerWorkspace.handlers) if (handler.state === 'observed') {
+  handler.state = 'inferred'; handler.notes = 'Caller-supplied report; no independent runtime observation.';
+}
+callerWorkspace.coverage.complete = false;
+callerWorkspace.coverage.omissions.push({reason: 'caller-samples-unverified'}, {reason: 'sampler-unavailable'});
+assert(validateModule(callerDocument), 'caller provenance remains visible without native proof');
+assert(runInNewContext(`${model}\nvmStaticSampleNoticeText(value)`, {value: callerWorkspace, TextEncoder}).includes('not native runtime observations'));
+assert(runInNewContext(`${model}\nvmOpcodeSamplePositions(value)[0]`, {value: callerWorkspace.samples, TextEncoder}).startsWith('Caller-reported PC'));
+for (const corrupt of [
+  doc => { doc.workspaces[0].samples[0].provenance.source = 'native'; },
+  doc => { delete doc.workspaces[0].samples[0].provenance; },
+  doc => { doc.workspaces[0].samples[0].provenance.source_artifact_sha256 = 'f'.repeat(64); },
+  doc => { doc.workspaces[0].samples[0].event.process_id = 7; },
+  doc => { doc.workspaces[0].samples[0].bytecode_artifact_id = '401'; },
+  doc => { doc.workspaces[0].samples[0].instruction_pointer_units = 'byte-offset'; },
+  doc => { doc.workspaces[0].handlers.find(handler => handler.sample_count > 0).state = 'observed'; },
+  doc => { doc.workspaces[0].coverage.omissions = doc.workspaces[0].coverage.omissions.filter(row => row.reason !== 'caller-samples-unverified'); }
+]) {
+  const invalid = structuredClone(callerDocument); corrupt(invalid);
+  assert(!validateModule(invalid), 'unknown or stripped provenance cannot become native proof');
+}
+assert(!runInNewContext(`${model}\nisVmHostLinksDocument(hostLinks, value)`, {hostLinks, value: callerDocument, TextEncoder}), 'native host position cannot bind a caller report');
+
 assert.equal(moduleDocument.summary.snapshot_count, fixture.summary.snapshot_count);
 for (const changes of [
   {artifact_id: '999'}, {byte_offset: 46}, {byte_offset: -1}, {byte_offset: Number.MAX_SAFE_INTEGER},
@@ -509,6 +540,23 @@ render();`;
     await evaluate("state.vmOpcodeWorkspace={...fixture,workspaces:[]};state.vmOpcodeWorkspaceStatus='ready';render()");
     assert.equal(await evaluate("document.querySelectorAll('.vm-handler-row').length"), 0);
     assert((await evaluate('document.body.textContent')).includes('Workspace unavailable for this finding'));
+    await evaluate(`state.vmOpcodeWorkspace=${JSON.stringify(callerDocument)};state.lastValidVmOpcodeWorkspace=state.vmOpcodeWorkspace;state.vmOpcodeWorkspaceStatus='ready';state.vmHostLinks=null;state.selectedVmHandlerKey=null;render()`);
+    assert((await evaluate('document.body.textContent')).includes('not native runtime observations'));
+    for (const width of [1440, 390]) {
+      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
+      await evaluate("(()=>{const key=vmOpcodeRows(state.vmOpcodeWorkspace.workspaces[0]).find(row=>row.retainedSamples.length).key;[...document.querySelectorAll('.vm-handler-row')].find(row=>row.dataset.handlerKey===key).click();})()");
+      const callerText = await evaluate("document.querySelector('.vm-selection-inspector').textContent");
+      assert(callerText.includes('Caller-reported PC'));
+      assert(!callerText.includes('Observed at a sampled program counter'));
+      await evaluate("document.querySelector('.vm-selection-inspector details summary').click()");
+      assert((await evaluate("document.querySelector('.vm-selection-inspector details').textContent")).includes('caller-supplied'));
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      const callerShot = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `caller-reports-${width}.png`), Buffer.from(callerShot.data, 'base64'));
+    }
+    await evaluate("retainVmOpcodeWorkspaceOnFailure(state,'malformed','unknown caller provenance');render()");
+    assert((await evaluate('document.body.textContent')).includes('last valid workspace is retained'));
+    assert((await evaluate('document.body.textContent')).includes('not native runtime observations'));
     assert.deepEqual(errors, []);
     await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440, 390],
       scope: 'Shipped workspace rendering with authored fixtures; no native capture, WASM execution or full-app polling acceptance'}, null, 2));

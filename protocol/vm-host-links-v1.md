@@ -57,3 +57,9 @@ broker. `make e2e` additionally runs the actual analyzer, checks PC 2 and origin
 host/sample identities, then checks absent samples, shared invocation alone,
 and conflicting host identities. Tests use only authored fixtures. No page
 JavaScript probe, browser attachment or target request is introduced.
+
+Caller-supplied `vm_dispatch_report` positions are never native parent evidence.
+They are explicitly excluded from guest-position joins and from the native
+sample-availability check, so caller-only workspaces retain
+`dispatch-samples-unavailable` even when report rows are visible. See
+[caller report v1](vm-dispatch-input-v1.md).

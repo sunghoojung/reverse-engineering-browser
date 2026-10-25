@@ -7374,42 +7374,27 @@ fn response_event_for_vm_test(root: &Value) -> Value {
 #[tokio::test]
 async fn live_wasm_requires_disposable_owner_and_explicit_bounded_reads() {
     let server = Server::start().await;
+    // An idle backend refuses before page classification. Attached-page
+    // confirmation and captured_owner checks live in the debugger unit tests.
     for request in [
         json!({"action":"list_live_wasm_objects","target_id":"baseline"}),
         json!({"action":"read_live_wasm_memory","target_id":"baseline","listing_id":1,"object_id":"memory:0","offset":0,"length":4,"confirmed":true}),
+        json!({"action":"list_live_wasm_objects","target_id":"baseline","captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}}),
+        json!({"action":"list_live_wasm_objects","target_id":"other","confirmed":true,"captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}}),
     ] {
         let response = server.action("/api/debugger/actions", request).await;
         assert_eq!(response.status(), 409);
         let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "idle_backend");
         assert!(
             body["error"]
                 .as_str()
                 .unwrap()
-                .contains("Other pages are refused"),
+                .contains("authorized live endpoint"),
             "{}",
             body["error"]
         );
     }
-    let captured = json!({"action":"list_live_wasm_objects","target_id":"baseline","captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}});
-    let missing = server.action("/api/debugger/actions", captured).await;
-    assert_eq!(missing.status(), 400);
-    let missing_body: Value = missing.json().await.unwrap();
-    assert!(
-        missing_body["error"]
-            .as_str()
-            .unwrap()
-            .contains("confirmed")
-    );
-    let mismatched = json!({"action":"list_live_wasm_objects","target_id":"other","confirmed":true,"captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}});
-    let refused = server.action("/api/debugger/actions", mismatched).await;
-    assert_eq!(refused.status(), 409);
-    let refused_body: Value = refused.json().await.unwrap();
-    assert!(
-        refused_body["error"]
-            .as_str()
-            .unwrap()
-            .contains("Other pages are refused")
-    );
     for (key, value) in [
         ("confirmed", json!(false)),
         ("length", json!(4097)),

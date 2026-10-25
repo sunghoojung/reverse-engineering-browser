@@ -157,6 +157,26 @@ impl Debugger {
         }
         connection.barrier().await?;
         collector.writer.lock().await.flush().await?;
+        let current = self.snapshot();
+        if current["network"]["capture_status"]["event_queue_drops"]
+            != snapshot["network"]["capture_status"]["event_queue_drops"]
+        {
+            return Err(Error::conflict(
+                "Heap snapshot is incomplete because debugger events were dropped; reduce target activity and capture a fresh snapshot",
+            ));
+        }
+        if current["target_document_epoch"] != snapshot["target_document_epoch"]
+            || !self
+                .connection
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|c| Arc::ptr_eq(c, &connection))
+        {
+            return Err(Error::conflict(
+                "Debugger connection or document changed during heap capture; attach and capture again",
+            ));
+        }
         if let Some(error) = collector
             .error
             .lock()
@@ -331,7 +351,7 @@ impl Debugger {
             .memory_started
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
-        self.update(|s|s["memory_origin_trace"]=json!({"protocol_version":1,"trace_id":id,"state":"armed","target_id":s["target"]["id"],"query":query,"scope":r["scope"].as_str().unwrap_or("all"),"case_sensitive":r["case_sensitive"]==true,"before_steps":r["before_steps"].as_u64().unwrap_or(3),"after_steps":r["after_steps"].as_u64().unwrap_or(8),"step_limit":32,"step_count":0,"first_match_step":null,"started_at_ms":validation::now_ms(),"elapsed_ms":0,"partial":false,"limit_reason":null,"message":"Trace armed. Click the page action that creates the value.","steps":[]}));
+        self.update(|s|s["memory_origin_trace"]=json!({"protocol_version":1,"trace_id":id,"state":"armed","target_id":s["target"]["id"],"query":query,"scope":r["scope"].as_str().unwrap_or("all"),"case_sensitive":r["case_sensitive"]==true,"before_steps":r["before_steps"].as_u64().unwrap_or(3),"after_steps":r["after_steps"].as_u64().unwrap_or(8),"step_limit":32,"step_count":0,"first_match_step":null,"started_at_ms":validation::now_ms(),"elapsed_ms":0,"partial":false,"limit_reason":null,"message":"Trace armed on the next page click. No allocation sampling occurs until JavaScript pauses; Wasm-only allocations do not create trace steps.","steps":[]}));
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(300)).await;
@@ -342,7 +362,7 @@ impl Debugger {
                     .finish_memory(
                         id,
                         "not_found",
-                        "Trace reached its five-minute limit.",
+                        "Trace reached its five-minute limit. Zero steps means no supported JavaScript click/function boundary was observed; Wasm-only allocation is not sampled.",
                         true,
                         Some("time_limit"),
                         true,

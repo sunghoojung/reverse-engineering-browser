@@ -459,3 +459,13 @@ After proven completion, body retrieval uses the terminal event's exact session;
 it does not transfer unrelated requests or invent response headers/status.
 Missing responses and detached body owners remain incomplete/unavailable. This
 repairs a lifecycle handoff, not passive capture of a target's first requests.
+
+## Disposable live Wasm inspection
+
+[Live Wasm inspection v1](../../protocol/live-wasm-inspection-v1.md) adds explicit
+prototype-based Instance/Module/Memory listing and confirmed 1–4096-byte memory
+reads in the existing navigated disposable Object Lab page. Handles expire in
+60 seconds; baseline execution, artifact-only selection, and guessed source
+joins are refused. `make heap-snapshot-check` exercises native V8 ingest, and
+`node tools/check-live-wasm.mjs` uses the real local Node inspector. The existing
+backend browser fixture covers the new HTTP actions on owned Wasm allocations.

@@ -22,6 +22,7 @@ mod parse;
 mod repeater;
 mod requests;
 mod wasm_capture;
+mod wasm_live;
 mod websocket;
 mod workers;
 use crate::{
@@ -69,6 +70,7 @@ pub struct Debugger {
     hooks: hooks::Hooks,
     fields: fields::Fields,
     wasm: wasm_capture::WasmCapture,
+    wasm_live: wasm_live::WasmLive,
 }
 impl Debugger {
     pub fn new(options: &Options) -> Arc<Self> {
@@ -124,6 +126,7 @@ impl Debugger {
             hooks: hooks::Hooks::new(),
             fields: fields::Fields::new(),
             wasm: wasm_capture::WasmCapture::new(),
+            wasm_live: wasm_live::WasmLive::new(),
         })
     }
     pub fn snapshot(&self) -> Value {
@@ -175,6 +178,7 @@ impl Debugger {
         self.stop.notify_waiters();
         let _refresh = self.refreshing.lock().await;
         self.close_captures().await;
+        self.clear_live_wasm().await;
         if self.experiment.context().is_some() {
             let _ = self.dispose_experiment().await;
         }
@@ -344,6 +348,7 @@ impl Debugger {
         {
             return Ok(());
         }
+        self.clear_live_wasm().await;
         if let Some(connection) = self.connection.lock().await.take() {
             connection.close().await;
         }
@@ -728,6 +733,7 @@ impl Debugger {
                         .with_code(Code::TargetUnavailable));
                 }
                 self.clear_object_search().await;
+                self.clear_live_wasm().await;
                 self.heap
                     .baseline
                     .lock()
@@ -767,6 +773,8 @@ impl Debugger {
             "disarm_automation_recipes" => return self.disarm_recipes().await,
             "cancel_automation_recipe" => return self.cancel_recipe().await,
             "clear_automation_runs" => return self.clear_recipe_runs(),
+            "list_live_wasm_objects" => return self.list_live_wasm(request).await,
+            "read_live_wasm_memory" => return self.read_live_wasm(request).await,
             "search_live_objects" => return self.search_objects(request, false).await,
             "navigate_object_experiment" => return self.navigate_object(request).await,
             "search_object_experiment" => return self.search_objects(request, true).await,
@@ -920,6 +928,7 @@ impl Debugger {
             .as_ref()
             .is_some_and(|connection| Arc::ptr_eq(connection, owner))
         {
+            self.clear_live_wasm().await;
             self.set_state("waiting", Some(&error.message));
             self.update(|s| s["paused"] = Value::Null);
         }
@@ -946,6 +955,17 @@ impl Debugger {
         };
         let method = message["method"].as_str().unwrap_or("");
         let p = &message["params"];
+        if [
+            "Page.frameNavigated",
+            "Page.documentOpened",
+            "Page.navigatedWithinDocument",
+            "Runtime.executionContextDestroyed",
+            "Runtime.executionContextsCleared",
+        ]
+        .contains(&method)
+        {
+            self.clear_live_wasm().await;
+        }
         if [
             "Page.frameNavigated",
             "Page.navigatedWithinDocument",

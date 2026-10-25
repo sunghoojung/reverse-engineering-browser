@@ -6598,6 +6598,10 @@ const fixture = createServer((req, res) => {
   if (req.url === "/page") {
     res.setHeader("Content-Type", "text/html");
     res.end(`<!doctype html><title>Origin Trace disposable fixture</title><link rel="icon" href="data:,"><button id="click">Click</button><script>globalThis.fixtureObject={originTraceMarker:"fixture",count:1};
+globalThis.ownedWasmModule=new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,5,3,1,0,1,7,10,1,6,109,101,109,111,114,121,2,0]));
+globalThis.ownedWasmInstance=new WebAssembly.Instance(ownedWasmModule);
+globalThis.ownedWasmMemory=ownedWasmInstance.exports.memory;
+new Uint8Array(ownedWasmMemory.buffer).set([17,33,65,129]);
 function makePayload(input){
 const out=input+"-observed";
 return out;
@@ -7218,6 +7222,20 @@ try {
     });
     assert(result.search.results.length > 0);
     console.log(`PASS ${name} passive live object search`);
+    passed++;
+    const wasmTarget=(await get()).target.id;
+    const listed=await action("list_live_wasm_objects",{target_id:wasmTarget});
+    for(const kind of ["instance","module","memory"]) assert(listed.wasm.objects.some(v=>v.kind===kind));
+    const liveInstance=listed.wasm.objects.find(v=>v.kind==="instance");
+    const sliceRequest={target_id:wasmTarget,listing_id:listed.wasm.listing_id,object_id:liveInstance.id,export_name:"memory",offset:0,length:4,confirmed:true};
+    const slice=await action("read_live_wasm_memory",sliceRequest);
+    assert.deepEqual(slice.memory.bytes,[17,33,65,129]);assert.equal(slice.memory.atomic,false);
+    const rawAction=body=>fetch(url+"/api/debugger/actions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    assert.equal((await rawAction({action:"read_live_wasm_memory",...sliceRequest,length:4097})).status,400);
+    assert.equal((await rawAction({action:"read_live_wasm_memory",...sliceRequest,confirmed:false})).status,400);
+    await action("list_live_wasm_objects",{target_id:wasmTarget});
+    assert.equal((await rawAction({action:"read_live_wasm_memory",...sliceRequest})).status,409);
+    console.log(`PASS ${name} disposable live Wasm listing, memory export slice, bounds, confirmation and stale listing`);
     passed++;
     await until(
       (s) =>

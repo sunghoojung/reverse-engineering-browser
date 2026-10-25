@@ -14481,6 +14481,177 @@
                 }
               ]
             }
+          },
+          {
+            "x-reb-requires-live-target": true,
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "list_live_wasm_objects"
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              }
+            },
+            "required": [
+              "action",
+              "target_id"
+            ],
+            "additionalProperties": false,
+            "x-source": [
+              "apps/origin-trace-backend/src/debugger/wasm_live.rs"
+            ],
+            "x-result-schema": "#/components/schemas/DebuggerLiveWasmResult",
+            "description": "Explicit selected-default-realm Wasm inspection in the attached disposable Object Lab page only. Does not inspect other realms/workers or infer live ownership from retained artifacts. Handles expire after 60 seconds; memory reads are bounded and not atomic.",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "browser-control",
+                "code-execution",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Remote-handle group cleanup fails or times out; the selected owned debugger transport is retired without retry to release retained renderer roots."
+                },
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "Replaced WebAssembly/Object/Reflect/typed-array built-ins run target code and can have downstream effects."
+                }
+              ],
+              "uncertainties": [
+                "Target-side built-ins may have effects; this is not a read-only sandbox. Shared memory may change during copying."
+              ],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "An existing navigated disposable Object Lab page must own the exact selected target throughout the operation. Baseline tabs are refused. Listing requires the default realm WebAssembly constructors; reads require an unexpired listing from the same connection and document."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Never automatically exports or persists raw bytes. Runtime.queryObjects can temporarily materialize all same-prototype objects in the renderer; only 32 per kind are retained. The renderer query itself is not a bounded heap scan.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/wasm_live.rs",
+                  "symbol": "Debugger::list_live_wasm"
+                }
+              ]
+            }
+          },
+          {
+            "x-reb-requires-live-target": true,
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "read_live_wasm_memory"
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              },
+              "listing_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "object_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 128
+              },
+              "export_name": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 512
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "length": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096
+              },
+              "confirmed": {
+                "const": true
+              }
+            },
+            "required": [
+              "action",
+              "target_id",
+              "listing_id",
+              "object_id",
+              "offset",
+              "length",
+              "confirmed"
+            ],
+            "additionalProperties": false,
+            "x-source": [
+              "apps/origin-trace-backend/src/debugger/wasm_live.rs"
+            ],
+            "x-result-schema": "#/components/schemas/DebuggerLiveWasmMemoryResult",
+            "description": "Explicit selected-default-realm Wasm inspection in the attached disposable Object Lab page only. Does not inspect other realms/workers or infer live ownership from retained artifacts. Handles expire after 60 seconds; memory reads are bounded and not atomic.",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "browser-control",
+                "code-execution",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Remote-handle group cleanup fails or times out; the selected owned debugger transport is retired without retry to release retained renderer roots."
+                },
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "Replaced WebAssembly/Object/Reflect/typed-array built-ins run target code and can have downstream effects."
+                }
+              ],
+              "uncertainties": [
+                "Target-side built-ins may have effects; this is not a read-only sandbox. Shared memory may change during copying."
+              ],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "An existing navigated disposable Object Lab page must own the exact selected target throughout the operation. Baseline tabs are refused. Listing requires the default realm WebAssembly constructors; reads require an unexpired listing from the same connection and document."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Never automatically exports or persists raw bytes. Runtime.queryObjects can temporarily materialize all same-prototype objects in the renderer; only 32 per kind are retained. The renderer query itself is not a bounded heap scan.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/wasm_live.rs",
+                  "symbol": "Debugger::read_live_wasm"
+                }
+              ]
+            }
           }
         ],
         "description": "All 62 action envelopes have source-backed request fields, types and requiredness, including conditional fields. Variants marked partial identify remaining complex runtime constraints explicitly. Session availability, record identity, mutation confirmation and state locks still apply. Extra properties remain allowed where dispatch ignores them."
@@ -14543,6 +14714,12 @@
           },
           {
             "$ref": "#/components/schemas/DebuggerElementScreenshotResult"
+          },
+          {
+            "$ref": "#/components/schemas/DebuggerLiveWasmResult"
+          },
+          {
+            "$ref": "#/components/schemas/DebuggerLiveWasmMemoryResult"
           }
         ],
         "description": "Closed source-backed action response envelopes. Branch by the requested action using x-action-results; nested experiment/CDP/heap state remains partially typed. No unrestricted object fallback.",
@@ -14732,6 +14909,12 @@
           },
           "capture_element_screenshot": {
             "$ref": "#/components/schemas/DebuggerElementScreenshotResult"
+          },
+          "list_live_wasm_objects": {
+            "$ref": "#/components/schemas/DebuggerLiveWasmResult"
+          },
+          "read_live_wasm_memory": {
+            "$ref": "#/components/schemas/DebuggerLiveWasmMemoryResult"
           }
         }
       },
@@ -26131,6 +26314,238 @@
           "source_hash",
           "execution_context_id"
         ]
+      },
+      "DebuggerLiveWasmResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "wasm": {
+            "type": "object",
+            "properties": {
+              "listing_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              },
+              "document_epoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "expires_after_ms": {
+                "const": 60000
+              },
+              "per_kind_limit": {
+                "const": 32
+              },
+              "objects": {
+                "type": "array",
+                "maxItems": 96,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "x-max-utf8-bytes": 128
+                    },
+                    "kind": {
+                      "enum": [
+                        "instance",
+                        "module",
+                        "memory"
+                      ]
+                    },
+                    "script_id": {
+                      "type": "null"
+                    },
+                    "artifact_id": {
+                      "type": "null"
+                    },
+                    "linkage": {
+                      "const": "unavailable"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "script_id",
+                    "artifact_id",
+                    "linkage"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "coverage": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "instance",
+                        "module",
+                        "memory"
+                      ]
+                    },
+                    "total_objects": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "returned_objects": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 32
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "total_objects",
+                    "returned_objects",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "scope": {
+                "const": "selected-default-realm"
+              },
+              "linkage_reason": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 256
+              }
+            },
+            "required": [
+              "listing_id",
+              "target_id",
+              "document_epoch",
+              "expires_after_ms",
+              "per_kind_limit",
+              "objects",
+              "coverage",
+              "scope",
+              "linkage_reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "ok",
+          "generation",
+          "wasm"
+        ],
+        "additionalProperties": false,
+        "x-source": "apps/origin-trace-backend/src/debugger/wasm_live.rs"
+      },
+      "DebuggerLiveWasmMemoryResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "listing_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              },
+              "object_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 128
+              },
+              "export_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 512
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "length": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096
+              },
+              "byte_length": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "bytes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                }
+              },
+              "shared": {
+                "type": "boolean"
+              },
+              "atomic": {
+                "const": false
+              }
+            },
+            "required": [
+              "listing_id",
+              "target_id",
+              "object_id",
+              "export_name",
+              "offset",
+              "length",
+              "byte_length",
+              "bytes",
+              "shared",
+              "atomic"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "ok",
+          "generation",
+          "memory"
+        ],
+        "additionalProperties": false,
+        "x-source": "apps/origin-trace-backend/src/debugger/wasm_live.rs"
       }
     }
   },

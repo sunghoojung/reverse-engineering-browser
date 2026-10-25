@@ -12,7 +12,7 @@ magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decode
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
 
-check: all native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
+check: all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
@@ -113,6 +113,7 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 javascript-check: capture-completeness-check
+	node tools/check-live-wasm.mjs
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-vm-request-linkage-ui.mjs
@@ -178,3 +179,6 @@ capture-completeness-browser-check: capture-completeness-check origin-trace-back
 	node tools/check-capture-completeness-browser.mjs .
 
 .PHONY: native-artifact-capture-check
+
+heap-snapshot-check: $(HEAP_SNAPSHOT_BINARY)
+	node tools/check-heap-snapshot-ingest.mjs $(HEAP_SNAPSHOT_BINARY)

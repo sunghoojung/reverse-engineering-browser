@@ -19,10 +19,24 @@ impl Drop for Server {
 }
 impl Server {
     fn start() -> Self {
+        Self::start_on(0)
+    }
+    fn start_on(port: u16) -> Self {
+        Self::start_config(port, None)
+    }
+    fn start_config(port: u16, active_endpoint: Option<&std::path::Path>) -> Self {
         let root = tempfile::tempdir().unwrap();
         let endpoint = root.path().join("endpoint");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"))
-            .args(["--port", "0", "--endpoint-file"])
+        let mut command = Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"));
+        if let Some(active_endpoint) = active_endpoint {
+            command
+                .arg("--active-endpoint-file")
+                .arg(active_endpoint)
+                .arg("--socket")
+                .arg(root.path().join("owned-disconnected-broker.sock"));
+        }
+        let mut child = command
+            .args(["--port", &port.to_string(), "--endpoint-file"])
             .arg(&endpoint)
             .args(["--store"])
             .arg(root.path().join("events.jsonl"))
@@ -527,7 +541,9 @@ fn assert_mcp_stopped(output: &std::process::Output, stderr_needle: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(stderr_needle), "{stderr}");
     assert!(
-        stderr.contains("No tools were advertised") || stderr.contains("No other session"),
+        stderr.contains("No tools were advertised")
+            || stderr.contains("No other session")
+            || stderr.contains("No tool request was sent"),
         "{stderr}"
     );
 }
@@ -755,7 +771,7 @@ fn reb_api_mcp_wrapper_selects_one_session_and_can_pass_effects() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(output.stdout.is_empty());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("No tools were advertised"),
+        String::from_utf8_lossy(&output.stderr).contains("No tool request was sent"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -765,4 +781,301 @@ fn repo_path(relative: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(relative)
+}
+
+struct LiveApi {
+    url: String,
+    health: std::sync::Arc<std::sync::Mutex<Value>>,
+    paths: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl LiveApi {
+    fn start() -> Self {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let health = Arc::new(Mutex::new(json!({
+            "status": "ok", "instance_id": "1:100", "capture_mode": "live", "debugger_state": "running"
+        })));
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (worker_health, worker_paths, worker_stop) =
+            (health.clone(), paths.clone(), stop.clone());
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let path = line.split_whitespace().nth(1).unwrap().to_owned();
+                worker_paths.lock().unwrap().push(path.clone());
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let body = if path == "/api/health" {
+                    worker_health.lock().unwrap().clone()
+                } else {
+                    json!({"events": []})
+                };
+                let bytes = serde_json::to_vec(&body).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+                stream.write_all(&bytes).unwrap();
+            }
+        });
+        Self {
+            url,
+            health,
+            paths,
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+impl Drop for LiveApi {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+
+#[test]
+fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
+    let first = LiveApi::start();
+    let second = LiveApi::start();
+    let home = tempfile::tempdir().unwrap();
+    let canonical = home.path().join(".config/origin-trace/reb-api.endpoint");
+    std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+    std::fs::write(&canonical, &first.url).unwrap();
+    let start = || {
+        let mut command = Command::new(repo_path("scripts/reb-api-mcp.sh"));
+        command
+            .args(["--allow-effects", "--timeout", "2"])
+            .env("HOME", home.path())
+            .env("REB_API", env!("CARGO_BIN_EXE_reb-api"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Mcp::from_command(&mut command)
+    };
+    let mut mcp = start();
+    assert_eq!(first.paths.lock().unwrap().as_slice(), ["/api/health"]);
+    let override_attempt = mcp.request(
+        "tools/call",
+        json!({"name": "get_health", "arguments": {"x-reb-expected-instance": "0:0"}}),
+    );
+    assert_eq!(override_attempt["result"]["isError"], true);
+    assert_eq!(
+        first.paths.lock().unwrap().as_slice(),
+        ["/api/health"],
+        "tool arguments overrode the transport precondition"
+    );
+    std::fs::write(&canonical, &second.url).unwrap();
+    let changed = mcp.request(
+        "tools/call",
+        json!({"name": "debugger_action", "arguments": {"body": {"action": "pause"}}}),
+    );
+    assert_eq!(changed["result"]["isError"], true, "{changed}");
+    assert!(tool_text(&changed).contains("Reconnect"), "{changed}");
+    assert!(second.paths.lock().unwrap().is_empty());
+    for method in ["tools/list", "initialize"] {
+        let rejected = mcp.request(method, json!({}));
+        assert_eq!(rejected["error"]["code"], -32000, "{rejected}");
+        assert!(rejected.get("result").is_none(), "{rejected}");
+    }
+    assert_eq!(
+        first.paths.lock().unwrap().len(),
+        1,
+        "old backend received an action"
+    );
+    // Restoring a file cannot resurrect the retired connection's authorization.
+    std::fs::write(&canonical, &first.url).unwrap();
+    let retired = mcp.request("tools/call", json!({"name": "get_health"}));
+    assert_eq!(retired["result"]["isError"], true);
+    drop(mcp);
+    std::fs::write(&canonical, &second.url).unwrap();
+    let mut reconnected = start();
+    let healthy = reconnected.request("tools/call", json!({"name": "get_health"}));
+    assert_eq!(healthy["result"]["isError"], false, "{healthy}");
+    assert_eq!(
+        second.paths.lock().unwrap().len(),
+        3,
+        "reconnect, preflight and call use new endpoint"
+    );
+    *second.health.lock().unwrap() = json!({"status": "ok", "capture_mode": "idle", "debugger_state": "unavailable", "store": "PRIVATE_PATH"});
+    let idle = reconnected.request("tools/call", json!({"name": "get_events"}));
+    assert_eq!(idle["result"]["isError"], true, "{idle}");
+    for expected in [
+        &second.url,
+        "capture_mode=idle",
+        "debugger_state=unavailable",
+    ] {
+        assert!(tool_text(&idle).contains(expected), "{idle}");
+    }
+    assert!(!tool_text(&idle).contains("PRIVATE_PATH"));
+    assert!(
+        second
+            .paths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| path == "/api/health")
+    );
+    *second.health.lock().unwrap() = json!({"status": "ok", "capture_mode": "live", "debugger_state": "running", "instance_id": "2:200"});
+    let replacement = reconnected.request("tools/call", json!({"name": "get_events"}));
+    assert_eq!(replacement["result"]["isError"], true, "{replacement}");
+    assert!(tool_text(&replacement).contains("backend instance changed"));
+    assert!(
+        second
+            .paths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| path == "/api/health")
+    );
+    std::fs::write(&canonical, "https://example.test/secret").unwrap();
+    let invalid = reconnected.request("tools/call", json!({"name": "get_health"}));
+    assert_eq!(invalid["result"]["isError"], true);
+    assert!(!tool_text(&invalid).contains("example.test"));
+}
+
+#[test]
+fn live_requirement_rejects_idle_unknown_and_disconnected_health_without_leaks() {
+    for (capture, debugger, accepted) in [
+        ("live", "running", true),
+        ("live", "paused", true),
+        ("idle", "unavailable", false),
+        ("demo", "running", false),
+        ("live", "waiting", false),
+        ("live", "PRIVATE_STATE", false),
+        ("PRIVATE_MODE", "running", false),
+    ] {
+        let health = serde_json::to_vec(&json!({"status": "ok", "instance_id": "1:100", "capture_mode": capture, "debugger_state": debugger, "store": "PRIVATE_PATH"})).unwrap();
+        let url = serve_http("200 OK", &health);
+        let output = mcp_output(&[
+            "mcp",
+            "--base-url",
+            &url,
+            "--require-live",
+            "--timeout",
+            "2",
+        ]);
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{capture} {debugger}: {output:?}"
+        );
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("PRIVATE_"), "{stderr}");
+        if !accepted {
+            assert!(stderr.contains(&url), "{stderr}");
+            assert!(stderr.contains("capture_mode="), "{stderr}");
+            assert!(stderr.contains("debugger_state="), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn idle_backend_cannot_publish_the_active_live_endpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = root.path().join("active.endpoint");
+    let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"))
+        .arg("--active-endpoint-file")
+        .arg(&endpoint)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!endpoint.exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--socket"));
+}
+
+#[test]
+fn backend_replacement_after_health_cannot_receive_an_old_instances_action() {
+    // Exercise the actual backend, not a model of the precondition: its port is
+    // reused after MCP health succeeds and before the client dispatches a tool.
+    let first = Server::start();
+    let url = first.url.clone();
+    let port = url::Url::parse(&url).unwrap().port().unwrap();
+    let mut mcp = Mcp::start(&url, true);
+    drop(first);
+    let second = Server::start_on(port);
+    assert_eq!(second.url, url);
+    let rejected = mcp.request(
+        "tools/call",
+        json!({
+            "name": "debugger_action", "arguments": {"body": {"action": "pause"}}
+        }),
+    );
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    let error: Value = serde_json::from_str(tool_text(&rejected)).unwrap();
+    assert_eq!(error["http_status"], 409, "{error}");
+    assert_eq!(error["code"], "state_conflict", "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("No operation was dispatched")
+    );
+    let mut reconnected = Mcp::start(&url, true);
+    let health = reconnected.request("tools/call", json!({"name": "get_health"}));
+    assert_eq!(health["result"]["isError"], false, "{health}");
+}
+
+#[tokio::test]
+async fn instance_precondition_rejects_duplicate_headers_before_body_dispatch() {
+    let server = Server::start();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let health: Value = client
+        .get(format!("{}/api/health", server.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = health["instance_id"].as_str().unwrap();
+    for headers in [vec![id, id], vec![id, "0:0"], vec!["not-an-instance"]] {
+        let mut request = client.post(format!("{}/api/debugger", server.url));
+        for value in headers {
+            request = request.header("x-reb-expected-instance", value);
+        }
+        let response = request.body("not json").send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 409);
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["code"], "state_conflict");
+    }
+}
+
+#[test]
+fn live_backend_publishes_the_canonical_alias_without_idle_takeover() {
+    let root = tempfile::tempdir().unwrap();
+    let canonical = root.path().join("canonical.endpoint");
+    let live = Server::start_config(0, Some(&canonical));
+    assert_eq!(
+        std::fs::read_to_string(&canonical).unwrap().trim(),
+        live.url
+    );
+    let _idle = Server::start();
+    assert_eq!(
+        std::fs::read_to_string(&canonical).unwrap().trim(),
+        live.url
+    );
 }

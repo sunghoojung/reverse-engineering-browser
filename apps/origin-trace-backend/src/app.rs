@@ -328,7 +328,7 @@ impl App {
         let mut etag = None;
         let value = match path {
             "/api/health" => {
-                json!({"status":"ok","store":self.options.store,"store_exists":self.options.store.exists(),"trace_store":self.options.trace_store,"trace_store_exists":self.options.trace_store.exists(),"signal_store":self.options.signal_store,"signal_store_exists":self.options.signal_store.exists(),"artifact_store":self.options.artifacts,"artifact_store_exists":self.options.artifacts.exists(),"artifact_receiver_configured":self.options.artifact_socket.is_some(),"artifact_receiver_connected":self.receiver_connected().await,"api_collection_store":self.collection.path,"api_collection_store_exists":self.collection.path.exists(),"local_analyst_store":self.workspace.path,"local_analyst_store_exists":self.workspace.path.exists(),"local_analyst_runner_available":self.analyst.state()["available"],"decoder_available":self.decoder.state()["available"],"broker_connected":self.broker_connected().await,"capture_mode":self.options.capture_mode(),"debugger_state":self.debugger.snapshot()["state"]})
+                json!({"status":"ok","instance_id":self.debugger.instance_id(),"store":self.options.store,"store_exists":self.options.store.exists(),"trace_store":self.options.trace_store,"trace_store_exists":self.options.trace_store.exists(),"signal_store":self.options.signal_store,"signal_store_exists":self.options.signal_store.exists(),"artifact_store":self.options.artifacts,"artifact_store_exists":self.options.artifacts.exists(),"artifact_receiver_configured":self.options.artifact_socket.is_some(),"artifact_receiver_connected":self.receiver_connected().await,"api_collection_store":self.collection.path,"api_collection_store_exists":self.collection.path.exists(),"local_analyst_store":self.workspace.path,"local_analyst_store_exists":self.workspace.path.exists(),"local_analyst_runner_available":self.analyst.state()["available"],"decoder_available":self.decoder.state()["available"],"broker_connected":self.broker_connected().await,"capture_mode":self.options.capture_mode(),"debugger_state":self.debugger.snapshot()["state"]})
             }
             "/api/analysis/catalog" => analysis_catalog::catalog()?,
             "/api/network/catalog" => {
@@ -899,6 +899,19 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             && !app.trusted(&parts.headers)
         {
             return Err(Error::new(403, "Local request origin rejected"));
+        }
+        // A preflight can race a backend restart at the same port. Bind each
+        // cooperating client's request to this process before any dispatch.
+        // This is a conflict precondition, not authentication or authorization.
+        if parts.headers.contains_key("x-reb-expected-instance") {
+            let expected = parts.headers.get_all("x-reb-expected-instance");
+            if expected.iter().count() != 1
+                || expected.iter().next().and_then(|value| value.to_str().ok())
+                    != app.debugger.instance_id().as_str()
+            {
+                return Err(Error::new(409, "Backend instance changed. Reconnect and reselect the intended session. No operation was dispatched.")
+                    .with_code(Code::StateConflict));
+            }
         }
         if parts.method == Method::GET {
             app.get(path, parts.uri.query().unwrap_or(""), &parts.headers)

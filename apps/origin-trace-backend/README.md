@@ -25,7 +25,16 @@ printed. Binary responses are refused before a request. JSON larger than
 the inline limit returns a structural summary and does not inline source,
 bytecode, or request bodies. [`scripts/reb-api-mcp.sh`](../../scripts/reb-api-mcp.sh)
 is the same-machine launcher for Cursor, Codex, Claude Code, Grok Bot, and
-T3 Code. See
+T3 Code. Its default and fresh configs use
+`~/.config/origin-trace/reb-api.endpoint` with `--require-live`. The live launcher
+publishes that private canonical alias; idle/demo startup cannot claim it.
+Reconnect rereads the file instead of freezing a session directory or port.
+A changed file or live backend identity retires the existing connection, never
+replaying a pending action on the replacement. `--require-live` checks live
+capture, a running/paused debugger, and backend identity at startup and before
+tool calls; idle/unavailable states produce an endpoint-specific error. Explicit
+session selectors retain their intentional stored-evidence behavior unless
+`--require-live` is added. See
 [OpenAPI MCP projection](../../protocol/http-api.md#openapi-mcp-projection)
 and [local coding agents](../../docs/development/local-coding-agents.md).
 

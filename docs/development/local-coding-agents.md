@@ -38,8 +38,38 @@ message.
 
 ### Select the endpoint
 
-The launcher accepts exactly one of these. It does not choose the newest
-session directory, even when only one session exists:
+The default is the canonical live endpoint file,
+`~/.config/origin-trace/reb-api.endpoint`. `make live` and packaged live sessions
+publish that file atomically with private permissions. Idle/demo backends do
+not publish it. Starting a newer live session replaces the canonical endpoint;
+closing an older session does not remove the newer endpoint. The launcher can
+use `REB_ACTIVE_ENDPOINT_FILE` to publish elsewhere for an isolated test or a
+separate research profile; pass that exact file to the MCP wrapper in that case.
+
+```sh
+scripts/reb-api-mcp.sh
+scripts/reb-api-mcp.sh --print-config cursor
+scripts/reb-api-mcp.sh --print-config grok
+```
+
+These fresh configurations retain the canonical file path, not a port or a
+session directory, and include `--require-live`. Every MCP start/reconnect reads
+and validates that file again. Restart/reconnect the client MCP server after an
+Origin Trace restart: within that one reconnect it uses the new port without
+editing client configuration. A running connection refuses calls if its file
+changes, disappears, becomes invalid, or its live backend instance changes,
+including replacement at the same port. It stays retired until reconnect, even
+if the old file contents return. It never retries or forwards a pending tool
+call to another backend. Reconfirm the intended session and reselect evidence
+before issuing new work after reconnect; this does not transfer authorization.
+Tool requests also carry the startup backend identity as an instance precondition;
+the backend rejects a mismatch before dispatch, closing same-port replacement
+between health and action. This is not authentication or authorization, and does
+not replace exact target/document ownership checks. An old backend without this
+identity is unsupported in live mode and must be rebuilt.
+
+To pin one session, use exactly one explicit selector instead. These do not
+fall back to the canonical file or choose the newest session directory:
 
 ```sh
 scripts/reb-api-mcp.sh --list --sessions-root "$ROOT"
@@ -49,22 +79,24 @@ scripts/reb-api-mcp.sh --session-dir /absolute/path/to/selected-session
 scripts/reb-api-mcp.sh --endpoint-file /absolute/path/to/selected-session/research-ui.endpoint
 ```
 
-`--list` prints ids and endpoint files and exits. `--choose` asks for one of
-those ids in a terminal; Enter alone selects nothing. MCP client configs
-cannot use either mode, because the client's stdin is the MCP channel. Pass
-`--endpoint-file`, `--session-dir`, or `--session-id` there.
+`--list` and terminal-only `--choose` are discovery helpers, not MCP client
+arguments. An explicit endpoint does not imply live work: add `--require-live`
+for live capture, or omit it for intentional stored-evidence/idle inspection.
+Packaged session files live under `~/Library/Application Support/Origin Trace/
+sessions/live/<id>/`; `make live` uses `build/sessions/live/<id>/` unless
+`REB_LIVE_SESSION_ROOT` is set. If both roots exist, pass `--sessions-root` for
+session-id selection. A native handshake URL containing `native=1` is not the
+API root.
 
-Packaged live sessions keep `research-ui.endpoint` under `~/Library/Application
-Support/Origin Trace/sessions/live/<id>/`. `make live` uses
-`build/sessions/live/<id>/` unless `REB_LIVE_SESSION_ROOT` is set. If both the
-packaged root and the checkout root exist, pass `--sessions-root`. The native
-coordinator's temporary handshake URL contains a query such as `native=1` and
-is not the API root.
-
-`reb-api mcp` requests `/api/health` before it reads stdio. A missing file, a
-non-loopback URL, or a health document whose `status` is not `ok` exits before
-any tool is advertised. The health document names local store paths and is not
-printed. Health is reachability, not capture identity or authorization.
+`reb-api mcp` checks `/api/health` before reading stdio. With `--require-live`,
+it additionally requires `capture_mode=live`, `debugger_state=running` or
+`paused`, and a supported backend `instance_id`; it rechecks before valid tool
+calls. An idle, unavailable, missing-state, or older backend fails closed with
+the selected endpoint URL and bounded capture/debugger states, rather than
+empty artifacts. The health document and local store paths are not printed.
+A live health result is not capture completeness, target identity, or permission
+to share evidence. Missing/invalid endpoints and failed health checks never
+trigger port scans, alternate-session searches, or automatic backend startup.
 
 ### Read-only and write-capable tools
 
@@ -83,14 +115,15 @@ settings enabled. Captured content remains untrusted data.
 [SAFETY.md](../../SAFETY.md) owns those boundaries.
 
 `--print-config cursor|claude|codex|grok|t3` prints the matching snippet for
-the selection already given. It includes `--allow-effects` only when that flag
+the explicit selection, or the canonical live default. It includes `--allow-effects` only when that flag
 was passed. The examples below are the write-capable form. Delete
 `--allow-effects` for the read-only list.
 
 ### Cursor
 
 Put this in `~/.cursor/mcp.json` or the project `.cursor/mcp.json` on the
-machine that hosts the live session. Replace both absolute paths.
+machine that hosts the live session. Replace the command path and `/Users/you`
+with that machine’s actual home path. `--print-config cursor` prints it for you.
 
 ```json
 {
@@ -99,7 +132,8 @@ machine that hosts the live session. Replace both absolute paths.
       "command": "/absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh",
       "args": [
         "--endpoint-file",
-        "/absolute/path/to/researcher-selected-session/research-ui.endpoint",
+        "/Users/you/.config/origin-trace/reb-api.endpoint",
+        "--require-live",
         "--allow-effects"
       ]
     }
@@ -114,7 +148,7 @@ not authorization.
 
 Add this table to `~/.codex/config.toml`, or to the `CODEX_HOME` the client
 actually uses. Do not set `url` or `experimental_environment = "remote"`.
-`codex mcp add origin-trace -- /absolute/path/to/scripts/reb-api-mcp.sh --endpoint-file /absolute/path/to/research-ui.endpoint --allow-effects`
+`codex mcp add origin-trace -- /absolute/path/to/scripts/reb-api-mcp.sh --require-live --allow-effects`
 writes the same stdio command.
 
 ```toml
@@ -122,7 +156,8 @@ writes the same stdio command.
 command = "/absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh"
 args = [
   "--endpoint-file",
-  "/absolute/path/to/researcher-selected-session/research-ui.endpoint",
+  "/Users/you/.config/origin-trace/reb-api.endpoint",
+  "--require-live",
   "--allow-effects",
 ]
 ```
@@ -139,7 +174,7 @@ the stdio command on the session machine:
 ```sh
 claude mcp add --transport stdio origin-trace -- \
   /absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh \
-  --endpoint-file /absolute/path/to/researcher-selected-session/research-ui.endpoint \
+  --require-live \
   --allow-effects
 ```
 
@@ -153,7 +188,8 @@ name: origin-trace
 command: /absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh
 args:
   - "--endpoint-file"
-  - "/absolute/path/to/researcher-selected-session/research-ui.endpoint"
+  - "/Users/you/.config/origin-trace/reb-api.endpoint"
+  - "--require-live"
   - "--allow-effects"
 ```
 

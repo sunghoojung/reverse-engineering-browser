@@ -36,6 +36,7 @@ const environment = {
   REB_USE_SYSTEM_KEYCHAIN: "0",
   REB_API_COLLECTION_STORE: join(temporary, "collection.json"),
   REB_LOCAL_ANALYST_STORE: join(temporary, "analyst.json"),
+  REB_ACTIVE_ENDPOINT_FILE: join(temporary, "active.endpoint"),
 };
 for (const [key, name] of Object.entries({
   REB_BROKER_BINARY: "OriginTraceEventBroker",

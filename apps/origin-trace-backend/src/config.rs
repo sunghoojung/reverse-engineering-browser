@@ -66,6 +66,9 @@ pub struct Options {
     pub demo_evidence: bool,
     #[arg(long)]
     pub endpoint_file: Option<PathBuf>,
+    /// Publish this live session's canonical endpoint; idle/demo backends cannot own it.
+    #[arg(long, requires = "socket")]
+    pub active_endpoint_file: Option<PathBuf>,
 }
 impl Options {
     pub fn address(&self) -> io::Result<SocketAddr> {
@@ -110,6 +113,7 @@ impl Options {
             &mut self.devtools_active_port,
             &mut self.native_console_live_directory,
             &mut self.endpoint_file,
+            &mut self.active_endpoint_file,
         ]
         .into_iter()
         .flatten()

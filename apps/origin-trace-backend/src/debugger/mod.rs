@@ -129,6 +129,10 @@ impl Debugger {
     pub fn snapshot(&self) -> Value {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+    /// Process-lifetime identity only; never clone retained capture content for health.
+    pub fn instance_id(&self) -> Value {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())["network"]["instance_id"].clone()
+    }
     fn update(&self, edit: impl FnOnce(&mut Value)) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         edit(&mut state);

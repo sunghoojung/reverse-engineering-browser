@@ -81,6 +81,32 @@ grep -q -F -- '--allow-effects' "$out"
 grep -q -F -- 'not authorization' "$out"
 grep -q -F -- 'newest' "$out"
 
+run_launcher
+assert_status 2
+assert_log_absent
+assert_stderr_has '.config/origin-trace/reb-api.endpoint'
+
+canonical="${home}/.config/origin-trace/reb-api.endpoint"
+mkdir -p "$(dirname "$canonical")"
+printf 'http://127.0.0.1:11\n' >"$canonical"
+for client in cursor grok codex claude t3; do
+  run_launcher --print-config "$client"
+  assert_status 0
+  grep -q -F -- "$canonical" "$out" || fail "$client did not use canonical file"
+  grep -q -F -- '--require-live' "$out" || fail "$client did not require live capture"
+  assert_stdout_lacks '"--allow-effects"'
+  assert_stdout_lacks 'http://127.0.0.1:11'
+done
+run_launcher
+assert_status 0
+grep -q -F -- "mcp --endpoint-file ${canonical} --require-live" "$log" || fail "canonical default was not forwarded"
+printf 'http://example.test:11\n' >"$canonical"
+run_launcher
+assert_status 2
+assert_log_absent
+assert_stderr_has 'loopback'
+printf 'http://127.0.0.1:11\n' >"$canonical"
+
 run_launcher --sessions-root "$root"
 assert_status 2
 assert_log_absent

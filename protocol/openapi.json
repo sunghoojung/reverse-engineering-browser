@@ -8294,6 +8294,11 @@
             "const": "ok",
             "type": "string"
           },
+          "instance_id": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Opaque backend process-lifetime identity. Live MCP connections pin it to reject same-port backend replacement."
+          },
           "store": {
             "type": "string"
           },

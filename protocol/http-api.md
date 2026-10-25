@@ -72,6 +72,24 @@ on its own.
 
 ## OpenAPI MCP projection
 
+The same-machine wrapper defaults to `~/.config/origin-trace/reb-api.endpoint`
+and `--require-live`; live launchers publish it, not idle/demo backends. Each
+MCP reconnect resolves the file anew. The current connection fails closed if
+the file changes or a live backend's `Health.instance_id` changes, rather than
+retargeting pending calls. MCP sends `X-REB-Expected-Instance` with the startup
+health identity on tool requests; the backend rejects a nonmatching or duplicate
+supplied precondition with HTTP 409 `state_conflict` before body processing or
+dispatch. Existing API clients that omit the header remain supported.
+This closes replacement at the same port between health and action. It is not
+an authentication token, permission grant, or a document-generation selector;
+existing action-specific target/document ownership checks remain required. A
+legacy backend without a health identity cannot use `--require-live`.
+Live mode requires `capture_mode=live` and a running
+or paused debugger before advertising tools and before valid tool dispatch.
+Diagnostics name the loopback endpoint and allowlisted states, never the health
+body's evidence paths. Explicit stored-evidence connections can omit the live
+requirement. See [connection and restart behavior](../docs/development/local-coding-agents.md#select-the-endpoint).
+
 `x-reb-mcp` in this specification is the only MCP contract. `reb-api mcp` reads
 that extension and serves operation IDs as stdio tools. It does not add an HTTP
 route. A client supplies the same loopback root as `call`, through `--base-url`

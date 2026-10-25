@@ -4463,10 +4463,19 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-contextual-workspace :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 760px) { .vm-contextual-panes { grid-template-columns: minmax(0, 1fr); } }
 
-.vm-effect-row { border-top: 1px solid var(--line); overflow-wrap: anywhere; }
-.vm-effect-row > .secondary-button { margin: 0 10px 10px; }
-.vm-effect-row summary { padding: 10px; cursor: pointer; }
+.vm-effect-row { border-top: 1px solid var(--line); overflow-wrap: anywhere; min-width: 0; }
+.vm-effect-row > .secondary-button { margin: 0 10px 10px; max-width: calc(100% - 20px); height: auto; white-space: normal; }
+.vm-effect-row summary { padding: 10px; cursor: pointer; overflow-wrap: anywhere; }
 .vm-effect-row summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.vm-evidence-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; min-width: 0; }
+.vm-evidence-pager button { max-width: 100%; height: auto; white-space: normal; }
+.vm-selection-inspector { min-width: 0; }
+.vm-selection-inspector h3 { margin: 10px; overflow-wrap: anywhere; }
+.vm-selection-fields { display: grid; grid-template-columns: minmax(88px, 34%) minmax(0, 1fr); gap: 6px 8px; padding: 0 10px 12px; min-width: 0; }
+.vm-selection-fields span { color: var(--muted); }
+.vm-selection-fields strong { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.vm-selection-inspector h4 { margin: 0 0 6px; }
+.vm-selection-inspector p { margin: 0 0 6px; overflow-wrap: anywhere; }
 .vm-effect-detail { padding: 10px; line-height: 1.6; overflow-wrap: anywhere; }
 .vm-experiment-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .vm-experiment-form label { display: flex; flex-direction: column; gap: 4px; min-width: 150px; max-width: 100%; }
@@ -4481,7 +4490,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-workbench-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 10px; align-items: start; min-width: 0; }
 .vm-workbench-listing { max-height: 580px; overflow: auto; }
 .vm-workbench-listing .vm-workspace-heading { position: sticky; top: 0; z-index: 1; background: var(--panel-2); }
-.vm-workbench-listing .vm-handler-head, .vm-workbench-listing .vm-handler-row { grid-template-columns: 50px minmax(90px, 1fr) 70px; gap: 6px; }
+.vm-workbench-listing .vm-handler-head, .vm-workbench-listing .vm-handler-row { grid-template-columns: minmax(64px, 88px) minmax(48px, 72px) minmax(0, 1fr); gap: 6px; }
 .vm-workbench-listing .vm-handler-head > :nth-child(n+4) { display: none; }
 .vm-workbench-listing .vm-handler-samples { grid-column: 1; }
 .vm-workbench-listing .vm-handler-samples::before { content: 'samples '; color: var(--muted); font-size: 9px; }

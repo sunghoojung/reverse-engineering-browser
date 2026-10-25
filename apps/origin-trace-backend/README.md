@@ -14,6 +14,14 @@ apps/origin-trace-backend/target/debug/reb-api mcp --endpoint-file /tmp/reb-api-
 make backend-e2e
 ```
 
+`get_session_context` (`GET /api/session/context`) is the first read for a
+connected agent. It reports `live_admission`, the health `instance_id`, and
+separate bounded Wasm script and artifact inventories without joining them or
+returning the full debugger snapshot. MCP annotates its actual effects
+admission; direct HTTP reports admission as unknown. See the
+[agent guide](../../docs/development/local-coding-agents.md#start-with-compact-session-context)
+for privacy omissions, inventory limits, conditional reads, and action errors.
+
 `reb-api mcp` projects [`protocol/openapi.json`](../../protocol/openapi.json)
 onto a local stdio MCP server. Tool names are the OpenAPI operation IDs. The
 default list is read-only. `--allow-effects` also lists the other operations.
@@ -32,7 +40,10 @@ Reconnect rereads the file instead of freezing a session directory or port.
 A changed file or live backend identity retires the existing connection, never
 replaying a pending action on the replacement. `--require-live` checks live
 capture, a running/paused debugger, and backend identity at startup and before
-tool calls; idle/unavailable states produce an endpoint-specific error. Explicit
+tool calls; idle/unavailable states produce an endpoint-specific error with
+`code=idle_backend`, `code=debugger_unavailable`, or `code=state_conflict`.
+`get_session_context` stays available after that startup check until the
+endpoint file or instance changes. Explicit
 session selectors retain their intentional stored-evidence behavior unless
 `--require-live` is added. See
 [OpenAPI MCP projection](../../protocol/http-api.md#openapi-mcp-projection)

@@ -324,7 +324,7 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             tool_text(&response)
         );
         let body: Value = serde_json::from_str(tool_text(&response)).unwrap();
-        let direct: Value = client
+        let mut direct: Value = client
             .get(format!("{}{}", server.url.trim_end_matches('/'), path))
             .send()
             .await
@@ -334,6 +334,11 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             .json()
             .await
             .unwrap();
+        if name == "get_session_context" {
+            assert!(direct["allow_effects"].is_null());
+            direct["allow_effects"] = json!(false);
+            direct["effects_admission"] = json!("read_only_projection");
+        }
         assert_eq!(body, direct, "{name} MCP body differs from HTTP");
         if body.is_object() {
             assert_eq!(response["result"]["structuredContent"], body, "{name}");
@@ -791,6 +796,7 @@ fn repo_path(relative: &str) -> std::path::PathBuf {
 
 struct LiveApi {
     url: String,
+    addr: std::net::SocketAddr,
     health: std::sync::Arc<std::sync::Mutex<Value>>,
     paths: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -802,9 +808,12 @@ impl LiveApi {
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         };
+        // Blocking accept. A nonblocking listener made accepted sockets inherit
+        // O_NONBLOCK on macOS, and a read timeout then surfaced as WouldBlock.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(false).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
         let health = Arc::new(Mutex::new(json!({
             "status": "ok", "instance_id": "1:100", "capture_mode": "live", "debugger_state": "running"
         })));
@@ -813,44 +822,25 @@ impl LiveApi {
         let (worker_health, worker_paths, worker_stop) =
             (health.clone(), paths.clone(), stop.clone());
         let worker = std::thread::spawn(move || {
-            while !worker_stop.load(Ordering::Relaxed) {
+            while !worker_stop.load(Ordering::SeqCst) {
                 let (mut stream, _) = match listener.accept() {
                     Ok(connection) => connection,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                        continue;
-                    }
-                    Err(error) => panic!("fixture accept: {error}"),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
                 };
-                // On macOS an accepted socket can inherit O_NONBLOCK from the
-                // listener. The fixture intentionally uses bounded blocking I/O.
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let path = line.split_whitespace().nth(1).unwrap().to_owned();
-                worker_paths.lock().unwrap().push(path.clone());
-                loop {
-                    line.clear();
-                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
-                        break;
-                    }
+                if worker_stop.load(Ordering::SeqCst) {
+                    break;
                 }
-                let body = if path == "/api/health" {
-                    worker_health.lock().unwrap().clone()
-                } else {
-                    json!({"events": []})
-                };
-                let bytes = serde_json::to_vec(&body).unwrap();
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
-                stream.write_all(&bytes).unwrap();
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                if serve_live_request(&mut stream, &worker_health, &worker_paths).is_err() {
+                    continue;
+                }
             }
         });
         Self {
             url,
+            addr,
             health,
             paths,
             stop,
@@ -858,9 +848,91 @@ impl LiveApi {
         }
     }
 }
+fn serve_live_request(
+    stream: &mut std::net::TcpStream,
+    health: &std::sync::Mutex<Value>,
+    paths: &std::sync::Mutex<Vec<String>>,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(());
+    }
+    let Some(path) = line
+        .split_whitespace()
+        .nth(1)
+        .map(|path| path.split('?').next().unwrap_or(path).to_owned())
+    else {
+        return Ok(());
+    };
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    paths.lock().unwrap().push(path.clone());
+    let body = if path == "/api/health" {
+        health.lock().unwrap().clone()
+    } else if path == "/api/session/context" {
+        fixture_session_context(&health.lock().unwrap())
+    } else {
+        json!({"events": []})
+    };
+    let bytes = serde_json::to_vec(&body).unwrap();
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        bytes.len()
+    )?;
+    stream.write_all(&bytes)
+}
+fn fixture_session_context(health: &Value) -> Value {
+    let capture = health["capture_mode"].as_str().unwrap_or("unknown");
+    let debugger = health["debugger_state"].as_str().unwrap_or("unknown");
+    let admission = if capture == "live" && matches!(debugger, "running" | "paused") {
+        "ready"
+    } else if capture == "live" {
+        "debugger_unavailable"
+    } else if capture == "idle" {
+        "idle"
+    } else {
+        "not_live_capture"
+    };
+    json!({
+        "protocol_version": 1,
+        "instance_id": health["instance_id"],
+        "endpoint": "http://127.0.0.1:9",
+        "capture_mode": capture,
+        "debugger_state": debugger,
+        "broker_connected": false,
+        "live_admission": admission,
+        "generation": 0,
+        "debugger_protocol_version": 1,
+        "target_document_epoch": 0,
+        "capture_epoch": 0,
+        "target": null,
+        "wasm_scripts": [],
+        "wasm_scripts_omitted": 0,
+        "wasm_artifacts": {"items": [], "window_truncated": false, "items_omitted": 0},
+        "debugger_etag": "\"debugger-0\"",
+        "allow_effects": null,
+        "effects_admission": "caller_specific_unknown",
+        "limits": {
+            "items_per_inventory": 16,
+            "url_policy": "origin_or_wasm_label",
+            "title_policy": "omitted",
+            "artifact_linkage": "not_inferred"
+        },
+        "consistency": "independent_debugger_snapshot_and_manifest_tail"
+    })
+}
 impl Drop for LiveApi {
     fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Unblock a blocking accept without inheriting nonblocking mode.
+        let _ = std::net::TcpStream::connect_timeout(&self.addr, Duration::from_secs(2));
         let result = self.worker.take().unwrap().join();
         // Keep a worker failure visible, but never abort while reporting the
         // original test assertion through an additional destructor panic.
@@ -933,11 +1005,13 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
         3,
         "reconnect, preflight and call use new endpoint"
     );
-    *second.health.lock().unwrap() = json!({"status": "ok", "capture_mode": "idle", "debugger_state": "unavailable", "store": "PRIVATE_PATH"});
+    *second.health.lock().unwrap() = json!({"status": "ok", "instance_id": "1:100", "capture_mode": "idle", "debugger_state": "unavailable", "store": "PRIVATE_PATH"});
     let idle = reconnected.request("tools/call", json!({"name": "get_events"}));
     assert_eq!(idle["result"]["isError"], true, "{idle}");
+    assert_eq!(idle["result"]["structuredContent"]["code"], "idle_backend");
     for expected in [
         &second.url,
+        "code=idle_backend",
         "capture_mode=idle",
         "debugger_state=unavailable",
     ] {
@@ -952,18 +1026,69 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
             .iter()
             .all(|path| path == "/api/health")
     );
-    *second.health.lock().unwrap() = json!({"status": "ok", "capture_mode": "live", "debugger_state": "running", "instance_id": "2:200"});
-    let replacement = reconnected.request("tools/call", json!({"name": "get_events"}));
-    assert_eq!(replacement["result"]["isError"], true, "{replacement}");
-    assert!(tool_text(&replacement).contains("backend instance changed"));
+    let context = reconnected.request("tools/call", json!({"name": "get_session_context"}));
+    assert_eq!(context["result"]["isError"], false, "{context}");
+    assert_eq!(
+        context["result"]["structuredContent"]["live_admission"],
+        "idle"
+    );
+    assert_eq!(
+        context["result"]["structuredContent"]["capture_mode"],
+        "idle"
+    );
+    assert_eq!(
+        context["result"]["structuredContent"]["endpoint"],
+        second.url
+    );
     assert!(
+        context["result"]["structuredContent"]["wasm_scripts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        context["result"]["structuredContent"]["wasm_artifacts"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
         second
             .paths
             .lock()
             .unwrap()
             .iter()
-            .all(|path| path == "/api/health")
+            .filter(|path| path.as_str() == "/api/session/context")
+            .count(),
+        1
     );
+    *second.health.lock().unwrap() = json!({"status": "ok", "instance_id": "1:100", "capture_mode": "live", "debugger_state": "waiting"});
+    let unattached = reconnected.request("tools/call", json!({"name": "get_events"}));
+    assert_eq!(
+        unattached["result"]["structuredContent"]["code"], "debugger_unavailable",
+        "{unattached}"
+    );
+    assert!(tool_text(&unattached).contains("debugger_state=waiting"));
+    let before_replacement = second.paths.lock().unwrap().len();
+    *second.health.lock().unwrap() = json!({"status": "ok", "capture_mode": "live", "debugger_state": "running", "instance_id": "2:200"});
+    let replacement = reconnected.request("tools/call", json!({"name": "get_events"}));
+    assert_eq!(replacement["result"]["isError"], true, "{replacement}");
+    assert!(tool_text(&replacement).contains("backend instance changed"));
+    assert_eq!(
+        second.paths.lock().unwrap().len(),
+        before_replacement + 1,
+        "instance mismatch retired the connection before dispatch"
+    );
+    assert_eq!(
+        second.paths.lock().unwrap().last().map(String::as_str),
+        Some("/api/health")
+    );
+    let blocked_context = reconnected.request("tools/call", json!({"name": "get_session_context"}));
+    assert_eq!(
+        blocked_context["result"]["isError"], true,
+        "{blocked_context}"
+    );
+    assert_eq!(second.paths.lock().unwrap().len(), before_replacement + 1);
     std::fs::write(&canonical, "https://example.test/secret").unwrap();
     let invalid = reconnected.request("tools/call", json!({"name": "get_health"}));
     assert_eq!(invalid["result"]["isError"], true);
@@ -1003,6 +1128,14 @@ fn live_requirement_rejects_idle_unknown_and_disconnected_health_without_leaks()
             assert!(stderr.contains(&url), "{stderr}");
             assert!(stderr.contains("capture_mode="), "{stderr}");
             assert!(stderr.contains("debugger_state="), "{stderr}");
+            let code = if capture == "idle" {
+                "code=idle_backend"
+            } else if capture == "live" {
+                "code=debugger_unavailable"
+            } else {
+                "code=state_conflict"
+            };
+            assert!(stderr.contains(code), "{stderr}");
         }
     }
 }
@@ -1092,4 +1225,62 @@ fn live_backend_publishes_the_canonical_alias_without_idle_takeover() {
         std::fs::read_to_string(&canonical).unwrap().trim(),
         live.url
     );
+}
+
+#[test]
+fn session_context_reports_actual_mcp_admission_and_action_guidance() {
+    let server = Server::start();
+    for allow_effects in [false, true] {
+        let mut mcp = Mcp::start(&server.url, allow_effects);
+        let response = mcp.request("tools/call", json!({"name":"get_session_context"}));
+        let context = &response["result"]["structuredContent"];
+        assert_eq!(response["result"]["isError"], false);
+        assert_eq!(context["allow_effects"], allow_effects);
+        assert_eq!(context["endpoint"], server.url);
+        assert_eq!(context["capture_mode"], "idle");
+        assert_eq!(context["live_admission"], "idle");
+        assert!(context["wasm_scripts"].as_array().unwrap().is_empty());
+        assert!(
+            context["wasm_artifacts"]["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let health = mcp.request("tools/call", json!({"name":"get_health"}));
+        assert_eq!(
+            context["instance_id"],
+            health["result"]["structuredContent"]["instance_id"]
+        );
+        let spec = specification();
+        let (_, _, definition) = operation(&spec, "get_session_context");
+        assert!(
+            jsonschema::validator_for(&response_schema(&spec, definition))
+                .unwrap()
+                .is_valid(context)
+        );
+        assert!(tool_text(&response).len() < 8192);
+        if !allow_effects {
+            continue;
+        }
+        for (name, valid) in [("debugger_action", "pause"), ("capture_action", "stop")] {
+            let response = mcp.request("tools/call", json!({"name":name,"arguments":{"body":{}}}));
+            assert_eq!(response["result"]["isError"], true);
+            let error = &response["result"]["structuredContent"];
+            assert_eq!(error["code"], "invalid_request");
+            assert!(
+                error["details"]["allowed_actions"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(valid))
+            );
+            assert_eq!(error["details"]["missing_fields"], json!(["action"]));
+            let response = mcp.request(
+                "tools/call",
+                json!({"name":name,"arguments":{"body":{"action":valid}}}),
+            );
+            assert_eq!(response["result"]["isError"], true);
+            let error: Value = serde_json::from_str(tool_text(&response)).unwrap();
+            assert_eq!(error["code"], "idle_backend");
+        }
+    }
 }

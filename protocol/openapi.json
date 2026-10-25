@@ -32,6 +32,122 @@
     "message_limit_bytes": 33554432
   },
   "paths": {
+    "/api/session/context": {
+      "get": {
+        "operationId": "get_session_context",
+        "summary": "Get compact session context",
+        "description": "First read for a connected agent. Reports live_admission, capture mode, the health instance id, and up to 16 Wasm scripts plus 16 retained Wasm artifacts from a 256 KiB manifest tail, without fetching source or bytecode and without joining those inventories. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag, not debugger generation alone.",
+        "tags": [
+          "health"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionContext"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or duplicate limit query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads allowlisted local state and a bounded artifact manifest tail. Probes the configured broker socket. Does not fetch source, launch helpers, reconnect, infer joins or authorize effects; inventories are not one atomic evidence snapshot.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "parameters": [
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/api/health": {
       "get": {
         "operationId": "get_health",
@@ -1935,7 +2051,7 @@
       "post": {
         "operationId": "capture_action",
         "summary": "capture action",
-        "description": "stop signals the configured broker and waits up to about five seconds. clear requires stopped broker plus confirm=true, and truncates event/trace/signal stores; artifact files remain. No restart action exists.",
+        "description": "Validates CaptureAction first; invalid bodies include allowed_actions and missing_fields. Idle backends refuse with idle_backend. Existing capture-controls and clear-confirmation requirements remain unchanged.",
         "tags": [
           "capture"
         ],
@@ -10277,6 +10393,7 @@
       "DebuggerAction": {
         "oneOf": [
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10346,6 +10463,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10484,6 +10602,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10538,6 +10657,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10618,6 +10738,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10710,6 +10831,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10764,6 +10886,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10816,6 +10939,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -10873,6 +10997,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10913,6 +11038,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10948,6 +11074,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -10995,6 +11122,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11030,6 +11158,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11070,6 +11199,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11105,6 +11235,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11145,6 +11276,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11202,6 +11334,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -11269,6 +11402,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11320,6 +11454,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11375,6 +11510,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11420,6 +11556,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11607,6 +11744,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11749,6 +11887,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11811,6 +11950,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11864,6 +12004,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11914,6 +12055,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -11970,6 +12112,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12024,6 +12167,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -12078,6 +12222,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12205,6 +12350,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12258,6 +12404,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -12308,6 +12455,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12358,6 +12506,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -12405,6 +12554,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -12452,6 +12602,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12502,6 +12653,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12543,6 +12695,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -12590,6 +12743,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -12644,6 +12798,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -12692,6 +12847,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12776,6 +12932,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12872,6 +13029,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -12945,6 +13103,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13033,6 +13192,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13171,6 +13331,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -13314,6 +13475,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -13377,6 +13539,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -13485,6 +13648,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13606,6 +13770,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13658,6 +13823,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13712,6 +13878,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13769,6 +13936,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13824,6 +13992,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13910,6 +14079,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -13958,6 +14128,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -14006,6 +14177,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -14054,6 +14226,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -14102,6 +14275,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -14180,6 +14354,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": true,
             "type": "object",
             "properties": {
               "action": {
@@ -14282,6 +14457,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "properties": {
               "action": {
@@ -14388,6 +14564,7 @@
             "additionalProperties": false
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "additionalProperties": false,
             "properties": {
@@ -14434,6 +14611,7 @@
             }
           },
           {
+            "x-reb-requires-live-target": false,
             "type": "object",
             "additionalProperties": false,
             "properties": {
@@ -17961,6 +18139,307 @@
           }
         ]
       },
+      "SessionContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "instance_id",
+          "endpoint",
+          "capture_mode",
+          "debugger_state",
+          "broker_connected",
+          "live_admission",
+          "generation",
+          "debugger_protocol_version",
+          "target_document_epoch",
+          "capture_epoch",
+          "target",
+          "wasm_scripts",
+          "wasm_scripts_omitted",
+          "wasm_artifacts",
+          "debugger_etag",
+          "allow_effects",
+          "effects_admission",
+          "limits",
+          "consistency"
+        ],
+        "properties": {
+          "protocol_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128,
+            "pattern": "^[0-9:]+$",
+            "description": "Same process-lifetime identity as /api/health instance_id and X-REB-Expected-Instance. Null when the snapshot value is not that format; it is never shortened into a different id."
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "capture_mode": {
+            "enum": [
+              "idle",
+              "demo",
+              "live"
+            ],
+            "type": "string"
+          },
+          "debugger_state": {
+            "enum": [
+              "unavailable",
+              "waiting",
+              "connecting",
+              "running",
+              "paused",
+              "crashed"
+            ],
+            "type": "string"
+          },
+          "broker_connected": {
+            "type": "boolean"
+          },
+          "live_admission": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "idle",
+              "debugger_unavailable",
+              "not_live_capture"
+            ],
+            "description": "Whether this process is the ready live session. ready requires capture_mode live and a running or paused debugger. idle is an idle backend with no DevTools port. debugger_unavailable means a live capture or configured DevTools port is not attached. not_live_capture is any other mode, including demo. This is not authorization or a completeness claim."
+          },
+          "generation": {
+            "$ref": "#/components/schemas/SafeInteger",
+            "description": "Debugger snapshot generation only; not a clock for the separately read artifact manifest or broker state."
+          },
+          "debugger_protocol_version": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "target_document_epoch": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "capture_epoch": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "target": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "url",
+                  "title",
+                  "title_omitted"
+                ],
+                "properties": {
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 256
+                  },
+                  "url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 256
+                  },
+                  "title": {
+                    "type": "null"
+                  },
+                  "title_omitted": {
+                    "const": true,
+                    "type": "boolean"
+                  }
+                }
+              }
+            ]
+          },
+          "wasm_scripts": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "script_id",
+                "target_id",
+                "url",
+                "byte_length",
+                "artifact_id",
+                "sha256"
+              ],
+              "properties": {
+                "script_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 256
+                },
+                "target_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 256
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 256
+                },
+                "byte_length": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "artifact_id": {
+                  "type": "null"
+                },
+                "sha256": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "wasm_scripts_omitted": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "wasm_artifacts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "items",
+              "window_truncated",
+              "items_omitted"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "artifact_id",
+                    "session_id",
+                    "url",
+                    "byte_length",
+                    "sha256",
+                    "script_id"
+                  ],
+                  "properties": {
+                    "artifact_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "session_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 256
+                    },
+                    "byte_length": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "script_id": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              "window_truncated": {
+                "type": "boolean"
+              },
+              "items_omitted": {
+                "$ref": "#/components/schemas/SafeInteger"
+              }
+            },
+            "description": "Retained store inventory, not restricted or linked to the selected live target. May contain another session or an artifact retained after the debugger snapshot."
+          },
+          "debugger_etag": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "allow_effects": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "effects_admission": {
+            "type": "string",
+            "enum": [
+              "caller_specific_unknown",
+              "read_only_projection",
+              "effects_exposed_not_authorized"
+            ]
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "items_per_inventory",
+              "url_policy",
+              "title_policy",
+              "artifact_linkage"
+            ],
+            "properties": {
+              "items_per_inventory": {
+                "const": 16,
+                "type": "integer"
+              },
+              "url_policy": {
+                "const": "origin_or_wasm_label",
+                "type": "string"
+              },
+              "title_policy": {
+                "const": "omitted",
+                "type": "string"
+              },
+              "artifact_linkage": {
+                "const": "not_inferred",
+                "type": "string"
+              }
+            }
+          },
+          "consistency": {
+            "type": "string",
+            "const": "independent_debugger_snapshot_and_manifest_tail"
+          }
+        },
+        "description": "Bounded discovery only. Titles are omitted and URL labels contain only HTTP(S) origins or conventional Wasm hex labels, not full locations. Identifiers and origins remain potentially sensitive metadata. Scripts and retained artifacts are separate inventories with no inferred association. Byte length is CDP script length when known; sha256 is populated only from validated artifact metadata. Not an authorization or retention guarantee."
+      },
       "ErrorCode": {
         "type": "string",
         "enum": [
@@ -17975,14 +18454,16 @@
           "timeout",
           "cancelled",
           "command_outcome_unknown",
-          "application_failed"
+          "application_failed",
+          "idle_backend",
+          "debugger_unavailable"
         ],
         "description": "Stable bounded application reason. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
       },
       "ErrorDetails": {
         "type": "object",
         "additionalProperties": false,
-        "maxProperties": 5,
+        "maxProperties": 7,
         "properties": {
           "phase": {
             "type": "string",
@@ -18015,6 +18496,28 @@
               "ambiguous_request"
             ],
             "description": "Exact retained Traffic lookup only: stale instance/epoch, absent exact row, or duplicate public request ID. No alternative identifiers or raw diagnostics."
+          },
+          "allowed_actions": {
+            "type": "array",
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "maxLength": 80
+            },
+            "description": "Names from the embedded request contract only; never submitted values or validator diagnostics."
+          },
+          "missing_fields": {
+            "type": "array",
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "maxLength": 80
+            },
+            "description": "Names from the embedded request contract only; never submitted values or validator diagnostics."
           }
         },
         "description": "Allowlisted bounded metadata only. Empty when no detail is known. No arbitrary strings, target URLs or IDs, submitted inputs, credentials, raw captures, diagnostics, or stacks. request_body timeout is before action dispatch; command_exchange uncertainty covers interrupted queued/partial writes and missing or malformed replies; it cannot establish whether an action happened. Worker termination does not undo prior effects."

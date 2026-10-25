@@ -97,6 +97,15 @@ empty artifacts. The health document and local store paths are not printed.
 A live health result is not capture completeness, target identity, or permission
 to share evidence. Missing/invalid endpoints and failed health checks never
 trigger port scans, alternate-session searches, or automatic backend startup.
+Startup refusal includes `code=idle_backend`, `code=debugger_unavailable`, or
+`code=state_conflict` with the endpoint URL and bounded capture/debugger states.
+
+After a live connection is up, call `get_session_context` before other tools.
+If that same connection later leaves the ready state, other tools fail with
+those codes and are not dispatched. `get_session_context` still reads that
+connection unless the endpoint file or backend instance changed; either change
+retires the connection with no request sent. See
+[Start with compact session context](#start-with-compact-session-context).
 
 ### Read-only and write-capable tools
 
@@ -507,3 +516,58 @@ per-operation connect/read timeouts explicit; do not claim a whole-request
 deadline or browser-profile parity. Dependencies are listed, never installed by
 export, and the initial dry run needs only Python's standard library. See
 [Python project v1](../product/python-client-project-v1.md).
+
+### Start with compact session context
+
+Cursor, Grok Bot, Codex, Claude Code, and T3 Code should call
+`get_session_context` with no arguments before other tools. The same read is
+available through
+`reb-api call get_session_context --read-only --endpoint-file /path/to/selected.endpoint`.
+Fresh wrapper configs from `scripts/reb-api-mcp.sh --print-config` use the
+canonical live file and `--require-live` for all five clients. It reports
+`live_admission` (`ready`, `idle`, `debugger_unavailable`, or
+`not_live_capture`), capture/debugger state, the same `instance_id` as
+`/api/health` and `X-REB-Expected-Instance`, selected target ID, debugger
+generation/document epoch, and separate bounded Wasm script and retained-artifact
+inventories. It does not scrape or return the full debugger document, fetch
+source/bytecode, reconnect a browser, or infer which artifact belongs to which
+script.
+
+`allow_effects` is the actual MCP invocation's admission flag, not permission to
+mutate a target or share captures. Direct HTTP/CLI reads return `null` because
+those clients have no MCP admission state. Existing confirmations, ownership,
+and effects gates remain required. `live_admission` is availability only.
+`ready` means capture is live and the debugger is running or paused. `idle`
+means an idle backend with no DevTools port. `debugger_unavailable` means live
+capture or a configured DevTools port is not attached, including a crashed
+renderer. `not_live_capture` covers demo and any other non-live mode. An idle
+endpoint remains useful for stored evidence and local cleanup. Live debugger
+commands return `idle_backend` when the backend is idle and no DevTools port is
+configured, or `debugger_unavailable` when a live target is required but not
+attached. `--require-live` uses `idle_backend` for idle capture,
+`debugger_unavailable` for a live capture whose debugger is not running or
+paused, and `state_conflict` for demo or unknown health. A capture stop whose
+broker is disconnected returns `dependency_unavailable` and does not report
+success. Correct the endpoint or attachment explicitly rather than automatically
+retrying mutations.
+
+The compact read deliberately omits titles, URL userinfo/paths/query/fragments,
+source, bodies, headers, socket URLs, and diagnostics. HTTP(S) URLs are origin
+labels; conventional Wasm hex labels are retained. IDs are never truncated into
+different identities: an oversized ID is `null`. These labels/IDs can still be
+sensitive metadata, so establish provider-sharing scope first. Each inventory
+has at most 16 entries. Artifact coverage is only a 256 KiB manifest tail;
+`window_truncated` and `items_omitted` are not evidence that an absent module was
+never captured. Scripts and artifacts are not joined by URL, time, or hash.
+`artifact_id`/`script_id` and script `sha256` remain `null` where no exact link or
+verified content digest exists. Script `byte_length` is CDP's script length,
+not proof of a retained complete module.
+
+Cache `/api/session/context` with its own response ETag and `If-None-Match`.
+`debugger_etag` belongs only to `/api/debugger`; generation alone does not cover
+manifest or broker changes, and context is not an atomic evidence snapshot.
+Invalid `debugger_action` or `capture_action` bodies include bounded
+`details.allowed_actions` and `details.missing_fields`, drawn only from the
+embedded schema. MCP validation reports those details before sending an invalid
+request. Inspect the exact action with `reb-api describe debugger_action
+--action ACTION` before enabling effects or supplying confirmation fields.

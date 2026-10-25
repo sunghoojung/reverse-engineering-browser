@@ -74,6 +74,8 @@ from Cursor on that Mac, or from a backend on the same host as the bot.
 Options:
   --allow-effects       Advertise effectful operations. Not authorization.
   --require-live        Refuse idle capture or an unavailable live debugger.
+                        get_session_context remains readable after startup until
+                        the endpoint file or backend instance changes.
   --timeout SECONDS     Passed through to reb-api (default 30).
   --sessions-root DIR   Exact live-session parent directory.
   --reb-api PATH        reb-api or packaged OriginTraceAPI binary.

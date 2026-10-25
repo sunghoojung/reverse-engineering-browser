@@ -448,14 +448,24 @@ fn resolve_mcp_endpoint(
     }
 }
 
+struct LiveRefusal {
+    code: &'static str,
+    capture_mode: String,
+    debugger_state: String,
+    message: String,
+}
+struct McpHealth {
+    instance_id: Option<String>,
+    live_refusal: Option<LiveRefusal>,
+}
+
 // Health runs before stdio so a client cannot list tools for a missing session.
 // The document names local evidence paths. Only allowlisted health fields enter
 // diagnostics; the body is never printed. `no_proxy` keeps the probe on loopback.
-async fn confirm_mcp_health(
+async fn probe_mcp_health(
     base: &str,
     timeout: f64,
-    require_live: bool,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+) -> Result<McpHealth, Box<dyn std::error::Error>> {
     let mut url = root_url(base)?;
     url.set_path("/api/health");
     let client = reqwest::Client::builder()
@@ -494,9 +504,6 @@ async fn confirm_mcp_health(
                 .into(),
         );
     }
-    if require_live {
-        require_live_health(base, &value)?;
-    }
     let instance_id = value["instance_id"]
         .as_str()
         .filter(|id| {
@@ -505,13 +512,30 @@ async fn confirm_mcp_health(
                 && id.bytes().all(|byte| byte.is_ascii_digit() || byte == b':')
         })
         .map(str::to_owned);
-    if require_live && instance_id.is_none() {
-        return Err(format!("Live endpoint {base} has no supported instance_id. Rebuild the backend before connecting with --require-live. No tool request was sent.").into());
-    }
-    Ok(instance_id)
+    Ok(McpHealth {
+        instance_id,
+        live_refusal: live_refusal(base, &value),
+    })
 }
 
-fn require_live_health(base: &str, value: &Value) -> Result<(), String> {
+async fn confirm_mcp_health(
+    base: &str,
+    timeout: f64,
+    require_live: bool,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let health = probe_mcp_health(base, timeout).await?;
+    if require_live {
+        if let Some(refusal) = health.live_refusal {
+            return Err(refusal.message.into());
+        }
+        if health.instance_id.is_none() {
+            return Err(format!("Live endpoint {base} has no supported instance_id. Rebuild the backend before connecting with --require-live. No tool request was sent.").into());
+        }
+    }
+    Ok(health.instance_id)
+}
+
+fn live_refusal(base: &str, value: &Value) -> Option<LiveRefusal> {
     let capture = value["capture_mode"]
         .as_str()
         .filter(|mode| matches!(*mode, "live" | "idle" | "demo"))
@@ -532,11 +556,23 @@ fn require_live_health(base: &str, value: &Value) -> Result<(), String> {
         })
         .unwrap_or("unknown");
     if capture == "live" && matches!(debugger, "running" | "paused") {
-        return Ok(());
+        return None;
     }
-    Err(format!(
-        "Live capture is unavailable at {base}: capture_mode={capture}, debugger_state={debugger}. Reconnect after the intended live debugger is ready, or explicitly select a stored-evidence endpoint without --require-live. No tool request was sent."
-    ))
+    let code = if capture == "idle" {
+        "idle_backend"
+    } else if capture == "live" {
+        "debugger_unavailable"
+    } else {
+        "state_conflict"
+    };
+    Some(LiveRefusal {
+        code,
+        capture_mode: capture.to_owned(),
+        debugger_state: debugger.to_owned(),
+        message: format!(
+            "code={code} Live capture is unavailable at {base}: capture_mode={capture}, debugger_state={debugger}. Reconnect after the intended live debugger is ready, or explicitly select a stored-evidence endpoint without --require-live. No tool request was sent."
+        ),
+    })
 }
 
 struct McpEndpointGuard {
@@ -1011,6 +1047,7 @@ fn bounded_http_error(spec: &Value, status: u16, bytes: &[u8]) -> Value {
             json!({"$ref":"#/components/schemas/ErrorDetails","components":spec["components"]});
         if jsonschema::validator_for(&schema)
             .is_ok_and(|validator| validator.is_valid(&value["details"]))
+            && origin_trace_backend::action_guidance::valid_details(spec, &value["details"])
         {
             result["details"] = value["details"].clone();
         }

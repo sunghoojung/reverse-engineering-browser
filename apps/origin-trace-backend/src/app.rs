@@ -33,7 +33,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 36] = [
+const UI_ASSETS: [&str; 37] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -65,6 +65,7 @@ const UI_ASSETS: [&str; 36] = [
     "request_value_test.js",
     "field_provenance.js",
     "app.js",
+    "captured_vm_lab.js",
     "pane_layout.js",
     "native_console.js",
     "native_console_completion.js",

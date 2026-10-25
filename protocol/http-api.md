@@ -719,6 +719,12 @@ is the machine-readable action-to-schema map.
 
 - `compare_heap_diff`: `diff`.
 
+- `list_live_wasm_objects`: `wasm`, including `owner_scope`, `captured_owner`, and `linkage_reason`.
+
+- `read_live_wasm_memory`: `memory`.
+
+- `inspect_paused_import_object`: `import_object`. `invocation` is `unproven` and `guest_position` is null.
+
 ## Inert evidence package validation
 
 `POST /api/evidence/packages/validate` (`validate_evidence_package`) accepts a

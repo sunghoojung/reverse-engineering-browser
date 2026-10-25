@@ -7,6 +7,7 @@ mod experiment;
 mod fields;
 mod heap;
 mod hooks;
+mod import_object;
 mod marker_fuzz;
 mod network;
 mod network_browser;
@@ -22,6 +23,7 @@ mod parse;
 mod repeater;
 mod requests;
 mod wasm_capture;
+mod wasm_live;
 mod websocket;
 mod workers;
 use crate::{
@@ -58,6 +60,7 @@ pub struct Debugger {
     console_id: AtomicU64,
     heap: heap::Heap,
     memory_id: AtomicU64,
+    pause_epoch: AtomicU64,
     memory_click: AtomicBool,
     memory_started: Mutex<Option<std::time::Instant>>,
     experiment: experiment::Experiment,
@@ -69,6 +72,7 @@ pub struct Debugger {
     hooks: hooks::Hooks,
     fields: fields::Fields,
     wasm: wasm_capture::WasmCapture,
+    wasm_live: wasm_live::WasmLive,
 }
 impl Debugger {
     pub fn new(options: &Options) -> Arc<Self> {
@@ -113,6 +117,7 @@ impl Debugger {
             console_id: AtomicU64::new(1),
             heap: heap::Heap::new(),
             memory_id: AtomicU64::new(1),
+            pause_epoch: AtomicU64::new(0),
             memory_click: AtomicBool::new(false),
             memory_started: Mutex::new(None),
             experiment: experiment::Experiment::new(),
@@ -124,6 +129,7 @@ impl Debugger {
             hooks: hooks::Hooks::new(),
             fields: fields::Fields::new(),
             wasm: wasm_capture::WasmCapture::new(),
+            wasm_live: wasm_live::WasmLive::new(),
         })
     }
     pub fn snapshot(&self) -> Value {
@@ -182,6 +188,7 @@ impl Debugger {
         self.stop.notify_waiters();
         let _refresh = self.refreshing.lock().await;
         self.close_captures().await;
+        self.clear_live_wasm().await;
         if self.experiment.context().is_some() {
             let _ = self.dispose_experiment().await;
         }
@@ -351,6 +358,7 @@ impl Debugger {
         {
             return Ok(());
         }
+        self.clear_live_wasm().await;
         if let Some(connection) = self.connection.lock().await.take() {
             connection.close().await;
         }
@@ -601,6 +609,9 @@ impl Debugger {
             )
         };
         match action {
+            "inspect_paused_import_object" => {
+                return self.inspect_paused_import_object(request).await;
+            }
             "inspect_element_document" => return self.element_screenshot(request, false).await,
             "capture_element_screenshot" => return self.element_screenshot(request, true).await,
             "pause" | "resume" | "step_over" | "step_into" | "step_out" => {
@@ -752,6 +763,7 @@ impl Debugger {
                         .with_code(Code::TargetUnavailable));
                 }
                 self.clear_object_search().await;
+                self.clear_live_wasm().await;
                 self.heap
                     .baseline
                     .lock()
@@ -791,6 +803,8 @@ impl Debugger {
             "disarm_automation_recipes" => return self.disarm_recipes().await,
             "cancel_automation_recipe" => return self.cancel_recipe().await,
             "clear_automation_runs" => return self.clear_recipe_runs(),
+            "list_live_wasm_objects" => return self.list_live_wasm(request).await,
+            "read_live_wasm_memory" => return self.read_live_wasm(request).await,
             "search_live_objects" => return self.search_objects(request, false).await,
             "navigate_object_experiment" => return self.navigate_object(request).await,
             "search_object_experiment" => return self.search_objects(request, true).await,
@@ -944,6 +958,7 @@ impl Debugger {
             .as_ref()
             .is_some_and(|connection| Arc::ptr_eq(connection, owner))
         {
+            self.clear_live_wasm().await;
             self.set_state("waiting", Some(&error.message));
             self.update(|s| s["paused"] = Value::Null);
         }
@@ -970,6 +985,17 @@ impl Debugger {
         };
         let method = message["method"].as_str().unwrap_or("");
         let p = &message["params"];
+        if [
+            "Page.frameNavigated",
+            "Page.documentOpened",
+            "Page.navigatedWithinDocument",
+            "Runtime.executionContextDestroyed",
+            "Runtime.executionContextsCleared",
+        ]
+        .contains(&method)
+        {
+            self.clear_live_wasm().await;
+        }
         if [
             "Page.frameNavigated",
             "Page.navigatedWithinDocument",
@@ -1023,8 +1049,8 @@ impl Debugger {
             "Debugger.scriptParsed"=>self.on_script_parsed(p),
             "Runtime.executionContextDestroyed"|"Runtime.executionContextsCleared"=>{self.update(|s| {self.hooks.candidate_source_changed(s["target"]["id"].as_str().unwrap_or(""));let clear=method.ends_with("Cleared");s["scripts"].as_array_mut().unwrap().retain(|v|v["target_type"]=="worker" || (!clear && v["execution_context_id"]!=p["executionContextId"]));let ids=s["scripts"].as_array().unwrap().iter().map(|v|v["script_id"].clone()).collect::<Vec<_>>();for b in s["breakpoints"].as_array_mut().unwrap() {b["locations"].as_array_mut().unwrap().retain(|l|ids.contains(&l["script_id"]));}})},
             "Page.frameNavigated"=>{if !p["frame"]["parentId"].is_string() {self.hooks.candidate_epoch.fetch_add(1,Ordering::AcqRel);self.clear_object_search().await;self.hooks_navigated().await;}},
-            "Debugger.paused"=>{let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();if owner.clone().is_some_and(|session| self.hook_pause(&target,session,p.clone())) {return;}let pause=parse::pause(p);self.update(|s| {s["state"]=json!("paused");s["error"]=Value::Null;s["paused"]=pause;});let generation=self.snapshot()["generation"].as_u64().unwrap();let weak=Arc::downgrade(self);tokio::spawn(async move {if let Some(debugger)=weak.upgrade() {if debugger.memory_active(debugger.snapshot()["memory_origin_trace"]["trace_id"].as_u64().unwrap()) {debugger.memory_pause(debugger.snapshot()["paused"].clone()).await;} else {debugger.enrich(generation).await;}}});},
-            "Debugger.resumed"=>{if let Some(owner)=owner {self.hook_resumed(self.snapshot()["target"]["id"].as_str().unwrap_or(""),&owner);}self.update(|s| {if s["state"]!="crashed" {s["state"]=json!("running");s["paused"]=Value::Null;}})},
+            "Debugger.paused"=>{let target=self.snapshot()["target"]["id"].as_str().unwrap_or("").to_owned();if owner.clone().is_some_and(|session| self.hook_pause(&target,session,p.clone())) {return;}let pause=parse::pause(p);self.update(|s| {self.pause_epoch.fetch_add(1, Ordering::AcqRel);s["state"]=json!("paused");s["error"]=Value::Null;s["paused"]=pause;});let generation=self.snapshot()["generation"].as_u64().unwrap();let weak=Arc::downgrade(self);tokio::spawn(async move {if let Some(debugger)=weak.upgrade() {if debugger.memory_active(debugger.snapshot()["memory_origin_trace"]["trace_id"].as_u64().unwrap()) {debugger.memory_pause(debugger.snapshot()["paused"].clone()).await;} else {debugger.enrich(generation).await;}}});},
+            "Debugger.resumed"=>{if let Some(owner)=owner {self.hook_resumed(self.snapshot()["target"]["id"].as_str().unwrap_or(""),&owner);}self.update(|s| {self.pause_epoch.fetch_add(1, Ordering::AcqRel);if s["state"]!="crashed" {s["state"]=json!("running");s["paused"]=Value::Null;}})},
             "Debugger.breakpointResolved"=>if let Some(location)=parse::location(&p["location"]) {self.update(|s| {if let Some(b)=s["breakpoints"].as_array_mut().unwrap().iter_mut().find(|b|b["id"]==p["breakpointId"]) {let locations=b["locations"].as_array_mut().unwrap();if !locations.contains(&location) {if locations.len()<256 {locations.push(location);} else {b["locations_truncated"]=json!(true);}}}});},
             "Runtime.exceptionThrown" => {let d=&p["exceptionDetails"];let value=if d["exception"].is_object() {d["exception"].clone()} else {json!({"type":"string","value":d["text"].as_str().unwrap_or("Exception")})};self.append_console(&json!({"type":"error","timestamp":p["timestamp"],"args":[value],"stackTrace":d["stackTrace"]}));},
             "Log.entryAdded" => {let e=&p["entry"];self.append_console(&json!({"type":e["level"].as_str().unwrap_or("info"),"timestamp":e["timestamp"],"args":[{"type":"string","value":e["text"].as_str().unwrap_or("")}],"stackTrace":e["stackTrace"]}));},

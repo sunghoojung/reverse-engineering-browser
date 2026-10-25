@@ -497,3 +497,17 @@ After proven completion, body retrieval uses the terminal event's exact session;
 it does not transfer unrelated requests or invent response headers/status.
 Missing responses and detached body owners remain incomplete/unavailable. This
 repairs a lifecycle handoff, not passive capture of a target's first requests.
+
+## Live Wasm inspection
+
+[Live Wasm inspection v1](../../protocol/live-wasm-inspection-v1.md) adds explicit
+prototype-based Instance/Module/Memory listing and confirmed 1–4096-byte memory
+reads. The navigated disposable Object Lab page remains one owner. The other is
+the exact attached page, and only when `confirmed` is true and `captured_owner`
+matches that document. Other pages are refused. Handles expire in 60 seconds;
+artifact-only selection and guessed source joins stay unavailable
+(`linkage_reason`). `make heap-snapshot-check` exercises native V8 ingest,
+including reordered sections, and `node tools/check-live-wasm.mjs` uses the real
+local Node inspector. The debugger **Captured document** pane calls these
+actions and the paused import-object map. Caller dispatch reports are not
+treated as a live sampler.

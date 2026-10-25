@@ -621,7 +621,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
     }
     assert_eq!(
         names.len(),
-        62,
+        65,
         "Review debugger action coverage when the dispatcher changes"
     );
     assert_eq!(names, mappings.keys().map(String::as_str).collect());
@@ -828,8 +828,9 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         }
     }
     // Includes explicit element document inspection, confirmed screenshot capture,
-    // and live-capture native console connect.
-    assert_eq!(action_count, 85);
+    // live-capture native console connect, live Wasm inspection, and paused
+    // import-object mapping.
+    assert_eq!(action_count, 88);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -891,7 +892,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             "Dispatch coverage: {name}"
         );
     }
-    assert_eq!(action_names("DebuggerAction").len(), 62);
+    assert_eq!(action_names("DebuggerAction").len(), 65);
     for (name, source, pattern) in [
         (
             "NativeConsoleAction",
@@ -7368,6 +7369,49 @@ fn response_event_for_vm_test(root: &Value) -> Value {
     response["sequence_number"] = json!("12");
     response["type"] = json!("response_started");
     response
+}
+
+#[tokio::test]
+async fn live_wasm_requires_disposable_owner_and_explicit_bounded_reads() {
+    let server = Server::start().await;
+    // An idle backend refuses before page classification. Attached-page
+    // confirmation and captured_owner checks live in the debugger unit tests.
+    for request in [
+        json!({"action":"list_live_wasm_objects","target_id":"baseline"}),
+        json!({"action":"read_live_wasm_memory","target_id":"baseline","listing_id":1,"object_id":"memory:0","offset":0,"length":4,"confirmed":true}),
+        json!({"action":"list_live_wasm_objects","target_id":"baseline","captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}}),
+        json!({"action":"list_live_wasm_objects","target_id":"other","confirmed":true,"captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}}),
+    ] {
+        let response = server.action("/api/debugger/actions", request).await;
+        assert_eq!(response.status(), 409);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "idle_backend");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("authorized live endpoint"),
+            "{}",
+            body["error"]
+        );
+    }
+    for (key, value) in [
+        ("confirmed", json!(false)),
+        ("length", json!(4097)),
+        ("length", json!(0)),
+        ("offset", json!(-1)),
+        ("target_id", json!("")),
+    ] {
+        let mut request = json!({"action":"read_live_wasm_memory","target_id":"baseline","listing_id":1,"object_id":"memory:0","offset":0,"length":4,"confirmed":true});
+        request[key] = value;
+        assert_eq!(
+            server
+                .action("/api/debugger/actions", request)
+                .await
+                .status(),
+            400
+        );
+    }
 }
 
 #[tokio::test]

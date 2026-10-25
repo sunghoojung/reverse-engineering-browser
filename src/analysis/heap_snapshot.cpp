@@ -102,6 +102,8 @@ class JsonReader final {
  public:
   explicit JsonReader(const std::string_view input) noexcept : input_(input) {}
 
+  [[nodiscard]] std::size_t Position() const noexcept { return position_; }
+
   [[nodiscard]] bool AtEnd() noexcept {
     SkipWhitespace();
     return position_ == input_.size();
@@ -169,18 +171,28 @@ class JsonReader final {
             return false;
           }
           if (code_point >= 0xd800U && code_point <= 0xdbffU) {
-            if (position_ + 2 > input_.size() || input_[position_] != '\\' ||
-                input_[position_ + 1] != 'u') {
-              return false;
-            }
-            position_ += 2;
+            // JSON permits unpaired UTF-16 code units and V8 strings can
+            // contain them. Keep valid pairs; normalize an isolated unit for
+            // UTF-8 display and make the lost string fidelity visible.
+            const std::size_t saved = position_;
             std::uint32_t low = 0;
-            if (!ReadHexQuad(low) || low < 0xdc00U || low > 0xdfffU) {
-              return false;
+            if (position_ + 2 <= input_.size() && input_[position_] == '\\' &&
+                input_[position_ + 1] == 'u') {
+              position_ += 2;
+              if (!ReadHexQuad(low)) {
+                return false;
+              }
             }
-            code_point = 0x10000U + ((code_point - 0xd800U) << 10U) + (low - 0xdc00U);
+            if (low >= 0xdc00U && low <= 0xdfffU) {
+              code_point = 0x10000U + ((code_point - 0xd800U) << 10U) + (low - 0xdc00U);
+            } else {
+              position_ = saved;
+              code_point = 0xfffdU;
+              truncated = true;
+            }
           } else if (code_point >= 0xdc00U && code_point <= 0xdfffU) {
-            return false;
+            code_point = 0xfffdU;
+            truncated = true;
           }
           AppendCodePoint(code_point, output, maximum_bytes, truncated);
           break;
@@ -198,7 +210,7 @@ class JsonReader final {
     while (position_ < input_.size() && input_[position_] >= '0' && input_[position_] <= '9') {
       ++position_;
     }
-    if (start == position_) {
+    if (start == position_ || (position_ - start > 1 && input_[start] == '0')) {
       return false;
     }
     const char* first = input_.data() + start;
@@ -612,8 +624,55 @@ bool ParseSnapshotStrings(JsonReader& reader, SnapshotData& data) {
   }
 }
 
-bool ParseSnapshotDocument(const std::string_view document, SnapshotData& data) {
+bool ParseSnapshotDocument(const std::string_view document,
+                           SnapshotData& data,
+                           std::string& error) {
+  JsonReader header(document);
+  // Object member order is not a schema/version signal. Discover bounded
+  // metadata first without retaining arrays, then parse data with its layout.
+  if (!header.Consume('{') || header.Consume('}')) {
+    error = "Heap snapshot must be a nonempty V8 JSON object";
+    return false;
+  }
+  bool found_header = false;
+  while (true) {
+    std::string key;
+    bool truncated = false;
+    if (!header.ReadString(key, kMaxMetadataTextBytes, truncated) || truncated ||
+        !header.Consume(':')) {
+      error =
+          "Heap snapshot JSON has an invalid member near byte " + std::to_string(header.Position());
+      return false;
+    }
+    bool valid = false;
+    if (key == "snapshot") {
+      valid = !found_header && ParseSnapshotHeader(header, data);
+      found_header = true;
+    } else {
+      valid = header.SkipValue();
+    }
+    if (!valid) {
+      error = "Heap snapshot JSON or V8 metadata is invalid near byte " +
+              std::to_string(header.Position()) +
+              "; verify a complete HeapProfiler snapshot (metadata limit: 64 fields, depth: 64)";
+      return false;
+    }
+    if (header.Consume('}')) {
+      if (!header.AtEnd() || !found_header) {
+        error =
+            "Heap snapshot requires exactly one V8 snapshot metadata object and no trailing data";
+        return false;
+      }
+      break;
+    }
+    if (!header.Consume(',')) {
+      error = "Heap snapshot JSON is incomplete near byte " + std::to_string(header.Position());
+      return false;
+    }
+  }
   JsonReader reader(document);
+  unsigned seen = 0;
+  error = "Heap snapshot V8 data arrays are malformed or exceed the supported metadata layout";
   if (!reader.Consume('{') || reader.Consume('}')) {
     return false;
   }
@@ -624,8 +683,18 @@ bool ParseSnapshotDocument(const std::string_view document, SnapshotData& data) 
         !reader.Consume(':')) {
       return false;
     }
+    const unsigned section = key == "snapshot"  ? 1U
+                             : key == "nodes"   ? 2U
+                             : key == "edges"   ? 4U
+                             : key == "strings" ? 8U
+                                                : 0U;
+    if ((seen & section) != 0) {
+      error = "Heap snapshot repeats a required V8 section";
+      return false;
+    }
+    seen |= section;
     if (key == "snapshot") {
-      if (!ParseSnapshotHeader(reader, data)) {
+      if (!reader.SkipValue()) {
         return false;
       }
     } else if (key == "nodes") {
@@ -674,6 +743,10 @@ bool ParseSnapshotDocument(const std::string_view document, SnapshotData& data) 
       return false;
     }
     if (reader.Consume('}')) {
+      if (seen != 15U) {
+        error = "Heap snapshot requires snapshot, nodes, edges, and strings sections";
+        return false;
+      }
       return reader.AtEnd();
     }
     if (!reader.Consume(',')) {
@@ -832,8 +905,7 @@ bool LoadSnapshot(const std::filesystem::path& snapshot_path,
   if (!document.Open(snapshot_path, error)) {
     return false;
   }
-  if (!ParseSnapshotDocument(document.View(), data)) {
-    error = "Heap snapshot JSON is malformed or unsupported";
+  if (!ParseSnapshotDocument(document.View(), data, error)) {
     return false;
   }
 
@@ -854,7 +926,9 @@ bool LoadSnapshot(const std::filesystem::path& snapshot_path,
       layout.edge_target_field == kNoNode || data.node_types.empty() || data.edge_types.empty() ||
       data.node_values_seen % layout.node_width != 0 ||
       data.edge_values_seen % layout.edge_width != 0) {
-    error = "Heap snapshot metadata is incomplete";
+    error =
+        "Unsupported V8 heap snapshot layout: expected type/name/id/self_size/edge_count nodes and "
+        "type/name_or_index/to_node edges with aligned data arrays";
     return false;
   }
   const std::size_t actual_nodes = data.node_values_seen / layout.node_width;

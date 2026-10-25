@@ -85,6 +85,25 @@ jobs:
           REB_PYTHON=/tmp/reb-python-export/bin/python \
             node tools/check-python-client-project.mjs --providers
 
+  heap-wasm-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build production backend and native heap helpers
+        run: make origin-trace-backend debugger-transport heap-snapshot
+
+      - name: Exercise owned heap and disposable Wasm inspection in Chrome
+        run: |
+          ORIGIN_TRACE_TEST_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export ORIGIN_TRACE_TEST_BROWSER
+          test -n "$ORIGIN_TRACE_TEST_BROWSER"
+          printf 'Browser executable: %s\n' "$ORIGIN_TRACE_TEST_BROWSER"
+          node --version
+          node tools/check-origin-trace-debugger.mjs --heap-wasm-browser
+
   requests-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 15

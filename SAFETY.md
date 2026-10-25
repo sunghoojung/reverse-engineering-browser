@@ -78,6 +78,17 @@ it.
   stale ownership rather than retargeting. This exception does not authorize other
   mutable tools, unrelated baseline tabs, production credentials, or automatic
   execution of extracted code.
+- Live Wasm inspection is a second, narrower exception. `list_live_wasm_objects`
+  and `read_live_wasm_memory` may run helper JavaScript in the exact attached
+  page only after the researcher sends `confirmed: true` and `captured_owner`
+  for that document (`instance_id`, connection epoch, document epoch, and
+  target id). Navigation, replacement, a worker, or any other target invalidates
+  the confirmation. The disposable Object Lab path remains available and does
+  not use `captured_owner`. Reads copy 1–4096 bytes; at most 32 handles per kind
+  are kept for 60 seconds. Prototype queries do not prove artifact identity.
+  This exception does not authorize challenge solving, automatic
+  instrumentation, guest program-counter invention, or inspection of a page
+  that was not the attached document.
 - Other experiments do not read or modify baseline tabs, production cookies,
   storage, or credentials. Never execute extracted code automatically.
 

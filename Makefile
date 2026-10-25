@@ -16,3 +16,5 @@ all: native-vm-fixture demo producer broker artifact-producer artifact-receiver 
 
 .PHONY: native-vm-fixture native-vm-recorder-check owned-vm-helper-check
 native-vm-fixture: $(NATIVE_VM_FIXTURE_BINARY)
+
+.PHONY: heap-snapshot-check

@@ -1169,8 +1169,10 @@ Hooks panel can target a function inside a minified line. Inline script offsets
 are included; readable representations cannot change the runtime cursor.
 In a connected session, **Hooks** opens the shared Runtime Hooks workspace
 beside the Sources editor, with its ephemeral hit trail below the code. The
-panel creates and manages the same disposable Experiment context used by
-Experiments; its header labels the isolation and links back to Experiments.
+panel can manage the same disposable Experiment context used by Experiments,
+or explicitly bind a live JavaScript source on the attached captured document.
+The header identifies which document is selected. Captured hooks do not require
+creating or navigating a disposable page.
 On the attached captured page, before an isolated context exists, the same
 panel lists that page's JavaScript and **Pause at this line** sets a debugger
 breakpoint on the selected script. The page stays paused when the line runs.
@@ -1263,6 +1265,15 @@ and incomplete native rows stay in Traffic with an unlinked notice; they never
 silently open session-wide analysis. The request-scoped view uses only acknowledged response
 creator chains and has a Back to traffic control. Use workspace navigation
 explicitly to inspect unfiltered session analysis.
+
+**Captured document**, in the debugger sidebar, and **Captured document VM Lab**,
+on the VM workbench, map a paused local, closure, or block binding with `inspect_paused_import_object`
+and can list or read live Wasm memory for the navigated Object Lab page or the
+confirmed attached page. Import rows keep `invocation` unproven and
+`guest_position` null. Heap snapshots stay in Memory Explorer; reordered V8
+sections remain readable. This lab does not invent a guest program counter or
+claim a live sampler. Caller dispatch reports remain a separate offline input.
+
 When the selected finding has a validated opcode workspace, VM Lab adds the
 handler mapping, runtime typed-array bytecode preview, characterized coverage,
 named omissions, and residual unknowns beneath the unchanged detection detail.

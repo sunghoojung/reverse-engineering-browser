@@ -1,6 +1,6 @@
 # Runtime Hook demo labs
 
-Two local, educational fixtures show different instrumentation boundaries. Use
+Three local, educational fixtures show different instrumentation boundaries. Use
 fake inputs only.
 
 ## 1. Page callback: REB's current hook target
@@ -112,3 +112,15 @@ Live-function-object mode offers an additional entry-only test using
 closure-held `_0x2a814c` signer. Ghostwire's object discovery and REB's
 source-location hook are distinct approaches; both use CDP rather than native
 V8 instrumentation.
+
+## 3. Owned Wasm imports on the attached page
+
+`node apps/runtime-hook-demo/lab.mjs --page imports --port 7321` serves a tiny
+owned Wasm module whose sole function import is `env.clock`. The explicit
+**Pause before instantiation** button makes its local import object available
+without evaluating page expressions. Follow the
+[paused import-object map workflow](../../protocol/paused-import-object-v1.md)
+to inspect descriptor bindings, select `ownedClock`, add and explicitly arm a
+captured-document hook, then use **Run benign Wasm call** for hits. No disposable
+page navigation is necessary. Getter/proxy trap counters must remain zero.
+The map proves only observed object bindings, never an invocation or guest PC.

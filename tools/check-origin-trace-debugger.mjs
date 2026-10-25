@@ -54,8 +54,9 @@ const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const candidateBridgeBrowser = process.argv[2] === "--candidate-bridge-ui-browser";
 const elementScreenshotBrowser = process.argv[2] === "--element-screenshot-ui-browser";
+const heapWasmBrowser = process.argv[2] === "--heap-wasm-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[elementScreenshotBrowser || candidateBridgeBrowser || fieldsOnly || canvasBrowser || sourcesTreeBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[heapWasmBrowser || elementScreenshotBrowser || candidateBridgeBrowser || fieldsOnly || canvasBrowser || sourcesTreeBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkCandidateFixture();
 await checkCandidateExperimentController(root);
 await checkSourceWindowModel(root);
@@ -6598,6 +6599,10 @@ const fixture = createServer((req, res) => {
   if (req.url === "/page") {
     res.setHeader("Content-Type", "text/html");
     res.end(`<!doctype html><title>Origin Trace disposable fixture</title><link rel="icon" href="data:,"><button id="click">Click</button><script>globalThis.fixtureObject={originTraceMarker:"fixture",count:1};
+globalThis.ownedWasmModule=new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,5,3,1,0,1,7,10,1,6,109,101,109,111,114,121,2,0]));
+globalThis.ownedWasmInstance=new WebAssembly.Instance(ownedWasmModule);
+globalThis.ownedWasmMemory=ownedWasmInstance.exports.memory;
+new Uint8Array(ownedWasmMemory.buffer).set([17,33,65,129]);
 function makePayload(input){
 const out=input+"-observed";
 return out;
@@ -6843,6 +6848,107 @@ try {
       );
     };
     await until((s) => s.state === "running");
+    if (heapWasmBrowser) {
+      // Only authored loopback documents: exercise production HTTP, native heap
+      // ingest and real Chrome handles, without enabling baseline execution.
+      const rejectAction = async (action, values, status) => {
+        const response = await fetch(url + "/api/debugger/actions", {
+          method: "POST", headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({action, ...values}), signal: AbortSignal.timeout(15000),
+        });
+        assert.equal(response.status, status, await response.text());
+      };
+      const baseline = (await get()).target.id;
+      const heap = await action("search_heap_snapshot", {
+        query:"originTraceMarker", scope:"all", case_sensitive:true,
+      });
+      assert.equal(heap.snapshot.protocol_version, 2);
+      assert.equal(heap.snapshot.scope, "all");
+      assert(heap.snapshot.file_bytes > 0 && heap.snapshot.analyzed_nodes > 0);
+      assert(heap.snapshot.results.some(row => row.name === "originTraceMarker"),
+        "Native heap ingest must find the authored string marker");
+      await rejectAction("list_live_wasm_objects", {target_id:baseline}, 409);
+      const attached = await get();
+      const capturedOwner = {
+        instance_id: attached.network.instance_id,
+        connection_epoch: attached.network.capture_epoch,
+        document_epoch: attached.target_document_epoch,
+        target_id: baseline,
+      };
+      await rejectAction("list_live_wasm_objects", {target_id: baseline, captured_owner: capturedOwner}, 400);
+      await rejectAction("list_live_wasm_objects", {target_id: "other-page", confirmed: true, captured_owner: {...capturedOwner, target_id: "other-page"}}, 409);
+      const capturedList = await action("list_live_wasm_objects", {target_id: baseline, confirmed: true, captured_owner: capturedOwner});
+      assert.equal(capturedList.wasm.owner_scope, "captured_document");
+      assert.deepEqual(capturedList.wasm.captured_owner, capturedOwner);
+      assert.match(String(capturedList.wasm.linkage_reason), /identity/);
+      for (const kind of ["instance", "module", "memory"]) {
+        assert(capturedList.wasm.objects.some(row => row.kind === kind), `Missing captured ${kind}`);
+      }
+      const capturedInstance = capturedList.wasm.objects.find(row => row.kind === "instance");
+      const capturedMemory = await action("read_live_wasm_memory", {
+        target_id: baseline, listing_id: capturedList.wasm.listing_id, object_id: capturedInstance.id,
+        export_name: "memory", offset: 0, length: 4, confirmed: true, captured_owner: capturedOwner,
+      });
+      assert.equal(capturedMemory.memory.owner_scope, "captured_document");
+      assert.deepEqual(capturedMemory.memory.bytes, [17, 33, 65, 129]);
+      assert.equal(capturedMemory.memory.atomic, false);
+      await rejectAction("read_live_wasm_memory", {
+        target_id: baseline, listing_id: capturedList.wasm.listing_id, object_id: capturedInstance.id,
+        export_name: "memory", offset: 0, length: 4, confirmed: true,
+      }, 409);
+      console.log(`PASS ${name} real Chrome heap ingest, captured-document Wasm inspection, and unconfirmed refusal`);
+      await action("create_request_interception_experiment");
+      let state = await until(s => s.state === "running" &&
+        s.target?.id === s.request_interception.target_id && s.action_scope.state === "ready");
+      const target = state.target.id;
+      assert.notEqual(target, baseline);
+      assert.equal(state.request_interception.isolated, true);
+      await rejectAction("list_live_wasm_objects", {target_id:target}, 409);
+      await action("navigate_object_experiment", {url:fixtureUrl + "/page"});
+      await until(s => s.request_interception.pending_requests === 0 &&
+        s.object_experiment.target_id === target && s.object_experiment.navigation_id > 0);
+      await rejectAction("list_live_wasm_objects", {target_id:baseline}, 409);
+      const listed = await action("list_live_wasm_objects", {target_id:target});
+      assert.equal(listed.wasm.owner_scope, "object_experiment");
+      assert.equal(listed.wasm.captured_owner, null);
+      assert.match(String(listed.wasm.linkage_reason), /identity/);
+      const current = await get();
+      await rejectAction("list_live_wasm_objects", {target_id: target, confirmed: true, captured_owner: {
+        instance_id: current.network.instance_id, connection_epoch: current.network.capture_epoch,
+        document_epoch: current.target_document_epoch, target_id: target}}, 409);
+      for (const kind of ["instance", "module", "memory"]) {
+        assert(listed.wasm.objects.some(row => row.kind === kind), `Missing live ${kind}`);
+      }
+      const instance = listed.wasm.objects.find(row => row.kind === "instance");
+      const memory = listed.wasm.objects.find(row => row.kind === "memory");
+      const module = listed.wasm.objects.find(row => row.kind === "module");
+      const read = {target_id:target, listing_id:listed.wasm.listing_id, object_id:instance.id,
+        export_name:"memory", offset:0, length:4, confirmed:true};
+      const exported = await action("read_live_wasm_memory", read);
+      assert.equal(exported.memory.owner_scope, "object_experiment");
+      assert.deepEqual(exported.memory.bytes, [17,33,65,129]);
+      assert.equal(exported.memory.atomic, false);
+      const direct = {...read, object_id:memory.id};
+      delete direct.export_name;
+      assert.deepEqual((await action("read_live_wasm_memory", direct)).memory.bytes, [17,33,65,129]);
+      await rejectAction("read_live_wasm_memory", {...read, target_id:baseline}, 409);
+      await rejectAction("read_live_wasm_memory", {...read, export_name:"missing"}, 409);
+      await rejectAction("read_live_wasm_memory", {...read, offset:65536}, 409);
+      await rejectAction("read_live_wasm_memory", {...read, length:4097}, 400);
+      await rejectAction("read_live_wasm_memory", {...read, confirmed:false}, 400);
+      await rejectAction("read_live_wasm_memory", {...direct, object_id:module.id}, 400);
+      const replacement = await action("list_live_wasm_objects", {target_id:target});
+      await rejectAction("read_live_wasm_memory", read, 409);
+      const fresh = {...read, listing_id:replacement.wasm.listing_id,
+        object_id:replacement.wasm.objects.find(row => row.kind === "instance").id};
+      await action("navigate_object_experiment", {url:fixtureUrl + "/page"});
+      await until(s => s.request_interception.pending_requests === 0);
+      await rejectAction("read_live_wasm_memory", fresh, 409);
+      await action("dispose_request_interception_experiment");
+      console.log(`PASS ${name} real Chrome Wasm handles, direct/export slices, owner/bounds/confirmation refusals and listing/navigation invalidation`);
+      passed += 2;
+      continue;
+    }
     if (elementScreenshotBrowser) {
       const address = trafficDevtoolsAddress(await readFile(join(profile, "DevToolsActivePort"), "utf8"));
       await checkElementScreenshotUI({address,uiURL:url,fixtureURL:fixtureUrl,root,socketFactory:trafficBrowserSocket});
@@ -7218,6 +7324,20 @@ try {
     });
     assert(result.search.results.length > 0);
     console.log(`PASS ${name} passive live object search`);
+    passed++;
+    const wasmTarget=(await get()).target.id;
+    const listed=await action("list_live_wasm_objects",{target_id:wasmTarget});
+    for(const kind of ["instance","module","memory"]) assert(listed.wasm.objects.some(v=>v.kind===kind));
+    const liveInstance=listed.wasm.objects.find(v=>v.kind==="instance");
+    const sliceRequest={target_id:wasmTarget,listing_id:listed.wasm.listing_id,object_id:liveInstance.id,export_name:"memory",offset:0,length:4,confirmed:true};
+    const slice=await action("read_live_wasm_memory",sliceRequest);
+    assert.deepEqual(slice.memory.bytes,[17,33,65,129]);assert.equal(slice.memory.atomic,false);
+    const rawAction=body=>fetch(url+"/api/debugger/actions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    assert.equal((await rawAction({action:"read_live_wasm_memory",...sliceRequest,length:4097})).status,400);
+    assert.equal((await rawAction({action:"read_live_wasm_memory",...sliceRequest,confirmed:false})).status,400);
+    await action("list_live_wasm_objects",{target_id:wasmTarget});
+    assert.equal((await rawAction({action:"read_live_wasm_memory",...sliceRequest})).status,409);
+    console.log(`PASS ${name} disposable live Wasm listing, memory export slice, bounds, confirmation and stale listing`);
     passed++;
     await until(
       (s) =>

@@ -321,6 +321,7 @@
                 <details class="debug-pane" open><summary>Watch</summary><div class="debug-pane-body"><form id="watch-form" class="debug-form"><input id="watch-expression" type="text" placeholder="Add expression" aria-label="Watch expression" autocomplete="off" /><button type="submit" aria-label="Add watch expression">+</button></form><div id="watch-list"></div></div></details>
                 <details class="debug-pane" open><summary>Breakpoints</summary><div id="breakpoint-list" class="debug-pane-body">No breakpoints</div></details>
                 <details class="debug-pane" open><summary>Scope</summary><div id="scope-list" class="debug-pane-body">Not paused</div></details>
+                <details id="debugger-vm-lab" class="debug-pane"><summary>Captured document</summary><div id="debugger-vm-lab-body" class="debug-pane-body"></div></details>
                 <details class="debug-pane" open><summary>Call Stack</summary><div id="call-stack" class="debug-pane-body">Not paused</div></details>
                 <details class="debug-pane"><summary>Pause on exceptions</summary><div class="debug-pane-body"><select id="pause-on-exceptions" class="debug-select" aria-label="Pause on exceptions"><option value="none">Don't pause</option><option value="uncaught">Uncaught exceptions</option><option value="all">Caught and uncaught</option></select></div></details>
                 <details class="debug-pane"><summary>XHR/fetch Breakpoints</summary><div class="debug-pane-body"><form id="xhr-breakpoint-form" class="debug-form"><input id="xhr-breakpoint-pattern" type="text" placeholder="URL contains" aria-label="XHR or fetch URL pattern" autocomplete="off" /><button type="submit" aria-label="Add XHR breakpoint">+</button></form><div id="xhr-breakpoint-list"></div></div></details>
@@ -429,6 +430,7 @@
               <div id="vm-detail" class="vm-detail" tabindex="0"></div>
             </div>
             <details class="vm-program-example"><summary>Explore a deterministic owned VM example <span>Fixture replay · no capture or execution</span></summary><div id="vm-program-workspace" class="vm-program-workspace"></div></details>
+            <details id="vm-captured-lab" class="vm-program-example"><summary>Captured document VM Lab <span>Paused import map and live Wasm memory. No guest PC.</span></summary><div id="vm-captured-lab-body" class="vm-program-workspace"></div></details>
             </div>
             <section id="vm-owned-debugger" aria-label="Live owned native fixture" hidden></section>
             <section id="vm-contextual-workspace" class="vm-contextual-workspace" aria-label="Per-build contextual VM analysis" hidden></section>
@@ -1506,6 +1508,7 @@
     <script src="investigation_notebook.js"></script>
     <script src="element_screenshot.js"></script>
     <script src="local_override_manager.js"></script>
+    <script src="captured_vm_lab.js"></script>
     <script src="app.js"></script>
     <script src="vm_program_workspace.js"></script>
   </body>

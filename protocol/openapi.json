@@ -2578,7 +2578,7 @@
       "post": {
         "operationId": "debugger_action",
         "summary": "debugger action",
-        "description": "Explicit action allowlist; live controls require the configured debugger; some local state actions work without a browser. State-specific locks and confirmation gates apply. Schema-invalid action fields return 400; unavailable state, ownership conflicts, and some action-specific semantic checks return 409. Do not retry mutation or evaluation automatically after an uncertain transport failure.",
+        "description": "Explicit action allowlist; live controls require the configured debugger; some local state actions work without a browser. State-specific locks and confirmation gates apply. Schema-invalid action fields return 400; unavailable state, ownership conflicts, and some action-specific semantic checks return 409. Do not retry mutation or evaluation automatically after an uncertain transport failure. describe --action names effects and the fields a captured Wasm or paused import action still requires.",
         "tags": [
           "debugger"
         ],
@@ -2717,7 +2717,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "notes": "Use reb-api describe debugger_action --action NAME for that action's effects, confirmations, and required fields. Effectful actions stay off the default MCP tool list until --allow-effects. list_live_wasm_objects and read_live_wasm_memory need the navigated Object Lab page, or confirmed true plus captured_owner (instance_id, connection_epoch, document_epoch, target_id). inspect_paused_import_object needs expected_generation, owner, call_frame_id, scope_index, and binding_name. Missing fields are rejected and are not inferred. No action inherits a default effect classification.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -15015,9 +15015,302 @@
                 }
               ]
             }
+          },
+          {
+            "x-reb-requires-live-target": true,
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "list_live_wasm_objects"
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              },
+              "confirmed": {
+                "const": true,
+                "type": "boolean",
+                "description": "Required when captured_owner is present. Authorizes helper JavaScript in that exact attached page. Object Lab listings omit it."
+              },
+              "captured_owner": {
+                "description": "Exact attached page owner: instance_id, connection_epoch, document_epoch, target_id. Omit on the navigated disposable Object Lab page. Other pages are refused.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CapturedHookOwner"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "action",
+              "target_id"
+            ],
+            "additionalProperties": false,
+            "x-source": [
+              "apps/origin-trace-backend/src/debugger/wasm_live.rs"
+            ],
+            "x-result-schema": "#/components/schemas/DebuggerLiveWasmResult",
+            "description": "Selected-default-realm Wasm inspection. Without captured_owner, the navigated disposable Object Lab page must own target_id. With captured_owner, confirmed must be true and every owner field must match the attached page (instance_id, connection_epoch, document_epoch, target_id). Workers and other pages are refused. Does not infer live ownership from retained artifacts. Handles expire after 60 seconds; at most 32 objects per kind are retained. linkage_reason stays explicit when artifact join is unavailable.",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "browser-control",
+                "code-execution",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Remote-handle group cleanup fails or times out; the selected owned debugger transport is retired without retry to release retained renderer roots."
+                },
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "Replaced WebAssembly/Object/Reflect/typed-array built-ins run target code and can have downstream effects."
+                },
+                {
+                  "effects": [
+                    "live-target-mutation"
+                  ],
+                  "when": "captured_owner is present: helper JavaScript runs in the confirmed attached page, not a disposable context."
+                }
+              ],
+              "uncertainties": [
+                "Target-side built-ins may have effects; this is not a read-only sandbox. Shared memory may change during copying."
+              ],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "Either the navigated disposable Object Lab page owns target_id, or confirmed is true and captured_owner matches the attached page (instance_id, connection_epoch, document_epoch, target_id). A disposable Experiment context refuses captured_owner. Workers and other pages are refused. Listing requires the default realm WebAssembly constructors."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {
+                    "type": "object",
+                    "required": [
+                      "captured_owner"
+                    ],
+                    "properties": {
+                      "captured_owner": {
+                        "type": "object"
+                      }
+                    },
+                    "additionalProperties": true
+                  }
+                }
+              ],
+              "notes": "Missing captured fields are confirmed and captured_owner.instance_id, captured_owner.connection_epoch, captured_owner.document_epoch, captured_owner.target_id. Effects include code-execution and browser-control; MCP hides this action until --allow-effects. Never automatically exports or persists raw bytes. Runtime.queryObjects can temporarily materialize all same-prototype objects in the renderer; only 32 per kind are retained. The renderer query itself is not a bounded heap scan. linkage_reason is unavailable when no artifact join exists.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/wasm_live.rs",
+                  "symbol": "Debugger::list_live_wasm"
+                }
+              ]
+            }
+          },
+          {
+            "x-reb-requires-live-target": true,
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "read_live_wasm_memory"
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              },
+              "listing_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "object_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 128
+              },
+              "export_name": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 512
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "length": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096
+              },
+              "confirmed": {
+                "const": true,
+                "description": "Always required. Authorizes the bounded memory copy."
+              },
+              "captured_owner": {
+                "description": "Required when the listing used captured_owner. Must repeat that exact owner. Omit for an Object Lab listing.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CapturedHookOwner"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "action",
+              "target_id",
+              "listing_id",
+              "object_id",
+              "offset",
+              "length",
+              "confirmed"
+            ],
+            "additionalProperties": false,
+            "x-source": [
+              "apps/origin-trace-backend/src/debugger/wasm_live.rs"
+            ],
+            "x-result-schema": "#/components/schemas/DebuggerLiveWasmMemoryResult",
+            "description": "Bounded 1-4096 byte Wasm memory copy. confirmed is always required. Repeat captured_owner when the listing was taken from the attached page; omit it for Object Lab. A mismatched owner, worker, or other page is refused. The copy is not atomic and is not an artifact join.",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "browser-control",
+                "code-execution",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Remote-handle group cleanup fails or times out; the selected owned debugger transport is retired without retry to release retained renderer roots."
+                },
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "Replaced WebAssembly/Object/Reflect/typed-array built-ins run target code and can have downstream effects."
+                },
+                {
+                  "effects": [
+                    "live-target-mutation"
+                  ],
+                  "when": "captured_owner is present: the bounded copy runs in the confirmed attached page. Object Lab reads omit captured_owner."
+                }
+              ],
+              "uncertainties": [
+                "Target-side built-ins may have effects; this is not a read-only sandbox. Shared memory may change during copying."
+              ],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "confirmed is always required. The listing must still match the attached page and document epoch. Repeat captured_owner for a captured listing; omit it for Object Lab. Length is 1 through 4096. Workers and other pages are refused."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Missing fields: confirmed, target_id, listing_id, object_id, offset, length (1-4096), and captured_owner (instance_id, connection_epoch, document_epoch, target_id) when the listing is a captured document. Effects include code-execution and browser-control; MCP hides this action until --allow-effects. Bytes stay in the response only. linkage_reason on the listing stays explicit when no artifact join exists.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/wasm_live.rs",
+                  "symbol": "Debugger::read_live_wasm"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "inspect_paused_import_object"
+              },
+              "expected_generation": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "owner": {
+                "$ref": "#/components/schemas/CapturedHookOwner"
+              },
+              "call_frame_id": {
+                "type": "string",
+                "maxLength": 4096,
+                "x-max-utf8-bytes": 4096,
+                "minLength": 1
+              },
+              "scope_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 11
+              },
+              "binding_name": {
+                "type": "string",
+                "maxLength": 256,
+                "x-max-utf8-bytes": 256,
+                "minLength": 1
+              }
+            },
+            "required": [
+              "action",
+              "expected_generation",
+              "owner",
+              "call_frame_id",
+              "scope_index",
+              "binding_name"
+            ],
+            "x-reb-requires-live-target": true,
+            "description": "Read bounded own data properties of an explicitly selected local/closure/block binding in the current pause. Never evaluates expressions, invokes getters, traverses proxies, installs hooks, resumes, or navigates. Descriptor labels are observed object bindings, not proof of Wasm instantiation or invocation. Exact initial snapshot generation and owner are required; connection, document, pause and source are rechecked after each command. Missing fields are rejected: expected_generation, owner.instance_id, owner.connection_epoch, owner.document_epoch, owner.target_id, call_frame_id, scope_index, binding_name. guest_position stays null and invocation stays unproven. The debugger VM Lab calls this action.",
+            "x-source": [
+              "apps/origin-trace-backend/src/debugger/import_object.rs"
+            ],
+            "x-result-schema": "#/components/schemas/DebuggerImportObjectResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "selected-current-pause",
+                  "condition": "The selected connection, document, frame, lexical scope and source catalog must remain current. Refresh expected_generation from get_debugger immediately before selecting the binding."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Runtime.getProperties only. Results are ephemeral and not appended to native event or host-links evidence. Existing debugger action owner guards and MCP effects visibility are unchanged. Effects are analysis only, but the shared debugger_action MCP tool stays hidden until --allow-effects. No guest program counter is invented.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/import_object.rs",
+                  "symbol": "Debugger::inspect_paused_import_object"
+                }
+              ]
+            }
           }
         ],
-        "description": "All 62 action envelopes have source-backed request fields, types and requiredness, including conditional fields. Variants marked partial identify remaining complex runtime constraints explicitly. Session availability, record identity, mutation confirmation and state locks still apply. Extra properties remain allowed where dispatch ignores them."
+        "description": "All 65 action envelopes have source-backed request fields, types and requiredness, including conditional fields. Variants marked partial identify remaining complex runtime constraints explicitly. Session availability, record identity, mutation confirmation and state locks still apply. Extra properties remain allowed where dispatch ignores them."
       },
       "DebuggerResult": {
         "oneOf": [
@@ -15077,6 +15370,15 @@
           },
           {
             "$ref": "#/components/schemas/DebuggerElementScreenshotResult"
+          },
+          {
+            "$ref": "#/components/schemas/DebuggerLiveWasmResult"
+          },
+          {
+            "$ref": "#/components/schemas/DebuggerLiveWasmMemoryResult"
+          },
+          {
+            "$ref": "#/components/schemas/DebuggerImportObjectResult"
           }
         ],
         "description": "Closed source-backed action response envelopes. Branch by the requested action using x-action-results; nested experiment/CDP/heap state remains partially typed. No unrestricted object fallback.",
@@ -15266,6 +15568,15 @@
           },
           "capture_element_screenshot": {
             "$ref": "#/components/schemas/DebuggerElementScreenshotResult"
+          },
+          "list_live_wasm_objects": {
+            "$ref": "#/components/schemas/DebuggerLiveWasmResult"
+          },
+          "read_live_wasm_memory": {
+            "$ref": "#/components/schemas/DebuggerLiveWasmMemoryResult"
+          },
+          "inspect_paused_import_object": {
+            "$ref": "#/components/schemas/DebuggerImportObjectResult"
           }
         }
       },
@@ -26990,6 +27301,470 @@
           "source_hash",
           "execution_context_id"
         ]
+      },
+      "DebuggerImportObjectResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "import_object": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "contract_version": {
+                "const": 1
+              },
+              "provenance": {
+                "const": "selected-paused-own-properties"
+              },
+              "invocation": {
+                "const": "unproven"
+              },
+              "guest_position": {
+                "type": "null"
+              },
+              "owner": {
+                "$ref": "#/components/schemas/CapturedHookOwner"
+              },
+              "call_frame_id": {
+                "type": "string",
+                "maxLength": 4096,
+                "x-max-utf8-bytes": 4096
+              },
+              "scope_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 11
+              },
+              "binding_name": {
+                "type": "string",
+                "maxLength": 256,
+                "x-max-utf8-bytes": 256
+              },
+              "observed_at_ms": {
+                "$ref": "#/components/schemas/PositiveSafeInteger"
+              },
+              "modules": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "module_name": {
+                      "type": "string",
+                      "maxLength": 256,
+                      "x-max-utf8-bytes": 256
+                    },
+                    "state": {
+                      "enum": [
+                        "inspected",
+                        "not-object",
+                        "accessor-not-invoked",
+                        "proxy-not-inspected",
+                        "unavailable"
+                      ]
+                    },
+                    "imports": {
+                      "type": "array",
+                      "maxItems": 64,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "import_name": {
+                            "type": "string",
+                            "maxLength": 256,
+                            "x-max-utf8-bytes": 256
+                          },
+                          "state": {
+                            "enum": [
+                              "function",
+                              "not-function",
+                              "accessor-not-invoked",
+                              "proxy-not-inspected",
+                              "unavailable"
+                            ]
+                          },
+                          "host_function_name": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 256,
+                                "x-max-utf8-bytes": 256
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "host_location": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "script_id": {
+                                    "type": "string",
+                                    "maxLength": 4096,
+                                    "x-max-utf8-bytes": 4096
+                                  },
+                                  "source_hash": {
+                                    "type": "string",
+                                    "maxLength": 65536,
+                                    "x-max-utf8-bytes": 65536
+                                  },
+                                  "execution_context_id": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 2147483647
+                                  },
+                                  "line": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 2147483646
+                                  },
+                                  "column": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 2147483646
+                                  }
+                                },
+                                "required": [
+                                  "script_id",
+                                  "source_hash",
+                                  "execution_context_id",
+                                  "line",
+                                  "column"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "guest_position": {
+                            "type": "null"
+                          }
+                        },
+                        "required": [
+                          "import_name",
+                          "state",
+                          "host_function_name",
+                          "host_location",
+                          "guest_position"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "module_name",
+                    "state",
+                    "imports"
+                  ]
+                }
+              },
+              "omissions": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 5,
+                "items": {
+                  "enum": [
+                    "property-limit",
+                    "module-limit",
+                    "import-limit",
+                    "deadline",
+                    "name-limit-or-symbol"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "contract_version",
+              "provenance",
+              "invocation",
+              "guest_position",
+              "owner",
+              "call_frame_id",
+              "scope_index",
+              "binding_name",
+              "observed_at_ms",
+              "modules",
+              "omissions"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "generation",
+          "import_object"
+        ],
+        "x-source": "apps/origin-trace-backend/src/debugger/import_object.rs"
+      },
+      "DebuggerLiveWasmResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "wasm": {
+            "type": "object",
+            "properties": {
+              "listing_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              },
+              "document_epoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "expires_after_ms": {
+                "const": 60000
+              },
+              "per_kind_limit": {
+                "const": 32
+              },
+              "objects": {
+                "type": "array",
+                "maxItems": 96,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "x-max-utf8-bytes": 128
+                    },
+                    "kind": {
+                      "enum": [
+                        "instance",
+                        "module",
+                        "memory"
+                      ]
+                    },
+                    "script_id": {
+                      "type": "null"
+                    },
+                    "artifact_id": {
+                      "type": "null"
+                    },
+                    "linkage": {
+                      "const": "unavailable"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "script_id",
+                    "artifact_id",
+                    "linkage"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "coverage": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "instance",
+                        "module",
+                        "memory"
+                      ]
+                    },
+                    "total_objects": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "returned_objects": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 32
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "total_objects",
+                    "returned_objects",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "scope": {
+                "const": "selected-default-realm"
+              },
+              "owner_scope": {
+                "enum": [
+                  "object_experiment",
+                  "captured_document"
+                ]
+              },
+              "captured_owner": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CapturedHookOwner"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "linkage_reason": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 256,
+                "description": "Explicit reason artifact or script identity was not joined. Prototype queries do not prove module ownership."
+              }
+            },
+            "required": [
+              "listing_id",
+              "target_id",
+              "document_epoch",
+              "expires_after_ms",
+              "per_kind_limit",
+              "objects",
+              "coverage",
+              "scope",
+              "owner_scope",
+              "captured_owner",
+              "linkage_reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "ok",
+          "generation",
+          "wasm"
+        ],
+        "additionalProperties": false,
+        "x-source": "apps/origin-trace-backend/src/debugger/wasm_live.rs"
+      },
+      "DebuggerLiveWasmMemoryResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "listing_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 4096
+              },
+              "object_id": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 128
+              },
+              "owner_scope": {
+                "enum": [
+                  "object_experiment",
+                  "captured_document"
+                ]
+              },
+              "export_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 512
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "length": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096
+              },
+              "byte_length": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "bytes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                }
+              },
+              "shared": {
+                "type": "boolean"
+              },
+              "atomic": {
+                "const": false
+              }
+            },
+            "required": [
+              "listing_id",
+              "target_id",
+              "object_id",
+              "owner_scope",
+              "export_name",
+              "offset",
+              "length",
+              "byte_length",
+              "bytes",
+              "shared",
+              "atomic"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "ok",
+          "generation",
+          "memory"
+        ],
+        "additionalProperties": false,
+        "x-source": "apps/origin-trace-backend/src/debugger/wasm_live.rs"
       }
     }
   },

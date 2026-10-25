@@ -210,10 +210,40 @@ not populate `snapshots`, `bytecode_artifact_id`, snapshot counts, byte coverage
 or traversal inputs. Missing runtime bytes retain their explicit omission even
 when the module instruction preview is visible.
 
+The optional `dispatch_inventory` is the same static inventory exposed in the
+VM detector's `frontend`. It counts all decoded `br_table` and `call_indirect`
+sites, including those outside loops, and retains at most 256 ranked metadata
+records. `site_count` is the complete decoded count; `omitted_site_count` counts
+unlisted records, not missing module traversal. A truncated inventory also adds
+`dispatch-inventory-limit` to coverage omissions. `arm_count` is the number of
+explicit `br_table` targets, excluding the default (and not the number of unique
+targets); it is null for `call_indirect` because the target count is unknown.
+
+Ranking v1 orders in-loop sites before non-loop sites, then tables with at least
+32 arms, their arm count, function structural score, IP-like local/global
+read/write pattern, loop depth, function body size, small-table arm count, and
+lowest module offset. `selected_byte_offset` names the top in-loop site, or null
+when none exists. Small tables are `cff-helper-candidate`, a heuristic label,
+not proof of CFF. Larger tables are `dispatch-candidate`, not proven guest ISAs.
+The ranking does not increase the detector's confidence or score. A Wasm
+`candidate` with an in-loop dispatch can expose a static workspace even without
+sufficient independent evidence for `likely-vm`.
+
+The UI's Dispatch sites panel lists the bounded inventory and can select an
+already retained site. Unrelated sites remain outside the retained neighborhood;
+listing metadata never expands the neighborhood or runs the module. A refresh
+preserves an explicit retained-handler selection. The initial listing emits the
+ranked site first, even when a smaller site occurs earlier in the same function.
+Static selectors still do not prove guest opcode binding without samples.
+
 A WebAssembly workspace keeps static arms from the detector-selected function
 and from a bounded neighborhood of that function: direct calls within three
 hops, either direction, and functions named by element segments of tables those
 functions use with in-loop `call_indirect`. At most 32 functions are retained.
+The extractor retains at most 1024 site metadata records per function, always
+preserving the selected ranked site, and reports `dispatch-site-limit` when that
+bound is reached. It expands arms lazily into the global 1024-handler budget;
+a large table does not allocate one arm array per site or stop module decoding.
 Further in-loop dispatch functions stay out under `dispatch-neighborhood`.
 Selector numbers remain `inferred` and local to one `br_table`. Default and
 `call_indirect` arms stay `unknown`. An observed sample binds an opcode only

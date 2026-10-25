@@ -593,7 +593,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 39, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 40, "Review route coverage when the API changes");
     assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
@@ -776,7 +776,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 39);
+    assert_eq!(operation_count, 40);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1963,7 +1963,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.4.0");
+        assert_eq!(document["producer"]["version"], "1.5.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -2180,6 +2180,77 @@ async fn vm_opcode_workspace_has_etag_and_failure_isolated_from_vm_analysis() {
     assert_eq!(blocked.get("/api/analysis/vm").await.status(), 200);
     assert_eq!(blocked.get("/api/analysis/vm/opcodes").await.status(), 500);
 }
+#[tokio::test]
+async fn vm_ranked_static_candidate_workspace_roundtrips_http_and_schema() {
+    let server = Server::start().await;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tools/fixtures/vm-dynamic-debug/wasm-ranked-dispatch.json"
+    ))
+    .unwrap();
+    let bytes = hex::decode(fixture["module_hex"].as_str().unwrap()).unwrap();
+    wasmparser::Validator::new().validate_all(&bytes).unwrap();
+    let root = server.root.path().join("artifacts");
+    let mut artifact = vm_artifact(&root, &bytes, "3");
+    artifact["kind"] = json!("wasm");
+    artifact["mime_type"] = json!("application/wasm");
+    artifact["url"] = json!("fixture://owned-ranked-dispatch/module");
+    server.file("artifacts/manifest.jsonl", &jsonl(&[artifact]));
+    let analysis: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/analysis/vm").await,
+            "get",
+            "/api/analysis/vm",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_vm_document(&analysis);
+    assert_eq!(analysis["results"][0]["tier"], "candidate");
+    let response = server.get("/api/analysis/vm/opcodes").await;
+    let etag = response.headers()["etag"].clone();
+    let document: Value = serde_json::from_slice(
+        &assert_contract_response(response, "get", "/api/analysis/vm/opcodes", 200).await,
+    )
+    .unwrap();
+    assert_eq!(document["summary"]["workspace_count"], 1);
+    let workspace = &document["workspaces"][0];
+    assert_eq!(
+        workspace["dispatch_inventory"],
+        analysis["results"][0]["frontend"]["dispatch_inventory"]
+    );
+    assert_eq!(
+        workspace["dispatch_inventory"]["candidates"][0]["function_index"],
+        1
+    );
+    assert_eq!(
+        workspace["dispatch_inventory"]["candidates"][0]["arm_count"],
+        200
+    );
+    assert_eq!(workspace["handlers"].as_array().unwrap().len(), 201);
+    assert_eq!(workspace["sample_count"], 0);
+    assert!(
+        workspace["handlers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|handler| handler["state"] != "observed")
+    );
+    assert_contract_response(
+        server
+            .client
+            .get(format!("{}/api/analysis/vm/opcodes", server.url))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap(),
+        "get",
+        "/api/analysis/vm/opcodes",
+        304,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn vm_host_links_are_digest_bound_payload_free_and_failure_isolated() {
     let server = Server::start().await;
@@ -2616,7 +2687,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.4.0");
+    assert_eq!(document["producer"]["version"], "1.5.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 2);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -3648,7 +3719,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.4.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.5.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -7356,4 +7427,171 @@ async fn live_wasm_requires_disposable_owner_and_explicit_bounded_reads() {
             400
         );
     }
+}
+
+#[tokio::test]
+async fn compact_session_context_and_action_errors_are_bounded_and_explicit() {
+    let server = Server::start_with_helper_canaries(true).await;
+    let response = server.get("/api/session/context").await;
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    let bytes = assert_contract_response(response, "get", "/api/session/context", 200).await;
+    assert!(bytes.len() < 8192);
+    let context: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(context["endpoint"], server.url);
+    assert_eq!(context["capture_mode"], "idle");
+    assert_eq!(context["live_admission"], "idle");
+    assert_eq!(context["debugger_state"], "unavailable");
+    assert_eq!(context["broker_connected"], false);
+    assert_eq!(context["target"], Value::Null);
+    assert_eq!(context["allow_effects"], Value::Null);
+    assert_eq!(context["effects_admission"], "caller_specific_unknown");
+    assert!(context["wasm_scripts"].as_array().unwrap().is_empty());
+    assert!(
+        context["wasm_artifacts"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let health: Value = server.get("/api/health").await.json().await.unwrap();
+    assert_eq!(context["instance_id"], health["instance_id"]);
+    assert_ne!(context["instance_id"], Value::Null);
+    let response = server
+        .client
+        .get(format!("{}/api/session/context", server.url))
+        .header("If-None-Match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "get", "/api/session/context", 304).await;
+    assert_contract_response(
+        server.get("/api/session/context?unexpected=1").await,
+        "get",
+        "/api/session/context",
+        400,
+    )
+    .await;
+    for (path, valid) in [
+        ("/api/debugger/actions", "pause"),
+        ("/api/capture/actions", "stop"),
+    ] {
+        for body in [json!({}), json!({"action":"secret_canary"})] {
+            let bytes =
+                assert_contract_response(server.action(path, body).await, "post", path, 400).await;
+            let error: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["code"], "invalid_request");
+            assert!(
+                error["details"]["allowed_actions"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(valid))
+            );
+            assert!(!String::from_utf8(bytes).unwrap().contains("secret_canary"));
+        }
+        let bytes = assert_contract_response(
+            server.action(path, json!({"action":valid})).await,
+            "post",
+            path,
+            409,
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+            "idle_backend"
+        );
+    }
+    let missing: Value = server
+        .action("/api/debugger/actions", json!({"action":"add_watch"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(missing["details"]["missing_fields"], json!(["expression"]));
+    let missing: Value = server
+        .action("/api/capture/actions", json!({"action":"clear"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(missing["details"]["missing_fields"], json!(["confirm"]));
+    // Offline cleanup remains available and is not mislabeled live work.
+    assert!(
+        server
+            .action("/api/debugger/actions", json!({"action":"clear_console"}))
+            .await
+            .status()
+            .is_success()
+    );
+    let response = server
+        .client
+        .get(format!("{}/api/session/context", server.url))
+        .header("If-None-Match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_ne!(response.headers()["etag"], etag);
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn configured_but_unattached_debugger_refuses_live_actions_explicitly() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start_with_args(&[
+        "--devtools-active-port".into(),
+        root.path().join("missing").display().to_string(),
+    ])
+    .await;
+    let response = server
+        .action("/api/debugger/actions", json!({"action":"pause"}))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/debugger/actions", 409).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+        "debugger_unavailable"
+    );
+    let context: Value = server
+        .get("/api/session/context")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(context["capture_mode"], "idle");
+    assert_eq!(context["debugger_state"], "waiting");
+    assert_eq!(context["live_admission"], "debugger_unavailable");
+}
+
+#[tokio::test]
+async fn disconnected_capture_stop_is_not_reported_as_success() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start_with_args(&[
+        "--socket".into(),
+        root.path().join("missing.sock").display().to_string(),
+        "--broker-pid".into(),
+        std::process::id().to_string(),
+    ])
+    .await;
+    let response = server
+        .action("/api/capture/actions", json!({"action":"stop"}))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/capture/actions", 409).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+        "dependency_unavailable"
+    );
+    // The deliberately absent socket must prevent signaling even a valid PID.
+    let context: Value = server
+        .get("/api/session/context")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(context["broker_connected"], false);
+    assert_eq!(context["capture_mode"], "live");
+    assert_eq!(context["live_admission"], "debugger_unavailable");
 }

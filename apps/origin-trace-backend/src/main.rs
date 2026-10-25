@@ -9,8 +9,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // launcher waits for that file, then starts Brave, and the bridge must
     // already be listening.
     let endpoint_file = options.endpoint_file.clone();
+    let active_endpoint_file = options.active_endpoint_file.clone();
     let app = App::new(options, address.port()).await;
     let endpoint = PublishedEndpoint::new(endpoint_file.as_deref(), address)?;
+    // Only the live launcher opts into this alias. Idle/development backends
+    // must never replace the active capture endpoint merely by starting.
+    let _active_endpoint = PublishedEndpoint::new(active_endpoint_file.as_deref(), address)?;
     println!("Research UI: {}", endpoint.url());
     let shutdown = app.clone();
     axum::serve(listener, app.router())

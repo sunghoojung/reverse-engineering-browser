@@ -1,6 +1,6 @@
 //! Bounded, inert dispatch-arm inspection of a captured WASM module.
 //!
-//! The detector selects one interpreter function. Large modules also keep
+//! The detector ranks one static candidate function. Large modules also keep
 //! in-loop `br_table` and `call_indirect` sites in a bounded neighborhood of
 //! that function: direct calls within three hops, either direction, and
 //! functions named by element segments of tables those functions use with
@@ -9,9 +9,12 @@
 use super::MAX_HANDLERS;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
+use wasmparser::{
+    BinaryReader, ElementItems, ElementKind, Operator, OperatorsReader, Parser, Payload, TypeRef,
+};
 
 const MAX_RELATED_FUNCTIONS: usize = 32;
+const MAX_SITES_PER_FUNCTION: usize = MAX_HANDLERS;
 const MAX_CALL_DEPTH: u8 = 3;
 const MAX_VISITED_FUNCTIONS: usize = 512;
 const MAX_CALLS_PER_FUNCTION: usize = 256;
@@ -46,7 +49,8 @@ enum ArmKind {
 }
 
 struct Site {
-    arms: Vec<Arm>,
+    offset: usize,
+    size: usize,
 }
 
 struct FunctionDispatch {
@@ -57,7 +61,7 @@ struct FunctionDispatch {
     tables: BTreeSet<u32>,
     sites: Vec<Site>,
     decoded: bool,
-    arm_overflow: bool,
+    sites_truncated: bool,
 }
 
 pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers> {
@@ -67,6 +71,7 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
         .find_map(|observation| {
             (observation["rule_id"] == "wasm.dispatch-loop").then_some(&observation["coordinate"])
         })?;
+    let selected_site = coordinate["byte_offset"].as_u64()? as usize;
     let body_offset = coordinate["function_body_offset"].as_u64()? as usize;
     let body_size = coordinate["function_body_size"].as_u64()? as usize;
     let mut functions = Vec::new();
@@ -142,7 +147,7 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
                     tables: BTreeSet::new(),
                     sites: Vec::new(),
                     decoded: false,
-                    arm_overflow: false,
+                    sites_truncated: false,
                 };
                 let Ok(mut reader) = body.get_operators_reader() else {
                     if selected {
@@ -154,7 +159,6 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
                 let mut control = Vec::new();
                 let mut loop_depth = 0usize;
                 let mut broken = false;
-                let mut arm_overflow = false;
                 while !reader.eof() {
                     let start = reader.original_position();
                     let Ok(op) = reader.read() else {
@@ -173,56 +177,26 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
                                 calls_truncated = true;
                             }
                         }
-                        Operator::BrTable { targets } if loop_depth > 0 => {
-                            let mut arms = Vec::new();
-                            for (selector, target) in targets.targets().enumerate() {
-                                let Ok(target) = target else {
-                                    broken = true;
-                                    break;
-                                };
-                                // One table can exceed the 1024-arm workspace cap.
-                                // Keep this prefix and stop the function so later
-                                // operators cannot add another site ahead of the cap.
-                                if selector >= MAX_HANDLERS {
-                                    arm_overflow = true;
-                                    break;
+                        Operator::BrTable { .. } | Operator::CallIndirect { .. }
+                            if loop_depth > 0 =>
+                        {
+                            if let Operator::CallIndirect { table_index, .. } = op {
+                                function.tables.insert(table_index);
+                            }
+                            // Only site metadata is retained during traversal. Arms are
+                            // decoded lazily under the final global handler budget below.
+                            let site = Site {
+                                offset: start,
+                                size,
+                            };
+                            if function.sites.len() < MAX_SITES_PER_FUNCTION {
+                                function.sites.push(site);
+                            } else {
+                                function.sites_truncated = true;
+                                if selected && start == selected_site {
+                                    *function.sites.last_mut().expect("site cap is nonzero") = site;
                                 }
-                                arms.push(Arm {
-                                    opcode: Some(selector as u32),
-                                    offset: start,
-                                    size,
-                                    kind: ArmKind::Selector,
-                                    detail: target,
-                                });
                             }
-                            if broken {
-                                break;
-                            }
-                            if !arm_overflow {
-                                arms.push(Arm {
-                                    opcode: None,
-                                    offset: start,
-                                    size,
-                                    kind: ArmKind::Default,
-                                    detail: targets.default(),
-                                });
-                            }
-                            function.sites.push(Site { arms });
-                            if arm_overflow {
-                                break;
-                            }
-                        }
-                        Operator::CallIndirect { table_index, .. } if loop_depth > 0 => {
-                            function.tables.insert(table_index);
-                            function.sites.push(Site {
-                                arms: vec![Arm {
-                                    opcode: None,
-                                    offset: start,
-                                    size,
-                                    kind: ArmKind::Indirect,
-                                    detail: table_index,
-                                }],
-                            });
                         }
                         Operator::Loop { .. } => {
                             control.push(true);
@@ -244,7 +218,6 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
                     }
                 } else {
                     function.decoded = true;
-                    function.arm_overflow = arm_overflow;
                 }
                 functions.push(function);
             }
@@ -261,6 +234,11 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
         return None;
     }
     let selected = functions[selected_pos].index;
+    // Emit the ranked instruction first, not the first syntactically pretty
+    // loop. In particular a large later table must precede an early tiny helper.
+    functions[selected_pos]
+        .sites
+        .sort_by_key(|site| site.offset != selected_site);
     attach_table_edges(&mut functions, &elements, &mut calls_truncated);
     let (included, neighborhood_limited) = neighborhood(&functions, selected);
     let mut handlers = Vec::new();
@@ -270,9 +248,12 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
             .into(),
         "The guest stack/register model, operand widths and state effects remain unknown.".into(),
     ];
-    let arm_overflow = functions
+    if functions
         .iter()
-        .any(|function| function.arm_overflow && included.contains(&function.index));
+        .any(|function| function.sites_truncated && included.contains(&function.index))
+    {
+        omissions.push(json!({"reason":"dispatch-site-limit","detail":"At most 1024 dispatch-site metadata records per function are retained; the ranked default is always kept. Arm expansion is separately bounded to 1024 total handlers."}));
+    }
     let mut limit_hit = false;
     let mut emitted_sites = 0u32;
     let mut emitted_functions = 0u32;
@@ -291,12 +272,55 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
                 break;
             }
             let before = handlers.len();
-            for arm in &site.arms {
-                if handlers.len() == MAX_HANDLERS {
-                    limit_hit = true;
-                    break;
+            let mut reader = OperatorsReader::new(BinaryReader::new(
+                &bytes[site.offset..site.offset + site.size],
+                site.offset,
+            ));
+            let op = reader.read().ok()?;
+            match op {
+                Operator::BrTable { targets } => {
+                    for (selector, target) in targets.targets().enumerate() {
+                        if handlers.len() == MAX_HANDLERS {
+                            limit_hit = true;
+                            break;
+                        }
+                        let arm = Arm {
+                            opcode: Some(selector as u32),
+                            offset: site.offset,
+                            size: site.size,
+                            kind: ArmKind::Selector,
+                            detail: target.ok()?,
+                        };
+                        handlers.push(arm_value(&arm, function.index, selected));
+                    }
+                    if handlers.len() < MAX_HANDLERS {
+                        let arm = Arm {
+                            opcode: None,
+                            offset: site.offset,
+                            size: site.size,
+                            kind: ArmKind::Default,
+                            detail: targets.default(),
+                        };
+                        handlers.push(arm_value(&arm, function.index, selected));
+                    } else {
+                        limit_hit = true;
+                    }
                 }
-                handlers.push(arm_value(arm, function.index, selected));
+                Operator::CallIndirect { table_index, .. } => {
+                    if handlers.len() < MAX_HANDLERS {
+                        let arm = Arm {
+                            opcode: None,
+                            offset: site.offset,
+                            size: site.size,
+                            kind: ArmKind::Indirect,
+                            detail: table_index,
+                        };
+                        handlers.push(arm_value(&arm, function.index, selected));
+                    } else {
+                        limit_hit = true;
+                    }
+                }
+                _ => return None,
             }
             if handlers.len() > before {
                 emitted_sites += 1;
@@ -310,7 +334,7 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
             break;
         }
     }
-    if limit_hit || arm_overflow {
+    if limit_hit {
         omissions.push(json!({"reason":"handler-limit","detail":"Only the first 1024 WASM dispatch-arm candidates are retained."}));
     }
     let dispatch_functions = functions

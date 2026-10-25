@@ -14,6 +14,14 @@ apps/origin-trace-backend/target/debug/reb-api mcp --endpoint-file /tmp/reb-api-
 make backend-e2e
 ```
 
+`get_session_context` (`GET /api/session/context`) is the first read for a
+connected agent. It reports `live_admission`, the health `instance_id`, and
+separate bounded Wasm script and artifact inventories without joining them or
+returning the full debugger snapshot. MCP annotates its actual effects
+admission; direct HTTP reports admission as unknown. See the
+[agent guide](../../docs/development/local-coding-agents.md#start-with-compact-session-context)
+for privacy omissions, inventory limits, conditional reads, and action errors.
+
 `reb-api mcp` projects [`protocol/openapi.json`](../../protocol/openapi.json)
 onto a local stdio MCP server. Tool names are the OpenAPI operation IDs. The
 default list is read-only. `--allow-effects` also lists the other operations.
@@ -25,7 +33,19 @@ printed. Binary responses are refused before a request. JSON larger than
 the inline limit returns a structural summary and does not inline source,
 bytecode, or request bodies. [`scripts/reb-api-mcp.sh`](../../scripts/reb-api-mcp.sh)
 is the same-machine launcher for Cursor, Codex, Claude Code, Grok Bot, and
-T3 Code. See
+T3 Code. Its default and fresh configs use
+`~/.config/origin-trace/reb-api.endpoint` with `--require-live`. The live launcher
+publishes that private canonical alias; idle/demo startup cannot claim it.
+Reconnect rereads the file instead of freezing a session directory or port.
+A changed file or live backend identity retires the existing connection, never
+replaying a pending action on the replacement. `--require-live` checks live
+capture, a running/paused debugger, and backend identity at startup and before
+tool calls; idle/unavailable states produce an endpoint-specific error with
+`code=idle_backend`, `code=debugger_unavailable`, or `code=state_conflict`.
+`get_session_context` stays available after that startup check until the
+endpoint file or instance changes. Explicit
+session selectors retain their intentional stored-evidence behavior unless
+`--require-live` is added. See
 [OpenAPI MCP projection](../../protocol/http-api.md#openapi-mcp-projection)
 and [local coding agents](../../docs/development/local-coding-agents.md).
 
@@ -150,9 +170,15 @@ The API CLI embeds the versioned OpenAPI document and requires an explicit
 loopback URL or endpoint file. The VM analyzer reads bounded input prefixes,
 reports omissions, and writes private analysis documents. The base detector is
 served at `/api/analysis/vm`; the inspector-free opcode workspace is served at
-`/api/analysis/vm/opcodes`. A Wasm likely-vm workspace lists static `br_table`
+`/api/analysis/vm/opcodes`. Wasm candidate and likely-vm workspaces list static `br_table`
 and `call_indirect` arms from the selected function and a bounded call/table
-neighborhood. Without dispatch samples it keeps `sampler-unavailable`. Without
+neighborhood. The module-wide `dispatch_inventory` counts every decoded `br_table`
+and `call_indirect` (including non-loop sites), retains the top 256 with exact arm
+counts, and reports omitted metadata separately. The default is the highest-ranked
+in-loop site, not the first loop. Interpreter-scale tables (32+ explicit arms)
+rank before small helper candidates; size never promotes the detector tier or
+proves guest opcode binding. The UI's Dispatch sites panel preserves explicit
+retained-handler selection. Without dispatch samples it keeps `sampler-unavailable`. Without
 a runtime snapshot it keeps `snapshot-bytes-unavailable` and names the guest-byte
 walk `static-module-only` instead of inventing a program counter. A workspace
 failure does not hide a valid detector

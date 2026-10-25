@@ -2482,10 +2482,39 @@
               BigInt(sample.invocation_event.sequence_number) < BigInt(sample.event.sequence_number)));
       }
 
+      function isVmDispatchInventory(inventory) {
+        if (!vmWorkspaceExact(inventory, ['ranking_version', 'site_count', 'br_table_count', 'call_indirect_count',
+          'omitted_site_count', 'selected_byte_offset', 'candidates']) || inventory.ranking_version !== 1 ||
+          !['site_count', 'br_table_count', 'call_indirect_count', 'omitted_site_count'].every(key =>
+            isSafeIntegerInRange(inventory[key], 0, 1000000)) ||
+          inventory.site_count !== inventory.br_table_count + inventory.call_indirect_count ||
+          !Array.isArray(inventory.candidates) || inventory.candidates.length > 256 ||
+          inventory.site_count !== inventory.candidates.length + inventory.omitted_site_count) return false;
+        const offsets = new Set();
+        for (const site of inventory.candidates) {
+          if (!vmWorkspaceExact(site, ['kind', 'function_index', 'byte_offset', 'byte_size', 'function_body_offset',
+            'function_body_size', 'arm_count', 'loop_depth', 'ip_like', 'structural_score', 'classification']) ||
+            !['br_table', 'call_indirect'].includes(site.kind) || typeof site.ip_like !== 'boolean' ||
+            !['function_index', 'byte_offset', 'function_body_offset', 'loop_depth', 'structural_score'].every(key =>
+              isSafeIntegerInRange(site[key], 0, Number.MAX_SAFE_INTEGER)) ||
+            !['byte_size', 'function_body_size'].every(key => isSafeIntegerInRange(site[key], 1, 16777216)) ||
+            site.byte_offset < site.function_body_offset ||
+            !Number.isSafeInteger(site.byte_offset + site.byte_size) ||
+            !Number.isSafeInteger(site.function_body_offset + site.function_body_size) ||
+            site.byte_offset + site.byte_size > site.function_body_offset + site.function_body_size ||
+            (site.kind === 'br_table' ? !isSafeIntegerInRange(site.arm_count, 0, 4294967295) : site.arm_count !== null) ||
+            site.classification !== (site.kind === 'br_table' && site.arm_count < 32 ? 'cff-helper-candidate' : 'dispatch-candidate') ||
+            offsets.has(site.byte_offset)) return false;
+          offsets.add(site.byte_offset);
+        }
+        return inventory.selected_byte_offset === null ||
+          inventory.candidates.some(site => site.byte_offset === inventory.selected_byte_offset && site.loop_depth > 0);
+      }
+
       function isVmOpcodeWorkspace(workspace) {
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
-          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview'
+          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
@@ -2494,6 +2523,8 @@
           !vmWorkspaceMode(workspace.capture_mode) || !Array.isArray(workspace.handlers) || workspace.handlers.length > 1024 ||
           !workspace.handlers.every(isVmOpcodeHandler) || !Array.isArray(workspace.snapshots) || workspace.snapshots.length > 16 ||
           !workspace.snapshots.every(isVmOpcodeSnapshot) ||
+          (workspace.dispatch_inventory !== undefined && (workspace.runtime !== 'webassembly' ||
+            !isVmDispatchInventory(workspace.dispatch_inventory))) ||
           (workspace.captured_module_preview !== undefined && !isVmCapturedModulePreview(workspace.captured_module_preview, workspace)) ||
           !Array.isArray(workspace.unknowns) || workspace.unknowns.length > 256 ||
           !workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0) ||
@@ -2615,17 +2646,20 @@
         const notes = first.notes || 'No handler notes recorded.';
         const sameWidth = handlers.every(handler => handler.operand_width === first.operand_width);
         const brTable = handlers.every(handler => typeof handler.label === 'string' && handler.label.startsWith('br_table'));
+        const selectorCount = handlers.filter(handler => handler.opcode !== null).length;
+        const defaultCount = handlers.length - selectorCount;
+        const countLabel = brTable && defaultCount ? `${selectorCount} selectors + default` : `${handlers.length} selectors`;
         return {
           key: `span:${offset}:${size}`,
           opcode: 'shared',
-          label: `${brTable ? 'br_table' : 'Shared dispatch'} · ${handlers.length} selectors`,
+          label: `${brTable ? 'br_table' : 'Shared dispatch'} · ${countLabel}`,
           state: handlers.every(handler => handler.state === 'inferred') ? 'inferred' : 'unknown',
           samples: handlers.reduce((total, handler) => total + handler.sample_count, 0),
           operandWidth: sameWidth ? first.operand_width : 0,
           retainedSamples,
           positions: vmOpcodeSamplePositions(retainedSamples),
           retainedPositions: retainedSamples.length,
-          notes: `${notes} ${handlers.length} selectors share this instruction and are not separate handler bodies.`,
+          notes: `${notes} ${countLabel} share this instruction and are not separate handler bodies.`,
           source: `${offset} + ${size} bytes`
         };
       }

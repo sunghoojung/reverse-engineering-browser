@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{Error, Reason, Result};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -31,10 +31,30 @@ pub fn schema(name: &str, value: &Value, status: u16) -> Result<()> {
             validator
         }
     };
-    validator
-        .validate(value)
-        .map_err(|e| Error::new(status, format!("{name} contract is invalid: {e}")))
+    validator.validate(value).map_err(|e| {
+        if status == 400
+            && let Some(guidance) =
+                crate::action_guidance::action_guidance(&SPEC["components"]["schemas"][name], value)
+        {
+            return Error::bad(format!(
+                "{name} action body is invalid; see allowed_actions and missing_fields"
+            ))
+            .with_reason(Reason::action(guidance));
+        }
+        Error::new(status, format!("{name} contract is invalid: {e}"))
+    })
 }
+/// Admission metadata lives beside each action contract so extensions cannot
+/// silently inherit a different target prerequisite from a dispatcher list.
+pub fn requires_live_target(action: &str) -> bool {
+    SPEC["components"]["schemas"]["DebuggerAction"]["oneOf"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|variant| variant["properties"]["action"]["const"] == action)
+        .is_none_or(|variant| variant["x-reb-requires-live-target"] != false)
+}
+
 pub fn fields(value: &Value, expected: &[&str], label: &str) -> Result<()> {
     let object = value
         .as_object()

@@ -72,6 +72,24 @@ on its own.
 
 ## OpenAPI MCP projection
 
+The same-machine wrapper defaults to `~/.config/origin-trace/reb-api.endpoint`
+and `--require-live`; live launchers publish it, not idle/demo backends. Each
+MCP reconnect resolves the file anew. The current connection fails closed if
+the file changes or a live backend's `Health.instance_id` changes, rather than
+retargeting pending calls. MCP sends `X-REB-Expected-Instance` with the startup
+health identity on tool requests; the backend rejects a nonmatching or duplicate
+supplied precondition with HTTP 409 `state_conflict` before body processing or
+dispatch. Existing API clients that omit the header remain supported.
+This closes replacement at the same port between health and action. It is not
+an authentication token, permission grant, or a document-generation selector;
+existing action-specific target/document ownership checks remain required. A
+legacy backend without a health identity cannot use `--require-live`.
+Live mode requires `capture_mode=live` and a running
+or paused debugger before advertising tools and before valid tool dispatch.
+Diagnostics name the loopback endpoint and allowlisted states, never the health
+body's evidence paths. Explicit stored-evidence connections can omit the live
+requirement. See [connection and restart behavior](../docs/development/local-coding-agents.md#select-the-endpoint).
+
 `x-reb-mcp` in this specification is the only MCP contract. `reb-api mcp` reads
 that extension and serves operation IDs as stdio tools. It does not add an HTTP
 route. A client supplies the same loopback root as `call`, through `--base-url`
@@ -236,6 +254,27 @@ never chooses between different sessions. Missing exact matches remain `empty`,
 without falling back to another session or event. Session selection participates
 in the ETag. The v1 response shape, stored evidence and capture policy are unchanged.
 
+## Compact session context
+
+`GET /api/session/context` (`get_session_context`) is the compact first read for
+a connected agent. It returns bounded current session discovery without fetching
+source or bytecode. It includes `live_admission`, the same process-lifetime
+`instance_id` as `/api/health` (also sent as `X-REB-Expected-Instance`), endpoint,
+capture/debugger state, target ID, debugger generation, and separate Wasm script
+and retained-artifact inventories (16 entries each; a 256 KiB artifact manifest
+tail). `consistency` explicitly identifies independent debugger and manifest
+snapshots. Generation and `debugger_etag` apply only to the debugger snapshot,
+not the manifest; use this route's own ETag for conditional reads. No
+target/session join is inferred from URL or timing. `instance_id` is null when
+the snapshot value is not the health identity format; it is never shortened.
+
+Titles are omitted, HTTP(S) URL labels contain only origins, and conventional
+Wasm hex labels are retained. Source, headers, bodies, socket URLs and diagnostics
+are absent. Identifiers/origins remain potentially sensitive metadata. Direct
+HTTP reports `allow_effects: null`; MCP annotates its own flag without granting
+authorization. See the [agent context recipe](../docs/development/local-coding-agents.md#start-with-compact-session-context)
+for field omissions and coverage limits.
+
 ## Error reasons and uncertain outcomes
 
 JSON error responses retain their existing HTTP status and human `error` text,
@@ -247,6 +286,24 @@ writes, missing/malformed replies, or workspace directory-sync failure after
 publication can have `command_outcome_unknown`; this never proves no effect or
 authorizes a retry. Dynamic failure reasons do not
 replace the [advisory effects and common guards](#execution-metadata).
+
+Invalid action bodies return schema-derived `allowed_actions` and, where
+unambiguous, `missing_fields` inside details. Submitted values are not echoed.
+Each debugger action declares `x-reb-requires-live-target`: live-target actions
+refuse before dispatch with `idle_backend` or `debugger_unavailable`; local
+editing, cleanup and cancellation keep their existing admission paths. This
+annotation supplements rather than replaces effects, ownership, and confirmation
+metadata. `idle_backend` is an idle process with no DevTools port.
+`debugger_unavailable` is a required live target that is not running or paused,
+including a configured port that has not attached and a crashed renderer.
+`live_admission` on session context uses the same distinction and adds
+`not_live_capture` for demo and other non-live modes. A disconnected capture
+broker cannot report a newly requested stop as successful
+(`dependency_unavailable`). `--require-live` MCP connections refuse other tools
+with `idle_backend`, `debugger_unavailable`, or `state_conflict` before
+dispatch. `get_session_context` remains readable on that connection until the
+endpoint file or instance identity changes, which retires the connection
+instead of retargeting the call.
 
 Analyst, JWT Decoder and native Console application failures can remain HTTP
 200. Inspect their existing `ok`, `outcome`, `status` or `runtime.status` fields

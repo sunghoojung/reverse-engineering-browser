@@ -1610,6 +1610,44 @@
         return lines.join('\n');
       }
 
+      function renderVmDispatchInventory(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.append(textElement('h4', '', 'Static dispatch inventory'));
+        const inventory = workspace.dispatch_inventory;
+        if (!inventory) {
+          section.append(textElement('p', '', 'No module-wide dispatch inventory is retained in this document.'));
+          return section;
+        }
+        section.append(textElement('p', '', `${inventory.site_count} module sites: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${inventory.candidates.length} ranked sites retained; ${inventory.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', 'Arm counts exclude the default branch. Ranking and CFF/helper labels are static heuristics, not proof of a guest ISA or opcode binding. Indirect target counts are unknown.'));
+        const retainedRows = vmOpcodeRows(workspace);
+        appendVmPagedRows(section, inventory.candidates, 'dispatch candidates', site => {
+          const row = document.createElement('details'); row.className = 'vm-effect-row';
+          const selected = site.byte_offset === inventory.selected_byte_offset;
+          const count = site.arm_count === null ? 'target count unknown' : `${site.arm_count} arms + default`;
+          row.append(textElement('summary', '', `${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset}`));
+          row.append(textElement('p', 'vm-effect-detail', `${site.classification === 'cff-helper-candidate' ? 'CFF / helper candidate' : 'Static dispatch candidate'} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. No guest PC is inferred.`));
+          const retained = retainedRows.find(candidate => candidate.source === `${site.byte_offset} + ${site.byte_size} bytes`);
+          if (retained) {
+            const select = textElement('button', 'secondary-button', 'Select retained site'); select.type = 'button';
+            select.addEventListener('click', () => {
+              const handler = [...document.querySelectorAll('.vm-handler-row')].find(item => item.dataset.handlerKey === retained.key);
+              if (!handler) return;
+              if (handler.hidden) {
+                const filter = handler.closest('.vm-workspace-card')?.querySelector('input[type="search"]');
+                if (filter) { filter.value = ''; filter.dispatchEvent(new Event('input')); }
+              }
+              handler.click(); handler.focus({preventScroll: true}); handler.scrollIntoView({block: 'nearest'});
+            });
+            row.append(select);
+          } else {
+            row.append(textElement('p', 'vm-effect-detail', 'Not in the retained handler neighborhood. This inventory does not expand or execute it.'));
+          }
+          return row;
+        });
+        return section;
+      }
+
       function renderVmHandlers(workspace, onSelection = null) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const rows = vmOpcodeRows(workspace);
@@ -1618,7 +1656,7 @@
           ? `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`
           : rows.length === workspace.handlers.length
             ? `${workspace.handlers.length} dispatch-arm candidates`
-            : `${rows.length} dispatch sites · ${workspace.handlers.length} selectors`;
+            : `${rows.length} dispatch sites · ${workspace.handlers.length} retained arms`;
         heading.append(textElement('h4', '', 'Handler listing'), textElement('span', '', listingCount));
         section.append(heading);
         if (!rows.some(row => row.key === state.selectedVmHandlerKey)) {
@@ -2112,6 +2150,7 @@
         const panels = document.createElement('div'); panels.className = 'vm-workbench-panels';
         const definitions = [
           ['effects', 'Effects', renderVmEffects],
+          ...(workspace.runtime === 'webassembly' ? [['dispatch', 'Dispatch sites', renderVmDispatchInventory]] : []),
           ['bytecode', 'Bytes', renderVmBytecode],
           ['reachability', 'Reachability', renderVmReachability],
           ['coverage', 'Coverage', renderVmWorkspaceCoverage],

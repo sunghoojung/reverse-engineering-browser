@@ -53,6 +53,8 @@ impl BrowserSetupFailure {
                 Code::Cancelled => "cancelled",
                 Code::CommandOutcomeUnknown => "outcome-unknown",
                 Code::Unspecified => "unspecified",
+                Code::IdleBackend => "idle-backend",
+                Code::DebuggerUnavailable => "debugger-unavailable",
             },
         }
     }

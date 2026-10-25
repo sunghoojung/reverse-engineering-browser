@@ -875,7 +875,12 @@ pub(crate) fn workspace(
     events: &[Value],
     budget_losses: &[DispatchBudgetLoss],
 ) -> Option<Value> {
-    if result["tier"] != "likely-vm" {
+    // A ranked Wasm table may be worth inspecting without enough independent
+    // evidence for likely-vm. Keeping its static workspace never raises that tier.
+    let static_wasm_candidate = result["runtime"] == "webassembly"
+        && result["tier"] == "candidate"
+        && result["frontend"]["dispatch_inventory"]["selected_byte_offset"].is_u64();
+    if result["tier"] != "likely-vm" && !static_wasm_candidate {
         return None;
     }
     let runtime = result["runtime"].as_str()?;
@@ -913,6 +918,13 @@ pub(crate) fn workspace(
         }
         _ => return None,
     };
+    if result["frontend"]["dispatch_inventory"]["omitted_site_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        omissions.push(json!({"reason":"dispatch-inventory-limit","detail":"The module-wide count includes every decoded dispatch site; only the top 256 ranked sites are listed."}));
+    }
     if handlers.is_empty() {
         omissions.push(json!({"reason":"handler-unavailable","detail":"No static integer handler candidate was visible in the dispatch region."}));
     }
@@ -1084,7 +1096,7 @@ pub(crate) fn workspace(
     }
     if traversal["complete"] != true {
         if static_module {
-            let dispatch = module_dispatch.expect("wasm dispatch summary");
+            let dispatch = module_dispatch.as_ref().expect("wasm dispatch summary");
             omissions.push(json!({
                 "reason": "static-module-dispatch",
                 "detail": format!(
@@ -1120,6 +1132,11 @@ pub(crate) fn workspace(
         "unknowns": unknowns,
         "traversal": traversal,
     });
+    if runtime == "webassembly"
+        && let Some(inventory) = result["frontend"].get("dispatch_inventory")
+    {
+        workspace["dispatch_inventory"] = inventory.clone();
+    }
     if let Some(preview) = module_preview {
         workspace["captured_module_preview"] = preview;
     }
@@ -1625,7 +1642,7 @@ mod tests {
     fn wasm_module(bodies: &[&[u8]], element_funcs: Option<&[u32]>) -> Vec<u8> {
         let mut module = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
         module.extend(wasm_section(1, &[0x01, 0x60, 0x00, 0x00]));
-        let mut functions = vec![bodies.len() as u8];
+        let mut functions = leb(bodies.len() as u32);
         functions.extend(std::iter::repeat_n(0u8, bodies.len()));
         module.extend(wasm_section(3, &functions));
         if let Some(funcs) = element_funcs {
@@ -1651,10 +1668,225 @@ mod tests {
         module
     }
 
-    fn br_table(selectors: u8) -> Vec<u8> {
-        let mut bytes = vec![0x0e, selectors];
-        bytes.extend(std::iter::repeat_n(0u8, usize::from(selectors) + 1));
+    fn br_table(selectors: u32) -> Vec<u8> {
+        let mut bytes = vec![0x0e];
+        bytes.extend(leb(selectors));
+        bytes.extend(std::iter::repeat_n(0u8, selectors as usize + 1));
         bytes
+    }
+
+    fn ranked_dispatch_body(arms: u32, signals: bool) -> Vec<u8> {
+        let mut body = vec![0x01, 0x01, 0x7f, 0x03, 0x40];
+        if signals {
+            body.extend([
+                0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x41, 0x00, 0x2d, 0x00, 0x00, 0x1a,
+            ]);
+        }
+        body.extend([0x41, 0x00]);
+        body.extend(br_table(arms));
+        body.extend([0x0b, 0x0b]);
+        body
+    }
+
+    #[test]
+    fn wasm_module_ranking_selects_large_site_not_early_helper() {
+        for (arms, signals) in [(200, true), (700, false)] {
+            let helper = ranked_dispatch_body(8, true);
+            let large = ranked_dispatch_body(arms, signals);
+            let bytes = wasm_module(&[&helper, &large], None);
+            wasmparser::Validator::new().validate_all(&bytes).unwrap();
+            let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+            let result = &analysis["results"][0];
+            assert_eq!(
+                result["tier"],
+                if signals { "likely-vm" } else { "candidate" }
+            );
+            let inventory = &result["frontend"]["dispatch_inventory"];
+            assert_eq!(inventory["site_count"], 2);
+            assert_eq!(inventory["candidates"][0]["function_index"], 1);
+            assert_eq!(inventory["candidates"][0]["arm_count"], arms);
+            assert_eq!(inventory["candidates"][1]["arm_count"], 8);
+            assert_eq!(
+                inventory["candidates"][1]["classification"],
+                "cff-helper-candidate"
+            );
+            let workspace = &document["workspaces"][0];
+            assert_eq!(workspace["dispatch_inventory"], *inventory);
+            assert_eq!(
+                workspace["handlers"].as_array().unwrap().len(),
+                arms as usize + 1
+            );
+            assert_eq!(
+                workspace["handlers"][0]["source"]["byte_offset"],
+                inventory["selected_byte_offset"]
+            );
+            assert_eq!(workspace["sample_count"], 0);
+            assert!(
+                workspace["handlers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|h| h["state"] != "observed")
+            );
+            assert_schema(&document);
+        }
+    }
+
+    #[test]
+    fn wasm_ranking_uses_ip_patterns_loop_depth_body_size_and_stable_offsets() {
+        let plain = ranked_dispatch_body(200, false);
+        let signaled = ranked_dispatch_body(200, true);
+        let mut larger = signaled.clone();
+        larger.splice(
+            larger.len() - 1..larger.len() - 1,
+            std::iter::repeat_n(0x01, 500),
+        );
+        let mut nested = signaled.clone();
+        nested.splice(3..3, [0x03, 0x40]);
+        nested.insert(nested.len() - 1, 0x0b);
+        for (left, right, selected) in [
+            (&plain, &signaled, 1),
+            (&signaled, &larger, 1),
+            (&larger, &nested, 1),
+            (&signaled, &signaled, 0),
+        ] {
+            let bytes = wasm_module(&[left, right], None);
+            wasmparser::Validator::new().validate_all(&bytes).unwrap();
+            let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+            assert_eq!(
+                document["workspaces"][0]["dispatch_inventory"]["candidates"][0]["function_index"],
+                selected
+            );
+            for (name, value) in [("VmAnalysis", &analysis), ("VmOpcodeWorkspace", &document)] {
+                let spec: Value =
+                    serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+                let schema = json!({"$ref":format!("#/components/schemas/{name}"),"components":spec["components"]});
+                jsonschema::validator_for(&schema)
+                    .unwrap()
+                    .validate(value)
+                    .unwrap();
+            }
+            assert_schema(&document);
+        }
+    }
+
+    #[test]
+    fn wasm_ranking_is_site_local_and_decodes_past_arm_retention_limit() {
+        for (small, large) in [(8, 200), (2048, 4096)] {
+            let mut body = ranked_dispatch_body(small, true);
+            body.pop();
+            body.extend([0x03, 0x40, 0x41, 0x00]);
+            body.extend(br_table(large));
+            body.extend([0x0b, 0x0b]);
+            let bytes = wasm_module(&[&body], None);
+            wasmparser::Validator::new().validate_all(&bytes).unwrap();
+            let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+            let workspace = &document["workspaces"][0];
+            let inventory = &workspace["dispatch_inventory"];
+            assert_eq!(inventory["site_count"], 2);
+            assert_eq!(inventory["candidates"][0]["arm_count"], large);
+            assert_eq!(
+                workspace["handlers"][0]["source"]["byte_offset"],
+                inventory["selected_byte_offset"]
+            );
+            assert_eq!(
+                workspace["handlers"].as_array().unwrap().len(),
+                ((small + large + 2) as usize).min(MAX_HANDLERS)
+            );
+            assert_schema(&document);
+        }
+    }
+
+    #[test]
+    fn wasm_large_site_stress_keeps_selected_after_metadata_cap() {
+        // 128 large tables previously retained 128 * 1024 Arm objects before
+        // imposing the output cap. The lazy emitter constructs at most 1024.
+        // The second case also puts the selected instruction past the site cap.
+        for (sites, arms) in [(128, 2048), (1100, 1)] {
+            let mut body = ranked_dispatch_body(arms, true);
+            body.pop();
+            for _ in 1..sites {
+                body.extend([0x03, 0x40, 0x41, 0x00]);
+                body.extend(br_table(arms));
+                body.push(0x0b);
+            }
+            body.extend([0x03, 0x40, 0x41, 0x00]);
+            body.extend(br_table(4096));
+            body.extend([0x0b, 0x0b]);
+            let bytes = wasm_module(&[&body], None);
+            wasmparser::Validator::new().validate_all(&bytes).unwrap();
+            let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+            let workspace = &document["workspaces"][0];
+            assert_eq!(workspace["dispatch_inventory"]["site_count"], sites + 1);
+            assert_eq!(
+                workspace["dispatch_inventory"]["candidates"][0]["arm_count"],
+                4096
+            );
+            assert_eq!(
+                workspace["handlers"].as_array().unwrap().len(),
+                MAX_HANDLERS
+            );
+            assert_eq!(
+                workspace["handlers"][0]["source"]["byte_offset"],
+                workspace["dispatch_inventory"]["selected_byte_offset"]
+            );
+            let omissions = workspace["coverage"]["omissions"].as_array().unwrap();
+            assert!(omissions.iter().any(|o| o["reason"] == "handler-limit"));
+            assert_eq!(
+                omissions
+                    .iter()
+                    .any(|o| o["reason"] == "dispatch-site-limit"),
+                sites > 1024
+            );
+            assert_schema(&document);
+        }
+    }
+
+    #[test]
+    fn wasm_inventory_includes_nonloop_and_indirect_sites_without_claiming_targets() {
+        let selected = ranked_dispatch_body(8, true);
+        let mut nonloop = vec![0x00, 0x02, 0x40, 0x41, 0x00];
+        nonloop.extend(br_table(700));
+        nonloop.extend([0x0b, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b]);
+        let bytes = wasm_module(&[&selected, &nonloop], Some(&[0]));
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let inventory = &document["workspaces"][0]["dispatch_inventory"];
+        assert_eq!(inventory["site_count"], 3);
+        assert_eq!(inventory["br_table_count"], 2);
+        assert_eq!(inventory["call_indirect_count"], 1);
+        assert_eq!(inventory["candidates"][0]["function_index"], 0);
+        let indirect = inventory["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|site| site["kind"] == "call_indirect")
+            .unwrap();
+        assert!(indirect["arm_count"].is_null());
+        assert_eq!(indirect["loop_depth"], 0);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn wasm_inventory_counts_all_sites_but_bounds_ranked_metadata() {
+        let body = ranked_dispatch_body(8, true);
+        let bytes = wasm_module(&vec![body.as_slice(); 300], None);
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let inventory = &document["workspaces"][0]["dispatch_inventory"];
+        assert_eq!(inventory["site_count"], 300);
+        assert_eq!(inventory["candidates"].as_array().unwrap().len(), 256);
+        assert_eq!(inventory["omitted_site_count"], 44);
+        assert_eq!(inventory["candidates"][0]["function_index"], 0);
+        assert_eq!(analysis["results"][0]["coverage"]["complete"], false);
+        assert!(
+            document["workspaces"][0]["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["reason"] == "dispatch-inventory-limit")
+        );
+        assert_schema(&document);
     }
 
     #[test]

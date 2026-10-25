@@ -14,6 +14,8 @@ use std::{
 use wasmparser::{Operator, Parser, Payload, TypeRef};
 #[path = "vm_capture_mode.rs"]
 pub(crate) mod capture_mode;
+#[path = "vm_wasm_dispatch.rs"]
+mod wasm_dispatch;
 
 const PROFILE: &str = "anti-bot-vm-detection-v1";
 static CONFIG: LazyLock<Value> = LazyLock::new(|| {
@@ -79,7 +81,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.4.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.5.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -321,6 +323,7 @@ struct Instruction {
     end: usize,
     variable: Option<(bool, u32)>,
     loop_depth: usize,
+    arm_count: Option<u32>,
 }
 fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
     let bad = |e: wasmparser::BinaryReaderError| Error::bad(e.to_string());
@@ -334,6 +337,8 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
     let mut instructions_count = 0;
     let mut best = Vec::new();
     let mut best_rank = (0, 0);
+    let mut best_dispatch = None;
+    let mut inventory = wasm_dispatch::Inventory::default();
     let mut seen = BTreeSet::new();
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(bad)?;
@@ -411,6 +416,10 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         end,
                         variable,
                         loop_depth,
+                        arm_count: match &op {
+                            Operator::BrTable { targets } => Some(targets.len()),
+                            _ => None,
+                        },
                     });
                     match op {
                         Operator::Block { .. } => control.push(2),
@@ -474,7 +483,7 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         "wasm.instruction-pointer",
                         first.start,
                         arithmetic.end,
-                        "The same decoded local or global is read, advanced, and written.",
+                        "A decoded local or global is both read and written, with arithmetic elsewhere in this function. This is an IP-like pattern, not a data-flow or dispatch-binding proof.",
                     ));
                 }
                 for (id, detail, opcodes) in [
@@ -503,8 +512,29 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                     o["coordinate"]["function_body_offset"] = json!(range.start);
                     o["coordinate"]["function_body_size"] = json!(range.len());
                 }
-                if rank(&obs) > best_rank {
-                    best_rank = rank(&obs);
+                let score = rank(&obs);
+                let dispatch = inventory.function(
+                    imported + functions,
+                    &range,
+                    &decoded,
+                    score.0,
+                    obs.iter()
+                        .any(|o| o["rule_id"] == "wasm.instruction-pointer"),
+                );
+                if let Some((site_rank, start, end)) = dispatch {
+                    if best_dispatch.is_none_or(|(previous, _)| site_rank > previous) {
+                        if let Some(observation) = obs
+                            .iter_mut()
+                            .find(|o| o["rule_id"] == "wasm.dispatch-loop")
+                        {
+                            observation["coordinate"]["byte_offset"] = json!(start);
+                            observation["coordinate"]["byte_size"] = json!(end - start);
+                        }
+                        best_dispatch = Some((site_rank, start));
+                        best = obs;
+                    }
+                } else if best_dispatch.is_none() && score > best_rank {
+                    best_rank = score;
                     best = obs;
                 }
                 functions += 1;
@@ -531,7 +561,7 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
     }
     Ok((
         best,
-        json!({"section_count":sections,"code_section_count":code_sections,"data_section_count":data_ranges.len(),"decoded_function_count":functions,"imported_function_count":imported,"decoded_instruction_count":instructions_count}),
+        json!({"section_count":sections,"code_section_count":code_sections,"data_section_count":data_ranges.len(),"decoded_function_count":functions,"imported_function_count":imported,"decoded_instruction_count":instructions_count,"dispatch_inventory":inventory.value(best_dispatch.map(|(_, offset)| offset))}),
     ))
 }
 pub fn canonical(value: &Value) -> Result<Vec<u8>> {
@@ -679,7 +709,17 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
         }
     } else {
         match wasm(bytes) {
-            Ok((obs, frontend)) => (obs, frontend, Vec::new()),
+            Ok((obs, frontend)) => {
+                let omitted = frontend["dispatch_inventory"]["omitted_site_count"]
+                    .as_u64()
+                    .unwrap_or(0);
+                let omissions = if omitted > 0 {
+                    vec![json!({"reason":"dispatch-inventory-limit","omitted_records":omitted})]
+                } else {
+                    Vec::new()
+                };
+                (obs, frontend, omissions)
+            }
             Err(e) => return failure(artifact, "malformed-artifact", &e.message),
         }
     };
@@ -1145,7 +1185,7 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.4.0");
+        assert_eq!(current_producer()["version"], "1.5.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical

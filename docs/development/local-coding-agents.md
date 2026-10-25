@@ -38,8 +38,38 @@ message.
 
 ### Select the endpoint
 
-The launcher accepts exactly one of these. It does not choose the newest
-session directory, even when only one session exists:
+The default is the canonical live endpoint file,
+`~/.config/origin-trace/reb-api.endpoint`. `make live` and packaged live sessions
+publish that file atomically with private permissions. Idle/demo backends do
+not publish it. Starting a newer live session replaces the canonical endpoint;
+closing an older session does not remove the newer endpoint. The launcher can
+use `REB_ACTIVE_ENDPOINT_FILE` to publish elsewhere for an isolated test or a
+separate research profile; pass that exact file to the MCP wrapper in that case.
+
+```sh
+scripts/reb-api-mcp.sh
+scripts/reb-api-mcp.sh --print-config cursor
+scripts/reb-api-mcp.sh --print-config grok
+```
+
+These fresh configurations retain the canonical file path, not a port or a
+session directory, and include `--require-live`. Every MCP start/reconnect reads
+and validates that file again. Restart/reconnect the client MCP server after an
+Origin Trace restart: within that one reconnect it uses the new port without
+editing client configuration. A running connection refuses calls if its file
+changes, disappears, becomes invalid, or its live backend instance changes,
+including replacement at the same port. It stays retired until reconnect, even
+if the old file contents return. It never retries or forwards a pending tool
+call to another backend. Reconfirm the intended session and reselect evidence
+before issuing new work after reconnect; this does not transfer authorization.
+Tool requests also carry the startup backend identity as an instance precondition;
+the backend rejects a mismatch before dispatch, closing same-port replacement
+between health and action. This is not authentication or authorization, and does
+not replace exact target/document ownership checks. An old backend without this
+identity is unsupported in live mode and must be rebuilt.
+
+To pin one session, use exactly one explicit selector instead. These do not
+fall back to the canonical file or choose the newest session directory:
 
 ```sh
 scripts/reb-api-mcp.sh --list --sessions-root "$ROOT"
@@ -49,22 +79,33 @@ scripts/reb-api-mcp.sh --session-dir /absolute/path/to/selected-session
 scripts/reb-api-mcp.sh --endpoint-file /absolute/path/to/selected-session/research-ui.endpoint
 ```
 
-`--list` prints ids and endpoint files and exits. `--choose` asks for one of
-those ids in a terminal; Enter alone selects nothing. MCP client configs
-cannot use either mode, because the client's stdin is the MCP channel. Pass
-`--endpoint-file`, `--session-dir`, or `--session-id` there.
+`--list` and terminal-only `--choose` are discovery helpers, not MCP client
+arguments. An explicit endpoint does not imply live work: add `--require-live`
+for live capture, or omit it for intentional stored-evidence/idle inspection.
+Packaged session files live under `~/Library/Application Support/Origin Trace/
+sessions/live/<id>/`; `make live` uses `build/sessions/live/<id>/` unless
+`REB_LIVE_SESSION_ROOT` is set. If both roots exist, pass `--sessions-root` for
+session-id selection. A native handshake URL containing `native=1` is not the
+API root.
 
-Packaged live sessions keep `research-ui.endpoint` under `~/Library/Application
-Support/Origin Trace/sessions/live/<id>/`. `make live` uses
-`build/sessions/live/<id>/` unless `REB_LIVE_SESSION_ROOT` is set. If both the
-packaged root and the checkout root exist, pass `--sessions-root`. The native
-coordinator's temporary handshake URL contains a query such as `native=1` and
-is not the API root.
+`reb-api mcp` checks `/api/health` before reading stdio. With `--require-live`,
+it additionally requires `capture_mode=live`, `debugger_state=running` or
+`paused`, and a supported backend `instance_id`; it rechecks before valid tool
+calls. An idle, unavailable, missing-state, or older backend fails closed with
+the selected endpoint URL and bounded capture/debugger states, rather than
+empty artifacts. The health document and local store paths are not printed.
+A live health result is not capture completeness, target identity, or permission
+to share evidence. Missing/invalid endpoints and failed health checks never
+trigger port scans, alternate-session searches, or automatic backend startup.
+Startup refusal includes `code=idle_backend`, `code=debugger_unavailable`, or
+`code=state_conflict` with the endpoint URL and bounded capture/debugger states.
 
-`reb-api mcp` requests `/api/health` before it reads stdio. A missing file, a
-non-loopback URL, or a health document whose `status` is not `ok` exits before
-any tool is advertised. The health document names local store paths and is not
-printed. Health is reachability, not capture identity or authorization.
+After a live connection is up, call `get_session_context` before other tools.
+If that same connection later leaves the ready state, other tools fail with
+those codes and are not dispatched. `get_session_context` still reads that
+connection unless the endpoint file or backend instance changed; either change
+retires the connection with no request sent. See
+[Start with compact session context](#start-with-compact-session-context).
 
 ### Read-only and write-capable tools
 
@@ -83,14 +124,15 @@ settings enabled. Captured content remains untrusted data.
 [SAFETY.md](../../SAFETY.md) owns those boundaries.
 
 `--print-config cursor|claude|codex|grok|t3` prints the matching snippet for
-the selection already given. It includes `--allow-effects` only when that flag
+the explicit selection, or the canonical live default. It includes `--allow-effects` only when that flag
 was passed. The examples below are the write-capable form. Delete
 `--allow-effects` for the read-only list.
 
 ### Cursor
 
 Put this in `~/.cursor/mcp.json` or the project `.cursor/mcp.json` on the
-machine that hosts the live session. Replace both absolute paths.
+machine that hosts the live session. Replace the command path and `/Users/you`
+with that machine’s actual home path. `--print-config cursor` prints it for you.
 
 ```json
 {
@@ -99,7 +141,8 @@ machine that hosts the live session. Replace both absolute paths.
       "command": "/absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh",
       "args": [
         "--endpoint-file",
-        "/absolute/path/to/researcher-selected-session/research-ui.endpoint",
+        "/Users/you/.config/origin-trace/reb-api.endpoint",
+        "--require-live",
         "--allow-effects"
       ]
     }
@@ -114,7 +157,7 @@ not authorization.
 
 Add this table to `~/.codex/config.toml`, or to the `CODEX_HOME` the client
 actually uses. Do not set `url` or `experimental_environment = "remote"`.
-`codex mcp add origin-trace -- /absolute/path/to/scripts/reb-api-mcp.sh --endpoint-file /absolute/path/to/research-ui.endpoint --allow-effects`
+`codex mcp add origin-trace -- /absolute/path/to/scripts/reb-api-mcp.sh --require-live --allow-effects`
 writes the same stdio command.
 
 ```toml
@@ -122,7 +165,8 @@ writes the same stdio command.
 command = "/absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh"
 args = [
   "--endpoint-file",
-  "/absolute/path/to/researcher-selected-session/research-ui.endpoint",
+  "/Users/you/.config/origin-trace/reb-api.endpoint",
+  "--require-live",
   "--allow-effects",
 ]
 ```
@@ -139,7 +183,7 @@ the stdio command on the session machine:
 ```sh
 claude mcp add --transport stdio origin-trace -- \
   /absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh \
-  --endpoint-file /absolute/path/to/researcher-selected-session/research-ui.endpoint \
+  --require-live \
   --allow-effects
 ```
 
@@ -153,7 +197,8 @@ name: origin-trace
 command: /absolute/path/to/reverse-engineering-browser/scripts/reb-api-mcp.sh
 args:
   - "--endpoint-file"
-  - "/absolute/path/to/researcher-selected-session/research-ui.endpoint"
+  - "/Users/you/.config/origin-trace/reb-api.endpoint"
+  - "--require-live"
   - "--allow-effects"
 ```
 
@@ -471,3 +516,58 @@ per-operation connect/read timeouts explicit; do not claim a whole-request
 deadline or browser-profile parity. Dependencies are listed, never installed by
 export, and the initial dry run needs only Python's standard library. See
 [Python project v1](../product/python-client-project-v1.md).
+
+### Start with compact session context
+
+Cursor, Grok Bot, Codex, Claude Code, and T3 Code should call
+`get_session_context` with no arguments before other tools. The same read is
+available through
+`reb-api call get_session_context --read-only --endpoint-file /path/to/selected.endpoint`.
+Fresh wrapper configs from `scripts/reb-api-mcp.sh --print-config` use the
+canonical live file and `--require-live` for all five clients. It reports
+`live_admission` (`ready`, `idle`, `debugger_unavailable`, or
+`not_live_capture`), capture/debugger state, the same `instance_id` as
+`/api/health` and `X-REB-Expected-Instance`, selected target ID, debugger
+generation/document epoch, and separate bounded Wasm script and retained-artifact
+inventories. It does not scrape or return the full debugger document, fetch
+source/bytecode, reconnect a browser, or infer which artifact belongs to which
+script.
+
+`allow_effects` is the actual MCP invocation's admission flag, not permission to
+mutate a target or share captures. Direct HTTP/CLI reads return `null` because
+those clients have no MCP admission state. Existing confirmations, ownership,
+and effects gates remain required. `live_admission` is availability only.
+`ready` means capture is live and the debugger is running or paused. `idle`
+means an idle backend with no DevTools port. `debugger_unavailable` means live
+capture or a configured DevTools port is not attached, including a crashed
+renderer. `not_live_capture` covers demo and any other non-live mode. An idle
+endpoint remains useful for stored evidence and local cleanup. Live debugger
+commands return `idle_backend` when the backend is idle and no DevTools port is
+configured, or `debugger_unavailable` when a live target is required but not
+attached. `--require-live` uses `idle_backend` for idle capture,
+`debugger_unavailable` for a live capture whose debugger is not running or
+paused, and `state_conflict` for demo or unknown health. A capture stop whose
+broker is disconnected returns `dependency_unavailable` and does not report
+success. Correct the endpoint or attachment explicitly rather than automatically
+retrying mutations.
+
+The compact read deliberately omits titles, URL userinfo/paths/query/fragments,
+source, bodies, headers, socket URLs, and diagnostics. HTTP(S) URLs are origin
+labels; conventional Wasm hex labels are retained. IDs are never truncated into
+different identities: an oversized ID is `null`. These labels/IDs can still be
+sensitive metadata, so establish provider-sharing scope first. Each inventory
+has at most 16 entries. Artifact coverage is only a 256 KiB manifest tail;
+`window_truncated` and `items_omitted` are not evidence that an absent module was
+never captured. Scripts and artifacts are not joined by URL, time, or hash.
+`artifact_id`/`script_id` and script `sha256` remain `null` where no exact link or
+verified content digest exists. Script `byte_length` is CDP's script length,
+not proof of a retained complete module.
+
+Cache `/api/session/context` with its own response ETag and `If-None-Match`.
+`debugger_etag` belongs only to `/api/debugger`; generation alone does not cover
+manifest or broker changes, and context is not an atomic evidence snapshot.
+Invalid `debugger_action` or `capture_action` bodies include bounded
+`details.allowed_actions` and `details.missing_fields`, drawn only from the
+embedded schema. MCP validation reports those details before sending an invalid
+request. Inspect the exact action with `reb-api describe debugger_action
+--action ACTION` before enabling effects or supplying confirmation fields.

@@ -51,10 +51,11 @@ class TestElement {
   addEventListener(key, action) { this.events[key] = action; }
   focus() { testDocument.activeElement = this; }
   click() { if (!this.disabled) this.events.click?.(); }
+  dispatchEvent(event) { this.events[event.type]?.(event); }
 }
 const testDocument = {createElement: tag => new TestElement(tag), createTextNode: text => { const node = new TestElement('#text'); node.textContent = text; return node; }, querySelector: () => null};
 const renderApiState = {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'};
-const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder});
+const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder, Event});
 const descendants = element => [element, ...element.children.flatMap(descendants)];
 const findButton = (root, label) => descendants(root).find(node => node.tagName === 'button' && node.textContent === label);
 const many = structuredClone(hostSource);
@@ -270,6 +271,25 @@ assert.equal(renderApiState.selectedVmHandlerKey, 'null::50', 'refresh must pres
 renderApiState.selectedVmHandlerKey = null;
 renderApi.renderVmHandlers(rankedWorkspace);
 assert.equal(renderApiState.selectedVmHandlerKey, 'span:45:5', 'the first ranked retained site is the initial default');
+// Exercise the actual selection callback, not just its label or stored key.
+const filteredListing = renderApi.renderVmHandlers(inventoryDocument.workspaces[0]);
+const filteredNodes = descendants(filteredListing);
+const filteredRows = filteredNodes.filter(node => node.className === 'vm-handler-row');
+const filteredList = filteredNodes.find(node => node.className === 'vm-handler-list');
+const filteredToolbar = filteredNodes.find(node => node.className === 'vm-listing-toolbar');
+const retainedFilter = filteredNodes.find(node => node.tagName === 'input');
+filteredList.querySelectorAll = () => filteredRows;
+filteredToolbar.querySelectorAll = () => descendants(filteredToolbar).filter(node => node.tagName === 'button');
+filteredListing.querySelector = () => retainedFilter;
+for (const row of filteredRows) { row.closest = () => filteredListing; row.scrollIntoView = () => {}; }
+testDocument.querySelectorAll = selector => selector === '.vm-handler-row' ? filteredRows : [];
+retainedFilter.value = 'call_indirect'; retainedFilter.dispatchEvent(new Event('input'));
+assert.equal(filteredRows[0].hidden, true);
+findButton(inventoryPanel, 'Select retained site').click();
+assert.equal(retainedFilter.value, '', 'the production selection callback clears an excluding filter');
+assert.equal(filteredRows[0].hidden, false);
+assert.equal(testDocument.activeElement, filteredRows[0]);
+assert.equal(renderApiState.selectedVmHandlerKey, '0::45');
 const boundedInventory = structuredClone(inventory);
 boundedInventory.candidates = Array.from({length: 65}, (_, index) => site(45 + index * 6, 200, index));
 boundedInventory.site_count = 70; boundedInventory.br_table_count = 70; boundedInventory.call_indirect_count = 0;
@@ -377,7 +397,11 @@ render();`;
       assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('200 arms + default'));
       assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('CFF / helper candidate'));
       await evaluate("(()=>{const search=document.querySelector('.vm-listing-toolbar input'); search.value='call_indirect'; search.dispatchEvent(new Event('input')); document.querySelector('[data-vm-panel-content=dispatch] details').open=true; document.querySelector('[data-vm-panel-content=dispatch] details button').focus()})()");
-      for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+      assert.equal(await evaluate("document.activeElement === document.querySelector('[data-vm-panel-content=dispatch] details button')"), true);
+      // Native button activation needs Enter's character event, not rawKeyDown
+      // alone. Match the existing pack/ledger keyboard browser checks.
+      await send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'});
+      await send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
       assert.equal(await evaluate("document.querySelector('.vm-listing-toolbar input').value"), '');
       assert.equal(await evaluate("state.selectedVmHandlerKey"), '0::45');
       await evaluate("document.querySelectorAll('.vm-handler-row')[1].click();render()");

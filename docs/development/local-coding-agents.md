@@ -471,3 +471,42 @@ per-operation connect/read timeouts explicit; do not claim a whole-request
 deadline or browser-profile parity. Dependencies are listed, never installed by
 export, and the initial dry run needs only Python's standard library. See
 [Python project v1](../product/python-client-project-v1.md).
+
+### Start with compact session context
+
+Cursor, Grok Bot, and Codex MCP clients can call `get_session_context` with no
+arguments before requesting live work. The same read is available through
+`reb-api call get_session_context --read-only --endpoint-file /path/to/selected.endpoint`.
+It reports the selected endpoint, backend instance, capture/debugger state,
+selected target ID, debugger generation/document epoch, and separate bounded
+Wasm script and retained-artifact inventories. It does not scrape or return the
+full debugger document, fetch source/bytecode, or reconnect a browser.
+
+`allow_effects` is the actual MCP invocation's admission flag, not permission to
+mutate a target or share captures. Direct HTTP/CLI reads return `null` because
+those clients have no MCP admission state. Existing confirmations, ownership,
+and effects gates remain required. An idle endpoint is still useful for stored
+evidence and local cleanup; live debugger commands return `idle_backend`, or
+`debugger_unavailable` when configured but not attached. Correct the endpoint or
+attachment explicitly rather than automatically retrying mutations.
+
+The compact read deliberately omits titles, URL userinfo/paths/query/fragments,
+source, bodies, headers, socket URLs, and diagnostics. HTTP(S) URLs are origin
+labels; conventional Wasm hex labels are retained. IDs are never truncated into
+different identities: an oversized ID is `null`. These labels/IDs can still be
+sensitive metadata, so establish provider-sharing scope first. Each inventory
+has at most 16 entries. Artifact coverage is only a 256 KiB manifest tail;
+`window_truncated` and `items_omitted` are not evidence that an absent module was
+never captured. Scripts and artifacts are not joined by URL, time, or hash.
+`artifact_id`/`script_id` and script `sha256` remain `null` where no exact link or
+verified content digest exists. Script `byte_length` is CDP's script length,
+not proof of a retained complete module.
+
+Cache `/api/session/context` with its own response ETag and `If-None-Match`.
+`debugger_etag` belongs only to `/api/debugger`; generation alone does not cover
+manifest or broker changes, and context is not an atomic evidence snapshot.
+Invalid `debugger_action` or `capture_action` bodies include bounded
+`details.allowed_actions` and `details.missing_fields`, drawn only from the
+embedded schema. MCP validation reports those details before sending an invalid
+request. Inspect the exact action with `reb-api describe debugger_action
+--action ACTION` before enabling effects or supplying confirmation fields.

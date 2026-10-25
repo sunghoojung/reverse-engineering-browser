@@ -743,7 +743,19 @@ async fn call_tool(
     };
     match schema_violation(&schema, &arguments) {
         Ok(None) => {}
-        Ok(Some(error)) => return tool_message(error, true),
+        Ok(Some(error)) => {
+            let mut result = json!({"code":"invalid_request", "error":error, "details":{}});
+            if let Some(guidance) = origin_trace_backend::action_guidance::action_guidance(
+                &schema["properties"]["body"],
+                &arguments["body"],
+            ) {
+                result["details"] =
+                    serde_json::to_value(guidance).expect("contract action guidance");
+            }
+            let mut message = tool_message(result.to_string(), true);
+            message["structuredContent"] = result;
+            return message;
+        }
         Err(error) => return tool_message(error, true),
     }
     if binary_response(definition) {
@@ -752,7 +764,7 @@ async fn call_tool(
             true,
         );
     }
-    let completed = match super::exchange(super::ExchangeRequest {
+    let mut completed = match super::exchange(super::ExchangeRequest {
         method,
         path,
         definition,
@@ -768,6 +780,21 @@ async fn call_tool(
         Ok(completed) => completed,
         Err(error) => return tool_message(error.to_string(), true),
     };
+    if name == "get_session_context" && completed.status == 200 && !completed.unreadable {
+        let value = serde_json::from_slice::<Value>(&completed.bytes);
+        if let Ok(mut value) = value
+            && value.is_object()
+        {
+            value["endpoint"] = json!(base.trim_end_matches('/'));
+            value["allow_effects"] = json!(allow_effects);
+            value["effects_admission"] = json!(if allow_effects {
+                "effects_exposed_not_authorized"
+            } else {
+                "read_only_projection"
+            });
+            completed.bytes = serde_json::to_vec(&value).expect("session context JSON");
+        }
+    }
     project_completed(
         spec,
         completed.status,

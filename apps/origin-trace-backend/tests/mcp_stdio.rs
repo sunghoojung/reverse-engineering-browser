@@ -304,7 +304,7 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             tool_text(&response)
         );
         let body: Value = serde_json::from_str(tool_text(&response)).unwrap();
-        let direct: Value = client
+        let mut direct: Value = client
             .get(format!("{}{}", server.url.trim_end_matches('/'), path))
             .send()
             .await
@@ -314,6 +314,11 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             .json()
             .await
             .unwrap();
+        if name == "get_session_context" {
+            assert!(direct["allow_effects"].is_null());
+            direct["allow_effects"] = json!(false);
+            direct["effects_admission"] = json!("read_only_projection");
+        }
         assert_eq!(body, direct, "{name} MCP body differs from HTTP");
         if body.is_object() {
             assert_eq!(response["result"]["structuredContent"], body, "{name}");
@@ -765,4 +770,49 @@ fn repo_path(relative: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(relative)
+}
+
+#[test]
+fn session_context_reports_actual_mcp_admission_and_action_guidance() {
+    let server = Server::start();
+    for allow_effects in [false, true] {
+        let mut mcp = Mcp::start(&server.url, allow_effects);
+        let response = mcp.request("tools/call", json!({"name":"get_session_context"}));
+        let context = &response["result"]["structuredContent"];
+        assert_eq!(response["result"]["isError"], false);
+        assert_eq!(context["allow_effects"], allow_effects);
+        assert_eq!(context["endpoint"], server.url);
+        assert_eq!(context["capture_mode"], "idle");
+        let spec = specification();
+        let (_, _, definition) = operation(&spec, "get_session_context");
+        assert!(
+            jsonschema::validator_for(&response_schema(&spec, definition))
+                .unwrap()
+                .is_valid(context)
+        );
+        assert!(tool_text(&response).len() < 8192);
+        if !allow_effects {
+            continue;
+        }
+        for (name, valid) in [("debugger_action", "pause"), ("capture_action", "stop")] {
+            let response = mcp.request("tools/call", json!({"name":name,"arguments":{"body":{}}}));
+            assert_eq!(response["result"]["isError"], true);
+            let error = &response["result"]["structuredContent"];
+            assert_eq!(error["code"], "invalid_request");
+            assert!(
+                error["details"]["allowed_actions"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(valid))
+            );
+            assert_eq!(error["details"]["missing_fields"], json!(["action"]));
+            let response = mcp.request(
+                "tools/call",
+                json!({"name":name,"arguments":{"body":{"action":valid}}}),
+            );
+            assert_eq!(response["result"]["isError"], true);
+            let error: Value = serde_json::from_str(tool_text(&response)).unwrap();
+            assert_eq!(error["code"], "idle_backend");
+        }
+    }
 }

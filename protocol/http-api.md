@@ -236,6 +236,24 @@ never chooses between different sessions. Missing exact matches remain `empty`,
 without falling back to another session or event. Session selection participates
 in the ETag. The v1 response shape, stored evidence and capture policy are unchanged.
 
+## Compact session context
+
+`GET /api/session/context` (`get_session_context`) returns bounded current
+session discovery without fetching source or bytecode. It includes backend
+instance, endpoint, capture/debugger state, target ID, debugger generation, and
+separate Wasm script and retained-artifact inventories (16 entries each; a
+256 KiB artifact manifest tail). `consistency` explicitly identifies independent
+debugger and manifest snapshots. Generation and `debugger_etag` apply only to the
+debugger snapshot, not the manifest; use this route's own ETag for conditional
+reads. No target/session join is inferred from URL or timing.
+
+Titles are omitted, HTTP(S) URL labels contain only origins, and conventional
+Wasm hex labels are retained. Source, headers, bodies, socket URLs and diagnostics
+are absent. Identifiers/origins remain potentially sensitive metadata. Direct
+HTTP reports `allow_effects: null`; MCP annotates its own flag without granting
+authorization. See the [agent context recipe](../docs/development/local-coding-agents.md#start-with-compact-session-context)
+for field omissions and coverage limits.
+
 ## Error reasons and uncertain outcomes
 
 JSON error responses retain their existing HTTP status and human `error` text,
@@ -247,6 +265,15 @@ writes, missing/malformed replies, or workspace directory-sync failure after
 publication can have `command_outcome_unknown`; this never proves no effect or
 authorizes a retry. Dynamic failure reasons do not
 replace the [advisory effects and common guards](#execution-metadata).
+
+Invalid action bodies return schema-derived `allowed_actions` and, where
+unambiguous, `missing_fields` inside details. Submitted values are not echoed.
+Each debugger action declares `x-reb-requires-live-target`: live-target actions
+refuse before dispatch with `idle_backend` or `debugger_unavailable`; local
+editing, cleanup and cancellation keep their existing admission paths. This
+annotation supplements rather than replaces effects, ownership, and confirmation
+metadata. A disconnected capture broker cannot report a newly requested stop as
+successful.
 
 Analyst, JWT Decoder and native Console application failures can remain HTTP
 200. Inspect their existing `ok`, `outcome`, `status` or `runtime.status` fields

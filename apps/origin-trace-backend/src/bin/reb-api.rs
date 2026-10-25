@@ -899,6 +899,7 @@ fn bounded_http_error(spec: &Value, status: u16, bytes: &[u8]) -> Value {
             json!({"$ref":"#/components/schemas/ErrorDetails","components":spec["components"]});
         if jsonschema::validator_for(&schema)
             .is_ok_and(|validator| validator.is_valid(&value["details"]))
+            && origin_trace_backend::action_guidance::valid_details(spec, &value["details"])
         {
             result["details"] = value["details"].clone();
         }

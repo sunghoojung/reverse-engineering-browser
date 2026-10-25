@@ -129,6 +129,9 @@ impl Debugger {
     pub fn snapshot(&self) -> Value {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+    pub fn session_context(&self) -> Value {
+        crate::session_context::debugger(&self.state.lock().unwrap_or_else(|e| e.into_inner()))
+    }
     fn update(&self, edit: impl FnOnce(&mut Value)) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         edit(&mut state);
@@ -548,6 +551,23 @@ impl Debugger {
             .as_str()
             .ok_or_else(|| Error::bad("Debugger action is required"))?;
         let snapshot = self.snapshot();
+        if validation::requires_live_target(action)
+            && !matches!(snapshot["state"].as_str(), Some("running" | "paused"))
+        {
+            return Err(
+                if self.options.capture_mode() == "idle"
+                    && self.options.devtools_active_port.is_none()
+                {
+                    Error::conflict(
+                        "Idle backend: select an authorized live endpoint before this action",
+                    )
+                    .with_code(Code::IdleBackend)
+                } else {
+                    Error::conflict("Debugger unavailable: attach a live target before this action")
+                        .with_code(Code::DebuggerUnavailable)
+                },
+            );
+        }
         if ["armed", "capturing", "stepping", "stopping"].contains(
             &snapshot["memory_origin_trace"]["state"]
                 .as_str()

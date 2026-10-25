@@ -14,6 +14,12 @@ apps/origin-trace-backend/target/debug/reb-api mcp --endpoint-file /tmp/reb-api-
 make backend-e2e
 ```
 
+`get_session_context` (`GET /api/session/context`) provides bounded target and
+Wasm discovery without returning the full debugger snapshot. MCP annotates its
+actual effects admission; direct HTTP reports admission as unknown. See the
+[agent guide](../../docs/development/local-coding-agents.md#start-with-compact-session-context)
+for privacy omissions, inventory limits, conditional reads, and action errors.
+
 `reb-api mcp` projects [`protocol/openapi.json`](../../protocol/openapi.json)
 onto a local stdio MCP server. Tool names are the OpenAPI operation IDs. The
 default list is read-only. `--allow-effects` also lists the other operations.

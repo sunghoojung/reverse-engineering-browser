@@ -28,9 +28,12 @@ The initial request must match the latest debugger generation and document
 owner. During inspection, every CDP read is pinned to the original connection
 and rechecks target, document, source catalog, frame/scopes and a monotonic pause
 serial. Resume/re-pause with reused frame IDs, reconnect, navigation, source
-replacement or detachment discards the result. Scope enrichment alone does not
-change the pause owner. Results carry the initial generation and must not be
-reused as current source evidence after the owner changes.
+replacement or detachment discards the result. Bounded event barriers drain
+queued lifecycle events before selection and after each reply. Any event loss
+on that selected connection fails closed, even if its diagnostic counter was
+already drained; reconnect and refresh before trying again. Scope enrichment
+alone does not change the pause owner. Results carry the initial generation and
+must not be reused as current source evidence after the owner changes.
 
 The response retains at most 16 namespaces and 64 import entries overall,
 examines at most 256 descriptors per object, and has a four-second deadline
@@ -38,7 +41,10 @@ with one-second command caps. Bounded omissions are explicit. Overlong names and
 symbols are omitted, never truncated into misleading identities. Transport
 limits still apply to CDP replies; this is not a claim that the renderer itself
 enumerates a large object incrementally. No object handles or function source
-text are returned. There is no automatic persistence/export.
+text are returned. There is no automatic persistence/export. If the deadline
+cancels a command write, the action retires only its selected debugger transport
+to avoid reusing a partial protocol frame; it does not close the browser or a
+replacement connection. Reconnect and refresh before retrying that failed read.
 
 ## API workflow
 
@@ -82,7 +88,8 @@ replay or extracted code is involved.
 
 Rust tests exercise the public action, response schemas, own-property command
 allowlist, getter/proxy rejection, missing/ambiguous bindings, stale generation,
-frame/scope/document/source/reused-pause/connection rejection, bounds and unavailable
+frame/scope/document/source/reused-pause/connection rejection, queued lifecycle
+changes and sticky event-loss rejection, bounds and unavailable
 locations using a deterministic local CDP transport. The existing browser E2E
 captured-hook test covers real entry/return hits without a disposable navigation.
 `make javascript-check` also runs the authored Wasm through the real in-process

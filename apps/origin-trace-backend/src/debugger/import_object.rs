@@ -22,6 +22,27 @@ fn stale() -> Error {
         "The selected pause, document, source or connection changed. Refresh and select the binding again.",
     )
 }
+fn remaining(started: Instant) -> Result<Duration> {
+    let remaining = DEADLINE.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(Error::conflict("Import object inspection deadline reached"));
+    }
+    Ok(remaining)
+}
+async fn synchronize(connection: &Connection, started: Instant) -> Result<()> {
+    if connection.is_closed() || connection.has_dropped_events() {
+        return Err(stale());
+    }
+    // Replies bypass the event consumer. Drain earlier lifecycle messages before
+    // trusting a snapshot, and never extend the overall budget for a busy queue.
+    tokio::time::timeout(remaining(started)?, connection.barrier())
+        .await
+        .map_err(|_| Error::conflict("Import object inspection deadline reached"))??;
+    if connection.is_closed() || connection.has_dropped_events() {
+        return Err(stale());
+    }
+    Ok(())
+}
 fn document(s: &Value) -> Value {
     json!({"instance_id":s["network"]["instance_id"],"connection_epoch":s["network"]["capture_epoch"],
         "document_epoch":s["target_document_epoch"],"target_id":s["target"]["id"]})
@@ -99,6 +120,7 @@ struct Inspection<'a> {
 }
 impl Inspection<'_> {
     async fn current(&self) -> Result<()> {
+        synchronize(&self.connection, self.started).await?;
         {
             // Compare compact owner tokens under the state lock. Never clone a
             // debugger snapshot (Traffic/history/source catalogs) for each import.
@@ -135,7 +157,11 @@ impl Inspection<'_> {
             .lock()
             .await
             .as_ref()
-            .is_some_and(|connection| Arc::ptr_eq(connection, &self.connection))
+            .is_some_and(|connection| {
+                Arc::ptr_eq(connection, &self.connection)
+                    && !connection.is_closed()
+                    && !connection.has_dropped_events()
+            })
         {
             return Err(stale());
         }
@@ -143,19 +169,26 @@ impl Inspection<'_> {
     }
     async fn descriptors(&self, id: &str) -> Result<Value> {
         self.current().await?;
-        let remaining = DEADLINE.saturating_sub(self.started.elapsed());
-        if remaining.is_zero() {
-            return Err(Error::conflict("Import object inspection deadline reached"));
-        }
-        let result = self
-            .connection
-            .command(
+        let remaining = remaining(self.started)?;
+        let result = match tokio::time::timeout(
+            remaining,
+            self.connection.command(
                 "Runtime.getProperties",
                 json!({"objectId":id,
             "ownProperties":true,"accessorPropertiesOnly":false,"generatePreview":false}),
                 remaining.min(Duration::from_secs(1)),
-            )
-            .await;
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                // Cancellation may interrupt a framed pipe write. Retire only
+                // this transport, never a concurrently selected replacement.
+                self.connection.close().await;
+                return Err(Error::conflict("Import object inspection deadline reached"));
+            }
+        };
         self.current().await?;
         result
     }
@@ -206,6 +239,9 @@ impl Inspection<'_> {
 }
 impl Debugger {
     pub(super) async fn inspect_paused_import_object(&self, request: &Value) -> Result<Value> {
+        let started = Instant::now();
+        let connection = self.connection.lock().await.clone().ok_or_else(stale)?;
+        synchronize(&connection, started).await?;
         // Snapshot and pause serial are read under the same lock used by event commits.
         let (owner, generation, frame, epoch, source_revision) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -269,7 +305,6 @@ impl Debugger {
         )?
         .to_owned();
         let binding = validation::text(&request["binding_name"], "Binding name", 256, false, true)?;
-        let connection = self.connection.lock().await.clone().ok_or_else(stale)?;
         let inspection = Inspection {
             debugger: self,
             connection,
@@ -279,7 +314,7 @@ impl Debugger {
             epoch,
             source_revision,
             source_locations: Mutex::new(BTreeMap::new()),
-            started: Instant::now(),
+            started,
         };
         let mut omissions = Vec::new();
         let scope_reply = inspection.descriptors(&scope_id).await?;
@@ -386,9 +421,11 @@ impl Debugger {
 
 #[cfg(test)]
 mod tests {
+    use super::super::connection::Event;
     use super::*;
     use clap::Parser;
     use std::os::unix::fs::PermissionsExt;
+    use tokio::sync::mpsc;
 
     struct Fixture {
         dir: tempfile::TempDir,
@@ -396,6 +433,29 @@ mod tests {
     }
     impl Fixture {
         async fn new() -> Self {
+            let (fixture, events) = Self::with_events().await;
+            Self::consume(fixture.debugger.clone(), events, false);
+            fixture
+        }
+        fn consume(debugger: Arc<Debugger>, mut events: mpsc::Receiver<Event>, defer: bool) {
+            tokio::spawn(async move {
+                let mut queued = Vec::new();
+                while let Some(event) = events.recv().await {
+                    match event {
+                        Event::Barrier(sender) => {
+                            for message in queued.drain(..) {
+                                debugger.event(message).await;
+                            }
+                            let _ = sender.send(());
+                        }
+                        Event::Message(Ok(message), _) if defer => queued.push(message),
+                        Event::Message(Ok(message), _) => debugger.event(message).await,
+                        Event::Message(Err(_), _) => break,
+                    }
+                }
+            });
+        }
+        async fn with_events() -> (Self, mpsc::Receiver<Event>) {
             let dir = tempfile::tempdir().unwrap();
             let interpreter = std::env::split_paths(&std::env::var_os("PATH").unwrap())
                 .map(|directory| directory.join("python3"))
@@ -413,12 +473,19 @@ emit(None)
 while True:
  h=inp.read(8)
  if not h:break
+ if (root/'write-gate').exists():
+  (root/'write-seen').touch()
+  while (root/'write-gate').exists():time.sleep(.002)
  q=json.loads(inp.read(struct.unpack('>I',h[4:])[0]))
  with (root/'commands').open('a') as log:log.write(json.dumps(q)+'\n')
  oid=q['params']['objectId']
  if oid=='host':
   (root/'seen').touch()
   while (root/'gate').exists():time.sleep(.002)
+ if (root/'events').exists():
+  messages=json.loads((root/'events').read_text()).get(oid,[])
+  if len(messages)>512:emit({'method':'Fixture.beforeBurst','params':{}})
+  for event in messages:emit(event)
  data=json.loads((root/'objects').read_text())
  emit({'id':q['id'],'result':data[oid]})
 "#).unwrap();
@@ -445,7 +512,7 @@ while True:
             });
             std::fs::write(dir.path().join("objects"), objects.to_string()).unwrap();
             let debugger = Debugger::new(&crate::config::Options::parse_from(["test"]));
-            let (connection, _events) = Connection::open(&transport, "ws://127.0.0.1:1")
+            let (connection, events) = Connection::open(&transport, "ws://127.0.0.1:1")
                 .await
                 .unwrap();
             *debugger.connection.lock().await = Some(connection);
@@ -456,7 +523,7 @@ while True:
                 s["paused"]=json!({"call_frames":[{"id":"frame-1","location":{"script_id":"7","line":0,"column":1},"function_location":null,
                     "scopes":[{"type":"local","object":{"type":"object","subtype":null,"object_id":"scope"},"properties":[]}]}]});
             });
-            Self { dir, debugger }
+            (Self { dir, debugger }, events)
         }
         fn request(&self) -> Value {
             let snapshot = self.debugger.snapshot();
@@ -595,6 +662,213 @@ while True:
             assert!(task.await.unwrap().is_err(), "{change}");
             if let Some(connection) = retired {
                 connection.close().await;
+            }
+            f.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn import_map_drains_queued_lifecycle_events_before_accepting_descriptors() {
+        for change in ["source", "document", "reused-pause"] {
+            let (f, events) = Fixture::with_events().await;
+            let pause = json!({"reason":"other","callFrames":[{"callFrameId":"frame-1",
+                "functionName":"ownedGlue","url":"http://127.0.0.1/owned.js",
+                "location":{"scriptId":"7","lineNumber":0,"columnNumber":1},
+                "scopeChain":[{"type":"local","object":{"type":"object","objectId":"scope"}}]}]});
+            f.debugger
+                .update(|s| s["paused"] = super::super::parse::pause(&pause));
+            let original_frame = frame_identity(&f.debugger.snapshot()["paused"]["call_frames"][0]);
+            let messages = match change {
+                "source" => {
+                    json!([{"method":"Runtime.executionContextDestroyed","params":{"executionContextId":2}}])
+                }
+                "document" => json!([{"method":"Page.documentOpened","params":{}}]),
+                _ => {
+                    json!([{"method":"Debugger.resumed","params":{}}, {"method":"Debugger.paused","params":pause}])
+                }
+            };
+            std::fs::write(
+                f.dir.path().join("events"),
+                json!({"host":messages}).to_string(),
+            )
+            .unwrap();
+            // Hold wire-ordered lifecycle events until a reader barrier. Replies
+            // still resolve directly, reproducing a delayed event consumer without sleeps.
+            Fixture::consume(f.debugger.clone(), events, true);
+            let result = f.debugger.action(&f.request()).await;
+            assert!(result.is_err(), "queued {change} must invalidate the map");
+            if change == "reused-pause" {
+                assert_eq!(
+                    frame_identity(&f.debugger.snapshot()["paused"]["call_frames"][0]),
+                    original_frame
+                );
+                assert_eq!(f.debugger.pause_epoch.load(Ordering::Acquire), 2);
+            }
+            f.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn import_map_drains_before_selection_and_bounds_event_barriers() {
+        let (f, events) = Fixture::with_events().await;
+        let request = f.request();
+        let connection = f.debugger.connection.lock().await.clone().unwrap();
+        std::fs::write(
+            f.dir.path().join("events"),
+            json!({"scope":[{
+                "method":"Runtime.executionContextDestroyed","params":{"executionContextId":2}
+            }]})
+            .to_string(),
+        )
+        .unwrap();
+        connection
+            .command(
+                "Runtime.getProperties",
+                json!({"objectId":"scope"}),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        Fixture::consume(f.debugger.clone(), events, true);
+        assert!(f.debugger.action(&request).await.is_err());
+        assert_eq!(
+            f.commands().len(),
+            1,
+            "Queued invalidation rejects before selection reads"
+        );
+        f.close().await;
+
+        let (f, _events) = Fixture::with_events().await;
+        let connection = f.debugger.connection.lock().await.clone().unwrap();
+        let started = Instant::now() - (DEADLINE - Duration::from_millis(10));
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), synchronize(&connection, started))
+                .await
+                .unwrap();
+        assert!(
+            result.unwrap_err().message.contains("deadline"),
+            "A stalled consumer cannot extend the inspection budget"
+        );
+        assert!(f.commands().is_empty());
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn import_map_deadline_retires_only_its_partially_written_connection() {
+        let f = Fixture::new().await;
+        let replacement = Fixture::new().await;
+        let connection = f.debugger.connection.lock().await.clone().unwrap();
+        let newer = replacement
+            .debugger
+            .connection
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        std::fs::write(f.dir.path().join("write-gate"), b"").unwrap();
+        let debugger = f.debugger.clone();
+        let retained = connection.clone();
+        let task = tokio::spawn(async move {
+            let s = debugger.snapshot();
+            let inspection = Inspection {
+                debugger: &debugger,
+                connection: retained,
+                owner: document(&s),
+                generation: s["generation"].clone(),
+                frame: frame_identity(&s["paused"]["call_frames"][0]),
+                epoch: debugger.pause_epoch.load(Ordering::Acquire),
+                source_revision: debugger
+                    .hooks
+                    .candidate_source_revision("owned-page")
+                    .unwrap(),
+                source_locations: Mutex::new(BTreeMap::new()),
+                started: Instant::now() - (DEADLINE - Duration::from_millis(500)),
+            };
+            // Private stress input fills the pipe while its reader holds after
+            // the frame header. Public scope/object IDs remain bounded to 4 KiB.
+            inspection.descriptors(&"x".repeat(1024 * 1024)).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !f.dir.path().join("write-seen").exists() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        *f.debugger.connection.lock().await = Some(newer.clone());
+        let result = task.await.unwrap();
+        assert!(result.unwrap_err().message.contains("deadline"));
+        assert!(
+            connection.is_closed(),
+            "Partially written frames cannot be reused"
+        );
+        assert!(
+            !newer.is_closed(),
+            "Never close a selected replacement transport"
+        );
+        assert!(
+            f.debugger
+                .connection
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &newer))
+        );
+        f.close().await;
+        replacement.close().await;
+    }
+    #[tokio::test]
+    async fn import_map_rejects_prior_and_inflight_connection_event_loss() {
+        for prior in [true, false] {
+            let (f, mut events) = Fixture::with_events().await;
+            let connection = f.debugger.connection.lock().await.clone().unwrap();
+            let messages = vec![json!({"method":"Debugger.resumed","params":{}}); 600];
+            let key = if prior { "scope" } else { "host" };
+            std::fs::write(
+                f.dir.path().join("events"),
+                json!({key:messages}).to_string(),
+            )
+            .unwrap();
+            if prior {
+                // Fill the real bounded queue without consuming it. The reply
+                // proves the reader already accounted for all preceding drops.
+                connection
+                    .command(
+                        "Runtime.getProperties",
+                        json!({"objectId":"scope"}),
+                        Duration::from_secs(1),
+                    )
+                    .await
+                    .unwrap();
+                assert!(connection.take_dropped_events() > 0);
+                assert_eq!(connection.take_dropped_events(), 0);
+                assert!(
+                    connection.has_dropped_events(),
+                    "Draining diagnostics cannot repair lifecycle evidence"
+                );
+                assert!(f.debugger.action(&f.request()).await.is_err());
+                assert_eq!(
+                    f.commands().len(),
+                    1,
+                    "Prior loss rejects before sending descriptors"
+                );
+            } else {
+                let debugger = f.debugger.clone();
+                let request = f.request();
+                let task = tokio::spawn(async move { debugger.action(&request).await });
+                // Acknowledge initial barriers, then deliberately stop this
+                // consumer before the final reply's burst. No timing sleeps.
+                loop {
+                    match events.recv().await.unwrap() {
+                        Event::Barrier(sender) => {
+                            let _ = sender.send(());
+                        }
+                        Event::Message(Ok(message), _) => {
+                            assert_eq!(message["method"], "Fixture.beforeBurst");
+                            break;
+                        }
+                        _ => panic!("Unexpected fixture event"),
+                    }
+                }
+                assert!(task.await.unwrap().is_err());
+                assert!(connection.has_dropped_events());
             }
             f.close().await;
         }

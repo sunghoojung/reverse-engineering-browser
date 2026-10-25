@@ -58,7 +58,13 @@ impl Server {
         let url = loop {
             if let Ok(url) = std::fs::read_to_string(&endpoint) {
                 let url = url.trim().to_owned();
-                if !url.is_empty() {
+                // Session and canonical files are separate atomic publications.
+                // Wait for both requested readiness signals, not just the first.
+                if !url.is_empty()
+                    && active_endpoint.is_none_or(|path| {
+                        std::fs::read_to_string(path).is_ok_and(|active| active.trim() == url)
+                    })
+                {
                     break url;
                 }
             }
@@ -816,6 +822,9 @@ impl LiveApi {
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 };
+                // On macOS an accepted socket can inherit O_NONBLOCK from the
+                // listener. The fixture intentionally uses bounded blocking I/O.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -852,7 +861,12 @@ impl LiveApi {
 impl Drop for LiveApi {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        let result = self.worker.take().unwrap().join();
+        // Keep a worker failure visible, but never abort while reporting the
+        // original test assertion through an additional destructor panic.
+        if !std::thread::panicking() {
+            result.expect("live API fixture worker panicked");
+        }
     }
 }
 

@@ -1619,25 +1619,51 @@
           return section;
         }
         section.append(textElement('p', '', `${inventory.site_count} module sites: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${inventory.candidates.length} ranked sites retained; ${inventory.omitted_site_count} omitted from this bounded list.`));
-        section.append(textElement('p', '', 'Arm counts exclude the default branch. Ranking and CFF/helper labels are static heuristics, not proof of a guest ISA or opcode binding. Indirect target counts are unknown.'));
+        section.append(textElement('p', '', 'Candidate dispatchers are ranked by loop shape, then by br_table arm count or call_indirect element fanout. Arm counts exclude the default. Unique branch targets cluster repeated Wasm labels. A small br_table is a CFF/relooper candidate, a large br_table is a handler-table candidate, and call_indirect is an indirect funcref candidate. None of these is a proven guest opcode ISA. This inventory does not invent registers, a stack, or a guest PC.'));
         const retainedRows = vmOpcodeRows(workspace);
+        const classificationLabel = classification => classification === 'cff-helper-candidate' ? 'CFF / relooper candidate'
+          : classification === 'indirect-handler-candidate' ? 'indirect funcref candidate' : 'handler-table candidate';
         appendVmPagedRows(section, inventory.candidates, 'dispatch candidates', site => {
           const row = document.createElement('details'); row.className = 'vm-effect-row';
           const selected = site.byte_offset === inventory.selected_byte_offset;
-          const count = site.arm_count === null ? 'target count unknown' : `${site.arm_count} arms + default`;
-          row.append(textElement('summary', '', `${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset}`));
-          row.append(textElement('p', 'vm-effect-detail', `${site.classification === 'cff-helper-candidate' ? 'CFF / helper candidate' : 'Static dispatch candidate'} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. No guest PC is inferred.`));
+          const count = site.kind === 'call_indirect'
+            ? (site.element_fanout === null ? 'element fanout unknown' : `${site.element_fanout} static element entries`)
+            : `${site.arm_count} arms + default · ${site.unique_target_count} unique branch targets`;
+          const rank = inventory.candidates.indexOf(site) + 1;
+          const classification = classificationLabel(site.classification);
+          const honesty = site.kind === 'call_indirect'
+            ? 'Static funcref initializers only. No arm index, guest opcode, guest PC, register, or stack is inferred.'
+            : site.classification === 'dispatch-candidate'
+              ? 'Selector index to Wasm branch target. Samples are absent, so this is a handler-table candidate, not a proven guest opcode ISA. No guest PC, register, or stack is inferred.'
+              : 'Static CFF or relooper arms. No guest opcode, guest PC, register, or stack is inferred.';
+          // Rank and the heuristic label stay in the collapsed summary. Opening
+          // every row is not usable once the bounded list reaches 256 sites.
+          row.append(textElement('summary', '', `#${rank} · ${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset} · ${classification}`));
+          if (selected) row.open = true;
+          row.append(textElement('p', 'vm-effect-detail', `${classification} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. ${honesty}`));
           const retained = retainedRows.find(candidate => candidate.source === `${site.byte_offset} + ${site.byte_size} bytes`);
           if (retained) {
             const select = textElement('button', 'secondary-button', 'Select retained site'); select.type = 'button';
-            select.addEventListener('click', () => {
+            const chooseRetainedSite = () => {
               const handler = [...document.querySelectorAll('.vm-handler-row')].find(item => item.dataset.handlerKey === retained.key);
               if (!handler) return;
+              // An excluding filter hides the row. Clear it before activation so
+              // the analyst lands on the site instead of a hidden selection.
               if (handler.hidden) {
-                const filter = handler.closest('.vm-workspace-card')?.querySelector('input[type="search"]');
+                const scope = handler.closest('.vm-workspace') || handler.closest('.vm-workspace-card') || document;
+                const filter = scope.querySelector('input[aria-label="Filter retained handlers"], input[type="search"]');
                 if (filter) { filter.value = ''; filter.dispatchEvent(new Event('input')); }
               }
               handler.click(); handler.focus({preventScroll: true}); handler.scrollIntoView({block: 'nearest'});
+            };
+            select.addEventListener('click', chooseRetainedSite);
+            // Own Enter and Space here. A keydown without the browser's default
+            // button activation must still clear an excluding filter.
+            select.addEventListener('keydown', event => {
+              if (event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              chooseRetainedSite();
             });
             row.append(select);
           } else {

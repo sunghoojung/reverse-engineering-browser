@@ -11,7 +11,7 @@ use std::{
     path::Path,
     sync::LazyLock,
 };
-use wasmparser::{Operator, Parser, Payload, TypeRef};
+use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
 #[path = "vm_capture_mode.rs"]
 pub(crate) mod capture_mode;
 #[path = "vm_wasm_dispatch.rs"]
@@ -324,6 +324,10 @@ struct Instruction {
     variable: Option<(bool, u32)>,
     loop_depth: usize,
     arm_count: Option<u32>,
+    // Distinct Wasm label indexes for br_table, including the default. Null for
+    // call_indirect. This clusters repeated arms; it is not a guest opcode count.
+    unique_targets: Option<u32>,
+    table_index: Option<u32>,
 }
 fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
     let bad = |e: wasmparser::BinaryReaderError| Error::bad(e.to_string());
@@ -339,6 +343,9 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
     let mut best_rank = (0, 0);
     let mut best_dispatch = None;
     let mut inventory = wasm_dispatch::Inventory::default();
+    // Active element-segment funcref initializers, keyed by table index. A missing
+    // key means the fanout is unknown. Passive and declarative segments are omitted.
+    let mut element_fanout: BTreeMap<u32, u32> = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(bad)?;
@@ -378,7 +385,42 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                 }
             }
             Payload::TableSection(reader) => table_ranges.push(reader.range()),
-            Payload::ElementSection(reader) => table_ranges.push(reader.range()),
+            Payload::ElementSection(reader) => {
+                table_ranges.push(reader.range());
+                for element in reader {
+                    let element = element.map_err(bad)?;
+                    let ElementKind::Active { table_index, .. } = element.kind else {
+                        continue;
+                    };
+                    // MVP active segments omit the table index and mean table 0.
+                    let slot = element_fanout.entry(table_index.unwrap_or(0)).or_insert(0);
+                    match element.items {
+                        ElementItems::Functions(functions) => {
+                            for function in functions {
+                                let _ = function.map_err(bad)?;
+                                *slot = slot.saturating_add(1);
+                            }
+                        }
+                        ElementItems::Expressions(_, expressions) => {
+                            for expression in expressions {
+                                let mut operators = expression.map_err(bad)?.get_operators_reader();
+                                let mut funcref = false;
+                                while !operators.eof() {
+                                    if matches!(
+                                        operators.read().map_err(bad)?,
+                                        Operator::RefFunc { .. }
+                                    ) {
+                                        funcref = true;
+                                    }
+                                }
+                                if funcref {
+                                    *slot = slot.saturating_add(1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Payload::DataSection(reader) => data_ranges.push(reader.range()),
             Payload::CodeSectionStart { count, .. } => {
                 code_sections += 1;
@@ -410,16 +452,33 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         _ => None,
                     };
                     let loop_depth = control.iter().filter(|c| **c == 3).count();
+                    let (arm_count, unique_targets, table_index) = match &op {
+                        Operator::BrTable { targets } => {
+                            let mut labels = BTreeSet::new();
+                            labels.insert(targets.default());
+                            for target in targets.targets() {
+                                labels.insert(target.map_err(bad)?);
+                            }
+                            (
+                                Some(targets.len()),
+                                Some(u32::try_from(labels.len()).unwrap_or(u32::MAX)),
+                                None,
+                            )
+                        }
+                        Operator::CallIndirect { table_index, .. } => {
+                            (None, None, Some(*table_index))
+                        }
+                        _ => (None, None, None),
+                    };
                     decoded.push(Instruction {
                         opcode,
                         start,
                         end,
                         variable,
                         loop_depth,
-                        arm_count: match &op {
-                            Operator::BrTable { targets } => Some(targets.len()),
-                            _ => None,
-                        },
+                        arm_count,
+                        unique_targets,
+                        table_index,
                     });
                     match op {
                         Operator::Block { .. } => control.push(2),
@@ -520,6 +579,7 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                     score.0,
                     obs.iter()
                         .any(|o| o["rule_id"] == "wasm.instruction-pointer"),
+                    &element_fanout,
                 );
                 if let Some((site_rank, start, end)) = dispatch {
                     if best_dispatch.is_none_or(|(previous, _)| site_rank > previous) {

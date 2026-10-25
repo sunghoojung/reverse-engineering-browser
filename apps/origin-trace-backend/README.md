@@ -173,12 +173,19 @@ served at `/api/analysis/vm`; the inspector-free opcode workspace is served at
 `/api/analysis/vm/opcodes`. Wasm candidate and likely-vm workspaces list static `br_table`
 and `call_indirect` arms from the selected function and a bounded call/table
 neighborhood. The module-wide `dispatch_inventory` counts every decoded `br_table`
-and `call_indirect` (including non-loop sites), retains the top 256 with exact arm
-counts, and reports omitted metadata separately. The default is the highest-ranked
-in-loop site, not the first loop. Interpreter-scale tables (32+ explicit arms)
-rank before small helper candidates; size never promotes the detector tier or
-proves guest opcode binding. The UI's Dispatch sites panel preserves explicit
-retained-handler selection. Without dispatch samples it keeps `sampler-unavailable`. Without
+and `call_indirect` (including non-loop sites), retains the top 256, and reports
+omitted metadata separately. The default is the highest-ranked in-loop site, not
+the first loop. Scale is explicit arm count for `br_table` and the static active
+element funcref count for `call_indirect`; unknown fanout ranks as zero and leaves
+`arm_count` null. Interpreter-scale sites (scale at least 32) rank before small
+helper candidates. Labels stay separate: a small `br_table` is a CFF/relooper
+candidate, a large `br_table` is a handler-table candidate (selector index to Wasm
+branch target, with a unique-target count), and `call_indirect` is an indirect
+funcref candidate. Static arms are not a proven guest opcode ISA and do not invent
+a guest PC, registers, or a stack. Size never promotes the detector tier. The UI's
+Dispatch sites panel shows those labels on each collapsed summary. Enter or Space
+on Select retained site clears a handler filter that hides that row. A refresh preserves
+an explicit retained-handler selection. Without dispatch samples it keeps `sampler-unavailable`. Without
 a runtime snapshot it keeps `snapshot-bytes-unavailable` and names the guest-byte
 walk `static-module-only` instead of inventing a program counter. A workspace
 failure does not hide a valid detector

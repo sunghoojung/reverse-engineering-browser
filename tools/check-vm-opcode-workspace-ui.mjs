@@ -267,8 +267,9 @@ assert(renderApi.renderVmHandlers(javascript).textContent.includes('2 candidate 
 // Authored ranking metadata has exact counts independent of retained handler arms.
 const site = (offset, arms, index = 0) => ({kind: arms === null ? 'call_indirect' : 'br_table',
   function_index: index, byte_offset: offset, byte_size: 5, function_body_offset: 40,
-  function_body_size: 500, arm_count: arms, loop_depth: 1, ip_like: true, structural_score: 60,
-  classification: arms !== null && arms < 32 ? 'cff-helper-candidate' : 'dispatch-candidate'});
+  function_body_size: 500, arm_count: arms, unique_target_count: arms === null ? null : arms,
+  element_fanout: arms === null ? 40 : null, loop_depth: 1, ip_like: true, structural_score: 60,
+  classification: arms === null ? 'indirect-handler-candidate' : arms < 32 ? 'cff-helper-candidate' : 'dispatch-candidate'});
 const inventory = {ranking_version: 1, site_count: 3, br_table_count: 2, call_indirect_count: 1,
   omitted_site_count: 0, selected_byte_offset: 45, candidates: [site(45, 200), site(70, 8, 1), site(50, null)]};
 const inventoryDocument = structuredClone(fixture);
@@ -278,6 +279,12 @@ for (const mutate of [
   value => { value.site_count = 4; }, value => { value.omitted_site_count = 1; },
   value => { value.selected_byte_offset = 49; }, value => { value.ranking_version = 2; },
   value => { value.candidates[0].arm_count = null; }, value => { value.candidates[2].arm_count = 200; },
+  value => { value.candidates[0].unique_target_count = 0; },
+  value => { value.candidates[0].unique_target_count = value.candidates[0].arm_count + 2; },
+  value => { value.candidates[0].element_fanout = 3; },
+  value => { value.candidates[2].classification = 'dispatch-candidate'; },
+  value => { value.candidates[2].unique_target_count = 2; },
+  value => { value.candidates[2].element_fanout = -1; },
   value => { value.candidates[0].byte_offset = 539; }, value => { value.candidates[0].classification = 'proven-vm'; },
   value => { value.candidates[0].byte_size = Number.MAX_SAFE_INTEGER; },
   value => { value.candidates.push(value.candidates[0]); value.site_count++; value.br_table_count++; }
@@ -286,10 +293,16 @@ for (const mutate of [
   assert(!validateModule(malformed), String(mutate));
 }
 const inventoryPanel = renderApi.renderVmDispatchInventory(inventoryDocument.workspaces[0]);
+const inventorySummaries = descendants(inventoryPanel).filter(node => node.tagName === 'summary').map(node => node.textContent);
 assert(inventoryPanel.textContent.includes('Default · f0 · br_table · 200 arms + default'));
-assert(inventoryPanel.textContent.includes('CFF / helper candidate'));
-assert(inventoryPanel.textContent.includes('target count unknown'));
-assert(inventoryPanel.textContent.includes('not proof of a guest ISA'));
+assert.equal(inventorySummaries[0], '#1 · Default · f0 · br_table · 200 arms + default · 200 unique branch targets · byte 45 · handler-table candidate');
+assert.equal(inventorySummaries[1], '#2 · f1 · br_table · 8 arms + default · 8 unique branch targets · byte 70 · CFF / relooper candidate');
+assert.equal(inventorySummaries[2], '#3 · f0 · call_indirect · 40 static element entries · byte 50 · indirect funcref candidate');
+assert.equal(descendants(inventoryPanel).find(node => node.tagName === 'details').open, true);
+assert(inventoryPanel.textContent.includes('CFF / relooper candidate'));
+assert(inventoryPanel.textContent.includes('indirect funcref candidate'));
+assert(inventoryPanel.textContent.includes('not a proven guest opcode ISA'));
+assert(inventoryPanel.textContent.includes('does not invent registers, a stack, or a guest PC'));
 assert(inventoryPanel.textContent.includes('3 module sites'));
 const rankedHandlers = Array.from({length: 200}, (_, opcode) => handler(opcode, 'inferred', 45, 5,
   `br_table selector ${opcode}`, 0, 'Static selector only.'));
@@ -320,6 +333,15 @@ findButton(inventoryPanel, 'Select retained site').click();
 assert.equal(retainedFilter.value, '', 'the production selection callback clears an excluding filter');
 assert.equal(filteredRows[0].hidden, false);
 assert.equal(testDocument.activeElement, filteredRows[0]);
+assert.equal(renderApiState.selectedVmHandlerKey, '0::45');
+retainedFilter.value = 'call_indirect'; retainedFilter.dispatchEvent(new Event('input'));
+assert.equal(filteredRows[0].hidden, true);
+const retainedButton = findButton(inventoryPanel, 'Select retained site');
+const enter = {type: 'keydown', key: 'Enter', defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }};
+retainedButton.dispatchEvent(enter);
+assert.equal(enter.defaultPrevented, true, 'Enter is handled by the button, not left to a missing default click');
+assert.equal(retainedFilter.value, '', 'Enter on Select retained site clears an excluding filter');
+assert.equal(filteredRows[0].hidden, false);
 assert.equal(renderApiState.selectedVmHandlerKey, '0::45');
 const boundedInventory = structuredClone(inventory);
 boundedInventory.candidates = Array.from({length: 65}, (_, index) => site(45 + index * 6, 200, index));
@@ -426,11 +448,15 @@ render();`;
       }
       await evaluate("document.querySelector('[data-vm-panel=dispatch]').click()");
       assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('200 arms + default'));
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('CFF / helper candidate'));
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('CFF / relooper candidate'));
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('indirect funcref candidate'));
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('not a proven guest opcode ISA'));
       await evaluate("(()=>{const search=document.querySelector('.vm-listing-toolbar input'); search.value='call_indirect'; search.dispatchEvent(new Event('input')); document.querySelector('[data-vm-panel-content=dispatch] details').open=true; document.querySelector('[data-vm-panel-content=dispatch] details button').focus()})()");
       assert.equal(await evaluate("document.activeElement === document.querySelector('[data-vm-panel-content=dispatch] details button')"), true);
-      // Native button activation needs Enter's character event, not rawKeyDown
-      // alone. Match the existing pack/ledger keyboard browser checks.
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch] summary').textContent")).includes('handler-table candidate'));
+      assert((await evaluate("[...document.querySelectorAll('[data-vm-panel-content=dispatch] summary')][1].textContent")).includes('CFF / relooper candidate'));
+      // The button owns Enter. Send the keydown the page actually receives;
+      // do not click the control from the test.
       await send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'});
       await send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
       assert.equal(await evaluate("document.querySelector('.vm-listing-toolbar input').value"), '');

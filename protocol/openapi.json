@@ -6300,6 +6300,8 @@
               "byte_size",
               "function_body_size",
               "arm_count",
+              "unique_target_count",
+              "element_fanout",
               "ip_like",
               "classification"
             ],
@@ -6346,13 +6348,30 @@
                 "minimum": 0,
                 "maximum": 4294967295
               },
+              "unique_target_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "element_fanout": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 4294967295
+              },
               "ip_like": {
                 "type": "boolean"
               },
               "classification": {
                 "enum": [
                   "cff-helper-candidate",
-                  "dispatch-candidate"
+                  "dispatch-candidate",
+                  "indirect-handler-candidate"
                 ]
               }
             }
@@ -7729,6 +7748,8 @@
               "byte_size",
               "function_body_size",
               "arm_count",
+              "unique_target_count",
+              "element_fanout",
               "ip_like",
               "classification"
             ],
@@ -7775,13 +7796,30 @@
                 "minimum": 0,
                 "maximum": 4294967295
               },
+              "unique_target_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "element_fanout": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 4294967295
+              },
               "ip_like": {
                 "type": "boolean"
               },
               "classification": {
                 "enum": [
                   "cff-helper-candidate",
-                  "dispatch-candidate"
+                  "dispatch-candidate",
+                  "indirect-handler-candidate"
                 ]
               }
             }

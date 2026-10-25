@@ -20,6 +20,7 @@ session_id=""
 sessions_root=""
 base_url=""
 allow_effects=0
+require_live=0
 timeout=""
 mode="serve"
 print_target=""
@@ -36,17 +37,22 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: reb-api-mcp.sh (--endpoint-file FILE | --session-dir DIR | --session-id ID | --base-url URL) [options]
+Usage: reb-api-mcp.sh [--endpoint-file FILE | --session-dir DIR | --session-id ID | --base-url URL] [options]
        reb-api-mcp.sh --list [--sessions-root DIR]
        reb-api-mcp.sh --choose [--sessions-root DIR]
-       reb-api-mcp.sh --print-config cursor|claude|codex|grok|t3 (--endpoint-file FILE | ...)
+       reb-api-mcp.sh --print-config cursor|claude|codex|grok|t3 [--endpoint-file FILE | ...]
 
 Resolve one researcher-selected Origin Trace endpoint and exec `reb-api mcp`.
 The default tool list is read-only. `--allow-effects` also lists operations
 that can change browser or stored state. That flag is not authorization,
 capture redaction, or permission to send captured data to a model provider.
 
-Selections are explicit. A single session, the newest directory, or a native
+Without an endpoint selection, use ~/.config/origin-trace/reb-api.endpoint
+and require live capture with a running or paused debugger. The live launcher
+publishes this canonical file. Each reconnect reads it again. An existing MCP
+connection refuses changed/missing endpoint files; it never retargets a call.
+
+A single session, the newest directory, or a native
 handshake URL with a query is not chosen for you. `--session-id` reads
 `<sessions-root>/<id>/research-ui.endpoint`. Packaged sessions normally live
 under ~/Library/Application Support/Origin Trace/sessions/live. A checkout
@@ -54,8 +60,8 @@ under ~/Library/Application Support/Origin Trace/sessions/live. A checkout
 set. If both roots exist, pass --sessions-root.
 
 `--list` and `--choose` never start the server. `--choose` reads one session
-id from a terminal. MCP client configs must pass --endpoint-file, --session-dir,
-or --session-id, because the client's stdin is the MCP channel.
+id from a terminal. MCP client configs use the canonical default or an explicit
+endpoint selection, because the client's stdin is the MCP channel.
 
 `reb-api mcp` requests /api/health before advertising tools. The health
 document names local store paths and is not printed. Health is reachability,
@@ -67,6 +73,9 @@ from Cursor on that Mac, or from a backend on the same host as the bot.
 
 Options:
   --allow-effects       Advertise effectful operations. Not authorization.
+  --require-live        Refuse idle capture or an unavailable live debugger.
+                        get_session_context remains readable after startup until
+                        the endpoint file or backend instance changes.
   --timeout SECONDS     Passed through to reb-api (default 30).
   --sessions-root DIR   Exact live-session parent directory.
   --reb-api PATH        reb-api or packaged OriginTraceAPI binary.
@@ -228,6 +237,12 @@ selected_endpoint_file() {
   if [[ -n "$base_url" ]]; then
     count=$((count + 1))
   fi
+  if [[ "$count" == 0 && -z "$sessions_root" ]]; then
+    [[ -n "${HOME:-}" ]] || die "HOME is unavailable. Pass --endpoint-file explicitly."
+    endpoint_file="${HOME}/.config/origin-trace/reb-api.endpoint"
+    require_live=1
+    count=1
+  fi
   if [[ "$count" -ne 1 ]]; then
     die "Pass exactly one of --endpoint-file, --session-dir, --session-id, or --base-url. No session was selected."
   fi
@@ -312,6 +327,9 @@ build_mcp_args() {
   if [[ "$allow_effects" == 1 ]]; then
     mcp_exec_args+=(--allow-effects)
   fi
+  if [[ "$require_live" == 1 ]]; then
+    mcp_exec_args+=(--require-live)
+  fi
   if [[ -n "$timeout" ]]; then
     mcp_exec_args+=(--timeout "$timeout")
   fi
@@ -330,21 +348,14 @@ serve_mcp() {
 }
 
 health_check() {
-  local binary probe_timeout
-  local -a args=()
+  local binary timeout="${timeout:-5}"
   binary="$(resolve_reb_api)"
   require_mcp_binary "$binary"
-  probe_timeout="${timeout:-5}"
-  args=(call get_health --read-only --timeout "$probe_timeout")
-  if [[ "$selection_kind" == file ]]; then
-    args+=(--endpoint-file "$selection_value")
-  else
-    args+=(--base-url "$selection_value")
-  fi
-  # Discard both streams. A non-2xx health body can name local store paths,
-  # and `reb-api call` would otherwise print that body. The message below is fixed.
-  if ! "$binary" "${args[@]}" </dev/null >/dev/null 2>&1; then
-    die "Selected loopback API did not pass /api/health. No config was written and no server was started."
+  build_mcp_args
+  # MCP startup never prints the health body or local store paths. Keep its
+  # bounded endpoint/state diagnostic on stderr, and never emit stdio content.
+  if ! "$binary" "${mcp_exec_args[@]}" </dev/null >/dev/null; then
+    die "Selected loopback API did not pass the MCP health preflight. No config was written."
   fi
 }
 
@@ -520,6 +531,10 @@ parse_args() {
       [[ -z "$endpoint_file" ]] || die "Pass --endpoint-file once."
       endpoint_file=$2
       shift 2
+      ;;
+    --require-live)
+      require_live=1
+      shift
       ;;
     --session-dir)
       [[ $# -ge 2 ]] || die "--session-dir needs a directory."

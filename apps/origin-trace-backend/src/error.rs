@@ -23,6 +23,8 @@ pub enum Code {
     Cancelled,
     CommandOutcomeUnknown,
     ApplicationFailed,
+    IdleBackend,
+    DebuggerUnavailable,
 }
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +61,8 @@ pub struct Details {
     expected_generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     current_generation: Option<u64>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    action_guidance: Option<Box<crate::action_guidance::ActionGuidance>>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Reason {
@@ -66,6 +70,15 @@ pub struct Reason {
     details: Details,
 }
 impl Reason {
+    pub fn action(guidance: crate::action_guidance::ActionGuidance) -> Self {
+        Self {
+            code: Code::InvalidRequest,
+            details: Details {
+                action_guidance: Some(Box::new(guidance)),
+                ..Details::default()
+            },
+        }
+    }
     pub fn with_cause(mut self, cause: Cause) -> Self {
         self.details.cause = Some(cause);
         self
@@ -207,6 +220,8 @@ mod tests {
             Code::Cancelled,
             Code::CommandOutcomeUnknown,
             Code::ApplicationFailed,
+            Code::IdleBackend,
+            Code::DebuggerUnavailable,
         ];
         assert_eq!(
             serde_json::to_value(codes).unwrap(),

@@ -52,6 +52,7 @@ readonly session_handshake="${REB_SESSION_HANDSHAKE:-}"
 readonly session_owner_pid="${REB_SESSION_OWNER_PID:-}"
 readonly api_collection_store="${REB_API_COLLECTION_STORE:-${live_session_root}/../api-collection-v1.json}"
 readonly local_analyst_store="${REB_LOCAL_ANALYST_STORE:-${live_session_root}/../local-analyst-workspace-v1.json}"
+readonly active_endpoint_file="${REB_ACTIVE_ENDPOINT_FILE:-${HOME:?HOME is required}/.config/origin-trace/reb-api.endpoint}"
 
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
   fail_live_session 2 "REB_NATIVE_QUIET_MODE must be 0 or 1."
@@ -311,6 +312,7 @@ analyzer_pid=$!
 
 ui_arguments=(
   --host 127.0.0.1 --port 0 --endpoint-file "${ui_endpoint_path}" \
+  --active-endpoint-file "${active_endpoint_file}" \
   --store "${store_path}" --trace-store "${trace_store_path}" \
   --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
   --api-collection "${api_collection_store}" --local-analyst "${local_analyst_store}" \

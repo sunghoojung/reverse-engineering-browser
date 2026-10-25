@@ -593,7 +593,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 39, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 40, "Review route coverage when the API changes");
     assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
@@ -776,7 +776,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 39);
+    assert_eq!(operation_count, 40);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -7368,4 +7368,171 @@ fn response_event_for_vm_test(root: &Value) -> Value {
     response["sequence_number"] = json!("12");
     response["type"] = json!("response_started");
     response
+}
+
+#[tokio::test]
+async fn compact_session_context_and_action_errors_are_bounded_and_explicit() {
+    let server = Server::start_with_helper_canaries(true).await;
+    let response = server.get("/api/session/context").await;
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    let bytes = assert_contract_response(response, "get", "/api/session/context", 200).await;
+    assert!(bytes.len() < 8192);
+    let context: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(context["endpoint"], server.url);
+    assert_eq!(context["capture_mode"], "idle");
+    assert_eq!(context["live_admission"], "idle");
+    assert_eq!(context["debugger_state"], "unavailable");
+    assert_eq!(context["broker_connected"], false);
+    assert_eq!(context["target"], Value::Null);
+    assert_eq!(context["allow_effects"], Value::Null);
+    assert_eq!(context["effects_admission"], "caller_specific_unknown");
+    assert!(context["wasm_scripts"].as_array().unwrap().is_empty());
+    assert!(
+        context["wasm_artifacts"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let health: Value = server.get("/api/health").await.json().await.unwrap();
+    assert_eq!(context["instance_id"], health["instance_id"]);
+    assert_ne!(context["instance_id"], Value::Null);
+    let response = server
+        .client
+        .get(format!("{}/api/session/context", server.url))
+        .header("If-None-Match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "get", "/api/session/context", 304).await;
+    assert_contract_response(
+        server.get("/api/session/context?unexpected=1").await,
+        "get",
+        "/api/session/context",
+        400,
+    )
+    .await;
+    for (path, valid) in [
+        ("/api/debugger/actions", "pause"),
+        ("/api/capture/actions", "stop"),
+    ] {
+        for body in [json!({}), json!({"action":"secret_canary"})] {
+            let bytes =
+                assert_contract_response(server.action(path, body).await, "post", path, 400).await;
+            let error: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["code"], "invalid_request");
+            assert!(
+                error["details"]["allowed_actions"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(valid))
+            );
+            assert!(!String::from_utf8(bytes).unwrap().contains("secret_canary"));
+        }
+        let bytes = assert_contract_response(
+            server.action(path, json!({"action":valid})).await,
+            "post",
+            path,
+            409,
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+            "idle_backend"
+        );
+    }
+    let missing: Value = server
+        .action("/api/debugger/actions", json!({"action":"add_watch"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(missing["details"]["missing_fields"], json!(["expression"]));
+    let missing: Value = server
+        .action("/api/capture/actions", json!({"action":"clear"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(missing["details"]["missing_fields"], json!(["confirm"]));
+    // Offline cleanup remains available and is not mislabeled live work.
+    assert!(
+        server
+            .action("/api/debugger/actions", json!({"action":"clear_console"}))
+            .await
+            .status()
+            .is_success()
+    );
+    let response = server
+        .client
+        .get(format!("{}/api/session/context", server.url))
+        .header("If-None-Match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_ne!(response.headers()["etag"], etag);
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn configured_but_unattached_debugger_refuses_live_actions_explicitly() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start_with_args(&[
+        "--devtools-active-port".into(),
+        root.path().join("missing").display().to_string(),
+    ])
+    .await;
+    let response = server
+        .action("/api/debugger/actions", json!({"action":"pause"}))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/debugger/actions", 409).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+        "debugger_unavailable"
+    );
+    let context: Value = server
+        .get("/api/session/context")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(context["capture_mode"], "idle");
+    assert_eq!(context["debugger_state"], "waiting");
+    assert_eq!(context["live_admission"], "debugger_unavailable");
+}
+
+#[tokio::test]
+async fn disconnected_capture_stop_is_not_reported_as_success() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start_with_args(&[
+        "--socket".into(),
+        root.path().join("missing.sock").display().to_string(),
+        "--broker-pid".into(),
+        std::process::id().to_string(),
+    ])
+    .await;
+    let response = server
+        .action("/api/capture/actions", json!({"action":"stop"}))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/capture/actions", 409).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+        "dependency_unavailable"
+    );
+    // The deliberately absent socket must prevent signaling even a valid PID.
+    let context: Value = server
+        .get("/api/session/context")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(context["broker_connected"], false);
+    assert_eq!(context["capture_mode"], "live");
+    assert_eq!(context["live_admission"], "debugger_unavailable");
 }

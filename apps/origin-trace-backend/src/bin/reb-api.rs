@@ -85,6 +85,10 @@ enum Action {
         /// capture redaction, or permission to send results to a model provider.
         #[arg(long)]
         allow_effects: bool,
+        /// Require live capture and a running or paused debugger at startup
+        /// and before every tool call. Does not authorize capture or effects.
+        #[arg(long)]
+        require_live: bool,
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
     },
@@ -348,8 +352,16 @@ fn validated_loopback_root(text: &str) -> Result<String, Box<dyn std::error::Err
 }
 
 fn read_endpoint_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Symlink aliases are allowed; a replaced FIFO must not hang reconnect.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(format!(
                 "Endpoint file does not exist: {}. Start the selected Origin Trace session, or pass that session's research-ui.endpoint. No tools were advertised.",
@@ -361,6 +373,11 @@ fn read_endpoint_file(path: &Path) -> Result<String, Box<dyn std::error::Error>>
             return Err(format!("Cannot read endpoint file {}: {error}.", path.display()).into());
         }
     };
+    if !file.metadata()?.is_file() {
+        return Err("Endpoint path must be a regular file. No tools were advertised.".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(1025).read_to_end(&mut bytes)?;
     if bytes.len() > 1024 {
         return Err(format!(
             "Endpoint file {} is larger than 1024 bytes. No tools were advertised.",
@@ -431,10 +448,24 @@ fn resolve_mcp_endpoint(
     }
 }
 
+struct LiveRefusal {
+    code: &'static str,
+    capture_mode: String,
+    debugger_state: String,
+    message: String,
+}
+struct McpHealth {
+    instance_id: Option<String>,
+    live_refusal: Option<LiveRefusal>,
+}
+
 // Health runs before stdio so a client cannot list tools for a missing session.
-// The document names local evidence paths, so only `status` is checked and the
-// body is never written to either stream. `no_proxy` keeps the probe on loopback.
-async fn confirm_mcp_health(base: &str, timeout: f64) -> Result<(), Box<dyn std::error::Error>> {
+// The document names local evidence paths. Only allowlisted health fields enter
+// diagnostics; the body is never printed. `no_proxy` keeps the probe on loopback.
+async fn probe_mcp_health(
+    base: &str,
+    timeout: f64,
+) -> Result<McpHealth, Box<dyn std::error::Error>> {
     let mut url = root_url(base)?;
     url.set_path("/api/health");
     let client = reqwest::Client::builder()
@@ -451,7 +482,7 @@ async fn confirm_mcp_health(base: &str, timeout: f64) -> Result<(), Box<dyn std:
         Ok(response) => response,
         Err(error) => {
             return Err(format!(
-                "Selected loopback API did not respond at /api/health ({error}). Start that session or choose its endpoint again. No tools were advertised."
+                "Selected loopback API {base} did not respond at /api/health ({error}). Reconnect after starting the intended session. No tool request was sent."
             )
             .into());
         }
@@ -473,7 +504,106 @@ async fn confirm_mcp_health(base: &str, timeout: f64) -> Result<(), Box<dyn std:
                 .into(),
         );
     }
-    Ok(())
+    let instance_id = value["instance_id"]
+        .as_str()
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && id.bytes().all(|byte| byte.is_ascii_digit() || byte == b':')
+        })
+        .map(str::to_owned);
+    Ok(McpHealth {
+        instance_id,
+        live_refusal: live_refusal(base, &value),
+    })
+}
+
+async fn confirm_mcp_health(
+    base: &str,
+    timeout: f64,
+    require_live: bool,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let health = probe_mcp_health(base, timeout).await?;
+    if require_live {
+        if let Some(refusal) = health.live_refusal {
+            return Err(refusal.message.into());
+        }
+        if health.instance_id.is_none() {
+            return Err(format!("Live endpoint {base} has no supported instance_id. Rebuild the backend before connecting with --require-live. No tool request was sent.").into());
+        }
+    }
+    Ok(health.instance_id)
+}
+
+fn live_refusal(base: &str, value: &Value) -> Option<LiveRefusal> {
+    let capture = value["capture_mode"]
+        .as_str()
+        .filter(|mode| matches!(*mode, "live" | "idle" | "demo"))
+        .unwrap_or("unknown");
+    let debugger = value["debugger_state"]
+        .as_str()
+        .filter(|state| {
+            matches!(
+                *state,
+                "running"
+                    | "paused"
+                    | "unavailable"
+                    | "disconnected"
+                    | "connecting"
+                    | "waiting"
+                    | "crashed"
+            )
+        })
+        .unwrap_or("unknown");
+    if capture == "live" && matches!(debugger, "running" | "paused") {
+        return None;
+    }
+    let code = if capture == "idle" {
+        "idle_backend"
+    } else if capture == "live" {
+        "debugger_unavailable"
+    } else {
+        "state_conflict"
+    };
+    Some(LiveRefusal {
+        code,
+        capture_mode: capture.to_owned(),
+        debugger_state: debugger.to_owned(),
+        message: format!(
+            "code={code} Live capture is unavailable at {base}: capture_mode={capture}, debugger_state={debugger}. Reconnect after the intended live debugger is ready, or explicitly select a stored-evidence endpoint without --require-live. No tool request was sent."
+        ),
+    })
+}
+
+struct McpEndpointGuard {
+    endpoint_file: Option<PathBuf>,
+    require_live: bool,
+    retired: bool,
+    instance_id: Option<String>,
+}
+
+impl McpEndpointGuard {
+    fn verify_instance(&mut self, base: &str, current: Option<String>) -> Result<(), String> {
+        if self.instance_id != current {
+            self.retired = true;
+        }
+        self.verify_endpoint(base)
+    }
+    fn verify_endpoint(&mut self, base: &str) -> Result<(), String> {
+        if !self.retired
+            && let Some(path) = &self.endpoint_file
+        {
+            // Never transfer a pending operation to a new session. A fresh
+            // stdio process resolves the file again after client reconnect.
+            self.retired = !read_endpoint_file(path).is_ok_and(|current| current == base);
+        }
+        if self.retired {
+            return Err(format!(
+                "Selected endpoint file or backend instance changed or became unavailable (connected endpoint {base}). Reconnect the MCP server to resolve the current endpoint and reselect evidence before acting. No tool request was sent."
+            ));
+        }
+        Ok(())
+    }
 }
 
 async fn read_capped_body(
@@ -521,6 +651,7 @@ struct ExchangeRequest<'a> {
     timeout: f64,
     json_errors: bool,
     missing_body: &'a str,
+    expected_instance: Option<&'a str>,
 }
 async fn exchange(
     request: ExchangeRequest<'_>,
@@ -535,6 +666,7 @@ async fn exchange(
         timeout,
         json_errors,
         missing_body,
+        expected_instance,
     } = request;
     let mut url = root_url(base)?;
     let mut route = path.to_owned();
@@ -594,6 +726,9 @@ async fn exchange(
     );
     for (name, value) in headers {
         request = request.header(name, value);
+    }
+    if let Some(instance) = expected_instance {
+        request = request.header("x-reb-expected-instance", instance);
     }
     if definition.get("requestBody").is_some() {
         let raw = body.ok_or(missing_body)?;
@@ -729,12 +864,24 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             endpoint_file,
             session_dir,
             allow_effects,
+            require_live,
             timeout,
         } => {
             check_timeout(timeout)?;
+            let mut guard = McpEndpointGuard {
+                endpoint_file: endpoint_file.clone().or_else(|| {
+                    session_dir
+                        .as_ref()
+                        .map(|dir| dir.join("research-ui.endpoint"))
+                }),
+                require_live,
+                retired: false,
+                instance_id: None,
+            };
             let base = resolve_mcp_endpoint(base_url, endpoint_file, session_dir)?;
-            confirm_mcp_health(&base, timeout).await?;
-            mcp::serve(&spec, &ops, &base, allow_effects, timeout).await
+            guard.instance_id = confirm_mcp_health(&base, timeout, require_live).await?;
+            guard.verify_endpoint(&base)?;
+            mcp::serve(&spec, &ops, &base, allow_effects, timeout, guard).await
         }
         Action::Describe {
             operation_id,
@@ -823,6 +970,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 timeout,
                 json_errors,
                 missing_body: "Operation requires --body-file PATH or --body-file -",
+                expected_instance: None,
             })
             .await?;
             if show_headers {
@@ -899,6 +1047,7 @@ fn bounded_http_error(spec: &Value, status: u16, bytes: &[u8]) -> Value {
             json!({"$ref":"#/components/schemas/ErrorDetails","components":spec["components"]});
         if jsonschema::validator_for(&schema)
             .is_ok_and(|validator| validator.is_valid(&value["details"]))
+            && origin_trace_backend::action_guidance::valid_details(spec, &value["details"])
         {
             result["details"] = value["details"].clone();
         }

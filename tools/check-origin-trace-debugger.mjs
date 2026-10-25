@@ -54,8 +54,9 @@ const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const candidateBridgeBrowser = process.argv[2] === "--candidate-bridge-ui-browser";
 const elementScreenshotBrowser = process.argv[2] === "--element-screenshot-ui-browser";
+const heapWasmBrowser = process.argv[2] === "--heap-wasm-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[elementScreenshotBrowser || candidateBridgeBrowser || fieldsOnly || canvasBrowser || sourcesTreeBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[heapWasmBrowser || elementScreenshotBrowser || candidateBridgeBrowser || fieldsOnly || canvasBrowser || sourcesTreeBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkCandidateFixture();
 await checkCandidateExperimentController(root);
 await checkSourceWindowModel(root);
@@ -6847,6 +6848,71 @@ try {
       );
     };
     await until((s) => s.state === "running");
+    if (heapWasmBrowser) {
+      // Only authored loopback documents: exercise production HTTP, native heap
+      // ingest and real Chrome handles, without enabling baseline execution.
+      const rejectAction = async (action, values, status) => {
+        const response = await fetch(url + "/api/debugger/actions", {
+          method: "POST", headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({action, ...values}), signal: AbortSignal.timeout(15000),
+        });
+        assert.equal(response.status, status, await response.text());
+      };
+      const baseline = (await get()).target.id;
+      const heap = await action("search_heap_snapshot", {
+        query:"originTraceMarker", scope:"all", case_sensitive:true,
+      });
+      assert.equal(heap.snapshot.protocol_version, 2);
+      assert.equal(heap.snapshot.scope, "all");
+      assert(heap.snapshot.file_bytes > 0 && heap.snapshot.analyzed_nodes > 0);
+      assert(heap.snapshot.results.some(row => row.name === "originTraceMarker"),
+        "Native heap ingest must find the authored string marker");
+      await rejectAction("list_live_wasm_objects", {target_id:baseline}, 409);
+      console.log(`PASS ${name} real Chrome heap ingest and baseline Wasm execution refusal`);
+      await action("create_request_interception_experiment");
+      let state = await until(s => s.state === "running" &&
+        s.target?.id === s.request_interception.target_id && s.action_scope.state === "ready");
+      const target = state.target.id;
+      assert.notEqual(target, baseline);
+      assert.equal(state.request_interception.isolated, true);
+      await rejectAction("list_live_wasm_objects", {target_id:target}, 409);
+      await action("navigate_object_experiment", {url:fixtureUrl + "/page"});
+      await until(s => s.request_interception.pending_requests === 0 &&
+        s.object_experiment.target_id === target && s.object_experiment.navigation_id > 0);
+      await rejectAction("list_live_wasm_objects", {target_id:baseline}, 409);
+      const listed = await action("list_live_wasm_objects", {target_id:target});
+      for (const kind of ["instance", "module", "memory"]) {
+        assert(listed.wasm.objects.some(row => row.kind === kind), `Missing live ${kind}`);
+      }
+      const instance = listed.wasm.objects.find(row => row.kind === "instance");
+      const memory = listed.wasm.objects.find(row => row.kind === "memory");
+      const module = listed.wasm.objects.find(row => row.kind === "module");
+      const read = {target_id:target, listing_id:listed.wasm.listing_id, object_id:instance.id,
+        export_name:"memory", offset:0, length:4, confirmed:true};
+      const exported = await action("read_live_wasm_memory", read);
+      assert.deepEqual(exported.memory.bytes, [17,33,65,129]);
+      assert.equal(exported.memory.atomic, false);
+      const direct = {...read, object_id:memory.id};
+      delete direct.export_name;
+      assert.deepEqual((await action("read_live_wasm_memory", direct)).memory.bytes, [17,33,65,129]);
+      await rejectAction("read_live_wasm_memory", {...read, target_id:baseline}, 409);
+      await rejectAction("read_live_wasm_memory", {...read, export_name:"missing"}, 409);
+      await rejectAction("read_live_wasm_memory", {...read, offset:65536}, 409);
+      await rejectAction("read_live_wasm_memory", {...read, length:4097}, 400);
+      await rejectAction("read_live_wasm_memory", {...read, confirmed:false}, 400);
+      await rejectAction("read_live_wasm_memory", {...direct, object_id:module.id}, 400);
+      const replacement = await action("list_live_wasm_objects", {target_id:target});
+      await rejectAction("read_live_wasm_memory", read, 409);
+      const fresh = {...read, listing_id:replacement.wasm.listing_id,
+        object_id:replacement.wasm.objects.find(row => row.kind === "instance").id};
+      await action("navigate_object_experiment", {url:fixtureUrl + "/page"});
+      await until(s => s.request_interception.pending_requests === 0);
+      await rejectAction("read_live_wasm_memory", fresh, 409);
+      await action("dispose_request_interception_experiment");
+      console.log(`PASS ${name} real Chrome Wasm handles, direct/export slices, owner/bounds/confirmation refusals and listing/navigation invalidation`);
+      passed += 2;
+      continue;
+    }
     if (elementScreenshotBrowser) {
       const address = trafficDevtoolsAddress(await readFile(join(profile, "DevToolsActivePort"), "utf8"));
       await checkElementScreenshotUI({address,uiURL:url,fixtureURL:fixtureUrl,root,socketFactory:trafficBrowserSocket});

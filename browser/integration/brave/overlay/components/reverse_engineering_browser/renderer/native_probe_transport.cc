@@ -80,18 +80,13 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   queue_mappings_.push_back(std::move(mapping));
   queue_.store(queue, std::memory_order_release);
   NativeProbeSink::Get().SetEmitters(
-      &NativeProbeTransport::Emit, &NativeProbeTransport::EmitArtifact, session_id, category_mask,
-      expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId);
+      &NativeProbeTransport::EmitStatus, &NativeProbeTransport::EmitArtifact, session_id,
+      category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId);
 }
 
 void NativeProbeTransport::Disable() {
   NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0, false);
   queue_.store(nullptr, std::memory_order_release);
-}
-
-bool NativeProbeTransport::Emit(const NativeProbeEvent& event,
-                                const std::uint64_t config_generation) noexcept {
-  return EmitStatus(event, config_generation) == NativeProbeEmitStatus::kAdmitted;
 }
 
 NativeProbeEmitStatus NativeProbeTransport::EmitStatus(

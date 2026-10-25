@@ -9,11 +9,11 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <vector>
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
-#include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
 namespace {
 constexpr std::uint64_t kSession = 42;
@@ -29,13 +29,17 @@ auto& renderer = reb::NativeProbeSink::Get();
 auto& browser = reb::NativeArtifactCaptureSink::Get();
 auto& socket = reb::NativeArtifactSocketClient::Get();
 
-bool EmitEvent(const reb::NativeProbeEvent& event, std::uint64_t generation) noexcept {
-  const bool accepted = renderer.CanAdmitEvent(event, generation) && renderer_queue.TryPush(event);
+reb::NativeProbeEmitStatus EmitEvent(const reb::NativeProbeEvent& event,
+                                     std::uint64_t generation) noexcept {
+  if (!renderer.CanAdmitEvent(event, generation)) {
+    return reb::NativeProbeEmitStatus::kRejected;
+  }
+  const bool accepted = renderer_queue.TryPush(event);
   if (accepted && reconfigure_after_accept) {
     reconfigure_after_accept = false;
     Configure();
   }
-  return accepted;
+  return accepted ? reb::NativeProbeEmitStatus::kAdmitted : reb::NativeProbeEmitStatus::kQueueFull;
 }
 void EmitBrowserEvent(const reb::NativeProbeEvent& event) noexcept {
   browser_events.push_back(event);
@@ -72,14 +76,6 @@ void Write(std::ofstream& output, const void* data, std::size_t size) {
   assert(output.good());
 }
 }  // namespace
-
-// The production transport is not linked: its Mojo queue and shared-memory
-// mapping stay in the browser. Dispatch samples that reach EmitStatus are
-// rejected instead of reported as admitted.
-reb::NativeProbeEmitStatus reb::NativeProbeTransport::EmitStatus(const reb::NativeProbeEvent&,
-                                                                 std::uint64_t) noexcept {
-  return reb::NativeProbeEmitStatus::kRejected;
-}
 
 int main(int argc, char* argv[]) {
   assert(argc == 4);  // OUTPUT SOURCE MODE

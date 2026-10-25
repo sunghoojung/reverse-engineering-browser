@@ -31,9 +31,11 @@ scope case directly invokes the browser boundary to check exact identity; it doe
 not claim that its supplied creator IDs were emitted by a renderer.
 
 The narrow adapters replace Chromium platform types, Mojo delivery and the
-artifact socket queue. `NativeProbeTransport::EmitStatus` rejects in this
-driver because that Mojo queue is not linked; runtime snapshots still use the
-injected emitter. The test does **not** execute a JavaScript allocator,
+artifact socket queue. The renderer sink links without the transport implementation
+or a replacement transport symbol, so this check also rejects a reverse link
+dependency from the shared sink into the renderer transport. Its injected emitter
+distinguishes admitted, policy-rejected and queue-full records. The test does
+**not** execute a JavaScript allocator,
 V8/Blink allocation hooks, real Mojo IPC or the browser socket writer. It does not
 render the UI or establish patched-browser acceptance. Those gates still require
 the supported pinned browser build and the owned task-checkpoint fixture.

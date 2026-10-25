@@ -362,8 +362,8 @@ void CaptureRuntimeMetadata(reb::NativeArtifactKind,
                             const reb::NativeRuntimeScript&) noexcept {
   captured_runtime_url = url;
 }
-bool AcceptRuntimeEvent(const NativeProbeEvent&, std::uint64_t) noexcept {
-  return true;
+reb::NativeProbeEmitStatus AcceptRuntimeEvent(const NativeProbeEvent&, std::uint64_t) noexcept {
+  return reb::NativeProbeEmitStatus::kAdmitted;
 }
 
 void RuntimeKeepList() {

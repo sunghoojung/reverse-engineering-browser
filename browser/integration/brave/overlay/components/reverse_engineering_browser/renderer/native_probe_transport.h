@@ -19,20 +19,13 @@
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/shared_remote.h"
 
 namespace reb {
 
 class NativeProbeQueue;
-
-// kAdmitted is in the renderer ring. kQueueFull was refused by that ring and
-// its drop weight is already in DroppedCount. kRejected never reached the ring.
-enum class NativeProbeEmitStatus : std::uint8_t {
-  kAdmitted = 0,
-  kRejected = 1,
-  kQueueFull = 2,
-};
 
 class NativeProbeTransport final : public mojom::NativeProbeClient {
  public:
@@ -61,7 +54,6 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   NativeProbeTransport();
   ~NativeProbeTransport() override;
 
-  static bool Emit(const NativeProbeEvent& event, std::uint64_t config_generation) noexcept;
   [[nodiscard]] NativeProbeEmitStatus EmitEvent(const NativeProbeEvent& event,
                                                 std::uint64_t config_generation) noexcept;
   static void EmitArtifact(NativeArtifactKind kind,

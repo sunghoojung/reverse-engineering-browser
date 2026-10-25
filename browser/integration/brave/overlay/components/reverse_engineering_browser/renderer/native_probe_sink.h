@@ -26,11 +26,20 @@ namespace reb {
 inline constexpr std::size_t kRuntimeScriptNoteBytes = 256U * 1024U;
 inline constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 
-// True means admitted to the renderer ring, not delivered to the browser,
-// broker, or evidence store. The generation identifies the captured policy.
-// Emitters must remain non-blocking and non-throwing.
-using NativeRendererProbeEmitter = bool (*)(const NativeProbeEvent& event,
-                                            std::uint64_t config_generation) noexcept;
+// kAdmitted is in the renderer ring, not delivered to the browser or store.
+// kQueueFull already contributes its drop weight to the ring's DroppedCount;
+// kRejected never reached the ring. Keep this boundary independent of Mojo.
+enum class NativeProbeEmitStatus : std::uint8_t {
+  kAdmitted = 0,
+  kRejected = 1,
+  kQueueFull = 2,
+};
+
+// The generation identifies the captured policy. Emitters must remain
+// non-blocking and non-throwing, including when called from another component.
+using NativeRendererProbeEmitter =
+    NativeProbeEmitStatus (*)(const NativeProbeEvent& event,
+                              std::uint64_t config_generation) noexcept;
 
 using NativeProbeFrameIdProvider = std::uint64_t (*)() noexcept;
 
@@ -208,6 +217,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
 
  private:
   NativeProbeSink() noexcept;
+
+  [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
+                                                 std::uint64_t generation) const noexcept;
 
   std::uint64_t RecordRuntimeBufferEvent(NativeProbeType type,
                                          std::uint64_t frame_id,

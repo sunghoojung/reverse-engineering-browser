@@ -330,6 +330,14 @@ dispatch instruction, not a recovered handler body. Default arms and dynamic
 `call_indirect` targets have null opcode, unknown state and zero samples. Label
 depths and table identifiers are never presented as known handler indices.
 Guest semantics and the stack/register model remain explicit residual unknowns.
+Module-wide ranking keeps every decoded `br_table` and `call_indirect`. A small `br_table` is a CFF/relooper
+candidate. A large `br_table` is a handler-table candidate: selector index to a
+Wasm branch target, with repeated labels reported as a unique-target count.
+`call_indirect` is an indirect funcref candidate; its arm count stays null, and
+a static element funcref count is fanout evidence only. A proven guest opcode
+ISA requires guest program-counter and bytecode-stream evidence. Static arms do
+not invent a guest PC, registers, or a stack. Owned fixtures and live captures
+share that schema.
 The same 1024-candidate and 16-snapshot caps apply. Non-VM modules have no
 workspace. Without a runtime snapshot, the guest-byte walk stops at
 `static-module-only` and does not invent a program counter or characterized

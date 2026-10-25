@@ -216,25 +216,43 @@ sites, including those outside loops, and retains at most 256 ranked metadata
 records. `site_count` is the complete decoded count; `omitted_site_count` counts
 unlisted records, not missing module traversal. A truncated inventory also adds
 `dispatch-inventory-limit` to coverage omissions. `arm_count` is the number of
-explicit `br_table` targets, excluding the default (and not the number of unique
-targets); it is null for `call_indirect` because the target count is unknown.
+explicit `br_table` targets, excluding the default, and is null for
+`call_indirect`. `unique_target_count` is the number of distinct Wasm label
+targets for a `br_table`, including the default, so repeated arms cluster; it
+is null for `call_indirect`. `element_fanout` counts static funcref initializers
+in active element segments for that `call_indirect` table. It is null when that
+table has no active segment, when the segment is passive or declarative, or
+when the site is a `br_table`. Fanout does not fill in `arm_count`. Owned
+fixtures and live captures use these same fields.
 
-Ranking v1 orders in-loop sites before non-loop sites, then tables with at least
-32 arms, their arm count, function structural score, IP-like local/global
-read/write pattern, loop depth, function body size, small-table arm count, and
-lowest module offset. `selected_byte_offset` names the top in-loop site, or null
-when none exists. Small tables are `cff-helper-candidate`, a heuristic label,
-not proof of CFF. Larger tables are `dispatch-candidate`, not proven guest ISAs.
-The ranking does not increase the detector's confidence or score. A Wasm
-`candidate` with an in-loop dispatch can expose a static workspace even without
-sufficient independent evidence for `likely-vm`.
+Ranking v1 orders in-loop sites before non-loop sites, then sites whose scale is
+at least 32, that scale, function structural score, IP-like local/global
+read/write pattern, loop depth, function body size, small-site scale, and
+lowest module offset. Scale is `arm_count` for `br_table` and `element_fanout`
+for `call_indirect`, or zero when fanout is unknown. `selected_byte_offset`
+names the top in-loop site, or null when none exists. A `br_table` below 32
+arms is `cff-helper-candidate`: a CFF or relooper candidate, not proof of CFF.
+A `br_table` at or above 32 arms is `dispatch-candidate`: a handler-table
+candidate from selector index to Wasm branch target. Repeated labels do not
+demote that site and do not prove a guest ISA. `call_indirect` is
+`indirect-handler-candidate`, a funcref-handler candidate. A proven guest
+opcode ISA is not emitted from static arms. It would require guest
+program-counter and bytecode-stream evidence, which this inventory does not
+invent, and it does not invent registers or a guest stack. The ranking does
+not increase the detector's confidence or score. A Wasm `candidate` with an
+in-loop dispatch can expose a static workspace even without sufficient
+independent evidence for `likely-vm`.
 
 The UI's Dispatch sites panel lists the bounded inventory and can select an
-already retained site. Unrelated sites remain outside the retained neighborhood;
-listing metadata never expands the neighborhood or runs the module. A refresh
-preserves an explicit retained-handler selection. The initial listing emits the
-ranked site first, even when a smaller site occurs earlier in the same function.
-Static selectors still do not prove guest opcode binding without samples.
+already retained site. Each collapsed summary shows the rank, explicit arm
+count and unique branch targets or the static element fanout, and one of the
+three candidate labels. The ranked default row starts open. Enter or Space on
+Select retained site clears a handler filter that hides that row, then selects
+it. Unrelated sites remain outside the retained neighborhood; listing metadata
+never expands the neighborhood or runs the module. A refresh preserves an
+explicit retained-handler selection. The initial listing emits the ranked site
+first, even when a smaller site occurs earlier in the same function. Static
+selectors still do not prove guest opcode binding without samples.
 
 A WebAssembly workspace keeps static arms from the detector-selected function
 and from a bounded neighborhood of that function: direct calls within three

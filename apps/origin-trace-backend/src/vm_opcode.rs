@@ -1673,7 +1673,18 @@ mod tests {
             assert_eq!(inventory["site_count"], 2);
             assert_eq!(inventory["candidates"][0]["function_index"], 1);
             assert_eq!(inventory["candidates"][0]["arm_count"], arms);
+            assert_eq!(
+                inventory["candidates"][0]["classification"],
+                "dispatch-candidate"
+            );
+            // Every explicit arm in the fixture repeats label 0, plus the same
+            // default. Clustering reports one Wasm target and does not demote
+            // the large table to a helper or invent a guest opcode.
+            assert_eq!(inventory["candidates"][0]["unique_target_count"], 1);
+            assert!(inventory["candidates"][0]["element_fanout"].is_null());
             assert_eq!(inventory["candidates"][1]["arm_count"], 8);
+            assert_eq!(inventory["candidates"][1]["unique_target_count"], 1);
+            assert!(inventory["candidates"][1]["element_fanout"].is_null());
             assert_eq!(
                 inventory["candidates"][1]["classification"],
                 "cff-helper-candidate"
@@ -1698,6 +1709,129 @@ mod tests {
             );
             assert_schema(&document);
         }
+    }
+
+    #[test]
+    fn wasm_nested_small_table_loses_to_larger_in_loop_table() {
+        // A deeper small table still has the structural signals. A later larger
+        // table has fewer signals and a shallower loop. Arm scale selects the
+        // larger table. No guest opcode is observed.
+        let mut helper = ranked_dispatch_body(16, true);
+        helper.splice(3..3, [0x03, 0x40]);
+        helper.insert(helper.len() - 1, 0x0b);
+        let large = ranked_dispatch_body(200, false);
+        let bytes = wasm_module(&[&helper, &large], None);
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+        assert_eq!(analysis["results"][0]["tier"], "candidate");
+        let inventory = &document["workspaces"][0]["dispatch_inventory"];
+        assert_eq!(inventory["candidates"][0]["function_index"], 1);
+        assert_eq!(inventory["candidates"][0]["arm_count"], 200);
+        assert_eq!(inventory["candidates"][0]["unique_target_count"], 1);
+        assert!(inventory["candidates"][0]["element_fanout"].is_null());
+        assert_eq!(
+            inventory["candidates"][0]["classification"],
+            "dispatch-candidate"
+        );
+        assert_eq!(inventory["candidates"][1]["arm_count"], 16);
+        assert_eq!(inventory["candidates"][1]["unique_target_count"], 1);
+        assert!(inventory["candidates"][1]["element_fanout"].is_null());
+        assert_eq!(
+            inventory["candidates"][1]["classification"],
+            "cff-helper-candidate"
+        );
+        assert!(
+            inventory["candidates"][1]["loop_depth"].as_u64().unwrap()
+                > inventory["candidates"][0]["loop_depth"].as_u64().unwrap()
+        );
+        let handlers = document["workspaces"][0]["handlers"].as_array().unwrap();
+        assert_eq!(handlers.len(), 201);
+        assert_eq!(
+            handlers[0]["source"]["byte_offset"],
+            inventory["selected_byte_offset"]
+        );
+        assert!(
+            handlers
+                .iter()
+                .all(|handler| handler["state"] != "observed")
+        );
+        assert_eq!(document["workspaces"][0]["sample_count"], 0);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn wasm_indirect_element_fanout_ranks_without_inventing_arm_count() {
+        let helper = ranked_dispatch_body(8, true);
+        let indirect = vec![0x00, 0x03, 0x40, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, 0x0b];
+        let large = ranked_dispatch_body(200, false);
+        let mut owned = vec![helper, indirect];
+        owned.extend(std::iter::repeat_n(vec![0x00, 0x0b], 38));
+        owned.push(large);
+        let bodies = owned.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let element = (0..40).collect::<Vec<_>>();
+        let bytes = wasm_module(&bodies, Some(&element));
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+        assert_eq!(analysis["results"][0]["tier"], "candidate");
+        let inventory = &document["workspaces"][0]["dispatch_inventory"];
+        let sites = inventory["candidates"].as_array().unwrap();
+        assert_eq!(sites.len(), 3);
+        assert_eq!(sites[0]["function_index"], 40);
+        assert_eq!(sites[0]["arm_count"], 200);
+        assert_eq!(sites[0]["unique_target_count"], 1);
+        assert!(sites[0]["element_fanout"].is_null());
+        assert_eq!(sites[0]["classification"], "dispatch-candidate");
+        assert_eq!(sites[1]["kind"], "call_indirect");
+        assert!(sites[1]["arm_count"].is_null());
+        assert!(sites[1]["unique_target_count"].is_null());
+        assert_eq!(sites[1]["element_fanout"], 40);
+        assert_eq!(sites[1]["loop_depth"], 1);
+        assert_eq!(sites[1]["classification"], "indirect-handler-candidate");
+        assert_eq!(sites[2]["arm_count"], 8);
+        assert_eq!(sites[2]["unique_target_count"], 1);
+        assert!(sites[2]["element_fanout"].is_null());
+        assert_eq!(sites[2]["classification"], "cff-helper-candidate");
+        assert_eq!(inventory["selected_byte_offset"], sites[0]["byte_offset"]);
+        let handlers = document["workspaces"][0]["handlers"].as_array().unwrap();
+        assert_eq!(handlers.len(), 201);
+        assert!(handlers.iter().all(|handler| {
+            handler["notes"].as_str().unwrap().contains("unproven")
+                && handler["state"] != "observed"
+                && handler["sample_count"] == 0
+        }));
+        assert_eq!(document["workspaces"][0]["sample_count"], 0);
+        assert_schema(&document);
+    }
+
+    #[test]
+    fn wasm_repeated_branch_targets_cluster_without_collapsing_arms() {
+        // loop { block { block { br_table [0, 1, 0, 1] default 0 } } }
+        let body = [
+            0x00, 0x03, 0x40, 0x02, 0x40, 0x02, 0x40, 0x41, 0x00, 0x0e, 0x04, 0x00, 0x01, 0x00,
+            0x01, 0x00, 0x0b, 0x0b, 0x0b, 0x0b,
+        ];
+        let bytes = wasm_module(&[&body], None);
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let inventory = &document["workspaces"][0]["dispatch_inventory"];
+        let site = &inventory["candidates"][0];
+        assert_eq!(site["kind"], "br_table");
+        assert_eq!(site["arm_count"], 4);
+        assert_eq!(site["unique_target_count"], 2);
+        assert!(site["element_fanout"].is_null());
+        assert_eq!(site["classification"], "cff-helper-candidate");
+        assert_eq!(site["loop_depth"], 1);
+        let handlers = document["workspaces"][0]["handlers"].as_array().unwrap();
+        assert_eq!(handlers.len(), 5);
+        let depths = handlers
+            .iter()
+            .map(|handler| handler["notes"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(depths.iter().any(|note| note.contains("label depth 0")));
+        assert!(depths.iter().any(|note| note.contains("label depth 1")));
+        assert!(depths.iter().all(|note| note.contains("unproven")));
+        assert_eq!(document["workspaces"][0]["sample_count"], 0);
+        assert_schema(&document);
     }
 
     #[test]
@@ -1831,7 +1965,20 @@ mod tests {
             .find(|site| site["kind"] == "call_indirect")
             .unwrap();
         assert!(indirect["arm_count"].is_null());
+        assert!(indirect["unique_target_count"].is_null());
+        assert_eq!(indirect["element_fanout"], 1);
+        assert_eq!(indirect["classification"], "indirect-handler-candidate");
         assert_eq!(indirect["loop_depth"], 0);
+        let large = inventory["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|site| site["arm_count"] == 700)
+            .unwrap();
+        assert_eq!(large["unique_target_count"], 1);
+        assert!(large["element_fanout"].is_null());
+        assert_eq!(large["classification"], "dispatch-candidate");
+        assert_eq!(large["loop_depth"], 0);
         assert_schema(&document);
     }
 

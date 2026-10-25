@@ -253,12 +253,12 @@ std::string_view RuntimeScriptIdentityLabel(
     std::uint64_t script_id,
     std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
   constexpr std::string_view kPrefix = "script://";
-  char digits[20];
+  std::array<char, 20> digits{};
   std::size_t count = 0;
   do {
     digits[count++] = static_cast<char>('0' + static_cast<int>(script_id % 10U));
     script_id /= 10U;
-  } while (script_id != 0 && count < sizeof(digits));
+  } while (script_id != 0 && count < digits.size());
   if (kPrefix.size() + count > output.size()) {
     return {};
   }
@@ -411,7 +411,8 @@ void MaskScriptSource(const std::span<char> text,
              IsIdentCont(static_cast<unsigned char>(text[index + 1U]))) {
         ++index;
       }
-      const std::string_view word(text.data() + start, index - start + 1U);
+      const auto word_bytes = text.subspan(start, index - start + 1U);
+      const std::string_view word(word_bytes.data(), word_bytes.size());
       if (!property_name && word == "class") {
         // Pending classes are stack entries too: an extends expression can
         // contain another class or function without losing the outer body.
@@ -1846,9 +1847,8 @@ void NativeProbeSink::PublishVmDispatchBudgetGap() noexcept {
   }
   publishing = true;
   struct ClearPublish {
-    bool& flag;
-    ~ClearPublish() { flag = false; }
-  } clear{publishing};
+    ~ClearPublish() { publishing = false; }
+  } clear;
 
   for (int attempt = 0; attempt < 4; ++attempt) {
     const std::uint64_t generation = dispatch_loss_generation_.load(std::memory_order_relaxed);
@@ -2011,8 +2011,8 @@ void NativeProbeSink::IngestOwnedRegisterInvocation(const std::uint64_t invocati
   if (!SnapshotVmAdmission(admission)) {
     return;
   }
-  constexpr char kLabel[] = "owned-register-v1";
-  constexpr std::uint16_t kLabelSize = sizeof(kLabel) - 1;
+  constexpr std::string_view kLabel = "owned-register-v1";
+  constexpr std::uint16_t kLabelSize = kLabel.size();
   static_assert(kLabelSize <= kNativeVmFindingLabelCapacity);
   NativeVmFindingPayload payload{};
   payload.kind = NativeVmFindingKind::kInvocation;

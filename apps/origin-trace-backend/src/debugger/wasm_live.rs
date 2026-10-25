@@ -77,22 +77,57 @@ impl Debugger {
         }
     }
     async fn live_wasm_current(&self, listing: &Listing) -> Result<()> {
-        let context = self.experiment.context();
         let connection = self.connection.lock().await;
+        self.live_wasm_current_on(listing, connection.as_ref())
+    }
+    fn live_wasm_current_on(
+        &self,
+        listing: &Listing,
+        connection: Option<&Arc<Connection>>,
+    ) -> Result<()> {
+        if listing.connection.has_dropped_events() {
+            return Err(Error::conflict(
+                "Debugger events were lost; attached document ownership is uncertain. Reconnect the debugger and list live Wasm objects again. Other pages are refused.",
+            ));
+        }
+        let context = self.experiment.context();
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if self.wasm_live.next.load(Ordering::Acquire) != listing.id.saturating_add(1)
             || listing.created.elapsed() >= LIFETIME
             || !same_owner(listing, &state, context.as_deref())
             || listing.connection.is_closed()
-            || !connection
-                .as_ref()
-                .is_some_and(|c| Arc::ptr_eq(c, &listing.connection))
+            || !connection.is_some_and(|c| Arc::ptr_eq(c, &listing.connection))
         {
             return Err(Error::conflict(
                 "Live Wasm selection expired or its page/document changed; list live Wasm objects again. Other pages are refused.",
             ));
         }
         Ok(())
+    }
+    async fn synchronize_live_wasm(&self, listing: &Listing) -> Result<()> {
+        self.live_wasm_current(listing).await?;
+        // Bound queue admission as well as acknowledgement. No ownership locks
+        // remain held while queued lifecycle events are applied.
+        tokio::time::timeout(Duration::from_secs(5), listing.connection.barrier())
+            .await
+            .map_err(|_| Error::conflict("Live Wasm ownership event barrier timed out"))??;
+        self.live_wasm_current(listing).await
+    }
+    async fn live_wasm_command(
+        &self,
+        listing: &Listing,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Result<Value> {
+        self.synchronize_live_wasm(listing).await?;
+        listing.connection.command_guarded(method, params, deadline, || {
+            self.connection.try_lock().is_ok_and(|connection| {
+                self.live_wasm_current_on(listing, connection.as_ref()).is_ok()
+            })
+        }).await?.ok_or_else(|| Error::conflict(
+            "Live Wasm command was not sent because document ownership could not be revalidated; reconnect and list objects again",
+        ))
     }
     async fn expire_live_wasm(&self, id: u64) {
         let expired = {
@@ -158,20 +193,20 @@ impl Debugger {
                 ("Instance", "instance"), ("Module", "module"), ("Memory", "memory")
             ] {
                 self.live_wasm_current(&listing).await?;
-                let prototype = connection.command(
+                let prototype = self.live_wasm_command(&listing,
                     "Runtime.evaluate",
                     json!({"expression": format!("WebAssembly.{constructor}.prototype"),
                         "objectGroup": group, "silent": true, "timeout": 1000}),
                     Duration::from_secs(3),
                 ).await?;
                 let prototype = remote_id(&prototype, "result")?;
-                let all = connection.command(
+                let all = self.live_wasm_command(&listing,
                     "Runtime.queryObjects",
                     json!({"prototypeObjectId": prototype, "objectGroup": group}),
                     Duration::from_secs(5),
                 ).await?;
                 let all = remote_id(&all, "objects")?;
-                let count = connection.command(
+                let count = self.live_wasm_command(&listing,
                     "Runtime.callFunctionOn",
                     json!({"objectId": all, "functionDeclaration": "function(){return this.length;}",
                         "returnByValue": true, "silent": true, "timeout": 1000}),
@@ -181,14 +216,14 @@ impl Debugger {
                     &count["result"]["value"], "Live Wasm object count", 0,
                     validation::MAX_SAFE_INTEGER,
                 ).map_err(|_| Error::protocol("Debugger returned an invalid live Wasm count"))?;
-                let bounded = connection.command(
+                let bounded = self.live_wasm_command(&listing,
                     "Runtime.callFunctionOn",
                     json!({"objectId": all, "functionDeclaration": BOUNDED_ARRAY,
                         "objectGroup": group, "silent": true, "timeout": 1000}),
                     Duration::from_secs(3),
                 ).await?;
                 let bounded = remote_id(&bounded, "result")?;
-                let props = connection.command(
+                let props = self.live_wasm_command(&listing,
                     "Runtime.getProperties",
                     json!({"objectId": bounded, "ownProperties": true, "generatePreview": false}),
                     Duration::from_secs(3),
@@ -226,8 +261,7 @@ impl Debugger {
                 coverage.push(json!({"kind": kind, "total_objects": total,
                     "returned_objects": found, "truncated": total > LIMIT as u64}));
             }
-            connection.barrier().await?;
-            self.live_wasm_current(&listing).await
+            self.synchronize_live_wasm(&listing).await
         }.await;
         if let Err(error) = result {
             release_group(&connection, &group).await;
@@ -301,14 +335,13 @@ impl Debugger {
                 "Select a Memory directly, or an Instance with an explicit memory export_name; a Module has no live memory",
             ));
         }
-        let response = listing.connection.command("Runtime.callFunctionOn",json!({"objectId":object,"functionDeclaration":include_str!("../../assets/live-wasm-slice.js"),"arguments":[{"value":kind},{"value":request["export_name"]},{"value":request["offset"]},{"value":request["length"]}],"returnByValue":true,"silent":true,"userGesture":false,"awaitPromise":false,"timeout":1000}),Duration::from_secs(3)).await?;
+        let response = self.live_wasm_command(&listing, "Runtime.callFunctionOn",json!({"objectId":object,"functionDeclaration":include_str!("../../assets/live-wasm-slice.js"),"arguments":[{"value":kind},{"value":request["export_name"]},{"value":request["offset"]},{"value":request["length"]}],"returnByValue":true,"silent":true,"userGesture":false,"awaitPromise":false,"timeout":1000}),Duration::from_secs(3)).await?;
         if response["exceptionDetails"].is_object() {
             return Err(Error::conflict(
                 "Unable to read this Wasm memory slice: verify the memory export, current buffer range (maximum 4096 bytes), and unchanged WebAssembly built-ins",
             ));
         }
-        listing.connection.barrier().await?;
-        self.live_wasm_current(&listing).await?;
+        self.synchronize_live_wasm(&listing).await?;
         let slice = &response["result"]["value"];
         validate_slice(slice, request)?;
         let result = json!({"ok":true,"generation":self.state.lock().unwrap_or_else(|e| e.into_inner())["generation"],"memory":{"listing_id":listing.id,"target_id":listing.target,"object_id":request["object_id"],"owner_scope":listing.scope,"export_name":request["export_name"],"offset":slice["offset"],"length":slice["length"],"byte_length":slice["byte_length"],"bytes":slice["bytes"],"shared":slice["shared"],"atomic":false}});
@@ -518,7 +551,12 @@ while True:
  if not h:break
  q=json.loads(inp.read(struct.unpack('>I',h[4:])[0]))
  with (root/'commands').open('a') as f:f.write(json.dumps(q)+'\n')
- if (root/'reject-release').exists():emit({'id':q['id'],'error':{'code':-32000,'message':'owned cleanup refusal'}})
+ if q['method']=='Owned.dropLifecycle':
+  for _ in range(512):emit({'method':'Runtime.consoleAPICalled','params':{}})
+  emit({'method':'Page.frameNavigated','params':{'frame':{'id':'replacement'}}})
+  emit({'method':'Runtime.executionContextsCleared','params':{}})
+  emit({'id':q['id'],'result':{}})
+ elif (root/'reject-release').exists():emit({'id':q['id'],'error':{'code':-32000,'message':'owned cleanup refusal'}})
  else:emit({'id':q['id'],'result':{}})
 "#).unwrap();
         std::fs::write(
@@ -666,6 +704,38 @@ while True:
                 .message
                 .contains("Workers")
         );
+        assert!(!connection.has_dropped_events());
+        connection
+            .command("Owned.dropLifecycle", json!({}), Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(connection.take_dropped_events(), 2);
+        assert_eq!(connection.take_dropped_events(), 0);
+        assert!(
+            connection.has_dropped_events(),
+            "Draining telemetry cannot repair lifecycle ownership"
+        );
+        assert!(
+            same_owner(&listing, &state, Some("owned")),
+            "Nominal identity did not observe the lost navigation"
+        );
+        let lost = debugger.live_wasm_current(&listing).await.unwrap_err();
+        assert!(lost.message.contains("events were lost"));
+        // Even before queue draining, the initial synchronization refuses loss
+        // rather than sending a query or blocking behind the full event queue.
+        assert!(
+            debugger
+                .live_wasm_command(
+                    &listing,
+                    "Runtime.evaluate",
+                    json!({}),
+                    Duration::from_secs(3)
+                )
+                .await
+                .unwrap_err()
+                .message
+                .contains("events were lost")
+        );
         let put = |listing| {
             *debugger.wasm_live.retained.lock().unwrap() = Some(listing);
         };
@@ -700,8 +770,13 @@ while True:
             .await;
         assert!(debugger.wasm_live.retained.lock().unwrap().is_none());
         let commands = std::fs::read_to_string(dir.path().join("commands")).unwrap();
+        assert!(
+            !commands.contains("Runtime.evaluate"),
+            "Lost ownership must refuse before execution"
+        );
         let groups = commands
             .lines()
+            .filter(|line| !line.contains("Owned.dropLifecycle"))
             .map(|line| {
                 serde_json::from_str::<Value>(line).unwrap()["params"]["objectGroup"].clone()
             })
@@ -718,6 +793,10 @@ while True:
         std::fs::write(dir.path().join("reject-release"), "1").unwrap();
         let (replacement, _events) = Connection::open(&helper, "ws://127.0.0.1:2").await.unwrap();
         *debugger.connection.lock().await = Some(replacement.clone());
+        assert!(
+            !replacement.has_dropped_events(),
+            "A fresh transport has independent event history"
+        );
         put(make_listing(5, false));
         debugger.clear_live_wasm().await;
         assert!(

@@ -9,7 +9,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex as StdMutex, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -33,6 +33,9 @@ pub struct Connection {
     // Events dropped because the consumer queue or byte budget was full.
     // The socket stays open so a burst cannot stall the browser UI thread.
     dropped_events: AtomicU64,
+    // Sticky for this transport: draining the visible counter cannot restore
+    // ownership evidence after an unknown lifecycle event was lost.
+    event_loss: AtomicBool,
 }
 struct Pending<'a> {
     connection: &'a Connection,
@@ -100,6 +103,7 @@ impl Connection {
             closed,
             events: sender.clone(),
             dropped_events: AtomicU64::new(0),
+            event_loss: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&connection);
         let diagnostics = Arc::new(StdMutex::new(Vec::new()));
@@ -158,6 +162,7 @@ impl Connection {
                         Err(_) => false,
                     };
                     if !accepted {
+                        connection.event_loss.store(true, Ordering::Release);
                         connection.dropped_events.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -206,6 +211,9 @@ impl Connection {
     }
     pub fn is_closed(&self) -> bool {
         *self.closed.borrow()
+    }
+    pub fn has_dropped_events(&self) -> bool {
+        self.event_loss.load(Ordering::Acquire)
     }
     pub fn take_dropped_events(&self) -> u64 {
         self.dropped_events.swap(0, Ordering::AcqRel)

@@ -2094,7 +2094,7 @@
           observations.append(textElement('h4', '', 'Retained positions'));
           appendVmPagedRows(observations, row.retainedSamples, 'retained samples', sample => {
             const item = document.createElement('details'); item.className = 'vm-effect-row';
-            item.append(textElement('summary', '', `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(sample, null, 2)));
+            item.append(textElement('summary', '', `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(sample, null, 2)));
             return item;
           });
           if (!row.retainedSamples.length) observations.append(textElement('p', 'vm-selection-empty', 'No retained PC or guest-byte position.'));

@@ -14,7 +14,7 @@ use std::{
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.3.0";
+const PRODUCER_VERSION: &str = "2.4.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -603,7 +603,8 @@ fn event_payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
     if event["category"] != "vm"
         || event["type"] != kind
         || !matches!(event["protocol_version"].as_u64(), Some(2 | 3))
-        || event_identity(event).is_none()
+        || (event_identity(event).is_none()
+            && crate::vm_dispatch_input::report_reference(event).is_none())
         || event
             .get("payload_truncated")
             .is_some_and(|value| value != false)
@@ -684,7 +685,19 @@ fn sample(
     {
         return None;
     }
-    let payload = event_payload(event, "vm_dispatch_sample")?;
+    let caller = match event["type"].as_str()? {
+        "vm_dispatch_report" => {
+            crate::vm_dispatch_input::report_reference(event)?;
+            let value = event.get("dispatch_provenance")?;
+            if !crate::vm_dispatch_input::provenance(value, artifact) {
+                return None;
+            }
+            Some(value)
+        }
+        "vm_dispatch_sample" if event.get("dispatch_provenance").is_none() => None,
+        _ => return None,
+    };
+    let payload = event_payload(event, event["type"].as_str()?)?;
     let finding = read_u64(&payload, 24);
     let investigation = read_u64(&payload, 32);
     let interpreter = read_u64(&payload, 40);
@@ -694,6 +707,7 @@ fn sample(
         || investigation == 0
         || interpreter == 0
         || interpreter.to_string() != artifact["artifact_id"].as_str()?
+        || (caller.is_some() && bytecode != 0)
         || payload[56] != 0
         || payload[58..].iter().any(|byte| *byte != 0)
     {
@@ -714,6 +728,10 @@ fn sample(
         "investigation_id":investigation.to_string(), "interpreter_artifact_id":interpreter.to_string(),
         "bytecode_artifact_id":bytecode.to_string(), "invocation_id":null, "invocation_event":null,
     });
+    if let Some(provenance) = caller {
+        result["provenance"] = provenance.clone();
+        return Some(result);
+    }
     if let Some(parent) = event["parent_event_id"].as_str() {
         let mut identity = event_identity(event)?;
         identity.2 = parent.into();
@@ -911,11 +929,18 @@ pub(crate) fn workspace(
         .filter_map(|event| event_identity(event).map(|identity| (identity, event)))
         .collect::<BTreeMap<_, _>>();
     let mut samples = BTreeMap::<u32, u64>::new();
+    let mut native_samples = BTreeSet::<u32>::new();
+    let mut caller_count = 0u64;
     let mut retained_samples = Vec::new();
     let mut sample_count = 0u64;
     for event in events {
         if let Some(value) = sample(event, artifact, &invocations) {
             let opcode = value["opcode"].as_u64().expect("sample opcode") as u32;
+            if value.get("provenance").is_some() {
+                caller_count += 1;
+            } else {
+                native_samples.insert(opcode);
+            }
             *samples.entry(opcode).or_default() += 1;
             sample_count += 1;
             if retained_samples.len() < MAX_SAMPLES {
@@ -932,10 +957,15 @@ pub(crate) fn workspace(
                 && loss.frame_id == artifact["frame_id"].as_str().unwrap_or("")
         })
         .fold(0u64, |total, loss| total.saturating_add(loss.dropped));
-    if sample_count == 0 && budget_dropped == 0 {
+    if caller_count > 0 {
+        omissions.push(json!({"reason":"caller-samples-unverified", "detail":
+            "Caller-supplied dispatch reports were retained, not independently observed by a native sampler. They cannot confirm handlers, PC units, invocation identity or host-call causality."}));
+    }
+    if native_samples.is_empty() && budget_dropped == 0 {
         omissions.push(json!({"reason":"sampler-unavailable", "detail":
             "No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented. A caller-fed writer still needs a runtime producer. Static dispatch, Canvas calls and snapshots do not prove a guest PC."}));
-    } else if sample_count > retained_samples.len() as u64 {
+    }
+    if sample_count > retained_samples.len() as u64 {
         omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
     }
     if budget_dropped > 0 {
@@ -960,7 +990,9 @@ pub(crate) fn workspace(
         }
         if let Some(count) = samples.get(&opcode) {
             handler["sample_count"] = json!(count);
-            handler["state"] = json!("observed");
+            if native_samples.contains(&opcode) {
+                handler["state"] = json!("observed");
+            }
         }
     }
     if opcode_sites
@@ -968,7 +1000,7 @@ pub(crate) fn workspace(
         .any(|(opcode, count)| *count > 1 && samples.contains_key(opcode))
     {
         unknowns.push(
-            "An observed opcode matches more than one static dispatch site, so it stays unbound."
+            "A reported opcode matches more than one static dispatch site, so it stays unbound."
                 .into(),
         );
     }
@@ -978,7 +1010,7 @@ pub(crate) fn workspace(
             .any(|handler| handler["opcode"].as_u64() == Some(u64::from(*opcode)))
         {
             unknowns.push(format!(
-                "Observed opcode {opcode} has no static handler candidate in the dispatch region."
+                "Reported opcode {opcode} has no static handler candidate in the dispatch region."
             ));
         }
     }

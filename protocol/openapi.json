@@ -7129,6 +7129,28 @@
                     "type": "null"
                   }
                 ]
+              },
+              "provenance": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "source",
+                  "source_artifact_sha256",
+                  "input_sha256"
+                ],
+                "properties": {
+                  "source": {
+                    "const": "caller-supplied"
+                  },
+                  "source_artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "input_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
               }
             },
             "allOf": [
@@ -7150,6 +7172,44 @@
                     },
                     "invocation_event": {
                       "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/eventIdentity"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "required": [
+                    "provenance"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "instruction_pointer_units": {
+                      "const": "unknown"
+                    },
+                    "invocation_id": {
+                      "type": "null"
+                    },
+                    "invocation_event": {
+                      "type": "null"
+                    },
+                    "event": {
+                      "properties": {
+                        "process_id": {
+                          "const": 0
+                        }
+                      }
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "event": {
+                      "properties": {
+                        "process_id": {
+                          "minimum": 1
+                        }
+                      }
                     }
                   }
                 }

@@ -305,3 +305,15 @@ unresolved frontier. Instruction positions use 32-row pages that expose the full
 bounded graph without changing the document. Frontend validation
 checks opcode bytes, effect identity, exact implied outgoing edges, nonoverlap,
 reachability from entries, complete snapshot entries and resolved destinations.
+
+## Caller-supplied report fallback
+
+The [caller report writer](vm-dispatch-input-v1.md) provides a bounded local
+analysis-only import path. Its `vm_dispatch_report` records are not native
+`vm_dispatch_sample` events. Optional sample `provenance` preserves the exact
+`caller-supplied` source and input/artifact digests; unknown sources fail closed.
+Caller reports count toward retained samples but cannot promote a handler,
+validate PC units or establish invocation/host parentage. They keep
+`caller-samples-unverified`; without native samples the existing native sampler
+and host-link omissions also remain. Mixed reports never promote caller-only
+opcodes. The UI labels their positions and exposes their provenance audit.

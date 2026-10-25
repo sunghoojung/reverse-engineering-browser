@@ -49,6 +49,7 @@ fn position(host: &Value, artifact: &Value, samples: &[Value]) -> Option<Value> 
         let before = event["sequence_number"].as_str()?.parse::<u64>().ok()?;
         (sample["invocation_id"].is_string()
             && sample["invocation_event"].is_object()
+            && sample.get("provenance").is_none()
             && sample["instruction_pointer_units"] != "unknown"
             && event["session_id"] == host["session_id"]
             && event["process_id"] == host["process_id"]
@@ -89,7 +90,10 @@ pub(crate) fn store(
             .expect("validated workspace samples");
         let mut links = Vec::new();
         let mut omissions = Vec::new();
-        if samples.is_empty() {
+        let native_samples_available = samples
+            .iter()
+            .any(|sample| sample.get("provenance").is_none());
+        if !native_samples_available {
             omissions.push("dispatch-samples-unavailable");
         }
         if workspace["sample_count"].as_u64().unwrap_or(0) > samples.len() as u64 {
@@ -108,7 +112,7 @@ pub(crate) fn store(
             let guest = position(event, artifact, samples);
             let (state, reason) = if guest.is_some() {
                 ("observed", "direct-dispatch-parent")
-            } else if samples.is_empty() {
+            } else if !native_samples_available {
                 ("unknown", "dispatch-samples-unavailable")
             } else {
                 ("correlated", "guest-position-unproven")

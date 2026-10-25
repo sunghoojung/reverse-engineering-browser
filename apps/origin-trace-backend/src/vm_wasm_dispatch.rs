@@ -4,10 +4,11 @@ use serde_json::{Value, json};
 use std::{cmp::Reverse, collections::BTreeMap, ops::Range};
 
 pub(super) const MAX_SITES: usize = 256;
-// Loops first, then interpreter-scale tables. Small sites retain the detector's
-// structural evidence preference, so a bare tiny jump table cannot displace an
-// indirect dispatch with local/global and memory signals. Size never raises the
-// VM confidence score or supplies an observed guest opcode.
+// Loops first, then interpreter-scale sites. Scale is the explicit br_table arm
+// count, or the static active-element funcref count for call_indirect. Unknown
+// indirect fanout ranks as zero and never fills arm_count. Small br_table sites
+// keep the detector's structural preference below that scale threshold. Size
+// never raises the VM confidence score or supplies an observed guest opcode.
 pub(super) type Rank = (
     bool,
     bool,
@@ -36,20 +37,30 @@ impl Inventory {
         decoded: &[Instruction],
         score: u64,
         ip_like: bool,
+        element_fanout: &BTreeMap<u32, u32>,
     ) -> Option<(Rank, usize, usize)> {
         let mut best = None;
         for instruction in decoded.iter().filter(|i| [0x0e, 0x11].contains(&i.opcode)) {
-            let arms = instruction.arm_count.unwrap_or(0);
-            let major = arms >= 32;
+            let fanout = instruction
+                .table_index
+                .and_then(|table| element_fanout.get(&table).copied());
+            // br_table scale is the explicit arm count. call_indirect scale is the
+            // static funcref count when an active element segment names that table.
+            let scale = if instruction.opcode == 0x0e {
+                instruction.arm_count.unwrap_or(0)
+            } else {
+                fanout.unwrap_or(0)
+            };
+            let major = scale >= 32;
             let rank = (
                 instruction.loop_depth > 0,
                 major,
-                if major { arms } else { 0 },
+                if major { scale } else { 0 },
                 score,
                 ip_like,
                 instruction.loop_depth,
                 body.len(),
-                arms,
+                scale,
                 Reverse(instruction.start),
             );
             let kind = if instruction.opcode == 0x0e {
@@ -60,7 +71,12 @@ impl Inventory {
                 "call_indirect"
             };
             self.sites += 1;
-            let classification = if kind == "br_table" && !major {
+            // Three static labels. None of them is a proven guest opcode ISA:
+            // that would require a guest PC and a bytecode stream, which this
+            // inventory does not have.
+            let classification = if kind == "call_indirect" {
+                "indirect-handler-candidate"
+            } else if !major {
                 "cff-helper-candidate"
             } else {
                 "dispatch-candidate"
@@ -69,7 +85,8 @@ impl Inventory {
                 "kind": kind, "function_index": index,
                 "byte_offset": instruction.start, "byte_size": instruction.end - instruction.start,
                 "function_body_offset": body.start, "function_body_size": body.len(),
-                "arm_count": instruction.arm_count, "loop_depth": instruction.loop_depth,
+                "arm_count": instruction.arm_count, "unique_target_count": instruction.unique_targets,
+                "element_fanout": fanout, "loop_depth": instruction.loop_depth,
                 "ip_like": ip_like, "structural_score": score, "classification": classification,
             }));
             if self.ranked.len() > MAX_SITES {

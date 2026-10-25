@@ -2493,7 +2493,8 @@
         const offsets = new Set();
         for (const site of inventory.candidates) {
           if (!vmWorkspaceExact(site, ['kind', 'function_index', 'byte_offset', 'byte_size', 'function_body_offset',
-            'function_body_size', 'arm_count', 'loop_depth', 'ip_like', 'structural_score', 'classification']) ||
+            'function_body_size', 'arm_count', 'unique_target_count', 'element_fanout', 'loop_depth', 'ip_like',
+            'structural_score', 'classification']) ||
             !['br_table', 'call_indirect'].includes(site.kind) || typeof site.ip_like !== 'boolean' ||
             !['function_index', 'byte_offset', 'function_body_offset', 'loop_depth', 'structural_score'].every(key =>
               isSafeIntegerInRange(site[key], 0, Number.MAX_SAFE_INTEGER)) ||
@@ -2502,8 +2503,13 @@
             !Number.isSafeInteger(site.byte_offset + site.byte_size) ||
             !Number.isSafeInteger(site.function_body_offset + site.function_body_size) ||
             site.byte_offset + site.byte_size > site.function_body_offset + site.function_body_size ||
-            (site.kind === 'br_table' ? !isSafeIntegerInRange(site.arm_count, 0, 4294967295) : site.arm_count !== null) ||
-            site.classification !== (site.kind === 'br_table' && site.arm_count < 32 ? 'cff-helper-candidate' : 'dispatch-candidate') ||
+            (site.kind === 'br_table'
+              ? !isSafeIntegerInRange(site.arm_count, 0, 4294967295) || site.element_fanout !== null ||
+                !isSafeIntegerInRange(site.unique_target_count, 1, site.arm_count + 1)
+              : site.arm_count !== null || site.unique_target_count !== null ||
+                (site.element_fanout !== null && !isSafeIntegerInRange(site.element_fanout, 0, 4294967295))) ||
+            site.classification !== (site.kind === 'call_indirect' ? 'indirect-handler-candidate'
+              : site.kind === 'br_table' && site.arm_count < 32 ? 'cff-helper-candidate' : 'dispatch-candidate') ||
             offsets.has(site.byte_offset)) return false;
           offsets.add(site.byte_offset);
         }

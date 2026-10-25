@@ -496,7 +496,7 @@ fn arm_value(arm: &Arm, function: u32, selected: u32) -> Value {
         ArmKind::Selector if function == selected => (
             format!("br_table selector {}", arm.opcode.unwrap_or(0)),
             format!(
-                "Function {function} static selector {} branches to label depth {}. The source range cites this module instruction; guest opcode binding is unproven.",
+                "Function {function} static selector {} is a Wasm branch to label depth {}. It is not a guest handler address. No guest opcode, PC, register, or stack is inferred; binding is unproven.",
                 arm.opcode.unwrap_or(0),
                 arm.detail
             ),
@@ -504,7 +504,7 @@ fn arm_value(arm: &Arm, function: u32, selected: u32) -> Value {
         ArmKind::Selector => (
             format!("br_table f{function} selector {}", arm.opcode.unwrap_or(0)),
             format!(
-                "Function {function} static selector {} branches to label depth {}. The source range cites this module instruction; guest opcode binding is unproven.",
+                "Function {function} static selector {} is a Wasm branch to label depth {}. It is not a guest handler address. No guest opcode, PC, register, or stack is inferred; binding is unproven.",
                 arm.opcode.unwrap_or(0),
                 arm.detail
             ),
@@ -512,28 +512,28 @@ fn arm_value(arm: &Arm, function: u32, selected: u32) -> Value {
         ArmKind::Default if function == selected => (
             "br_table default".into(),
             format!(
-                "Function {function} default dispatch arm to label depth {} has no static selector. Guest opcode binding is unproven.",
+                "Function {function} default arm is a Wasm branch to label depth {} with no static selector. It is not a guest handler address. Binding is unproven.",
                 arm.detail
             ),
         ),
         ArmKind::Default => (
             format!("br_table f{function} default"),
             format!(
-                "Function {function} default dispatch arm to label depth {} has no static selector. Guest opcode binding is unproven.",
+                "Function {function} default arm is a Wasm branch to label depth {} with no static selector. It is not a guest handler address. Binding is unproven.",
                 arm.detail
             ),
         ),
         ArmKind::Indirect if function == selected => (
             "call_indirect target".into(),
             format!(
-                "Function {function} call_indirect uses function table {}. The selected entry is dynamic. No static handler index or guest opcode binding is inferred.",
+                "Function {function} call_indirect uses function table {}. The selected entry is dynamic. No static arm index, guest opcode, PC, register, or stack is inferred; binding is unproven.",
                 arm.detail
             ),
         ),
         ArmKind::Indirect => (
             format!("call_indirect f{function}"),
             format!(
-                "Function {function} call_indirect uses function table {}. The selected entry is dynamic. No static handler index or guest opcode binding is inferred.",
+                "Function {function} call_indirect uses function table {}. The selected entry is dynamic. No static arm index, guest opcode, PC, register, or stack is inferred; binding is unproven.",
                 arm.detail
             ),
         ),

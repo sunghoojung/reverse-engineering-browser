@@ -6119,6 +6119,128 @@
           }
         },
         "$defs": {
+          "dispatchInventory": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ranking_version",
+              "site_count",
+              "br_table_count",
+              "call_indirect_count",
+              "omitted_site_count",
+              "selected_byte_offset",
+              "candidates"
+            ],
+            "properties": {
+              "ranking_version": {
+                "const": 1
+              },
+              "site_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "br_table_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "call_indirect_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "omitted_site_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "selected_byte_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "candidates": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/dispatchSite"
+                }
+              }
+            }
+          },
+          "dispatchSite": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "function_index",
+              "byte_offset",
+              "function_body_offset",
+              "loop_depth",
+              "structural_score",
+              "byte_size",
+              "function_body_size",
+              "arm_count",
+              "ip_like",
+              "classification"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "br_table",
+                  "call_indirect"
+                ]
+              },
+              "function_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byte_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "function_body_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "loop_depth": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "structural_score": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byte_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "function_body_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "arm_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "ip_like": {
+                "type": "boolean"
+              },
+              "classification": {
+                "enum": [
+                  "cff-helper-candidate",
+                  "dispatch-candidate"
+                ]
+              }
+            }
+          },
           "digest": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
@@ -6471,6 +6593,9 @@
               },
               "traversal": {
                 "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/traversal"
+              },
+              "dispatch_inventory": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/dispatchInventory"
               },
               "captured_module_preview": {
                 "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/modulePreview"
@@ -7360,6 +7485,128 @@
           }
         },
         "$defs": {
+          "dispatchInventory": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ranking_version",
+              "site_count",
+              "br_table_count",
+              "call_indirect_count",
+              "omitted_site_count",
+              "selected_byte_offset",
+              "candidates"
+            ],
+            "properties": {
+              "ranking_version": {
+                "const": 1
+              },
+              "site_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "br_table_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "call_indirect_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "omitted_site_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "selected_byte_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "candidates": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "$ref": "#/components/schemas/VmAnalysis/$defs/dispatchSite"
+                }
+              }
+            }
+          },
+          "dispatchSite": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "function_index",
+              "byte_offset",
+              "function_body_offset",
+              "loop_depth",
+              "structural_score",
+              "byte_size",
+              "function_body_size",
+              "arm_count",
+              "ip_like",
+              "classification"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "br_table",
+                  "call_indirect"
+                ]
+              },
+              "function_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byte_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "function_body_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "loop_depth": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "structural_score": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byte_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "function_body_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "arm_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "ip_like": {
+                "type": "boolean"
+              },
+              "classification": {
+                "enum": [
+                  "cff-helper-candidate",
+                  "dispatch-candidate"
+                ]
+              }
+            }
+          },
           "digest": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
@@ -7981,6 +8228,9 @@
                   "decoded_instruction_count": {
                     "type": "integer",
                     "minimum": 0
+                  },
+                  "dispatch_inventory": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/dispatchInventory"
                   }
                 }
               },

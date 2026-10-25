@@ -17,6 +17,8 @@
       "interpreter_artifact_id": "1",
       "finding_id": "c5e529342af22aafd3d7ddbc",
       "model": "stack",
+      "evidence_class": "guest-opcode-isa",
+      "machine_state": {"register_count": 2, "stack_observed": true},
       "handlers": [
         {
           "opcode": 9,
@@ -222,5 +224,5 @@
     "unknown_count": 2
   },
   "capture_mode": "unknown",
-  "document_digest": "35bf7e374099bb547759918a79440cf04d92fb80fde1d27b2fabaf1a6a5418cd"
+  "document_digest": "6632b9b046bad93eb6b7992b963e161c5a8845ba07a0b52bc5d3d6fd0d4bc0aa"
 }

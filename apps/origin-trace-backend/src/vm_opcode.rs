@@ -866,6 +866,135 @@ fn captured_module_preview(artifact: &Value, bytes: &[u8], handlers: &[Value]) -
     }))
 }
 
+/// A retained sample proves a guest ISA only when its PC units are real and
+/// the opcode hits exactly one static handler. Owned exact-hash effects are
+/// the other proof. Static arms, unknown PC units, and repeated selectors do not.
+fn guest_opcode_isa_proven(samples: &[Value], handlers: &[Value], owned: Option<&Value>) -> bool {
+    let mut sites = BTreeMap::<u32, usize>::new();
+    for handler in handlers {
+        if let Some(opcode) = handler["opcode"].as_u64() {
+            *sites.entry(opcode as u32).or_default() += 1;
+        }
+    }
+    let sample_proves = samples.iter().any(|sample| {
+        let units = sample["instruction_pointer_units"].as_str();
+        if units != Some("instruction-index") && units != Some("byte-offset") {
+            return false;
+        }
+        let Some(opcode) = sample["opcode"].as_u64().map(|value| value as u32) else {
+            return false;
+        };
+        sites.get(&opcode).copied() == Some(1)
+            && handlers.iter().any(|handler| {
+                handler["opcode"].as_u64() == Some(u64::from(opcode))
+                    && handler["state"] == "observed"
+                    && handler["sample_count"].as_u64().unwrap_or(0) > 0
+            })
+    });
+    if sample_proves {
+        return true;
+    }
+    let Some(declaration) = owned else {
+        return false;
+    };
+    if !handlers
+        .iter()
+        .any(|handler| crate::vm_effects::unique_effect(handler).is_some())
+    {
+        return false;
+    }
+    // Byte-addressed owned programs publish an entry offset. Native owned
+    // programs keep that offset null and name instruction-index units by
+    // exact-hash declaration. Neither path reads an identifier out of an
+    // arbitrary page script.
+    let declared_model = matches!(declaration["model"].as_str(), Some("stack" | "register"));
+    declared_model
+        && (declaration["entry_offset"].as_u64().is_some()
+            || (declaration["entry_offset"].is_null()
+                && declaration["operand_endianness"].is_null()))
+}
+
+/// Effect cells are the only machine-state evidence. A null register index
+/// does not invent a register file, and a stack-shaped identifier does not
+/// count as an observed stack.
+fn machine_state(handlers: &[Value]) -> Option<Value> {
+    let mut stack = false;
+    let mut max_register: Option<u64> = None;
+    for handler in handlers {
+        let Some(effects) = handler.get("effects").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        for effect in effects {
+            for key in ["reads", "writes"] {
+                let Some(cells) = effect.get(key).and_then(|value| value.as_array()) else {
+                    continue;
+                };
+                for cell in cells {
+                    match cell["space"].as_str() {
+                        Some("stack") => stack = true,
+                        Some("register") => {
+                            if let Some(index) = canonical_index(&cell["index"]) {
+                                max_register =
+                                    Some(max_register.map_or(index, |prior| prior.max(index)));
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+            }
+        }
+    }
+    if !stack && max_register.is_none() {
+        return None;
+    }
+    Some(json!({
+        "register_count": max_register.map(|index| index + 1),
+        "stack_observed": if stack { Some(true) } else { None::<bool> },
+    }))
+}
+
+fn canonical_index(value: &Value) -> Option<u64> {
+    let text = value.as_str()?;
+    if text == "0" {
+        return Some(0);
+    }
+    if text.is_empty() || text.starts_with('0') || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let index = text.parse::<u64>().ok()?;
+    (index < 65536).then_some(index)
+}
+
+fn workspace_evidence_class(
+    samples: &[Value],
+    handlers: &[Value],
+    owned: Option<&Value>,
+    inventory: Option<&Value>,
+) -> Option<&'static str> {
+    if guest_opcode_isa_proven(samples, handlers, owned) {
+        return Some("guest-opcode-isa");
+    }
+    if let Some(candidates) = inventory
+        .and_then(|value| value.get("candidates"))
+        .and_then(|value| value.as_array())
+    {
+        let class_of = |name| candidates.iter().any(|site| site["evidence_class"] == name);
+        if class_of("handler-table-candidate") {
+            return Some("handler-table-candidate");
+        }
+        if class_of("call-indirect-table") {
+            return Some("call-indirect-table");
+        }
+        if class_of("cff-helper") {
+            return Some("cff-helper");
+        }
+    }
+    handlers
+        .iter()
+        .any(|handler| handler["opcode"].as_u64().is_some())
+        .then_some("handler-table-candidate")
+}
+
 pub(crate) fn workspace(
     root: &Path,
     artifact: &Value,
@@ -884,40 +1013,42 @@ pub(crate) fn workspace(
         return None;
     }
     let runtime = result["runtime"].as_str()?;
-    let (mut handlers, model, mut unknowns, mut omissions, module_dispatch) = match runtime {
-        "javascript" => {
-            let source = std::str::from_utf8(bytes).ok()?;
-            let region = result["observations"]
-                .as_array()?
-                .iter()
-                .find_map(|observation| {
-                    (observation["rule_id"] == "js.dispatch-loop").then_some((
-                        observation["function_region"]["byte_offset"].as_u64()? as usize,
-                        observation["function_region"]["byte_size"].as_u64()? as usize,
-                    ))
-                })?;
-            let end = region.0.checked_add(region.1)?;
-            if end > source.len()
-                || !source.is_char_boundary(region.0)
-                || !source.is_char_boundary(end)
-            {
-                return None;
+    let (mut handlers, model, mut unknowns, mut omissions, module_dispatch, handler_tables) =
+        match runtime {
+            "javascript" => {
+                let source = std::str::from_utf8(bytes).ok()?;
+                let region = result["observations"]
+                    .as_array()?
+                    .iter()
+                    .find_map(|observation| {
+                        (observation["rule_id"] == "js.dispatch-loop").then_some((
+                            observation["function_region"]["byte_offset"].as_u64()? as usize,
+                            observation["function_region"]["byte_size"].as_u64()? as usize,
+                        ))
+                    })?;
+                let end = region.0.checked_add(region.1)?;
+                if end > source.len()
+                    || !source.is_char_boundary(region.0)
+                    || !source.is_char_boundary(end)
+                {
+                    return None;
+                }
+                let (handlers, model, unknowns, omissions) = static_handlers(source, region.0, end);
+                (handlers, model, unknowns, omissions, None, Vec::new())
             }
-            let (handlers, model, unknowns, omissions) = static_handlers(source, region.0, end);
-            (handlers, model, unknowns, omissions, None)
-        }
-        "webassembly" => {
-            let extracted = wasm::handlers(bytes, result)?;
-            (
-                extracted.handlers,
-                "unknown".into(),
-                extracted.unknowns,
-                extracted.omissions,
-                Some(extracted.dispatch),
-            )
-        }
-        _ => return None,
-    };
+            "webassembly" => {
+                let extracted = wasm::handlers(bytes, result)?;
+                (
+                    extracted.handlers,
+                    "unknown".into(),
+                    extracted.unknowns,
+                    extracted.omissions,
+                    Some(extracted.dispatch),
+                    extracted.handler_tables,
+                )
+            }
+            _ => return None,
+        };
     if result["frontend"]["dispatch_inventory"]["omitted_site_count"]
         .as_u64()
         .unwrap_or(0)
@@ -1109,6 +1240,15 @@ pub(crate) fn workspace(
             omissions.push(json!({"reason":"reachable-frontier","detail":"The bounded instruction walk has unresolved entries or edges."}));
         }
     }
+    let evidence_class = workspace_evidence_class(
+        &retained_samples,
+        &handlers,
+        owned.as_ref(),
+        result
+            .get("frontend")
+            .and_then(|frontend| frontend.get("dispatch_inventory")),
+    );
+    let machine = machine_state(&handlers);
     let attributions = crate::vm_reachability::attributions(&traversal, &handlers);
     let coverage = crate::vm_byte_coverage::coverage(
         &snapshots,
@@ -1136,6 +1276,15 @@ pub(crate) fn workspace(
         && let Some(inventory) = result["frontend"].get("dispatch_inventory")
     {
         workspace["dispatch_inventory"] = inventory.clone();
+    }
+    if let Some(class) = evidence_class {
+        workspace["evidence_class"] = json!(class);
+    }
+    if let Some(state) = machine {
+        workspace["machine_state"] = state;
+    }
+    if !handler_tables.is_empty() {
+        workspace["handler_tables"] = json!(handler_tables);
     }
     if let Some(preview) = module_preview {
         workspace["captured_module_preview"] = preview;
@@ -1686,6 +1835,149 @@ mod tests {
         body.extend(br_table(arms));
         body.extend([0x0b, 0x0b]);
         body
+    }
+
+    fn br_table_targets(targets: &[u32], default: u32) -> Vec<u8> {
+        let mut bytes = vec![0x0e];
+        bytes.extend(leb(targets.len() as u32));
+        for target in targets {
+            bytes.extend(leb(*target));
+        }
+        bytes.extend(leb(default));
+        bytes
+    }
+
+    fn ranked_body_with_targets(targets: &[u32], default: u32, signals: bool) -> Vec<u8> {
+        let mut body = vec![0x01, 0x01, 0x7f, 0x03, 0x40];
+        if signals {
+            body.extend([
+                0x20, 0x00, 0x41, 0x01, 0x6a, 0x21, 0x00, 0x41, 0x00, 0x2d, 0x00, 0x00, 0x1a,
+            ]);
+        }
+        // Two nested blocks give label depths 0, 1, and 2 (the loop).
+        body.extend([0x02, 0x40, 0x02, 0x40, 0x41, 0x00]);
+        body.extend(br_table_targets(targets, default));
+        body.extend([0x0b, 0x0b, 0x0b, 0x0b]);
+        body
+    }
+
+    #[test]
+    fn wasm_large_table_stays_a_handler_candidate_ahead_of_an_11_arm_helper() {
+        // Relationship from a static module pass: dozens of ≥100-arm tables
+        // beside small helpers, no plaintext guest bytecode, no proven ISA.
+        // The numbers are not a score and the bytes are not that module.
+        let helper = ranked_body_with_targets(&[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 2], 0, true);
+        let large = ranked_dispatch_body(100, false);
+        let indirect = vec![0x00, 0x03, 0x40, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, 0x0b];
+        let bytes = wasm_module(&[&helper, &large, &indirect], Some(&[0, 1, 0]));
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let workspace = &document["workspaces"][0];
+        let inventory = &workspace["dispatch_inventory"];
+        assert_eq!(inventory["candidates"][0]["arm_count"], 100);
+        assert_eq!(
+            inventory["candidates"][0]["evidence_class"],
+            "handler-table-candidate"
+        );
+        let helper_site = inventory["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|site| site["arm_count"] == 11)
+            .unwrap();
+        assert_eq!(helper_site["evidence_class"], "cff-helper");
+        assert_eq!(helper_site["classification"], "cff-helper-candidate");
+        assert_ne!(
+            inventory["selected_byte_offset"],
+            helper_site["byte_offset"]
+        );
+        let indirect_site = inventory["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|site| site["kind"] == "call_indirect")
+            .unwrap();
+        assert_eq!(indirect_site["evidence_class"], "call-indirect-table");
+        assert!(indirect_site["arm_count"].is_null());
+        assert_eq!(workspace["evidence_class"], "handler-table-candidate");
+        assert_ne!(workspace["evidence_class"], "guest-opcode-isa");
+        assert_eq!(workspace["model"], "unknown");
+        assert!(workspace.get("machine_state").is_none());
+        assert_eq!(workspace["sample_count"], 0);
+        assert_eq!(
+            workspace["traversal"]["frontier"][0]["reason"],
+            "static-module-only"
+        );
+        assert!(
+            workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "sampler-unavailable")
+        );
+        let tables = workspace["handler_tables"].as_array().unwrap();
+        let large_table = tables
+            .iter()
+            .find(|table| table["arm_count"] == 100)
+            .unwrap();
+        assert_eq!(large_table["evidence_class"], "handler-table-candidate");
+        assert_eq!(large_table["unique_target_count"], 1);
+        assert_eq!(large_table["clusters"][0]["selector_count"], 100);
+        assert_eq!(
+            large_table["clusters"][0]["selectors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            32
+        );
+        let small_table = tables
+            .iter()
+            .find(|table| table["arm_count"] == 11)
+            .unwrap();
+        assert_eq!(small_table["evidence_class"], "cff-helper");
+        assert_eq!(small_table["unique_target_count"], 3);
+        assert_eq!(small_table["clusters"][0]["target"], 0);
+        assert_eq!(
+            small_table["clusters"][0]["selectors"],
+            json!([0, 2, 4, 6, 8])
+        );
+        assert_eq!(
+            small_table["clusters"][1]["selectors"],
+            json!([1, 3, 5, 7, 9])
+        );
+        assert_eq!(small_table["clusters"][2]["selectors"], json!([10]));
+        let element = tables
+            .iter()
+            .find(|table| table["kind"] == "element")
+            .unwrap();
+        assert_eq!(element["evidence_class"], "call-indirect-table");
+        assert_eq!(element["entry_count"], 3);
+        assert_eq!(element["unique_target_count"], 2);
+        assert_eq!(element["clusters"][0]["target"], 0);
+        assert_eq!(element["clusters"][0]["selector_count"], 2);
+        assert_eq!(element["clusters"][0]["selectors"], json!([0, 2]));
+        assert!(
+            inventory["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|site| site["evidence_class"] != "guest-opcode-isa")
+        );
+        let handlers = workspace["handlers"].as_array().unwrap();
+        let selected = inventory["selected_byte_offset"].as_u64().unwrap();
+        assert_eq!(
+            handlers
+                .iter()
+                .filter(|handler| handler["source"]["byte_offset"] == selected)
+                .count(),
+            101
+        );
+        assert!(
+            handlers
+                .iter()
+                .all(|handler| handler["state"] != "observed")
+        );
+        assert_schema(&document);
     }
 
     #[test]
@@ -2247,6 +2539,7 @@ mod tests {
         let workspace = &document["workspaces"][0];
         assert_eq!(workspace["sample_count"], 1);
         assert_eq!(workspace["samples"][0]["opcode"], 0);
+        assert_ne!(workspace["evidence_class"], "guest-opcode-isa");
         assert!(
             workspace["handlers"]
                 .as_array()
@@ -2386,6 +2679,14 @@ mod tests {
                     .all(|row| row["effects"][0]["evidence_class"] == "inferred")
             );
             assert_eq!(rows[0]["state"], "observed");
+            let workspace = &document["workspaces"][0];
+            assert_eq!(workspace["evidence_class"], "guest-opcode-isa");
+            if workspace["model"] == "stack" {
+                assert_eq!(workspace["machine_state"]["stack_observed"], true);
+            }
+            if let Some(state) = workspace.get("machine_state") {
+                assert!(state["register_count"].as_u64().unwrap_or(0) <= 65536);
+            }
             assert_schema(&document);
             let (_, _, altered) = analyze(&format!("{source}\n"), &[event(1)]);
             assert!(
@@ -2395,6 +2696,11 @@ mod tests {
                     .iter()
                     .all(|row| row["effects"] == json!([]))
             );
+            assert_eq!(
+                altered["workspaces"][0]["evidence_class"],
+                "handler-table-candidate"
+            );
+            assert!(altered["workspaces"][0].get("machine_state").is_none());
             assert_schema(&altered);
         }
     }

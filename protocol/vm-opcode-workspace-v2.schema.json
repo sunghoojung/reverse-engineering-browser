@@ -186,7 +186,8 @@
         "unique_target_count",
         "element_fanout",
         "ip_like",
-        "classification"
+        "classification",
+        "evidence_class"
       ],
       "properties": {
         "kind": {
@@ -256,6 +257,183 @@
             "dispatch-candidate",
             "indirect-handler-candidate"
           ]
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/staticEvidenceClass"
+        }
+      }
+    },
+    "staticEvidenceClass": {
+      "description": "Static dispatch structure. A br_table or call_indirect site is never a proven guest ISA.",
+      "enum": [
+        "handler-table-candidate",
+        "call-indirect-table",
+        "cff-helper"
+      ]
+    },
+    "structuralEvidenceClass": {
+      "description": "Workspace claim. guest-opcode-isa requires samples with guest PC units or an exact-hash owned effect declaration.",
+      "enum": [
+        "guest-opcode-isa",
+        "handler-table-candidate",
+        "call-indirect-table",
+        "cff-helper"
+      ]
+    },
+    "machineState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "register_count",
+        "stack_observed"
+      ],
+      "properties": {
+        "register_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "stack_observed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "handlerCluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "selector_count",
+        "selectors"
+      ],
+      "properties": {
+        "target": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "selector_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "selectors": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        }
+      }
+    },
+    "handlerTable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "evidence_class",
+        "function_index",
+        "byte_offset",
+        "byte_size",
+        "table_index",
+        "arm_count",
+        "entry_count",
+        "unique_target_count",
+        "default_target",
+        "clusters",
+        "omitted_cluster_count"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "br_table",
+            "call_indirect",
+            "element"
+          ]
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/staticEvidenceClass"
+        },
+        "function_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "byte_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "byte_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "table_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "arm_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "entry_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "unique_target_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "default_target": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "clusters": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/handlerCluster"
+          }
+        },
+        "omitted_cluster_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
         }
       }
     },
@@ -554,6 +732,19 @@
             "register",
             "unknown"
           ]
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/structuralEvidenceClass"
+        },
+        "machine_state": {
+          "$ref": "#/$defs/machineState"
+        },
+        "handler_tables": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "$ref": "#/$defs/handlerTable"
+          }
         },
         "handlers": {
           "type": "array",

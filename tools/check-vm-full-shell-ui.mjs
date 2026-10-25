@@ -83,6 +83,8 @@ const analysis = {
 assert(runInNewContext(`${model}\nisVmAnalysisDocument(analysis) && isVmOpcodeWorkspaceDocument(fixture)`, {analysis, fixture, TextEncoder}));
 const noSamplerFixture = structuredClone(fixture), noSamplerWorkspace = noSamplerFixture.workspaces[0];
 noSamplerWorkspace.runtime = 'webassembly'; noSamplerWorkspace.model = 'unknown';
+noSamplerWorkspace.evidence_class = 'handler-table-candidate';
+delete noSamplerWorkspace.machine_state;
 noSamplerWorkspace.samples = []; noSamplerWorkspace.sample_count = noSamplerFixture.summary.sample_count = 0;
 for (const handler of noSamplerWorkspace.handlers) {
   handler.sample_count = 0;

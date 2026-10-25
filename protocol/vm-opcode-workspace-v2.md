@@ -184,6 +184,79 @@ inspector pages through every retained sample in groups of 32 and exposes its
 complete recorded fields. Missing positions are explicitly unknown.
 Malformed refreshes retain the last valid workspace and detection findings.
 
+## Universal VM shape
+
+Protection VMs differ in bytecode. The pieces a researcher can ask about stay
+the same:
+
+1. Guest program. The bytecode or word stream the dispatcher reads.
+2. Virtual PC. The guest position of the current word, in that program's units.
+3. Dispatcher and handler table. An opcode or selector chooses a handler-table
+   entry.
+4. Machine state. A stack, registers, or both.
+5. Host bridge. Imports or JavaScript builtins the guest calls.
+
+A static `br_table`, JavaScript `switch`, or `call_indirect` is only piece 3
+until something proves the others. Arm count is not an ISA size. This producer
+does not assume a fixed opcode cardinality and does not score site names.
+
+## Evidence class
+
+`evidence_class` is one closed claim about a workspace. The same vocabulary,
+except `guest-opcode-isa`, labels each static dispatch candidate. A candidate
+is never a proven guest ISA.
+
+| Class | What it claims |
+| --- | --- |
+| `guest-opcode-isa` | A retained sample whose units are `instruction-index` or `byte-offset` binds one opcode to one handler, or an exact-hash owned effect declaration does. Repeated selectors and `unknown` PC units do not. |
+| `handler-table-candidate` | Static selector arms map to entries: a `br_table` with at least 32 explicit arms, or integer JavaScript cases. Not a guest ISA. |
+| `call-indirect-table` | A `call_indirect` or an element/funcref segment. Targets are not guest opcodes. `arm_count` stays null when the selected entry is dynamic. |
+| `cff-helper` | A `br_table` with fewer than 32 explicit arms. Ranking demotes it behind larger in-loop tables. Not a guest ISA. |
+
+The 32-arm cutoff is the major-table rank from dispatch inventory v1. It
+separates small state-machine helpers from larger static tables. It is not a
+claim that a VM has 32 opcodes. A table of 100 or more arms and an 11-arm
+helper fall on opposite sides of that cutoff. The larger site stays
+`handler-table-candidate` until samples or owned effects prove a guest ISA.
+
+`sampler-unavailable` and `static-module-only` stay an omission and a frontier
+reason. They are not evidence classes. A static-only workspace keeps unknown
+guest PCs. `model` stays `stack`, `register`, or `unknown`. `unknown` means
+stack or registers are unproven. `machine_state.register_count` and
+`machine_state.stack_observed` appear only when effect cells name those
+spaces. A null register index does not invent a register file. Spelling in a
+page script does not fill `machine_state`.
+
+`handler_tables` keeps the top 8 ranked dispatch sites and up to 4 element
+segments. Each `br_table` records an exact `arm_count` and clusters selectors
+that share a label depth. `selector_count` is exact. `selectors` lists at most
+32 indexes, so a prefix is not a shorter table. The flat handler list is still
+capped at 1024 and still emits the ranked site first. Element clusters group
+duplicate funcref slots. They are `call-indirect-table`, not opcodes.
+
+A workspace with no recovered arms omits `evidence_class`. That absence is not
+a guest ISA and not an empty workspace; `handler-unavailable` still names the gap.
+
+### Worked static module
+
+A static pass over one captured module
+(`sha256 b9613db05423e4f5619fe2bd69ccc55fb6eb4ae7fa362731ad38aee4e2ad5c94`)
+counted 731 `br_table` sites, 47 of them with at least 100 explicit arms. The
+largest were function 248 (747 labeled arms, 742 unique targets), function 631
+(746), and function 703 (599). One funcref table had 170 slots and 153 unique
+functions. No plaintext guest bytecode stream was present, and no guest opcode
+ISA was proven. For that binary the five pieces were: guest program absent as
+plaintext, virtual PC unproven, handler table present as Wasm dispatch
+surfaces rather than opcode-to-handler, stack or registers unproven, host
+imports present.
+
+Those counts are an honesty example. Scoring does not look for a site name, a
+hash, or an opcode count of 11, 100, or 747. The same ladder on that shape
+ranks each ≥100-arm site ahead of an 11-arm helper, labels the large sites
+`handler-table-candidate`, the small site `cff-helper`, and the funcref table
+`call-indirect-table`, and refuses `guest-opcode-isa`. The module bytes are
+not in this repository. Producer version 2.5.0 emits the class.
+
 ## Validation
 
 `make native-tests` rejects short and dirty-reserved dispatch payloads.

@@ -18,6 +18,7 @@
       "bytecode_artifact_id": "401",
       "finding_id": "c5e529342af22aafd3d7ddbc",
       "model": "stack",
+      "evidence_class": "guest-opcode-isa",
       "handlers": [
         {
           "opcode": 1,

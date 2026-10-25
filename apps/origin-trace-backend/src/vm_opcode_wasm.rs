@@ -21,6 +21,10 @@ const MAX_CALLS_PER_FUNCTION: usize = 256;
 const MAX_CALL_EDGES: usize = 16384;
 const MAX_TABLE_DISPATCH_TARGETS: usize = 256;
 const MAX_TABLE_OTHER_TARGETS: usize = 64;
+const MAX_HANDLER_TABLES: usize = 8;
+const MAX_ELEMENT_TABLES: usize = 4;
+const MAX_CLUSTERS: usize = 1024;
+const MAX_LISTED_SELECTORS: usize = 32;
 
 pub(super) struct ModuleDispatch {
     pub sites: u32,
@@ -32,6 +36,7 @@ pub(super) struct ExtractedHandlers {
     pub unknowns: Vec<String>,
     pub omissions: Vec<Value>,
     pub dispatch: ModuleDispatch,
+    pub handler_tables: Vec<Value>,
 }
 
 struct Arm {
@@ -373,6 +378,13 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
             "detail": "Direct-call or table-element edges were bounded. Some statically related dispatch functions may be absent.",
         }));
     }
+    let handler_tables = build_handler_tables(
+        bytes,
+        result
+            .get("frontend")
+            .and_then(|frontend| frontend.get("dispatch_inventory")),
+        &elements,
+    );
     Some(ExtractedHandlers {
         handlers,
         unknowns,
@@ -381,6 +393,161 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
             sites: emitted_sites,
             functions: emitted_functions,
         },
+        handler_tables,
+    })
+}
+
+/// Top-ranked dispatch sites keep every explicit arm as a target cluster.
+/// The flat handler list is still capped; `selector_count` is the exact arm
+/// membership and `selectors` is only a prefix when a cluster is long.
+fn build_handler_tables(
+    bytes: &[u8],
+    inventory: Option<&Value>,
+    elements: &BTreeMap<u32, Vec<u32>>,
+) -> Vec<Value> {
+    let mut tables = Vec::new();
+    if let Some(candidates) = inventory
+        .and_then(|value| value.get("candidates"))
+        .and_then(|value| value.as_array())
+    {
+        for site in candidates.iter().take(MAX_HANDLER_TABLES) {
+            let row = if site["kind"] == "br_table" {
+                br_table_handler_table(site, bytes)
+            } else if site["kind"] == "call_indirect" {
+                Some(call_indirect_handler_table(site, bytes))
+            } else {
+                None
+            };
+            if let Some(row) = row {
+                tables.push(row);
+            }
+        }
+    }
+    for (table_index, funcs) in elements.iter().take(MAX_ELEMENT_TABLES) {
+        if funcs.len() > 1_000_000 {
+            continue;
+        }
+        tables.push(element_handler_table(*table_index, funcs));
+    }
+    tables
+}
+
+fn clusters_from_pairs(pairs: &[(u32, u32)]) -> (Vec<Value>, u64, u64) {
+    let mut grouped: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for (selector, target) in pairs {
+        grouped.entry(*target).or_default().push(*selector);
+    }
+    let unique = grouped.len() as u64;
+    let mut rows: Vec<(u32, Vec<u32>)> = grouped.into_iter().collect();
+    let omitted = unique.saturating_sub(MAX_CLUSTERS as u64);
+    if rows.len() > MAX_CLUSTERS {
+        rows.sort_by(|left, right| right.1.len().cmp(&left.1.len()).then(left.0.cmp(&right.0)));
+        rows.truncate(MAX_CLUSTERS);
+        rows.sort_by_key(|(_, selectors)| selectors.first().copied().unwrap_or(0));
+    }
+    let clusters = rows
+        .into_iter()
+        .map(|(target, selectors)| {
+            let listed: Vec<u32> = selectors
+                .iter()
+                .copied()
+                .take(MAX_LISTED_SELECTORS)
+                .collect();
+            json!({
+                "target": target,
+                "selector_count": selectors.len(),
+                "selectors": listed,
+            })
+        })
+        .collect();
+    (clusters, unique, omitted)
+}
+
+fn br_table_handler_table(site: &Value, bytes: &[u8]) -> Option<Value> {
+    let offset = usize::try_from(site["byte_offset"].as_u64()?).ok()?;
+    let size = usize::try_from(site["byte_size"].as_u64()?).ok()?;
+    let end = offset.checked_add(size)?;
+    let slice = bytes.get(offset..end)?;
+    let mut reader = OperatorsReader::new(BinaryReader::new(slice, offset));
+    let Operator::BrTable { targets } = reader.read().ok()? else {
+        return None;
+    };
+    let mut pairs = Vec::new();
+    for (selector, target) in targets.targets().enumerate() {
+        let selector = u32::try_from(selector).ok()?;
+        pairs.push((selector, target.ok()?));
+    }
+    let default_target = targets.default();
+    if Some(pairs.len() as u64) != site["arm_count"].as_u64() {
+        return None;
+    }
+    let (clusters, unique, omitted) = clusters_from_pairs(&pairs);
+    Some(json!({
+        "kind": "br_table",
+        "evidence_class": site["evidence_class"],
+        "function_index": site["function_index"],
+        "byte_offset": site["byte_offset"],
+        "byte_size": site["byte_size"],
+        "table_index": null,
+        "arm_count": site["arm_count"],
+        "entry_count": site["arm_count"],
+        "unique_target_count": unique,
+        "default_target": default_target,
+        "clusters": clusters,
+        "omitted_cluster_count": omitted,
+    }))
+}
+
+fn call_indirect_table_index(site: &Value, bytes: &[u8]) -> Option<u32> {
+    let offset = usize::try_from(site["byte_offset"].as_u64()?).ok()?;
+    let size = usize::try_from(site["byte_size"].as_u64()?).ok()?;
+    let end = offset.checked_add(size)?;
+    let slice = bytes.get(offset..end)?;
+    let mut reader = OperatorsReader::new(BinaryReader::new(slice, offset));
+    match reader.read().ok()? {
+        Operator::CallIndirect { table_index, .. } => Some(table_index),
+        _ => None,
+    }
+}
+
+fn call_indirect_handler_table(site: &Value, bytes: &[u8]) -> Value {
+    let table_index = call_indirect_table_index(site, bytes);
+    json!({
+        "kind": "call_indirect",
+        "evidence_class": site["evidence_class"],
+        "function_index": site["function_index"],
+        "byte_offset": site["byte_offset"],
+        "byte_size": site["byte_size"],
+        "table_index": table_index,
+        "arm_count": null,
+        "entry_count": null,
+        "unique_target_count": null,
+        "default_target": null,
+        "clusters": [],
+        "omitted_cluster_count": 0,
+    })
+}
+
+fn element_handler_table(table_index: u32, funcs: &[u32]) -> Value {
+    let pairs = funcs
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, function)| u32::try_from(slot).ok().map(|slot| (slot, *function)))
+        .collect::<Vec<_>>();
+    let (clusters, unique, omitted) = clusters_from_pairs(&pairs);
+    json!({
+        "kind": "element",
+        "evidence_class": "call-indirect-table",
+        "function_index": null,
+        "byte_offset": null,
+        "byte_size": null,
+        "table_index": table_index,
+        "arm_count": null,
+        "entry_count": funcs.len(),
+        "unique_target_count": unique,
+        "default_target": null,
+        "clusters": clusters,
+        "omitted_cluster_count": omitted,
     })
 }
 

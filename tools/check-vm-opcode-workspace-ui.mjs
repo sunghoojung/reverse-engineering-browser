@@ -54,7 +54,7 @@ class TestElement {
 }
 const testDocument = {createElement: tag => new TestElement(tag), createTextNode: text => { const node = new TestElement('#text'); node.textContent = text; return node; }, querySelector: () => null};
 const renderApiState = {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'};
-const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder});
+const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder});
 const descendants = element => [element, ...element.children.flatMap(descendants)];
 const findButton = (root, label) => descendants(root).find(node => node.tagName === 'button' && node.textContent === label);
 const many = structuredClone(hostSource);
@@ -218,7 +218,7 @@ assert.equal(duplicateRows[0].retainedSamples.length, 1);
 assert.equal(duplicateRows[0].samples, 2);
 assert.equal(duplicateRows[0].state, 'inferred');
 const sharedListing = renderApi.renderVmHandlers(sharedWorkspace);
-assert(sharedListing.textContent.includes('3 dispatch sites · 6 selectors'));
+assert(sharedListing.textContent.includes('3 dispatch sites · 6 retained arms'));
 assert(!sharedListing.textContent.includes('dispatch-arm candidates'));
 const sharedButtons = descendants(sharedListing).filter(node => node.className === 'vm-handler-row');
 assert.equal(sharedButtons.length, 3);
@@ -232,6 +232,53 @@ const javascriptRows = renderApi.vmOpcodeRows(javascript);
 assert.equal(javascriptRows.length, 2);
 assert.deepEqual(Array.from(javascriptRows, row => row.key), ['1:0:10', '7:1:10']);
 assert(renderApi.renderVmHandlers(javascript).textContent.includes('2 candidate handlers'));
+// Authored ranking metadata has exact counts independent of retained handler arms.
+const site = (offset, arms, index = 0) => ({kind: arms === null ? 'call_indirect' : 'br_table',
+  function_index: index, byte_offset: offset, byte_size: 5, function_body_offset: 40,
+  function_body_size: 500, arm_count: arms, loop_depth: 1, ip_like: true, structural_score: 60,
+  classification: arms !== null && arms < 32 ? 'cff-helper-candidate' : 'dispatch-candidate'});
+const inventory = {ranking_version: 1, site_count: 3, br_table_count: 2, call_indirect_count: 1,
+  omitted_site_count: 0, selected_byte_offset: 45, candidates: [site(45, 200), site(70, 8, 1), site(50, null)]};
+const inventoryDocument = structuredClone(fixture);
+inventoryDocument.workspaces[0].dispatch_inventory = inventory;
+assert(validateModule(inventoryDocument));
+for (const mutate of [
+  value => { value.site_count = 4; }, value => { value.omitted_site_count = 1; },
+  value => { value.selected_byte_offset = 49; }, value => { value.ranking_version = 2; },
+  value => { value.candidates[0].arm_count = null; }, value => { value.candidates[2].arm_count = 200; },
+  value => { value.candidates[0].byte_offset = 539; }, value => { value.candidates[0].classification = 'proven-vm'; },
+  value => { value.candidates[0].byte_size = Number.MAX_SAFE_INTEGER; },
+  value => { value.candidates.push(value.candidates[0]); value.site_count++; value.br_table_count++; }
+]) {
+  const malformed = structuredClone(inventoryDocument); mutate(malformed.workspaces[0].dispatch_inventory);
+  assert(!validateModule(malformed), String(mutate));
+}
+const inventoryPanel = renderApi.renderVmDispatchInventory(inventoryDocument.workspaces[0]);
+assert(inventoryPanel.textContent.includes('Default · f0 · br_table · 200 arms + default'));
+assert(inventoryPanel.textContent.includes('CFF / helper candidate'));
+assert(inventoryPanel.textContent.includes('target count unknown'));
+assert(inventoryPanel.textContent.includes('not proof of a guest ISA'));
+assert(inventoryPanel.textContent.includes('3 module sites'));
+const rankedHandlers = Array.from({length: 200}, (_, opcode) => handler(opcode, 'inferred', 45, 5,
+  `br_table selector ${opcode}`, 0, 'Static selector only.'));
+rankedHandlers.push(handler(null, 'unknown', 45, 5, 'br_table default', 0, 'Default branch.'));
+const rankedWorkspace = {...inventoryDocument.workspaces[0], handlers: rankedHandlers};
+assert.equal(renderApi.vmOpcodeRows(rankedWorkspace)[0].label, 'br_table · 200 selectors + default');
+renderApiState.selectedVmHandlerKey = 'null::50';
+renderApi.renderVmHandlers(inventoryDocument.workspaces[0]);
+assert.equal(renderApiState.selectedVmHandlerKey, 'null::50', 'refresh must preserve an explicitly selected retained site');
+renderApiState.selectedVmHandlerKey = null;
+renderApi.renderVmHandlers(rankedWorkspace);
+assert.equal(renderApiState.selectedVmHandlerKey, 'span:45:5', 'the first ranked retained site is the initial default');
+const boundedInventory = structuredClone(inventory);
+boundedInventory.candidates = Array.from({length: 65}, (_, index) => site(45 + index * 6, 200, index));
+boundedInventory.site_count = 70; boundedInventory.br_table_count = 70; boundedInventory.call_indirect_count = 0;
+boundedInventory.omitted_site_count = 5;
+const pagedInventory = renderApi.renderVmDispatchInventory({...workspace, dispatch_inventory: boundedInventory});
+assert(pagedInventory.textContent.includes('5 omitted'));
+findButton(pagedInventory, 'Next dispatch candidates').click(); findButton(pagedInventory, 'Next dispatch candidates').click();
+assert(pagedInventory.textContent.includes('f64')); assert(findButton(pagedInventory, 'Next dispatch candidates').disabled);
+console.log('PASS ranked module inventory counts, bounded paging, malformed metadata, default-vs-explicit selection and static inference labels');
 const symbolTree = app.slice(app.indexOf('      function renderVmOpcodeWorkspaceInPlace('), app.indexOf('      function renderVmDetail('));
 assert(symbolTree.includes('const rows = workspace ? vmOpcodeRows(workspace) : [];'));
 assert(symbolTree.includes('row.label'));
@@ -250,6 +297,7 @@ console.log('PASS complete bounded Findings paging: 257 effects/instructions, 65
 
 if (process.argv.includes('--browser')) {
   fixture.workspaces[0].captured_module_preview = modulePreview;
+  fixture.workspaces[0].dispatch_inventory = inventory;
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
   const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
 const hostWorkspace=${JSON.stringify(hostWorkspace)},hostLinks=${JSON.stringify(hostLinks)};
@@ -320,11 +368,23 @@ render();`;
       assert((await evaluate("document.querySelector('.vm-selection-inspector').textContent")).includes('50 + 3 bytes'));
       assert.equal(await evaluate("document.querySelectorAll('.vm-selection-inspector img').length"), 0);
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      for (const panel of ['bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'sources', 'effects']) {
+      for (const panel of ['dispatch', 'bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'sources', 'effects']) {
         await evaluate(`document.querySelector('[data-vm-panel="${panel}"]').click()`);
         assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
         assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
       }
+      await evaluate("document.querySelector('[data-vm-panel=dispatch]').click()");
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('200 arms + default'));
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('CFF / helper candidate'));
+      await evaluate("(()=>{const search=document.querySelector('.vm-listing-toolbar input'); search.value='call_indirect'; search.dispatchEvent(new Event('input')); document.querySelector('[data-vm-panel-content=dispatch] details').open=true; document.querySelector('[data-vm-panel-content=dispatch] details button').focus()})()");
+      for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+      assert.equal(await evaluate("document.querySelector('.vm-listing-toolbar input').value"), '');
+      assert.equal(await evaluate("state.selectedVmHandlerKey"), '0::45');
+      await evaluate("document.querySelectorAll('.vm-handler-row')[1].click();render()");
+      assert.equal(await evaluate("state.selectedVmHandlerKey"), 'null::50');
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+      const inventoryShot = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
+      await writeFile(join(output, `dispatch-inventory-${width}.png`), Buffer.from(inventoryShot.data, 'base64'));
       await evaluate("document.querySelector('[data-vm-panel=bytecode]').click();document.querySelector('.vm-snapshot-selector').focus()");
       for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'End', code: 'End', windowsVirtualKeyCode: 35});
       assert.equal(await evaluate("document.querySelector('.vm-snapshot-selector').value"), '1');

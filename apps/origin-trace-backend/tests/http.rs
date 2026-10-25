@@ -1962,7 +1962,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.4.0");
+        assert_eq!(document["producer"]["version"], "1.5.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -2179,6 +2179,77 @@ async fn vm_opcode_workspace_has_etag_and_failure_isolated_from_vm_analysis() {
     assert_eq!(blocked.get("/api/analysis/vm").await.status(), 200);
     assert_eq!(blocked.get("/api/analysis/vm/opcodes").await.status(), 500);
 }
+#[tokio::test]
+async fn vm_ranked_static_candidate_workspace_roundtrips_http_and_schema() {
+    let server = Server::start().await;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tools/fixtures/vm-dynamic-debug/wasm-ranked-dispatch.json"
+    ))
+    .unwrap();
+    let bytes = hex::decode(fixture["module_hex"].as_str().unwrap()).unwrap();
+    wasmparser::Validator::new().validate_all(&bytes).unwrap();
+    let root = server.root.path().join("artifacts");
+    let mut artifact = vm_artifact(&root, &bytes, "3");
+    artifact["kind"] = json!("wasm");
+    artifact["mime_type"] = json!("application/wasm");
+    artifact["url"] = json!("fixture://owned-ranked-dispatch/module");
+    server.file("artifacts/manifest.jsonl", &jsonl(&[artifact]));
+    let analysis: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/analysis/vm").await,
+            "get",
+            "/api/analysis/vm",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_vm_document(&analysis);
+    assert_eq!(analysis["results"][0]["tier"], "candidate");
+    let response = server.get("/api/analysis/vm/opcodes").await;
+    let etag = response.headers()["etag"].clone();
+    let document: Value = serde_json::from_slice(
+        &assert_contract_response(response, "get", "/api/analysis/vm/opcodes", 200).await,
+    )
+    .unwrap();
+    assert_eq!(document["summary"]["workspace_count"], 1);
+    let workspace = &document["workspaces"][0];
+    assert_eq!(
+        workspace["dispatch_inventory"],
+        analysis["results"][0]["frontend"]["dispatch_inventory"]
+    );
+    assert_eq!(
+        workspace["dispatch_inventory"]["candidates"][0]["function_index"],
+        1
+    );
+    assert_eq!(
+        workspace["dispatch_inventory"]["candidates"][0]["arm_count"],
+        200
+    );
+    assert_eq!(workspace["handlers"].as_array().unwrap().len(), 201);
+    assert_eq!(workspace["sample_count"], 0);
+    assert!(
+        workspace["handlers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|handler| handler["state"] != "observed")
+    );
+    assert_contract_response(
+        server
+            .client
+            .get(format!("{}/api/analysis/vm/opcodes", server.url))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap(),
+        "get",
+        "/api/analysis/vm/opcodes",
+        304,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn vm_host_links_are_digest_bound_payload_free_and_failure_isolated() {
     let server = Server::start().await;
@@ -2615,7 +2686,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.4.0");
+    assert_eq!(document["producer"]["version"], "1.5.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 2);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -3647,7 +3718,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.4.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.5.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);

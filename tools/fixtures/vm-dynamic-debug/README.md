@@ -22,3 +22,9 @@ the instruction, not a recovered guest handler body. Dynamic/default arms retain
 unknown opcodes. Repeated selectors remain scoped to their dispatch source site.
 Functions reached by a direct call or by a `call_indirect` table element can
 contribute more sites. Unrelated functions do not.
+
+`wasm-ranked-dispatch.json` is an authored, validated inert module with an early
+8-arm helper and a disconnected 200-arm loop. The latter has no IP-like or
+memory signal: selection may change, but its detector tier stays `candidate`.
+The HTTP regression validates both standalone and embedded OpenAPI contracts;
+unit fixtures separately exercise large tables, inventory bounds and tie-breaks.

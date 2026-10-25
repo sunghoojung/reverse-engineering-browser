@@ -45,6 +45,10 @@ not publish it. Starting a newer live session replaces the canonical endpoint;
 closing an older session does not remove the newer endpoint. The launcher can
 use `REB_ACTIVE_ENDPOINT_FILE` to publish elsewhere for an isolated test or a
 separate research profile; pass that exact file to the MCP wrapper in that case.
+When the shared alias is configured, both endpoint files remain after shutdown;
+neither publisher unlinks a possibly replaced entry. The next live launch replaces
+the stale alias atomically. A leftover file is not proof of a live session:
+`--require-live` still refuses unavailable or idle backends before advertising tools.
 
 ```sh
 scripts/reb-api-mcp.sh

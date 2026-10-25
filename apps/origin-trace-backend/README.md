@@ -28,6 +28,9 @@ is the same-machine launcher for Cursor, Codex, Claude Code, Grok Bot, and
 T3 Code. Its default and fresh configs use
 `~/.config/origin-trace/reb-api.endpoint` with `--require-live`. The live launcher
 publishes that private canonical alias; idle/demo startup cannot claim it.
+Shared live publication leaves both endpoint files in place at shutdown, avoiding
+an older publisher unlinking a newer alias. Stale files do not establish liveness:
+health checks fail closed until a live session publishes a healthy endpoint.
 Reconnect rereads the file instead of freezing a session directory or port.
 A changed file or live backend identity retires the existing connection, never
 replaying a pending action on the replacement. `--require-live` checks live

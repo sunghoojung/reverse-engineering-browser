@@ -11,10 +11,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let endpoint_file = options.endpoint_file.clone();
     let active_endpoint_file = options.active_endpoint_file.clone();
     let app = App::new(options, address.port()).await;
-    let endpoint = PublishedEndpoint::new(endpoint_file.as_deref(), address)?;
+    // A shared publication disables cleanup of both files. They may name the
+    // same entry through aliases, so path/inode comparisons cannot safely grant
+    // a cleanup owner. A stale endpoint is rejected by the client's health check.
+    let publish = if active_endpoint_file.is_some() {
+        PublishedEndpoint::retained
+    } else {
+        PublishedEndpoint::new
+    };
+    let endpoint = publish(endpoint_file.as_deref(), address)?;
     // Only the live launcher opts into this alias. Idle/development backends
     // must never replace the active capture endpoint merely by starting.
-    let _active_endpoint = PublishedEndpoint::new(active_endpoint_file.as_deref(), address)?;
+    let _active_endpoint = PublishedEndpoint::retained(active_endpoint_file.as_deref(), address)?;
     println!("Research UI: {}", endpoint.url());
     let shutdown = app.clone();
     axum::serve(listener, app.router())

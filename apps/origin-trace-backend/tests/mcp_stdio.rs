@@ -25,8 +25,17 @@ impl Server {
         Self::start_config(port, None)
     }
     fn start_config(port: u16, active_endpoint: Option<&std::path::Path>) -> Self {
+        Self::start_config_paths(port, active_endpoint, None)
+    }
+    fn start_config_paths(
+        port: u16,
+        active_endpoint: Option<&std::path::Path>,
+        session_endpoint: Option<&std::path::Path>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let endpoint = root.path().join("endpoint");
+        let endpoint = session_endpoint
+            .map(std::path::Path::to_owned)
+            .unwrap_or_else(|| root.path().join("endpoint"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"));
         if let Some(active_endpoint) = active_endpoint {
             command
@@ -79,6 +88,29 @@ impl Server {
             child,
             url,
             _root: root,
+        }
+    }
+
+    #[cfg(unix)]
+    fn stop_gracefully(&mut self) {
+        // The initialized client proves the server has begun serving and its
+        // graceful shutdown handler is registered before SIGTERM is sent.
+        drop(Mcp::start(&self.url, false));
+        assert_eq!(
+            unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(status.success(), "backend graceful shutdown: {status}");
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "backend graceful shutdown timeout"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -1092,4 +1124,44 @@ fn live_backend_publishes_the_canonical_alias_without_idle_takeover() {
         std::fs::read_to_string(&canonical).unwrap().trim(),
         live.url
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_endpoint_shutdown_retains_all_path_aliases_and_stale_clients_fail_closed() {
+    for case in ["separate", "same", "parent-alias"] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("real");
+        std::fs::create_dir(&directory).unwrap();
+        let canonical = directory.join("active.endpoint");
+        let session = match case {
+            "same" => canonical.clone(),
+            "parent-alias" => {
+                let alias = root.path().join("alias");
+                std::os::unix::fs::symlink(&directory, &alias).unwrap();
+                alias.join("active.endpoint")
+            }
+            _ => directory.join("session.endpoint"),
+        };
+        let mut live = Server::start_config_paths(0, Some(&canonical), Some(&session));
+        let expected = format!("{}\n", live.url);
+        live.stop_gracefully();
+        for path in [&canonical, &session] {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), expected, "{case}");
+        }
+        let args = [
+            "mcp",
+            "--endpoint-file",
+            canonical.to_str().unwrap(),
+            "--require-live",
+            "--timeout",
+            "2",
+        ];
+        assert_mcp_stopped(&mcp_output(&args), &live.url);
+        let port = url::Url::parse(&live.url).unwrap().port().unwrap();
+        let _idle_replacement = Server::start_on(port);
+        let refused = mcp_output(&args);
+        assert_mcp_stopped(&refused, &live.url);
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("capture_mode=idle"));
+    }
 }

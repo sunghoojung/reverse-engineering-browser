@@ -170,9 +170,15 @@ The API CLI embeds the versioned OpenAPI document and requires an explicit
 loopback URL or endpoint file. The VM analyzer reads bounded input prefixes,
 reports omissions, and writes private analysis documents. The base detector is
 served at `/api/analysis/vm`; the inspector-free opcode workspace is served at
-`/api/analysis/vm/opcodes`. A Wasm likely-vm workspace lists static `br_table`
+`/api/analysis/vm/opcodes`. Wasm candidate and likely-vm workspaces list static `br_table`
 and `call_indirect` arms from the selected function and a bounded call/table
-neighborhood. Without dispatch samples it keeps `sampler-unavailable`. Without
+neighborhood. The module-wide `dispatch_inventory` counts every decoded `br_table`
+and `call_indirect` (including non-loop sites), retains the top 256 with exact arm
+counts, and reports omitted metadata separately. The default is the highest-ranked
+in-loop site, not the first loop. Interpreter-scale tables (32+ explicit arms)
+rank before small helper candidates; size never promotes the detector tier or
+proves guest opcode binding. The UI's Dispatch sites panel preserves explicit
+retained-handler selection. Without dispatch samples it keeps `sampler-unavailable`. Without
 a runtime snapshot it keeps `snapshot-bytes-unavailable` and names the guest-byte
 walk `static-module-only` instead of inventing a program counter. A workspace
 failure does not hide a valid detector

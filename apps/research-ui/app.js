@@ -1610,6 +1610,65 @@
         return lines.join('\n');
       }
 
+      function vmModelLabel(workspace) {
+        if (workspace.model === 'stack') return 'stack model';
+        if (workspace.model === 'register') return 'register model';
+        return 'stack or registers unproven';
+      }
+
+      function vmEvidenceClassText(workspace) {
+        switch (workspace.evidence_class) {
+          case 'guest-opcode-isa':
+            return 'Guest opcode ISA. Samples or owned effects bind an opcode to one handler with guest PC units.';
+          case 'handler-table-candidate':
+            return 'Handler table candidate. Static selector arms map to entries. This is not a proven guest opcode ISA.';
+          case 'call-indirect-table':
+            return 'Call-indirect table. Funcref or element entries are handlers. Targets are not guest opcodes.';
+          case 'cff-helper':
+            return 'CFF helper. Small branch table, demoted when a larger dispatch site is present. Not a guest opcode ISA.';
+          default:
+            return 'No handler table was recovered. Missing arms are not a guest opcode ISA.';
+        }
+      }
+
+      function vmDispatchEvidenceText(site) {
+        switch (site.evidence_class) {
+          case 'cff-helper': return 'CFF helper';
+          case 'handler-table-candidate': return 'Handler table candidate';
+          case 'call-indirect-table': return 'Call-indirect table';
+          default: return 'Static dispatch candidate';
+        }
+      }
+
+      function renderVmHandlerTables(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.append(textElement('h4', '', 'Handler tables'));
+        const tables = Array.isArray(workspace.handler_tables) ? workspace.handler_tables : [];
+        if (!tables.length) {
+          section.append(textElement('p', '', 'No clustered handler table is retained. Static arms are not a guest opcode ISA.'));
+          return section;
+        }
+        section.append(textElement('p', '', 'Duplicate targets are clustered. selector_count is exact. A listed selector prefix is not a shorter table. These rows do not prove a guest PC, stack, or registers.'));
+        appendVmPagedRows(section, tables, 'handler tables', table => {
+          const row = document.createElement('details'); row.className = 'vm-effect-row';
+          const count = table.kind === 'br_table'
+            ? `${table.arm_count} arms, ${table.unique_target_count} unique targets`
+            : table.kind === 'element'
+              ? `${table.entry_count} slots, ${table.unique_target_count} unique functions`
+              : 'dynamic target';
+          row.append(textElement('summary', '', `${table.kind} · ${table.evidence_class} · ${count}`));
+          const clusters = table.clusters.map(cluster => {
+            const noun = table.kind === 'element' ? 'function' : 'label depth';
+            const more = cluster.selectors.length < cluster.selector_count ? ` · listed ${cluster.selectors.length} of ${cluster.selector_count}` : '';
+            return `${noun} ${cluster.target} · selectors ${cluster.selectors.join(', ') || 'none'}${more}`;
+          });
+          if (table.omitted_cluster_count) clusters.push(`${table.omitted_cluster_count} additional target clusters omitted`);
+          row.append(textElement('p', 'vm-effect-detail', clusters.join('; ') || 'No static targets.'));
+          return row;
+        });
+        return section;
+      }
+
       function renderVmDispatchInventory(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         section.append(textElement('h4', '', 'Static dispatch inventory'));
@@ -1640,7 +1699,7 @@
           // every row is not usable once the bounded list reaches 256 sites.
           row.append(textElement('summary', '', `#${rank} · ${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset} · ${classification}`));
           if (selected) row.open = true;
-          row.append(textElement('p', 'vm-effect-detail', `${classification} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. ${honesty}`));
+          row.append(textElement('p', 'vm-effect-detail', `${classification} · ${vmDispatchEvidenceText(site)} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. ${honesty}`));
           const retained = retainedRows.find(candidate => candidate.source === `${site.byte_offset} + ${site.byte_size} bytes`);
           if (retained) {
             const select = textElement('button', 'secondary-button', 'Select retained site'); select.type = 'button';
@@ -2140,8 +2199,15 @@
         const head = document.createElement('div'); head.className = 'vm-workspace-title';
         head.append(
           textElement('div', '', 'Opcode workspace'),
-          textElement('span', '', `${workspace.runtime === 'webassembly' ? 'WebAssembly · ' : ''}${workspace.model ?? 'unknown'} model · interpreter artifact ${workspace.interpreter_artifact_id}`)
+          textElement('span', '', `${workspace.runtime === 'webassembly' ? 'WebAssembly · ' : ''}${vmModelLabel(workspace)} · interpreter artifact ${workspace.interpreter_artifact_id}`)
         );
+        const evidence = textElement('p', 'vm-workspace-notice', vmEvidenceClassText(workspace));
+        evidence.dataset.kind = workspace.evidence_class || 'unclassified';
+        const machine = workspace.machine_state;
+        const machineText = !machine ? '' : [
+          machine.stack_observed === true ? 'stack observed in effects' : '',
+          machine.register_count === null ? '' : `${machine.register_count} registers named by effects`
+        ].filter(Boolean).join(' · ');
         const body = document.createElement('div'); body.className = 'vm-workbench-body';
         const selectedInspector = document.createElement('aside'); selectedInspector.className = 'vm-selection-inspector';
         selectedInspector.setAttribute('aria-label', 'Selected handler');
@@ -2176,7 +2242,7 @@
         const panels = document.createElement('div'); panels.className = 'vm-workbench-panels';
         const definitions = [
           ['effects', 'Effects', renderVmEffects],
-          ...(workspace.runtime === 'webassembly' ? [['dispatch', 'Dispatch sites', renderVmDispatchInventory]] : []),
+          ...(workspace.runtime === 'webassembly' ? [['dispatch', 'Dispatch sites', renderVmDispatchInventory], ['tables', 'Handler tables', renderVmHandlerTables]] : []),
           ['bytecode', 'Bytes', renderVmBytecode],
           ['reachability', 'Reachability', renderVmReachability],
           ['coverage', 'Coverage', renderVmWorkspaceCoverage],
@@ -2201,7 +2267,9 @@
         });
         inspector.append(navigation, panels);
         body.append(handlers, selectedInspector);
-        container.append(head, body, inspector);
+        container.append(head, evidence);
+        if (machineText) container.append(textElement('p', 'vm-effect-detail', machineText));
+        container.append(body, inspector);
         return container;
       }
 

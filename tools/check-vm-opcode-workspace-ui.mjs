@@ -25,6 +25,7 @@ const hostLinks = {contract_version: 1, document_kind: 'vm-host-links', workspac
 assert(runInNewContext(`${model}\nisVmHostLinksDocument(hostLinks, hostWorkspace)`, {hostLinks, hostWorkspace, TextEncoder}));
 const workspace = fixture.workspaces[0];
 workspace.runtime = 'webassembly'; workspace.model = 'unknown'; workspace.samples = []; workspace.sample_count = 0;
+workspace.evidence_class = 'handler-table-candidate'; delete workspace.machine_state;
 workspace.handlers = [
   {opcode: 0, state: 'inferred', source: {byte_offset: 45, byte_size: 5}, label: 'br_table selector 0', operand_width: 0,
     sample_count: 0, effects: [], notes: 'Dispatch selector only; guest opcode binding is unproven.'},
@@ -55,7 +56,7 @@ class TestElement {
 }
 const testDocument = {createElement: tag => new TestElement(tag), createTextNode: text => { const node = new TestElement('#text'); node.textContent = text; return node; }, querySelector: () => null};
 const renderApiState = {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'};
-const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder, Event});
+const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,renderVmHandlerTables,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder, Event});
 const descendants = element => [element, ...element.children.flatMap(descendants)];
 const findButton = (root, label) => descendants(root).find(node => node.tagName === 'button' && node.textContent === label);
 const many = structuredClone(hostSource);
@@ -93,6 +94,8 @@ for (const handler of callerWorkspace.handlers) if (handler.state === 'observed'
 }
 callerWorkspace.coverage.complete = false;
 callerWorkspace.coverage.omissions.push({reason: 'caller-samples-unverified'}, {reason: 'sampler-unavailable'});
+// Unknown PC units and inferred handlers are not a guest ISA. Numeric cases remain a static candidate.
+callerWorkspace.evidence_class = 'handler-table-candidate';
 assert(validateModule(callerDocument), 'caller provenance remains visible without native proof');
 assert(runInNewContext(`${model}\nvmStaticSampleNoticeText(value)`, {value: callerWorkspace, TextEncoder}).includes('not native runtime observations'));
 assert(runInNewContext(`${model}\nvmOpcodeSamplePositions(value)[0]`, {value: callerWorkspace.samples, TextEncoder}).startsWith('Caller-reported PC'));
@@ -269,7 +272,8 @@ const site = (offset, arms, index = 0) => ({kind: arms === null ? 'call_indirect
   function_index: index, byte_offset: offset, byte_size: 5, function_body_offset: 40,
   function_body_size: 500, arm_count: arms, unique_target_count: arms === null ? null : arms,
   element_fanout: arms === null ? 40 : null, loop_depth: 1, ip_like: true, structural_score: 60,
-  classification: arms === null ? 'indirect-handler-candidate' : arms < 32 ? 'cff-helper-candidate' : 'dispatch-candidate'});
+  classification: arms === null ? 'indirect-handler-candidate' : arms < 32 ? 'cff-helper-candidate' : 'dispatch-candidate',
+  evidence_class: arms === null ? 'call-indirect-table' : arms >= 32 ? 'handler-table-candidate' : 'cff-helper'});
 const inventory = {ranking_version: 1, site_count: 3, br_table_count: 2, call_indirect_count: 1,
   omitted_site_count: 0, selected_byte_offset: 45, candidates: [site(45, 200), site(70, 8, 1), site(50, null)]};
 const inventoryDocument = structuredClone(fixture);
@@ -286,6 +290,8 @@ for (const mutate of [
   value => { value.candidates[2].unique_target_count = 2; },
   value => { value.candidates[2].element_fanout = -1; },
   value => { value.candidates[0].byte_offset = 539; }, value => { value.candidates[0].classification = 'proven-vm'; },
+  value => { value.candidates[0].evidence_class = 'guest-opcode-isa'; },
+  value => { value.candidates[1].evidence_class = 'handler-table-candidate'; },
   value => { value.candidates[0].byte_size = Number.MAX_SAFE_INTEGER; },
   value => { value.candidates.push(value.candidates[0]); value.site_count++; value.br_table_count++; }
 ]) {
@@ -303,6 +309,37 @@ assert(inventoryPanel.textContent.includes('CFF / relooper candidate'));
 assert(inventoryPanel.textContent.includes('indirect funcref candidate'));
 assert(inventoryPanel.textContent.includes('not a proven guest opcode ISA'));
 assert(inventoryPanel.textContent.includes('does not invent registers, a stack, or a guest PC'));
+assert(inventoryPanel.textContent.includes('CFF helper'));
+assert(inventoryPanel.textContent.includes('Handler table candidate'));
+assert(inventoryPanel.textContent.includes('Call-indirect table'));
+assert(!inventoryPanel.textContent.includes('Guest opcode ISA'));
+const promoted = structuredClone(inventoryDocument);
+promoted.workspaces[0].evidence_class = 'guest-opcode-isa';
+assert(!validateModule(promoted), 'static arms cannot be labeled guest-opcode-isa');
+const tables = [{
+  kind: 'br_table', evidence_class: 'cff-helper', function_index: 0, byte_offset: 70, byte_size: 5,
+  table_index: null, arm_count: 11, entry_count: 11, unique_target_count: 3, default_target: 0,
+  omitted_cluster_count: 0,
+  clusters: [
+    {target: 0, selector_count: 5, selectors: [0, 2, 4, 6, 8]},
+    {target: 1, selector_count: 5, selectors: [1, 3, 5, 7, 9]},
+    {target: 2, selector_count: 1, selectors: [10]}
+  ]
+}, {
+  kind: 'br_table', evidence_class: 'handler-table-candidate', function_index: 1, byte_offset: 45, byte_size: 5,
+  table_index: null, arm_count: 100, entry_count: 100, unique_target_count: 1, default_target: 0,
+  omitted_cluster_count: 0,
+  clusters: [{target: 0, selector_count: 100, selectors: Array.from({length: 32}, (_, index) => index)}]
+}];
+const tableWorkspace = {...inventoryDocument.workspaces[0], handler_tables: tables, evidence_class: 'handler-table-candidate'};
+assert(validateModule({...inventoryDocument, workspaces: [tableWorkspace]}));
+const tablePanel = renderApi.renderVmHandlerTables(tableWorkspace);
+assert(tablePanel.textContent.includes('cff-helper'));
+assert(tablePanel.textContent.includes('11 arms, 3 unique targets'));
+assert(tablePanel.textContent.includes('label depth 0 · selectors 0, 2, 4, 6, 8'));
+assert(tablePanel.textContent.includes('listed 32 of 100'));
+assert(tablePanel.textContent.includes('do not prove a guest PC'));
+assert(!tablePanel.textContent.includes('guest-opcode-isa'));
 assert(inventoryPanel.textContent.includes('3 module sites'));
 const rankedHandlers = Array.from({length: 200}, (_, opcode) => handler(opcode, 'inferred', 45, 5,
   `br_table selector ${opcode}`, 0, 'Static selector only.'));
@@ -371,6 +408,7 @@ console.log('PASS complete bounded Findings paging: 257 effects/instructions, 65
 if (process.argv.includes('--browser')) {
   fixture.workspaces[0].captured_module_preview = modulePreview;
   fixture.workspaces[0].dispatch_inventory = inventory;
+  fixture.workspaces[0].handler_tables = tables;
   const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
   const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
 const hostWorkspace=${JSON.stringify(hostWorkspace)},hostLinks=${JSON.stringify(hostLinks)};
@@ -429,6 +467,8 @@ render();`;
     await until(() => evaluate("document.querySelectorAll('.vm-handler-row').length === 3"), 'WASM handler rows');
     const text = await evaluate('document.body.textContent');
     assert(text.includes('WebAssembly')); assert(text.includes('3 dispatch-arm candidates')); assert(text.includes('unknown'));
+    assert(text.includes('stack or registers unproven'));
+    assert(text.includes('not a proven guest opcode ISA'));
     assert.equal(await evaluate("document.querySelectorAll('#workspace img').length"), 0);
     for (const width of [1440, 390]) {
       await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
@@ -441,7 +481,7 @@ render();`;
       assert((await evaluate("document.querySelector('.vm-selection-inspector').textContent")).includes('50 + 3 bytes'));
       assert.equal(await evaluate("document.querySelectorAll('.vm-selection-inspector img').length"), 0);
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      for (const panel of ['dispatch', 'bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'sources', 'effects']) {
+      for (const panel of ['dispatch', 'tables', 'bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'sources', 'effects']) {
         await evaluate(`document.querySelector('[data-vm-panel="${panel}"]').click()`);
         assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
         assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
@@ -451,6 +491,21 @@ render();`;
       assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('CFF / relooper candidate'));
       assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('indirect funcref candidate'));
       assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('not a proven guest opcode ISA'));
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('CFF helper'));
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('Handler table candidate'));
+      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('Call-indirect table'));
+      assert(!(await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('Guest opcode ISA'));
+      const tableText = await evaluate("document.querySelector('[data-vm-panel-content=tables]').textContent");
+      assert(tableText.includes('11 arms, 3 unique targets'));
+      assert(tableText.includes('listed 32 of 100'));
+      assert(tableText.includes('do not prove a guest PC'));
+      assert(!tableText.includes('guest-opcode-isa'));
+      await evaluate("document.querySelector('[data-vm-panel=tables]').focus()");
+      await send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'});
+      await send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+      assert.equal(await evaluate("document.querySelector('[data-vm-panel-content=tables]').hidden"), false);
+      assert.equal(await evaluate("document.activeElement?.dataset?.vmPanel"), 'tables');
+      await evaluate("document.querySelector('[data-vm-panel=dispatch]').click()");
       await evaluate("(()=>{const search=document.querySelector('.vm-listing-toolbar input'); search.value='call_indirect'; search.dispatchEvent(new Event('input')); document.querySelector('[data-vm-panel-content=dispatch] details').open=true; document.querySelector('[data-vm-panel-content=dispatch] details button').focus()})()");
       assert.equal(await evaluate("document.activeElement === document.querySelector('[data-vm-panel-content=dispatch] details button')"), true);
       assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch] summary').textContent")).includes('handler-table candidate'));

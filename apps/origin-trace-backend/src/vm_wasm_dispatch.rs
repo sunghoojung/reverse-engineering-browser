@@ -4,6 +4,22 @@ use serde_json::{Value, json};
 use std::{cmp::Reverse, collections::BTreeMap, ops::Range};
 
 pub(super) const MAX_SITES: usize = 256;
+/// Same cutoff the rank uses to prefer interpreter-scale sites over small
+/// state-machine helpers. It is not an opcode-cardinality assumption.
+pub(super) const MAJOR_ARM_COUNT: u32 = 32;
+
+/// Static sites never become `guest-opcode-isa`. A `br_table` arm is a
+/// selector, not proof of a guest bytecode stream. `call_indirect` stays a
+/// funcref table even when its element fanout crosses the major-site cutoff.
+pub(super) fn static_evidence_class(kind: &str, arm_count: Option<u32>) -> &'static str {
+    if kind == "call_indirect" {
+        "call-indirect-table"
+    } else if arm_count.unwrap_or(0) >= MAJOR_ARM_COUNT {
+        "handler-table-candidate"
+    } else {
+        "cff-helper"
+    }
+}
 // Loops first, then interpreter-scale sites. Scale is the explicit br_table arm
 // count, or the static active-element funcref count for call_indirect. Unknown
 // indirect fanout ranks as zero and never fills arm_count. Small br_table sites
@@ -51,7 +67,7 @@ impl Inventory {
             } else {
                 fanout.unwrap_or(0)
             };
-            let major = scale >= 32;
+            let major = scale >= MAJOR_ARM_COUNT;
             let rank = (
                 instruction.loop_depth > 0,
                 major,
@@ -81,6 +97,7 @@ impl Inventory {
             } else {
                 "dispatch-candidate"
             };
+            let evidence_class = static_evidence_class(kind, instruction.arm_count);
             self.ranked.insert(rank, json!({
                 "kind": kind, "function_index": index,
                 "byte_offset": instruction.start, "byte_size": instruction.end - instruction.start,
@@ -88,6 +105,7 @@ impl Inventory {
                 "arm_count": instruction.arm_count, "unique_target_count": instruction.unique_targets,
                 "element_fanout": fanout, "loop_depth": instruction.loop_depth,
                 "ip_like": ip_like, "structural_score": score, "classification": classification,
+                "evidence_class": evidence_class,
             }));
             if self.ranked.len() > MAX_SITES {
                 self.ranked.pop_first();

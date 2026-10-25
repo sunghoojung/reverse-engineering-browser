@@ -178,14 +178,22 @@ omitted metadata separately. The default is the highest-ranked in-loop site, not
 the first loop. Scale is explicit arm count for `br_table` and the static active
 element funcref count for `call_indirect`; unknown fanout ranks as zero and leaves
 `arm_count` null. Interpreter-scale sites (scale at least 32) rank before small
-helper candidates. Labels stay separate: a small `br_table` is a CFF/relooper
-candidate, a large `br_table` is a handler-table candidate (selector index to Wasm
-branch target, with a unique-target count), and `call_indirect` is an indirect
-funcref candidate. Static arms are not a proven guest opcode ISA and do not invent
-a guest PC, registers, or a stack. Size never promotes the detector tier. The UI's
-Dispatch sites panel shows those labels on each collapsed summary. Enter or Space
-on Select retained site clears a handler filter that hides that row. A refresh preserves
-an explicit retained-handler selection. Without dispatch samples it keeps `sampler-unavailable`. Without
+helper candidates. Heuristic labels stay separate from the evidence class: a small
+`br_table` is a CFF/relooper candidate, a large `br_table` is a handler-table
+candidate (selector index to Wasm branch target, with a unique-target count), and
+`call_indirect` is an indirect funcref candidate. Each workspace and each static
+site also carries an `evidence_class`: `guest-opcode-isa` only when a sample with
+guest PC units or an exact-hash owned effect proves opcode-to-handler, otherwise
+`handler-table-candidate`, `call-indirect-table`, or `cff-helper`. Static arms are
+never a guest ISA and do not invent a guest PC, registers, or a stack. Size never
+promotes the detector tier. `handler_tables` clusters duplicate targets for the top
+ranked sites and element segments; `selector_count` stays exact. `model: unknown`
+means stack or registers are unproven. `machine_state` is present only when effect
+cells name a stack or a numeric register. The UI's Dispatch sites panel shows the
+heuristic labels on each collapsed summary and the evidence class on the detail.
+Enter or Space on Select retained site clears a handler filter that hides that row.
+A refresh preserves an explicit retained-handler selection. Without dispatch samples
+it keeps `sampler-unavailable`. Without
 a runtime snapshot it keeps `snapshot-bytes-unavailable` and names the guest-byte
 walk `static-module-only` instead of inventing a program counter. A workspace
 failure does not hide a valid detector

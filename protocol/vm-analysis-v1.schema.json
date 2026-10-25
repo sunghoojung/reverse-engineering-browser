@@ -128,7 +128,8 @@
         "unique_target_count",
         "element_fanout",
         "ip_like",
-        "classification"
+        "classification",
+        "evidence_class"
       ],
       "properties": {
         "kind": {
@@ -197,6 +198,13 @@
             "cff-helper-candidate",
             "dispatch-candidate",
             "indirect-handler-candidate"
+          ]
+        },
+        "evidence_class": {
+          "enum": [
+            "handler-table-candidate",
+            "call-indirect-table",
+            "cff-helper"
           ]
         }
       }

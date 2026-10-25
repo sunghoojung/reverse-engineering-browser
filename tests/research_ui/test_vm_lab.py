@@ -217,6 +217,8 @@ let fetch = () => new Promise(resolve => complete=resolve);
         workspace = fixture["workspaces"][0]
         workspace["runtime"] = "webassembly"
         workspace["model"] = "unknown"
+        workspace["evidence_class"] = "handler-table-candidate"
+        workspace.pop("machine_state", None)
         workspace["handlers"] = [
             {
                 "opcode": 0, "state": "inferred", "sample_count": 0,

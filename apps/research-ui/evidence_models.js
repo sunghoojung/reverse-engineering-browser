@@ -2482,6 +2482,126 @@
               BigInt(sample.invocation_event.sequence_number) < BigInt(sample.event.sequence_number)));
       }
 
+      function vmStaticSiteEvidenceClass(site) {
+        if (site.kind === 'call_indirect') return 'call-indirect-table';
+        if (site.kind === 'br_table' && site.arm_count >= 32) return 'handler-table-candidate';
+        if (site.kind === 'br_table') return 'cff-helper';
+        return null;
+      }
+
+      // Samples prove a guest ISA only with real PC units and one handler.
+      // Owned effects prove it only when the model is stack or register and a
+      // known effect exists. Static arms and identifier spelling do not.
+      function vmGuestOpcodeIsaProven(workspace) {
+        const uses = new Map();
+        for (const handler of workspace.handlers) {
+          if (handler.opcode !== null) uses.set(handler.opcode, (uses.get(handler.opcode) ?? 0) + 1);
+        }
+        if (workspace.samples.some(sample =>
+          ['instruction-index', 'byte-offset'].includes(sample.instruction_pointer_units) &&
+          uses.get(sample.opcode) === 1 &&
+          workspace.handlers.some(handler => handler.opcode === sample.opcode && handler.state === 'observed' &&
+            handler.sample_count > 0))) return true;
+        return ['stack', 'register'].includes(workspace.model) &&
+          workspace.handlers.some(handler => vmUniqueWorkspaceEffect(handler));
+      }
+
+      function vmWorkspaceEvidenceClass(workspace) {
+        if (vmGuestOpcodeIsaProven(workspace)) return 'guest-opcode-isa';
+        const candidates = workspace.dispatch_inventory?.candidates;
+        if (Array.isArray(candidates)) {
+          const classes = candidates.map(site => site.evidence_class);
+          if (classes.includes('handler-table-candidate')) return 'handler-table-candidate';
+          if (classes.includes('call-indirect-table')) return 'call-indirect-table';
+          if (classes.includes('cff-helper')) return 'cff-helper';
+        }
+        if (workspace.handlers.some(handler => handler.opcode !== null)) return 'handler-table-candidate';
+        return null;
+      }
+
+      function vmSupportedMachineState(workspace) {
+        let stack = false;
+        let maxRegister = null;
+        for (const handler of workspace.handlers) {
+          for (const effect of handler.effects ?? []) {
+            for (const cell of [...(effect.reads ?? []), ...(effect.writes ?? [])]) {
+              if (cell.space === 'stack') stack = true;
+              if (cell.space === 'register' && cell.index !== null && isCanonicalInteger(cell.index, 0n, 65535n)) {
+                const index = Number(cell.index);
+                if (maxRegister === null || index > maxRegister) maxRegister = index;
+              }
+            }
+          }
+        }
+        if (!stack && maxRegister === null) return null;
+        return {register_count: maxRegister === null ? null : maxRegister + 1, stack_observed: stack ? true : null};
+      }
+
+      function vmMachineStateMatches(workspace) {
+        const supported = vmSupportedMachineState(workspace);
+        if (supported === null) return workspace.machine_state === undefined;
+        return vmWorkspaceExact(workspace.machine_state, ['register_count', 'stack_observed']) &&
+          workspace.machine_state.register_count === supported.register_count &&
+          workspace.machine_state.stack_observed === supported.stack_observed;
+      }
+
+      function isVmHandlerCluster(cluster) {
+        return vmWorkspaceExact(cluster, ['target', 'selector_count', 'selectors']) &&
+          isSafeIntegerInRange(cluster.target, 0, 4294967295) &&
+          isSafeIntegerInRange(cluster.selector_count, 1, 4294967295) &&
+          Array.isArray(cluster.selectors) && cluster.selectors.length <= 32 &&
+          cluster.selectors.length <= cluster.selector_count &&
+          cluster.selectors.every(value => isSafeIntegerInRange(value, 0, 4294967295)) &&
+          new Set(cluster.selectors).size === cluster.selectors.length;
+      }
+
+      function isVmHandlerTables(tables) {
+        if (!Array.isArray(tables) || tables.length === 0 || tables.length > 12 || !tables.every(isVmHandlerTable)) return false;
+        return true;
+      }
+
+      function isVmHandlerTable(table) {
+        if (!vmWorkspaceExact(table, ['kind', 'evidence_class', 'function_index', 'byte_offset', 'byte_size',
+          'table_index', 'arm_count', 'entry_count', 'unique_target_count', 'default_target', 'clusters',
+          'omitted_cluster_count']) || !['br_table', 'call_indirect', 'element'].includes(table.kind) ||
+          !isSafeIntegerInRange(table.omitted_cluster_count, 0, 4294967295) ||
+          !Array.isArray(table.clusters) || table.clusters.length > 1024 ||
+          !table.clusters.every(isVmHandlerCluster)) return false;
+        const counted = table.clusters.reduce((sum, cluster) => sum + cluster.selector_count, 0);
+        if (table.kind === 'br_table') {
+          const expected = table.arm_count >= 32 ? 'handler-table-candidate' : 'cff-helper';
+          return table.evidence_class === expected &&
+            isSafeIntegerInRange(table.function_index, 0, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(table.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(table.byte_size, 1, 16777216) &&
+            table.table_index === null &&
+            isSafeIntegerInRange(table.arm_count, 0, 4294967295) &&
+            table.entry_count === table.arm_count &&
+            isSafeIntegerInRange(table.unique_target_count, 0, 4294967295) &&
+            isSafeIntegerInRange(table.default_target, 0, 4294967295) &&
+            table.clusters.length + table.omitted_cluster_count === table.unique_target_count &&
+            (table.omitted_cluster_count === 0 ? counted === table.arm_count : counted <= table.arm_count);
+        }
+        if (table.kind === 'call_indirect') {
+          return table.evidence_class === 'call-indirect-table' &&
+            isSafeIntegerInRange(table.function_index, 0, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(table.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(table.byte_size, 1, 16777216) &&
+            (table.table_index === null || isSafeIntegerInRange(table.table_index, 0, 4294967295)) &&
+            table.arm_count === null && table.entry_count === null && table.unique_target_count === null &&
+            table.default_target === null && table.clusters.length === 0 && table.omitted_cluster_count === 0;
+        }
+        return table.evidence_class === 'call-indirect-table' &&
+          table.function_index === null && table.byte_offset === null && table.byte_size === null &&
+          isSafeIntegerInRange(table.table_index, 0, 4294967295) &&
+          table.arm_count === null &&
+          isSafeIntegerInRange(table.entry_count, 0, 4294967295) &&
+          isSafeIntegerInRange(table.unique_target_count, 0, 4294967295) &&
+          table.default_target === null &&
+          table.clusters.length + table.omitted_cluster_count === table.unique_target_count &&
+          (table.omitted_cluster_count === 0 ? counted === table.entry_count : counted <= table.entry_count);
+      }
+
       function isVmDispatchInventory(inventory) {
         if (!vmWorkspaceExact(inventory, ['ranking_version', 'site_count', 'br_table_count', 'call_indirect_count',
           'omitted_site_count', 'selected_byte_offset', 'candidates']) || inventory.ranking_version !== 1 ||
@@ -2494,7 +2614,7 @@
         for (const site of inventory.candidates) {
           if (!vmWorkspaceExact(site, ['kind', 'function_index', 'byte_offset', 'byte_size', 'function_body_offset',
             'function_body_size', 'arm_count', 'unique_target_count', 'element_fanout', 'loop_depth', 'ip_like',
-            'structural_score', 'classification']) ||
+            'structural_score', 'classification', 'evidence_class']) ||
             !['br_table', 'call_indirect'].includes(site.kind) || typeof site.ip_like !== 'boolean' ||
             !['function_index', 'byte_offset', 'function_body_offset', 'loop_depth', 'structural_score'].every(key =>
               isSafeIntegerInRange(site[key], 0, Number.MAX_SAFE_INTEGER)) ||
@@ -2510,6 +2630,7 @@
                 (site.element_fanout !== null && !isSafeIntegerInRange(site.element_fanout, 0, 4294967295))) ||
             site.classification !== (site.kind === 'call_indirect' ? 'indirect-handler-candidate'
               : site.kind === 'br_table' && site.arm_count < 32 ? 'cff-helper-candidate' : 'dispatch-candidate') ||
+            site.evidence_class !== vmStaticSiteEvidenceClass(site) ||
             offsets.has(site.byte_offset)) return false;
           offsets.add(site.byte_offset);
         }
@@ -2520,7 +2641,8 @@
       function isVmOpcodeWorkspace(workspace) {
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
-          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory'
+          'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory',
+          'evidence_class', 'machine_state', 'handler_tables'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
@@ -2531,6 +2653,10 @@
           !workspace.snapshots.every(isVmOpcodeSnapshot) ||
           (workspace.dispatch_inventory !== undefined && (workspace.runtime !== 'webassembly' ||
             !isVmDispatchInventory(workspace.dispatch_inventory))) ||
+          (workspace.handler_tables !== undefined && (workspace.runtime !== 'webassembly' ||
+            !isVmHandlerTables(workspace.handler_tables))) ||
+          !vmMachineStateMatches(workspace) ||
+          (workspace.evidence_class ?? null) !== vmWorkspaceEvidenceClass(workspace) ||
           (workspace.captured_module_preview !== undefined && !isVmCapturedModulePreview(workspace.captured_module_preview, workspace)) ||
           !Array.isArray(workspace.unknowns) || workspace.unknowns.length > 256 ||
           !workspace.unknowns.every(value => isBoundedText(value, 240) && value.length > 0) ||

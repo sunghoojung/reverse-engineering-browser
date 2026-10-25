@@ -1198,6 +1198,9 @@
                     "const": 0
                   }
                 }
+              },
+              "bytecode_artifact_id": {
+                "const": "0"
               }
             }
           },

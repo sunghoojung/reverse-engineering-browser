@@ -89,6 +89,7 @@ fn cli_reports_roundtrip_without_becoming_native_samples() {
         "rename-native",
         "native-process",
         "unknown-source",
+        "foreign-bytecode",
     ] {
         let mut event = report.clone();
         match patch {
@@ -100,6 +101,11 @@ fn cli_reports_roundtrip_without_becoming_native_samples() {
             }
             "native-process" => {
                 event["process_id"] = json!(7);
+            }
+            "foreign-bytecode" => {
+                let mut payload = hex::decode(event["payload"].as_str().unwrap()).unwrap();
+                payload[48] = 1;
+                event["payload"] = json!(hex::encode(payload));
             }
             _ => {
                 event["dispatch_provenance"]["source"] = json!("native");

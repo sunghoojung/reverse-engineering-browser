@@ -85,8 +85,11 @@ for (const retained of callerWorkspace.samples) {
   retained.provenance = {source: 'caller-supplied', source_artifact_sha256: callerWorkspace.source_artifact_sha256, input_sha256: 'a'.repeat(64)};
   retained.event.process_id = 0;
   retained.instruction_pointer_units = 'unknown'; retained.invocation_id = null; retained.invocation_event = null;
+  retained.bytecode_artifact_id = '0';
 }
-for (const handler of callerWorkspace.handlers) if (handler.state === 'observed') handler.state = 'inferred';
+for (const handler of callerWorkspace.handlers) if (handler.state === 'observed') {
+  handler.state = 'inferred'; handler.notes = 'Caller-supplied report; no independent runtime observation.';
+}
 callerWorkspace.coverage.complete = false;
 callerWorkspace.coverage.omissions.push({reason: 'caller-samples-unverified'}, {reason: 'sampler-unavailable'});
 assert(validateModule(callerDocument), 'caller provenance remains visible without native proof');
@@ -97,6 +100,7 @@ for (const corrupt of [
   doc => { delete doc.workspaces[0].samples[0].provenance; },
   doc => { doc.workspaces[0].samples[0].provenance.source_artifact_sha256 = 'f'.repeat(64); },
   doc => { doc.workspaces[0].samples[0].event.process_id = 7; },
+  doc => { doc.workspaces[0].samples[0].bytecode_artifact_id = '401'; },
   doc => { doc.workspaces[0].samples[0].instruction_pointer_units = 'byte-offset'; },
   doc => { doc.workspaces[0].handlers.find(handler => handler.sample_count > 0).state = 'observed'; },
   doc => { doc.workspaces[0].coverage.omissions = doc.workspaces[0].coverage.omissions.filter(row => row.reason !== 'caller-samples-unverified'); }
@@ -431,7 +435,9 @@ render();`;
     for (const width of [1440, 390]) {
       await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
       await evaluate("(()=>{const key=vmOpcodeRows(state.vmOpcodeWorkspace.workspaces[0]).find(row=>row.retainedSamples.length).key;[...document.querySelectorAll('.vm-handler-row')].find(row=>row.dataset.handlerKey===key).click();})()");
-      assert((await evaluate("document.querySelector('.vm-selection-inspector').textContent")).includes('Caller-reported PC'));
+      const callerText = await evaluate("document.querySelector('.vm-selection-inspector').textContent");
+      assert(callerText.includes('Caller-reported PC'));
+      assert(!callerText.includes('Observed at a sampled program counter'));
       await evaluate("document.querySelector('.vm-selection-inspector details summary').click()");
       assert((await evaluate("document.querySelector('.vm-selection-inspector details').textContent")).includes('caller-supplied'));
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);

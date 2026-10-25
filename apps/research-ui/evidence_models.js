@@ -2468,7 +2468,7 @@
           (provenance === undefined || (vmWorkspaceExact(provenance, ['source', 'source_artifact_sha256', 'input_sha256']) &&
             provenance.source === 'caller-supplied' && provenance.source_artifact_sha256 === workspace.source_artifact_sha256 &&
             vmWorkspaceDigest(provenance.input_sha256) && sample.instruction_pointer_units === 'unknown' &&
-            sample.invocation_id === null && sample.invocation_event === null)) &&
+            sample.invocation_id === null && sample.invocation_event === null && sample.bytecode_artifact_id === '0')) &&
           vmSampleEvent(sample.event, provenance !== undefined) && ['instruction_pointer', 'opcode', 'handler_index', 'sample_index']
             .every(key => isSafeIntegerInRange(sample[key], 0, 0xffffffff)) &&
           isSafeIntegerInRange(sample.operand_count, 0, 255) &&

@@ -14934,8 +14934,12 @@
                 "description": "Required when captured_owner is present. Authorizes helper JavaScript in that exact attached page. Object Lab listings omit it."
               },
               "captured_owner": {
-                "$ref": "#/components/schemas/CapturedHookOwner",
-                "description": "Exact attached page owner: instance_id, connection_epoch, document_epoch, target_id. Omit on the navigated disposable Object Lab page. Other pages are refused."
+                "description": "Exact attached page owner: instance_id, connection_epoch, document_epoch, target_id. Omit on the navigated disposable Object Lab page. Other pages are refused.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CapturedHookOwner"
+                  }
+                ]
               }
             },
             "required": [
@@ -15056,8 +15060,12 @@
                 "description": "Always required. Authorizes the bounded memory copy."
               },
               "captured_owner": {
-                "$ref": "#/components/schemas/CapturedHookOwner",
-                "description": "Required when the listing used captured_owner. Must repeat that exact owner. Omit for an Object Lab listing."
+                "description": "Required when the listing used captured_owner. Must repeat that exact owner. Omit for an Object Lab listing.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CapturedHookOwner"
+                  }
+                ]
               }
             },
             "required": [

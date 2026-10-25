@@ -25,6 +25,7 @@ mod validation;
 pub mod vm;
 mod vm_byte_coverage;
 mod vm_bytecode;
+pub mod vm_dispatch_input;
 mod vm_effects;
 mod vm_experiment;
 mod vm_host_links;

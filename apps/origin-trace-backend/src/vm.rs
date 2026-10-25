@@ -1018,7 +1018,11 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
     let mut capture_gaps = 0usize;
     let mut dispatch_budget_losses = Vec::new();
     for (line, event) in event_records {
-        let reference = event_reference(&event);
+        let reference = if event["type"] == "vm_dispatch_report" {
+            crate::vm_dispatch_input::report_reference(&event)
+        } else {
+            event_reference(&event)
+        };
         if reference.is_none()
             || !matches!(event["protocol_version"].as_u64(), Some(2 | 3))
             || !["navigation_id", "frame_id"]

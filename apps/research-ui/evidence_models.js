@@ -2453,17 +2453,23 @@
 
       function vmWorkspaceDigest(value) { return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value); }
       function vmWorkspaceMode(value) { return ['native-stealth', 'cdp-attached', 'unknown'].includes(value); }
-      function vmSampleEvent(value) {
+      function vmSampleEvent(value, caller = false) {
         return vmWorkspaceExact(value, ['session_id', 'process_id', 'sequence_number']) &&
           isCanonicalInteger(value.session_id, 1n, uint64Max) &&
-          isCanonicalInteger(value.sequence_number, 1n, uint64Max) && isSafeIntegerInRange(value.process_id, 1, 0xffffffff);
+          isCanonicalInteger(value.sequence_number, 1n, uint64Max) && (caller ? value.process_id === 0 : isSafeIntegerInRange(value.process_id, 1, 0xffffffff));
       }
       function vmSampleEventKey(value) { return `${value.session_id}:${value.process_id}:${value.sequence_number}`; }
       function isVmDispatchSample(sample, workspace) {
+        const provenance = sample?.provenance;
         return vmWorkspaceExact(sample, ['event', 'instruction_pointer', 'instruction_pointer_units', 'opcode',
           'handler_index', 'sample_index', 'operand_count', 'finding_id', 'investigation_id',
-          'interpreter_artifact_id', 'bytecode_artifact_id', 'invocation_id', 'invocation_event']) &&
-          vmSampleEvent(sample.event) && ['instruction_pointer', 'opcode', 'handler_index', 'sample_index']
+          'interpreter_artifact_id', 'bytecode_artifact_id', 'invocation_id', 'invocation_event',
+          ...(provenance === undefined ? [] : ['provenance'])]) &&
+          (provenance === undefined || (vmWorkspaceExact(provenance, ['source', 'source_artifact_sha256', 'input_sha256']) &&
+            provenance.source === 'caller-supplied' && provenance.source_artifact_sha256 === workspace.source_artifact_sha256 &&
+            vmWorkspaceDigest(provenance.input_sha256) && sample.instruction_pointer_units === 'unknown' &&
+            sample.invocation_id === null && sample.invocation_event === null && sample.bytecode_artifact_id === '0')) &&
+          vmSampleEvent(sample.event, provenance !== undefined) && ['instruction_pointer', 'opcode', 'handler_index', 'sample_index']
             .every(key => isSafeIntegerInRange(sample[key], 0, 0xffffffff)) &&
           isSafeIntegerInRange(sample.operand_count, 0, 255) &&
           ['finding_id', 'investigation_id', 'interpreter_artifact_id'].every(key => isCanonicalInteger(sample[key], 1n, uint64Max)) &&
@@ -2549,8 +2555,14 @@
           if (repeatedSelector) {
             if (handler.sample_count !== 0 || handler.state === 'observed') return false;
           } else if (handler.sample_count < retained || (!truncated && handler.sample_count !== retained)) return false;
+          if (!truncated && handler.state === 'observed' && retained > 0 &&
+            !workspace.samples.some(sample => sample.opcode === handler.opcode && sample.provenance === undefined)) return false;
           total += handler.sample_count;
         }
+        if (workspace.samples.some(sample => sample.provenance !== undefined) &&
+          !workspace.coverage.omissions.some(row => row.reason === 'caller-samples-unverified')) return false;
+        if (!truncated && workspace.samples.length > 0 && workspace.samples.every(sample => sample.provenance !== undefined) &&
+          !workspace.coverage.omissions.some(row => ['sampler-unavailable', 'dispatch-sample-budget'].includes(row.reason))) return false;
         return total <= workspace.sample_count;
       }
 
@@ -2603,7 +2615,7 @@
 
       function vmOpcodeSamplePositions(samples) {
         return samples.slice(0, 4).map(sample =>
-          `PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`);
+          `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`);
       }
 
       function vmOpcodeHandlerRow(workspace, handler) {
@@ -2766,7 +2778,7 @@
               !isSafeIntegerInRange(position.instruction_pointer, 0, 0xffffffff) ||
               position.sample_event.session_id !== link.host_event.session_id || position.sample_event.process_id !== link.host_event.process_id ||
               BigInt(position.sample_event.sequence_number) >= BigInt(link.host_event.sequence_number) ||
-              !workspace.samples.some(sample => vmSampleEventKey(sample.event) === vmSampleEventKey(position.sample_event) &&
+              !workspace.samples.some(sample => sample.provenance === undefined && vmSampleEventKey(sample.event) === vmSampleEventKey(position.sample_event) &&
                 sample.invocation_event && vmSampleEventKey(sample.invocation_event) === vmSampleEventKey(position.invocation_event) &&
                 sample.invocation_id === position.invocation_id && sample.instruction_pointer === position.instruction_pointer &&
                 sample.instruction_pointer_units === position.instruction_pointer_units)) return false;
@@ -2786,7 +2798,7 @@
 
       function vmHostLinkOmissionText(reason) {
         return {
-          'dispatch-samples-unavailable': 'No retained dispatch samples. guest_position stays null. Static handlers can still be listed. This is the missing sampler, not an empty workspace.',
+          'dispatch-samples-unavailable': 'No retained native dispatch samples. guest_position stays null. Static handlers can still be listed. This is the missing sampler, not an empty workspace.',
           'dispatch-sample-retention-limit': 'Accepted samples were dropped from the retained set, so those samples cannot prove a guest position.',
           'host-link-limit': 'Host-link retention reached its cap. Further same-scope events are omitted.',
           'host-events-unavailable': 'No host event shared this interpreter session, navigation, and frame.'
@@ -2821,7 +2833,7 @@
         if (staticOnly && links.length > 0) {
           headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null on every row. Same session, navigation, and frame is correlation, not a proven Wasm loader and not request-value provenance. Static handlers stay listed. This is the missing sampler, not an empty workspace. Session sources lists stored JavaScript and any joined live CDP scripts separately.';
         } else if (staticOnly) {
-          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null because no dispatch samples were retained, and no host event shared this session, navigation, and frame (host-events-unavailable). This is not an empty workspace.';
+          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null because no native dispatch samples were retained, and no host event shared this session, navigation, and frame (host-events-unavailable). This is not an empty workspace.';
         } else if (links.length === 0) {
           headline = 'Guest position unknown: no proven host-to-dispatch link is available.';
         } else {
@@ -2837,7 +2849,11 @@
       }
 
       function vmStaticSampleNoticeText(workspace) {
-        if (!workspace || workspace.sample_count !== 0 || !Array.isArray(workspace.coverage?.omissions)) return null;
+        if (!workspace || !Array.isArray(workspace.coverage?.omissions)) return null;
+        if (workspace.coverage.omissions.some(row => row?.reason === 'caller-samples-unverified')) {
+          return 'Caller-supplied dispatch reports are unverified, not native runtime observations. They do not confirm handlers, guest PC units or host-call causality. Native sampler omissions remain where no native samples were retained.';
+        }
+        if (workspace.sample_count !== 0) return null;
         if (!workspace.coverage.omissions.some(row => row?.reason === 'sampler-unavailable')) return null;
         return 'Static only. sampler-unavailable. No dispatch samples were retained, so host links stay reason dispatch-samples-unavailable and guest_position null. Static handlers remain listed. This is the missing sampler, not an empty workspace. Real samples without rebuilding the browser come from reb-native-vm-fixture --emit-dispatch-events-v1.';
       }

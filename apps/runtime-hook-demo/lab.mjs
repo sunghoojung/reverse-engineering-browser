@@ -9,10 +9,10 @@ const { values } = parseArgs({
     port: { type: "string" },
   },
 });
-if (!["callback", "worker"].includes(values.page)) {
-  throw new Error("--page must be callback or worker");
+if (!["callback", "worker", "imports"].includes(values.page)) {
+  throw new Error("--page must be callback, worker or imports");
 }
-const port = Number(values.port ?? (values.page === "callback" ? 7320 : 8766));
+const port = Number(values.port ?? (values.page === "callback" ? 7320 : values.page === "imports" ? 7321 : 8766));
 if (!Number.isInteger(port) || port < 0 || port > 65535) {
   throw new Error("--port must be an integer from 0 through 65535");
 }
@@ -22,7 +22,12 @@ const routes =
         "/": ["index.html", "text/html; charset=utf-8"],
         "/demo.js": ["demo.js", "text/javascript"],
       }
-    : {
+      : values.page === "imports"
+      ? {
+          "/": ["imports.html", "text/html; charset=utf-8"],
+          "/imports.js": ["imports.js", "text/javascript"],
+        }
+      : {
         "/": ["ghostwire-worker/parcel.html", "text/html; charset=utf-8"],
         "/signer-worker.js": [
           "ghostwire-worker/signer-worker.js",

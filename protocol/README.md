@@ -7,6 +7,12 @@ research UI. Authorization, capture, and privacy rules are defined in
 [WASM Inspection v1](wasm-inspection-v1.md) defines bounded static module
 inspection and its original-byte coordinates.
 
+[Live Wasm inspection v1](live-wasm-inspection-v1.md) defines confirmed
+Object Lab and attached-page memory inspection. It does not invent a guest PC.
+
+[Paused import-object map v1](paused-import-object-v1.md) defines the
+getProperties-only host import map. Invocation stays unproven.
+
 [JavaScript Source Facts v1](javascript-source-facts-v1.md) defines exact-artifact
 lexical binding/effect analysis, original-byte ranges and explicit unknown coverage.
 

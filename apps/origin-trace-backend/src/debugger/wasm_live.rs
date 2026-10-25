@@ -30,6 +30,8 @@ struct Listing {
     session: Value,
     navigation: Value,
     context: Option<String>,
+    scope: &'static str,
+    captured: Value,
     connection: Arc<Connection>,
     group: String,
     created: Instant,
@@ -87,7 +89,7 @@ impl Debugger {
                 .is_some_and(|c| Arc::ptr_eq(c, &listing.connection))
         {
             return Err(Error::conflict(
-                "Live Wasm selection expired or its disposable target/document changed; list live Wasm objects again",
+                "Live Wasm selection expired or its page/document changed; list live Wasm objects again. Other pages are refused.",
             ));
         }
         Ok(())
@@ -113,13 +115,8 @@ impl Debugger {
         }
     }
     pub(super) async fn list_live_wasm(self: &Arc<Self>, request: &Value) -> Result<Value> {
-        self.isolated_target("object_experiment", true)?;
         let s = self.snapshot();
-        if request["target_id"] != s["target"]["id"] || !s["target"]["id"].is_string() {
-            return Err(Error::conflict(
-                "Select the exact attached debugger target before listing live Wasm objects",
-            ));
-        }
+        let scope = classify_live_wasm(request, &s, self.experiment.context().as_deref())?;
         let connection = self
             .connection
             .lock()
@@ -138,7 +135,17 @@ impl Debugger {
             epoch: s["target_document_epoch"].clone(),
             session: s["object_experiment"]["session_id"].clone(),
             navigation: s["object_experiment"]["navigation_id"].clone(),
-            context: self.experiment.context(),
+            context: if scope == "object_experiment" {
+                self.experiment.context()
+            } else {
+                None
+            },
+            scope,
+            captured: if scope == "captured_document" {
+                request["captured_owner"].clone()
+            } else {
+                Value::Null
+            },
             connection: connection.clone(),
             group: group.clone(),
             created: Instant::now(),
@@ -229,7 +236,7 @@ impl Debugger {
         // The public handle lifetime starts when collection finishes, not when
         // the first potentially slow renderer query began.
         listing.created = Instant::now();
-        let result = json!({"ok":true,"generation":self.state.lock().unwrap_or_else(|e| e.into_inner())["generation"],"wasm":{"listing_id":id,"target_id":listing.target,"document_epoch":listing.epoch,"expires_after_ms":60000,"per_kind_limit":LIMIT,"objects":rows,"coverage":coverage,"scope":"selected-default-realm","linkage_reason":"CDP prototype queries do not prove module-to-script/artifact identity; no name or URL join is inferred"}});
+        let result = json!({"ok":true,"generation":self.state.lock().unwrap_or_else(|e| e.into_inner())["generation"],"wasm":{"listing_id":id,"target_id":listing.target,"document_epoch":listing.epoch,"expires_after_ms":60000,"per_kind_limit":LIMIT,"objects":rows,"coverage":coverage,"scope":"selected-default-realm","owner_scope":listing.scope,"captured_owner":listing.captured,"linkage_reason":"CDP prototype queries do not prove module-to-script/artifact identity; no name or URL join is inferred"}});
         if let Err(error) = validation::schema("DebuggerLiveWasmResult", &result, 422) {
             release_group(&connection, &group).await;
             return Err(error);
@@ -263,7 +270,8 @@ impl Debugger {
         Ok(result)
     }
     pub(super) async fn read_live_wasm(&self, request: &Value) -> Result<Value> {
-        self.isolated_target("object_experiment", true)?;
+        let snapshot = self.snapshot();
+        let scope = classify_live_wasm(request, &snapshot, self.experiment.context().as_deref())?;
         let listing = self
             .wasm_live
             .retained
@@ -273,9 +281,14 @@ impl Debugger {
             .ok_or_else(|| {
                 Error::conflict("List live Wasm objects before reading a memory slice")
             })?;
-        if request["listing_id"] != listing.id || request["target_id"] != listing.target {
+        if request["listing_id"] != listing.id
+            || request["target_id"] != listing.target
+            || listing.scope != scope
+            || (scope == "captured_document" && request["captured_owner"] != listing.captured)
+            || (scope == "object_experiment" && request.get("captured_owner").is_some())
+        {
             return Err(Error::conflict(
-                "Live Wasm listing or target does not match; list objects again",
+                "Live Wasm listing or target does not match this request. List objects again. Captured reads repeat captured_owner; Object Lab reads omit it. Other pages are refused.",
             ));
         }
         self.live_wasm_current(&listing).await?;
@@ -298,17 +311,110 @@ impl Debugger {
         self.live_wasm_current(&listing).await?;
         let slice = &response["result"]["value"];
         validate_slice(slice, request)?;
-        let result = json!({"ok":true,"generation":self.state.lock().unwrap_or_else(|e| e.into_inner())["generation"],"memory":{"listing_id":listing.id,"target_id":listing.target,"object_id":request["object_id"],"export_name":request["export_name"],"offset":slice["offset"],"length":slice["length"],"byte_length":slice["byte_length"],"bytes":slice["bytes"],"shared":slice["shared"],"atomic":false}});
+        let result = json!({"ok":true,"generation":self.state.lock().unwrap_or_else(|e| e.into_inner())["generation"],"memory":{"listing_id":listing.id,"target_id":listing.target,"object_id":request["object_id"],"owner_scope":listing.scope,"export_name":request["export_name"],"offset":slice["offset"],"length":slice["length"],"byte_length":slice["byte_length"],"bytes":slice["bytes"],"shared":slice["shared"],"atomic":false}});
         validation::schema("DebuggerLiveWasmMemoryResult", &result, 422)?;
         Ok(result)
     }
 }
+fn attached_document(state: &Value) -> Value {
+    json!({"instance_id":state["network"]["instance_id"],"connection_epoch":state["network"]["capture_epoch"],
+        "document_epoch":state["target_document_epoch"],"target_id":state["target"]["id"]})
+}
+fn owner_pins(owner: &Value) -> bool {
+    owner.as_object().is_some_and(|object| object.len() == 4)
+        && owner["instance_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 256)
+        && owner["connection_epoch"].as_u64().is_some()
+        && owner["document_epoch"].as_u64().is_some()
+        && owner["target_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 4096)
+}
+fn page_attached(state: &Value) -> bool {
+    matches!(state["state"].as_str(), Some("running" | "paused"))
+        && state["target"]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+        && state["request_interception"]["pending_requests"]
+            .as_u64()
+            .unwrap_or(0)
+            == 0
+}
+/// Object Lab stays the disposable path. A captured page is admitted only when
+/// the request names that exact attached page and confirms the effect. A
+/// different target, worker, or unconfirmed baseline tab is refused.
+fn classify_live_wasm(
+    request: &Value,
+    state: &Value,
+    experiment: Option<&str>,
+) -> Result<&'static str> {
+    if request.get("captured_owner").is_some() && request["confirmed"] != true {
+        return Err(Error::bad(
+            "Captured Wasm inspection requires confirmed true. Missing fields: confirmed, captured_owner.instance_id, captured_owner.connection_epoch, captured_owner.document_epoch, captured_owner.target_id. Effects: code-execution and browser-control. Other pages are refused.",
+        ));
+    }
+    if !page_attached(state) {
+        return Err(Error::conflict(
+            "Attach the debugger to one page before live Wasm inspection. Other pages are refused.",
+        ));
+    }
+    if request["target_id"] != state["target"]["id"] {
+        return Err(Error::conflict(
+            "target_id is not the attached debugger page. Other pages are refused.",
+        ));
+    }
+    if request.get("captured_owner").is_some() {
+        if experiment.is_some() {
+            return Err(Error::conflict(
+                "A disposable Experiment context is active, so captured_owner is refused. Use Object Lab on that disposable page, or dispose the experiment and confirm the attached page. Other pages are refused.",
+            ));
+        }
+        if state["target"]["type"] != "page"
+            || !owner_pins(&request["captured_owner"])
+            || request["captured_owner"] != attached_document(state)
+        {
+            return Err(Error::conflict(
+                "captured_owner does not match the attached page. Required fields: instance_id, connection_epoch, document_epoch, target_id. Workers are refused. Other pages are refused.",
+            ));
+        }
+        return Ok("captured_document");
+    }
+    if experiment.is_none()
+        || state["object_experiment"]["isolated"] != true
+        || state["object_experiment"]["target_id"] != state["target"]["id"]
+        || state["object_experiment"]["navigation_id"]
+            .as_u64()
+            .unwrap_or(0)
+            == 0
+        || state["object_experiment"]["url"]
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
+        return Err(Error::conflict(
+            "Live Wasm inspection needs the navigated disposable Object Lab page, or confirmed true plus captured_owner for the exact attached page. Missing captured fields: confirmed, captured_owner.instance_id, captured_owner.connection_epoch, captured_owner.document_epoch, captured_owner.target_id. Other pages are refused.",
+        ));
+    }
+    Ok("object_experiment")
+}
 fn same_owner(listing: &Listing, state: &Value, context: Option<&str>) -> bool {
+    if !page_attached(state)
+        || listing.target != state["target"]["id"]
+        || listing.epoch != state["target_document_epoch"]
+    {
+        return false;
+    }
+    if listing.scope == "captured_document" {
+        return context.is_none()
+            && listing.context.is_none()
+            && state["target"]["type"] == "page"
+            && listing.captured == attached_document(state);
+    }
     context.is_some()
+        && listing.scope == "object_experiment"
+        && listing.captured.is_null()
         && listing.context.as_deref() == context
-        && listing.target == state["target"]["id"]
         && listing.target == state["object_experiment"]["target_id"]
-        && listing.epoch == state["target_document_epoch"]
         && listing.session == state["object_experiment"]["session_id"]
         && listing.navigation == state["object_experiment"]["navigation_id"]
         && state["object_experiment"]["isolated"] == true
@@ -318,11 +424,6 @@ fn same_owner(listing: &Listing, state: &Value, context: Option<&str>) -> bool {
         && state["object_experiment"]["url"]
             .as_str()
             .is_some_and(|url| !url.is_empty())
-        && ["running", "paused"].contains(&state["state"].as_str().unwrap_or(""))
-        && state["request_interception"]["pending_requests"]
-            .as_u64()
-            .unwrap_or(0)
-            == 0
 }
 async fn release_group(connection: &Connection, group: &str) {
     if connection
@@ -441,6 +542,8 @@ while True:
                 session: json!(4),
                 navigation: json!(5),
                 context: Some("owned".into()),
+                scope: "object_experiment",
+                captured: Value::Null,
                 connection: connection.clone(),
                 group: format!("listing-{id}"),
                 created: if expired {
@@ -469,6 +572,100 @@ while True:
         }
         assert!(!same_owner(&listing, &state, None));
         assert!(!same_owner(&listing, &state, Some("replacement")));
+        let captured_owner = json!({"instance_id":"instance","connection_epoch":2,"document_epoch":3,"target_id":"page"});
+        let captured = Listing {
+            id: 1,
+            target: json!("page"),
+            epoch: json!(3),
+            session: json!(0),
+            navigation: json!(0),
+            context: None,
+            scope: "captured_document",
+            captured: captured_owner.clone(),
+            connection: connection.clone(),
+            group: "listing-captured".into(),
+            created: Instant::now(),
+            objects: BTreeMap::new(),
+        };
+        let captured_state = json!({"target":{"id":"page","type":"page"},"target_document_epoch":3,"state":"paused","network":{"instance_id":"instance","capture_epoch":2},"object_experiment":{"isolated":false},"request_interception":{"pending_requests":0}});
+        assert!(same_owner(&captured, &captured_state, None));
+        assert!(!same_owner(&captured, &captured_state, Some("owned")));
+        for (pointer, value) in [
+            ("/target/type", json!("worker")),
+            ("/target/id", json!("other")),
+            ("/network/instance_id", json!("other")),
+            ("/network/capture_epoch", json!(9)),
+            ("/target_document_epoch", json!(4)),
+            ("/state", json!("waiting")),
+            ("/request_interception/pending_requests", json!(1)),
+        ] {
+            let mut changed = captured_state.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(!same_owner(&captured, &changed, None), "{pointer}");
+        }
+        let lab = json!({"action":"list_live_wasm_objects","target_id":"page"});
+        let experiment_state = json!({"target":{"id":"page","type":"page"},"target_document_epoch":3,"state":"running","network":{"instance_id":"instance","capture_epoch":2},"object_experiment":{"target_id":"page","session_id":4,"navigation_id":5,"isolated":true,"url":"http://127.0.0.1/owned"},"request_interception":{"pending_requests":0}});
+        assert_eq!(
+            classify_live_wasm(&lab, &experiment_state, Some("owned")).unwrap(),
+            "object_experiment"
+        );
+        assert!(
+            classify_live_wasm(&lab, &experiment_state, None)
+                .unwrap_err()
+                .message
+                .contains("disposable")
+        );
+        assert!(
+            classify_live_wasm(&lab, &captured_state, None)
+                .unwrap_err()
+                .message
+                .contains("Missing captured fields")
+        );
+        let mut confirmed = json!({"action":"list_live_wasm_objects","target_id":"page","confirmed":true,"captured_owner":captured_owner.clone()});
+        assert_eq!(
+            classify_live_wasm(&confirmed, &captured_state, None).unwrap(),
+            "captured_document"
+        );
+        assert!(
+            classify_live_wasm(&confirmed, &captured_state, Some("owned"))
+                .unwrap_err()
+                .message
+                .contains("disposable")
+        );
+        confirmed["confirmed"] = json!(false);
+        assert!(
+            classify_live_wasm(&confirmed, &captured_state, None)
+                .unwrap_err()
+                .message
+                .contains("confirmed")
+        );
+        confirmed["confirmed"] = json!(true);
+        confirmed["captured_owner"]["target_id"] = json!("other-page");
+        assert!(
+            classify_live_wasm(&confirmed, &captured_state, None)
+                .unwrap_err()
+                .message
+                .contains("Other pages are refused")
+        );
+        confirmed["target_id"] = json!("other-page");
+        confirmed["captured_owner"]["target_id"] = json!("other-page");
+        let mut other_page = captured_state.clone();
+        other_page["target"]["id"] = json!("demo");
+        assert!(
+            classify_live_wasm(&confirmed, &other_page, None)
+                .unwrap_err()
+                .message
+                .contains("target_id")
+        );
+        let mut worker = captured_state.clone();
+        worker["target"]["type"] = json!("worker");
+        confirmed = json!({"action":"read_live_wasm_memory","target_id":"page","confirmed":true,"captured_owner":captured_owner});
+        assert!(
+            classify_live_wasm(&confirmed, &worker, None)
+                .unwrap_err()
+                .message
+                .contains("Workers")
+        );
         let put = |listing| {
             *debugger.wasm_live.retained.lock().unwrap() = Some(listing);
         };

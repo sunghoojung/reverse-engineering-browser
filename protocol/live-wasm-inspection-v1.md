@@ -2,10 +2,21 @@
 
 The existing `POST /api/debugger/actions` surface adds
 `list_live_wasm_objects` and `read_live_wasm_memory`. These are explicit,
-effectful operations in an attached, navigated **disposable Object Lab page**,
-not retained-artifact reads or an extension of captured-document execution.
-Create the disposable experiment and navigate it through existing actions first.
-Both operations require its exact `target_id`. Baseline tabs are refused.
+effectful operations. Two owners are accepted, and every other page is refused:
+
+- the attached, navigated **disposable Object Lab page**, selected by its exact
+  `target_id` with no `captured_owner`; or
+- the **exact attached page document**, when `confirmed` is true and
+  `captured_owner` repeats `instance_id`, `connection_epoch` (`network.capture_epoch`),
+  `document_epoch` (`target_document_epoch`), and `target_id`.
+
+A disposable Experiment context refuses `captured_owner`. Workers, a different
+target id, a stale epoch, and an unconfirmed captured request are refused.
+Missing captured fields are named in the error. `describe debugger_action
+--action list_live_wasm_objects` (and the read action) advertises effects,
+including code-execution and browser-control, and the confirmation. The shared
+debugger action stays off the default MCP tool list until `--allow-effects`.
+That flag is not authorization.
 
 ## Listing and ownership
 
@@ -36,8 +47,13 @@ transport is stopped, never the browser or a replacement debugger connection.
 
 CDP prototype queries provide no proven module-to-script/artifact identity.
 `script_id` and `artifact_id` are therefore null and linkage is `unavailable`.
-URLs, constructor names, static exports, and retained bytecode are not proof of
-live instance ownership. Artifact-ID-only memory reads are not supported.
+`linkage_reason` says that explicitly for both Object Lab and captured-page
+listings. `owner_scope` is `object_experiment` or `captured_document`.
+`captured_owner` is null on the Object Lab path. URLs, constructor names,
+static exports, and retained bytecode are not proof of live instance ownership.
+Artifact-ID-only memory reads are not supported. This inspection does not
+invent a guest program counter. Caller-supplied dispatch reports, when used
+offline, stay unverified analysis input and are not a live sampler.
 
 ## Memory slices
 

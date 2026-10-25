@@ -11488,7 +11488,18 @@
             const row = document.createElement('div'); row.className = 'scope-property';
             const name = document.createElement('span'); name.className = 'scope-property-name'; name.textContent = property.name;
             const value = document.createElement('span'); value.className = 'scope-property-value'; value.textContent = debuggerValueText(property.value ?? property.get);
-            row.append(name, value); return row;
+            row.append(name, value);
+            if (['local', 'closure', 'block'].includes(scope.type) && property.name) {
+              const map = document.createElement('button');
+              map.type = 'button';
+              map.className = 'scope-map';
+              map.textContent = 'Map imports';
+              map.setAttribute('aria-label', `Map ${property.name} as a paused import object`);
+              map.disabled = memoryOriginTraceActive();
+              map.addEventListener('click', () => mapPausedImport(frame, scope, index, property.name));
+              row.append(map);
+            }
+            return row;
           });
           if (properties.length === 0) properties.push(textElement('div', 'debug-pane-empty', 'No retained properties'));
           group.append(summary, ...properties); nodes.push(group);
@@ -11671,10 +11682,28 @@
         renderDebuggerPart('state', JSON.stringify([session?.state, session?.error, session?.target, session?.targets, state.debuggerError, originTraceActive]), renderDebuggerState);
         renderDebuggerPart('callStack', `${originTraceActive}:${selectedPauseSignature}`, renderCallStack);
         renderDebuggerPart('scope', selectedPauseSignature, renderScope);
+        if (typeof CapturedVmLab !== 'undefined') CapturedVmLab.refresh();
         renderDebuggerPart('watches', JSON.stringify([session?.watches ?? [], originTraceActive]), renderWatches);
         renderDebuggerPart('breakpoints', JSON.stringify([session?.breakpoints ?? [], originTraceActive]), renderBreakpoints);
         renderDebuggerPart('specialBreakpoints', JSON.stringify([session?.settings ?? null, attached, originTraceActive]), renderSpecialBreakpoints);
         renderConsole();
+      }
+
+      async function mapPausedImport(frame, scope, scopeIndex, bindingName) {
+        if (typeof CapturedVmLab === 'undefined') return;
+        const built = CapturedVmLab.importRequest(state.debuggerSession, {
+          scopeType: scope.type, callFrameId: frame.id, scopeIndex, bindingName
+        });
+        if (!built.ok) {
+          CapturedVmLab.showImport(null, built.message);
+          return;
+        }
+        const result = await debuggerAction(built.request);
+        if (result?.import_object) {
+          CapturedVmLab.showImport(result.import_object, 'Import map is descriptor labels only. invocation is unproven and guest_position is null.');
+          document.querySelector('#debugger-vm-lab')?.setAttribute('open', '');
+          document.querySelector('#vm-captured-lab')?.setAttribute('open', '');
+        } else CapturedVmLab.showImport(null, state.debuggerError || 'Import map was not accepted.');
       }
 
       async function debuggerAction(request, memoryOwner = null, experimentOwner = null) {
@@ -12561,6 +12590,15 @@
         elements.sourcesEditor.classList.toggle('console-open', open);
         elements.consoleToggle.setAttribute('aria-pressed', String(open));
       };
+      if (typeof CapturedVmLab !== 'undefined') {
+        const labApi = {
+          session: () => state.debuggerSession,
+          busy: () => state.debuggerActionPending || memoryOriginTraceActive(),
+          run: request => debuggerAction(request)
+        };
+        CapturedVmLab.mount(document.querySelector('#debugger-vm-lab-body'), labApi);
+        CapturedVmLab.mount(document.querySelector('#vm-captured-lab-body'), labApi);
+      }
       elements.sourceSidebarToggle.addEventListener('click', () => {
         state.sourceSidebarOpen = elements.sourceSidebar.hidden;
         renderSourceSidebar();

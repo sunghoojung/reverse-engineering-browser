@@ -621,7 +621,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
     }
     assert_eq!(
         names.len(),
-        64,
+        65,
         "Review debugger action coverage when the dispatcher changes"
     );
     assert_eq!(names, mappings.keys().map(String::as_str).collect());
@@ -828,8 +828,9 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         }
     }
     // Includes explicit element document inspection, confirmed screenshot capture,
-    // and live-capture native console connect.
-    assert_eq!(action_count, 87);
+    // live-capture native console connect, live Wasm inspection, and paused
+    // import-object mapping.
+    assert_eq!(action_count, 88);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -891,7 +892,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             "Dispatch coverage: {name}"
         );
     }
-    assert_eq!(action_names("DebuggerAction").len(), 64);
+    assert_eq!(action_names("DebuggerAction").len(), 65);
     for (name, source, pattern) in [
         (
             "NativeConsoleAction",
@@ -7309,8 +7310,35 @@ async fn live_wasm_requires_disposable_owner_and_explicit_bounded_reads() {
         let response = server.action("/api/debugger/actions", request).await;
         assert_eq!(response.status(), 409);
         let body: Value = response.json().await.unwrap();
-        assert!(body["error"].as_str().unwrap().contains("disposable"));
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Other pages are refused"),
+            "{}",
+            body["error"]
+        );
     }
+    let captured = json!({"action":"list_live_wasm_objects","target_id":"baseline","captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}});
+    let missing = server.action("/api/debugger/actions", captured).await;
+    assert_eq!(missing.status(), 400);
+    let missing_body: Value = missing.json().await.unwrap();
+    assert!(
+        missing_body["error"]
+            .as_str()
+            .unwrap()
+            .contains("confirmed")
+    );
+    let mismatched = json!({"action":"list_live_wasm_objects","target_id":"other","confirmed":true,"captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}});
+    let refused = server.action("/api/debugger/actions", mismatched).await;
+    assert_eq!(refused.status(), 409);
+    let refused_body: Value = refused.json().await.unwrap();
+    assert!(
+        refused_body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Other pages are refused")
+    );
     for (key, value) in [
         ("confirmed", json!(false)),
         ("length", json!(4097)),

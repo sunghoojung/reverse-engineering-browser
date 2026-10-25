@@ -6868,7 +6868,35 @@ try {
       assert(heap.snapshot.results.some(row => row.name === "originTraceMarker"),
         "Native heap ingest must find the authored string marker");
       await rejectAction("list_live_wasm_objects", {target_id:baseline}, 409);
-      console.log(`PASS ${name} real Chrome heap ingest and baseline Wasm execution refusal`);
+      const attached = await get();
+      const capturedOwner = {
+        instance_id: attached.network.instance_id,
+        connection_epoch: attached.network.capture_epoch,
+        document_epoch: attached.target_document_epoch,
+        target_id: baseline,
+      };
+      await rejectAction("list_live_wasm_objects", {target_id: baseline, captured_owner: capturedOwner}, 400);
+      await rejectAction("list_live_wasm_objects", {target_id: "other-page", confirmed: true, captured_owner: {...capturedOwner, target_id: "other-page"}}, 409);
+      const capturedList = await action("list_live_wasm_objects", {target_id: baseline, confirmed: true, captured_owner: capturedOwner});
+      assert.equal(capturedList.wasm.owner_scope, "captured_document");
+      assert.deepEqual(capturedList.wasm.captured_owner, capturedOwner);
+      assert.match(String(capturedList.wasm.linkage_reason), /identity/);
+      for (const kind of ["instance", "module", "memory"]) {
+        assert(capturedList.wasm.objects.some(row => row.kind === kind), `Missing captured ${kind}`);
+      }
+      const capturedInstance = capturedList.wasm.objects.find(row => row.kind === "instance");
+      const capturedMemory = await action("read_live_wasm_memory", {
+        target_id: baseline, listing_id: capturedList.wasm.listing_id, object_id: capturedInstance.id,
+        export_name: "memory", offset: 0, length: 4, confirmed: true, captured_owner: capturedOwner,
+      });
+      assert.equal(capturedMemory.memory.owner_scope, "captured_document");
+      assert.deepEqual(capturedMemory.memory.bytes, [17, 33, 65, 129]);
+      assert.equal(capturedMemory.memory.atomic, false);
+      await rejectAction("read_live_wasm_memory", {
+        target_id: baseline, listing_id: capturedList.wasm.listing_id, object_id: capturedInstance.id,
+        export_name: "memory", offset: 0, length: 4, confirmed: true,
+      }, 409);
+      console.log(`PASS ${name} real Chrome heap ingest, captured-document Wasm inspection, and unconfirmed refusal`);
       await action("create_request_interception_experiment");
       let state = await until(s => s.state === "running" &&
         s.target?.id === s.request_interception.target_id && s.action_scope.state === "ready");
@@ -6881,6 +6909,13 @@ try {
         s.object_experiment.target_id === target && s.object_experiment.navigation_id > 0);
       await rejectAction("list_live_wasm_objects", {target_id:baseline}, 409);
       const listed = await action("list_live_wasm_objects", {target_id:target});
+      assert.equal(listed.wasm.owner_scope, "object_experiment");
+      assert.equal(listed.wasm.captured_owner, null);
+      assert.match(String(listed.wasm.linkage_reason), /identity/);
+      const current = await get();
+      await rejectAction("list_live_wasm_objects", {target_id: target, confirmed: true, captured_owner: {
+        instance_id: current.network.instance_id, connection_epoch: current.network.capture_epoch,
+        document_epoch: current.target_document_epoch, target_id: target}}, 409);
       for (const kind of ["instance", "module", "memory"]) {
         assert(listed.wasm.objects.some(row => row.kind === kind), `Missing live ${kind}`);
       }
@@ -6890,6 +6925,7 @@ try {
       const read = {target_id:target, listing_id:listed.wasm.listing_id, object_id:instance.id,
         export_name:"memory", offset:0, length:4, confirmed:true};
       const exported = await action("read_live_wasm_memory", read);
+      assert.equal(exported.memory.owner_scope, "object_experiment");
       assert.deepEqual(exported.memory.bytes, [17,33,65,129]);
       assert.equal(exported.memory.atomic, false);
       const direct = {...read, object_id:memory.id};

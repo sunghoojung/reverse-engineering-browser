@@ -1440,6 +1440,15 @@
       .scope-group { margin-bottom: 6px; }
       .scope-group summary { cursor: pointer; color: var(--muted); }
       .scope-property { display: grid; grid-template-columns: minmax(64px, .7fr) minmax(0, 1.3fr); gap: 7px; padding: 2px 0 2px 12px; font-family: var(--mono); }
+      .scope-map { grid-column: 1 / -1; justify-self: start; margin: 0 0 4px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--text); font: 11px var(--sans); cursor: pointer; }
+      .scope-map:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+      .scope-map:disabled { opacity: .55; cursor: default; }
+      .vm-lab-note, .vm-lab-notice { margin: 0 0 8px; overflow-wrap: anywhere; }
+      .vm-lab-check { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 8px; }
+      .vm-lab-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 8px 0; }
+      .vm-lab-row label { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 120px; }
+      .vm-lab-row input, .vm-lab-row select, #debugger-vm-lab .secondary-button, #vm-captured-lab .secondary-button { box-sizing: border-box; max-width: 100%; }
+      .vm-lab-report { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; margin: 8px 0; font: 11px/1.45 var(--mono); }
       .scope-property-name { color: var(--blue); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .scope-property-value { color: var(--text); overflow-wrap: anywhere; }
       .debug-checkbox { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
@@ -4510,7 +4519,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-session-status { grid-column: 3; grid-row: 1; justify-self: end; padding: 0; min-width: 0; }
 #screen-vm .vm-session-copy { display: none; }
 #screen-vm .vm-session-chip { padding: 3px 6px; font-size: 9px; letter-spacing: .03em; }
-#vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+#vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; overflow: hidden; }
+#vm-captured-lab { max-height: 42vh; overflow: auto; }
 #vm-findings-workspace > .vm-notice { margin: 0; padding: 5px 12px; font-size: 10px; max-height: 48px; overflow: auto; border-bottom: 1px solid var(--line); }
 #vm-findings-workspace > .vm-grid { height: auto; min-height: 0; max-height: none; grid-template-columns: 210px minmax(0, 1fr); }
 #screen-vm .vm-list-pane { background: var(--chrome); }

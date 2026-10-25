@@ -14481,6 +14481,77 @@
                 }
               ]
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "inspect_paused_import_object"
+              },
+              "expected_generation": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "owner": {
+                "$ref": "#/components/schemas/CapturedHookOwner"
+              },
+              "call_frame_id": {
+                "type": "string",
+                "maxLength": 4096,
+                "x-max-utf8-bytes": 4096,
+                "minLength": 1
+              },
+              "scope_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 11
+              },
+              "binding_name": {
+                "type": "string",
+                "maxLength": 256,
+                "x-max-utf8-bytes": 256,
+                "minLength": 1
+              }
+            },
+            "required": [
+              "action",
+              "expected_generation",
+              "owner",
+              "call_frame_id",
+              "scope_index",
+              "binding_name"
+            ],
+            "x-reb-requires-live-target": true,
+            "description": "Read bounded own data properties of an explicitly selected local/closure/block binding in the current pause. Never evaluates expressions, invokes getters, traverses proxies, installs hooks, resumes, or navigates. Descriptor labels are observed object bindings, not proof of Wasm instantiation or invocation. Exact initial snapshot generation and owner are required; connection, document, pause and source are rechecked after each command.",
+            "x-source": [
+              "apps/origin-trace-backend/src/debugger/import_object.rs"
+            ],
+            "x-result-schema": "#/components/schemas/DebuggerImportObjectResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "selected-current-pause",
+                  "condition": "The selected connection, document, frame, lexical scope and source catalog must remain current. Refresh expected_generation from get_debugger immediately before selecting the binding."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Runtime.getProperties only. Results are ephemeral and not appended to native event or host-links evidence. Existing debugger action owner guards and MCP effects visibility are unchanged.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/import_object.rs",
+                  "symbol": "Debugger::inspect_paused_import_object"
+                }
+              ]
+            }
           }
         ],
         "description": "All 62 action envelopes have source-backed request fields, types and requiredness, including conditional fields. Variants marked partial identify remaining complex runtime constraints explicitly. Session availability, record identity, mutation confirmation and state locks still apply. Extra properties remain allowed where dispatch ignores them."
@@ -14543,6 +14614,9 @@
           },
           {
             "$ref": "#/components/schemas/DebuggerElementScreenshotResult"
+          },
+          {
+            "$ref": "#/components/schemas/DebuggerImportObjectResult"
           }
         ],
         "description": "Closed source-backed action response envelopes. Branch by the requested action using x-action-results; nested experiment/CDP/heap state remains partially typed. No unrestricted object fallback.",
@@ -14732,6 +14806,9 @@
           },
           "capture_element_screenshot": {
             "$ref": "#/components/schemas/DebuggerElementScreenshotResult"
+          },
+          "inspect_paused_import_object": {
+            "$ref": "#/components/schemas/DebuggerImportObjectResult"
           }
         }
       },
@@ -26131,6 +26208,212 @@
           "source_hash",
           "execution_context_id"
         ]
+      },
+      "DebuggerImportObjectResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "import_object": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "contract_version": {
+                "const": 1
+              },
+              "provenance": {
+                "const": "selected-paused-own-properties"
+              },
+              "invocation": {
+                "const": "unproven"
+              },
+              "guest_position": {
+                "type": "null"
+              },
+              "owner": {
+                "$ref": "#/components/schemas/CapturedHookOwner"
+              },
+              "call_frame_id": {
+                "type": "string",
+                "maxLength": 4096,
+                "x-max-utf8-bytes": 4096
+              },
+              "scope_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 11
+              },
+              "binding_name": {
+                "type": "string",
+                "maxLength": 256,
+                "x-max-utf8-bytes": 256
+              },
+              "observed_at_ms": {
+                "$ref": "#/components/schemas/PositiveSafeInteger"
+              },
+              "modules": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "module_name": {
+                      "type": "string",
+                      "maxLength": 256,
+                      "x-max-utf8-bytes": 256
+                    },
+                    "state": {
+                      "enum": [
+                        "inspected",
+                        "not-object",
+                        "accessor-not-invoked",
+                        "proxy-not-inspected",
+                        "unavailable"
+                      ]
+                    },
+                    "imports": {
+                      "type": "array",
+                      "maxItems": 64,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "import_name": {
+                            "type": "string",
+                            "maxLength": 256,
+                            "x-max-utf8-bytes": 256
+                          },
+                          "state": {
+                            "enum": [
+                              "function",
+                              "not-function",
+                              "accessor-not-invoked",
+                              "proxy-not-inspected",
+                              "unavailable"
+                            ]
+                          },
+                          "host_function_name": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 256,
+                                "x-max-utf8-bytes": 256
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "host_location": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "script_id": {
+                                    "type": "string",
+                                    "maxLength": 4096,
+                                    "x-max-utf8-bytes": 4096
+                                  },
+                                  "source_hash": {
+                                    "type": "string",
+                                    "maxLength": 65536,
+                                    "x-max-utf8-bytes": 65536
+                                  },
+                                  "execution_context_id": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 2147483647
+                                  },
+                                  "line": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 2147483646
+                                  },
+                                  "column": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 2147483646
+                                  }
+                                },
+                                "required": [
+                                  "script_id",
+                                  "source_hash",
+                                  "execution_context_id",
+                                  "line",
+                                  "column"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "guest_position": {
+                            "type": "null"
+                          }
+                        },
+                        "required": [
+                          "import_name",
+                          "state",
+                          "host_function_name",
+                          "host_location",
+                          "guest_position"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "module_name",
+                    "state",
+                    "imports"
+                  ]
+                }
+              },
+              "omissions": {
+                "type": "array",
+                "uniqueItems": true,
+                "maxItems": 5,
+                "items": {
+                  "enum": [
+                    "property-limit",
+                    "module-limit",
+                    "import-limit",
+                    "deadline",
+                    "name-limit-or-symbol"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "contract_version",
+              "provenance",
+              "invocation",
+              "guest_position",
+              "owner",
+              "call_frame_id",
+              "scope_index",
+              "binding_name",
+              "observed_at_ms",
+              "modules",
+              "omissions"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "generation",
+          "import_object"
+        ],
+        "x-source": "apps/origin-trace-backend/src/debugger/import_object.rs"
       }
     }
   },

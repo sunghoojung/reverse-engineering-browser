@@ -621,7 +621,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
     }
     assert_eq!(
         names.len(),
-        62,
+        63,
         "Review debugger action coverage when the dispatcher changes"
     );
     assert_eq!(names, mappings.keys().map(String::as_str).collect());
@@ -828,8 +828,8 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         }
     }
     // Includes explicit element document inspection, confirmed screenshot capture,
-    // and live-capture native console connect.
-    assert_eq!(action_count, 85);
+    // live-capture native console connect, and paused import-object inspection.
+    assert_eq!(action_count, 86);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -891,7 +891,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             "Dispatch coverage: {name}"
         );
     }
-    assert_eq!(action_names("DebuggerAction").len(), 62);
+    assert_eq!(action_names("DebuggerAction").len(), 63);
     for (name, source, pattern) in [
         (
             "NativeConsoleAction",

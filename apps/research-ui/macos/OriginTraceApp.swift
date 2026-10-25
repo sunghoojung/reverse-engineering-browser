@@ -1832,7 +1832,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
                        "preview_bytes": 256, "observations": 16],
           ],
           "last_failure": NSNull(),
-          "message": "Create an isolated Experiment context to use Runtime Hooks.",
+          "message": "Select a live JavaScript source on the attached page, or create a disposable Experiment context. Add a hook, then confirm before arming.",
           "limits": [
             "definitions": 8,
             "workers": 8,

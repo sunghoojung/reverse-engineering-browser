@@ -1169,8 +1169,13 @@ Hooks panel can target a function inside a minified line. Inline script offsets
 are included; readable representations cannot change the runtime cursor.
 In a connected session, **Hooks** opens the shared Runtime Hooks workspace
 beside the Sources editor, with its ephemeral hit trail below the code. The
-panel creates and manages the same disposable Experiment context used by
-Experiments; its header labels the isolation and links back to Experiments.
+panel can manage the same disposable Experiment context used by Experiments,
+or explicitly bind a live JavaScript source on the attached captured document.
+The header identifies which document is selected. Captured hooks do not require
+creating or navigating a disposable page; Add establishes the exact source and
+document owner, then Arm requires confirmation of live-page mutation.
+See [paused import-object mapping](../../protocol/paused-import-object-v1.md)
+for an owned Wasm import/glue workflow without page-world evaluation.
 On the attached captured page, before an isolated context exists, the same
 panel lists that page's JavaScript and **Pause at this line** sets a debugger
 breakpoint on the selected script. The page stays paused when the line runs.

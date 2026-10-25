@@ -207,7 +207,7 @@
       }
     },
     "last_failure": null,
-    "message": "Create an isolated Experiment context to use Runtime Hooks.",
+    "message": "Select a live JavaScript source on the attached page, or create a disposable Experiment context. Add a hook, then confirm before arming.",
     "limits": {
       "definitions": 8,
       "workers": 8,

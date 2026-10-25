@@ -33,3 +33,33 @@ impl Drop for PublishedEndpoint {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PublishedEndpoint;
+
+    #[test]
+    fn retiring_old_session_does_not_remove_replacement_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().join("config/origin-trace/reb-api.endpoint");
+        let old =
+            PublishedEndpoint::new(Some(&canonical), "127.0.0.1:9100".parse().unwrap()).unwrap();
+        let current =
+            PublishedEndpoint::new(Some(&canonical), "127.0.0.1:9200".parse().unwrap()).unwrap();
+        drop(old);
+        assert_eq!(
+            std::fs::read_to_string(&canonical).unwrap(),
+            "http://127.0.0.1:9200\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&canonical).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(current);
+        assert!(!canonical.exists());
+    }
+}

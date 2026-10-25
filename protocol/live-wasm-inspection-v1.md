@@ -27,7 +27,11 @@ Only one listing is retained. Refreshing it releases its old group. All handles
 expire after 60 seconds, even if no further request arrives. Target replacement,
 connection replacement, navigation/document epoch drift, and expired or
 superseded listings are rejected rather than rebound. Actions use the existing
-serialized debugger action and ownership guards. Handles retain objects and may
+serialized debugger action and ownership guards. Queued lifecycle events are
+drained with a bounded barrier before inspection commands and before accepting
+results. Any dropped event permanently invalidates ownership on that exact
+connection, even after telemetry counters are drained; reconnect before listing
+again. Handles retain objects and may
 affect garbage collection until released. A failed or timed-out group release
 retires the owned debugger transport rather than accumulating remote roots or
 retrying an uncertain cleanup command. The release outcome and remote retention

@@ -74,8 +74,9 @@ impl Drop for OwnedProcess {
 
 enum ConsoleDir {
     Disposable(TempDir),
-    // The capture owns this directory. Dropping the console must not delete it.
-    Live(PathBuf),
+    // Only the short transport directory is owned here. The capture keeps its
+    // binding file and evidence directory when this console is retired.
+    Live(TempDir),
 }
 
 struct Session {
@@ -103,7 +104,7 @@ impl Session {
                 let _ = directory.path();
             }
             ConsoleDir::Live(directory) => {
-                let _ = directory.as_os_str();
+                let _ = directory.path();
             }
         }
         self.bridge.stop().await;
@@ -612,7 +613,21 @@ impl NativeConsole {
             return;
         }
         let _ = std::fs::remove_file(directory.join("binding.absent"));
-        let bridge = match self.spawn_bridge(&directory).await {
+        // Capture paths can exceed sockaddr_un.sun_path, especially beneath
+        // macOS Application Support. Publish the binding there, but keep the
+        // authenticated socket and token in a short, privately owned directory.
+        let transport = match tempfile::Builder::new()
+            .prefix("reb-console-live.")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+        {
+            Ok(directory) => directory,
+            Err(_) => {
+                write_absent(&directory);
+                return;
+            }
+        };
+        let bridge = match self.spawn_bridge(transport.path()).await {
             Ok(bridge) => bridge,
             Err(_) => {
                 write_absent(&directory);
@@ -624,7 +639,7 @@ impl NativeConsole {
             write_absent(&directory);
             return;
         }
-        *self.live_bridge.lock().await = Some(bridge.session(ConsoleDir::Live(directory), true));
+        *self.live_bridge.lock().await = Some(bridge.session(ConsoleDir::Live(transport), true));
     }
     async fn launch(&self, address: &str) -> Result<Session> {
         let directory = tempfile::Builder::new()
@@ -1054,7 +1069,7 @@ while True:
             browser: None,
             input,
             output,
-            directory: ConsoleDir::Live(directory.path().into()),
+            directory: ConsoleDir::Live(tempfile::tempdir().unwrap()),
             next_request: 1,
             poisoned: false,
             started: Instant::now(),

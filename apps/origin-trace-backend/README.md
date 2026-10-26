@@ -113,6 +113,12 @@ separate session uses no CDP connection. It owns a temporary profile and both
 process groups, validates bounded replies, and retires ambiguous exchanges. See
 [Native Console v2](../../protocol/native-console-v2.md).
 
+Live capture publishes its Console binding inside the capture directory. The
+socket and authentication token live in a separate mode-0700 temporary directory
+under `/tmp`, so long evidence paths stay within the Unix socket path limit.
+Console shutdown removes that transport directory and preserves the capture's
+binding and evidence files.
+
 Each browser connection owns a native transport process, a bounded event queue,
 and command deadlines. Failed domain initialization retires that connection so
 the next refresh retries the complete setup. `make backend-e2e` also exercises

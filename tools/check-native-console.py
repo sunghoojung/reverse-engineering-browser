@@ -430,11 +430,17 @@ def check_backend(binary, backend):
     with tempfile.TemporaryDirectory(prefix="reb-console-http.", dir="/tmp") as directory:
         root = Path(directory)
         endpoint = root / "endpoint"
+        live_directory = root / ("long-capture-path-" * 4) / ("session-evidence-" * 4)
+        live_directory.mkdir(parents=True, mode=0o700)
+        assert len(str(live_directory / "console.sock").encode()) > 108
         command = [backend, "--port", "0", "--endpoint-file", str(endpoint),
-                   "--native-console", binary, "--brave-binary", str(Path(__file__).resolve())]
+                   "--native-console", binary, "--brave-binary", str(Path(__file__).resolve()),
+                   "--native-console-live-directory", str(live_directory)]
         for flag in ["store", "trace-store", "signal-store", "artifacts", "api-collection", "local-analyst"]:
             command += [f"--{flag}", str(root / flag)]
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        live_peer = None
+        live_transport = None
         def call(action=None, status=200, headers=None):
             data = json.dumps(action).encode() if action is not None else None
             request = urllib.request.Request(url + ("/api/native-console/actions" if data else "/api/native-console"), data=data,
@@ -453,8 +459,23 @@ def check_backend(binary, backend):
                 assert time.monotonic() < deadline
                 time.sleep(0.02)
             url = endpoint.read_text().strip()
+            binding = live_directory / "binding"
+            assert binding.is_file(), "Long capture path prevented the live Console binding"
+            live_id, live_socket, live_token = binding.read_text().splitlines()
+            live_transport = Path(live_socket).parent
+            assert len(live_socket.encode()) < 104 and Path(live_socket).is_socket()
+            assert live_transport.stat().st_mode & 0o777 == 0o700
+            assert Path(live_token).stat().st_mode & 0o777 == 0o600
+            live_peer = subprocess.Popen([
+                sys.executable, __file__, "--reb-native-console",
+                f"--reb-native-console-socket={live_socket}",
+                f"--reb-native-console-token-file={live_token}",
+                f"--reb-native-console-session-id={live_id}",
+                f"--user-data-dir={live_transport / 'profile'}",
+            ])
             state = call()
             assert state["available"] and state["state"] == "idle"
+            assert state["live_available"] and state["targets"], "Live bridge did not authenticate"
             call({"action": "start", "url": "http://127.0.0.1/fixture"}, 403, {"Origin": "https://example.invalid"})
             call({"action": "start", "url": "file:///tmp/fixture"}, 400)
             call({"action": "start", "url": "http://user:secret@127.0.0.1/"}, 400)
@@ -545,8 +566,13 @@ def check_backend(binary, backend):
         finally:
             process.terminate()
             process.wait(timeout=10)
+            if live_peer:
+                live_peer.wait(timeout=10)
             if process.stderr:
                 process.stderr.close()
+        assert live_transport is not None and not live_transport.exists(), "Live Console transport survived backend shutdown"
+        assert live_directory.is_dir() and binding.is_file(), "Stopping Console removed capture-owned evidence"
+        print("PASS long live capture paths use an authenticated private short socket directory; shutdown removes transport and preserves capture-owned files")
 
 
 def main():

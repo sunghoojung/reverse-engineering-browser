@@ -1504,7 +1504,7 @@
       .native-console-head-spacer { flex: 1; }
       .native-console-head select { width: min(34%, 250px); height: 24px; min-width: 0; margin-left: 4px; padding: 0 5px; border: 1px solid transparent; border-left-color: var(--line); border-radius: 0; background: transparent; color: var(--muted); font: 10px var(--sans); text-overflow: ellipsis; }
       .native-console-head select:hover:enabled { background: var(--panel-3); }
-      .native-console-panel[data-session="idle"] #native-console-target, .native-console-panel[data-session="idle"] #native-console-refresh, .native-console-panel[data-session="idle"] #native-console-stop { display: none; }
+      .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) #native-console-target, .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) #native-console-refresh, .native-console-panel[data-session="idle"] #native-console-stop { display: none; }
       .native-console-panel[data-session="ready"] .native-console-controls { display: none; }
       .native-console-button { height: 24px; flex-shrink: 0; padding: 0 7px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: var(--muted); font: 10px var(--sans); }
       .native-console-button:hover:enabled { color: var(--text); background: var(--panel-3); }
@@ -3316,7 +3316,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-title { font: 600 11px var(--sans); color: var(--text); }
 .native-console-context { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; max-width: 480px; color: var(--faint); font: 10px var(--sans); }
 .native-console-context select { flex: 1; width: 100%; margin: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); }
-.native-console-panel[data-session="idle"] .native-console-context { visibility: hidden; }
+.native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) .native-console-context { visibility: hidden; }
 .native-console-head-spacer { flex: 1; }
 .native-console-badge { gap: 6px; font: 10px var(--sans); white-space: nowrap; }
 .native-console-badge[data-state="disconnected"], .native-console-badge[data-state="unavailable"] { color: var(--red); }
@@ -3360,7 +3360,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .native-console-head { flex-wrap: wrap; gap: 4px 6px; }
   .native-console-title { margin-right: auto; }
   .native-console-context { order: 5; flex-basis: 100%; max-width: none; }
-  .native-console-panel[data-session="idle"] .native-console-context { display: none; }
+  .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) .native-console-context { display: none; }
   .native-console-context select { width: 100%; flex: 1; }
   .native-console-head-spacer, .native-console-extended-help, .native-console-private { display: none; }
   .native-console-composer-footer { font-size: 9px; }

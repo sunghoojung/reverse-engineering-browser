@@ -62,6 +62,10 @@ and the browser session checks them again before socket delivery. The
 browser-side session starts only after its Unix-socket client authenticates to
 the local event broker. It uses another bounded queue and a dedicated writer
 thread, so network and renderer capture paths never wait for the socket.
+The shared renderer sink uses only its injected emitter callback, which reports
+admitted, policy-rejected or queue-full status. The sink never links back into
+the renderer transport; queue-full status keeps dispatch loss accounting from
+counting a ring rejection twice.
 Both event queues reuse 8,192 slots (3,146,048 bytes per queue); that capacity is
 an in-flight bound, not a lifetime limit on captured events. A full queue drops
 without blocking and preserves visible, saturating drop accounting. The larger

@@ -296,7 +296,23 @@ async function checkBrowser() {
     const {text,unmodifiedText,...release}=event;
     await send('Input.dispatchKeyEvent',{type:'keyUp',...release});
   };
-  const click=async selector=>{const point=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});n.scrollIntoView({block:'nearest'});const r=n.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});};
+  // Row selection and dialog dismissal schedule responsive pane layout. Observe
+  // its painted result before every pointer action, then refuse an occluded
+  // target instead of clicking the unrelated control at its old coordinates.
+  const click=async selector=>{
+    const point=await evaluate(`(async()=>{
+      const n=document.querySelector(${JSON.stringify(selector)});
+      if(!n)throw Error('Missing pointer target: '+${JSON.stringify(selector)});
+      n.scrollIntoView({block:'nearest'});
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      const r=n.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);
+      if(n.disabled || r.width<=0 || r.height<=0 || x<0 || x>=innerWidth || y<0 || y>=innerHeight || !hit || !n.contains(hit))
+        throw Error('Pointer target is not ready: '+${JSON.stringify(selector)}+'; hit '+(hit?.id ?? hit?.tagName ?? 'nothing'));
+      return{x,y};
+    })()`);
+    await send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
+    await send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
+  };
   const shot=async name=>{const result=await send('Page.captureScreenshot',{format:'png'});await writeFile(join(output,`${name}.png`),Buffer.from(result.data,'base64'));};
   const scrollCatalogTo=async selector=>{
     const geometry=await evaluate(`(()=>{const c=document.querySelector('#api-catalog-content').getBoundingClientRect(),r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:c.x+c.width/2,y:c.y+c.height/2,deltaY:r.top-c.top-8};})()`);

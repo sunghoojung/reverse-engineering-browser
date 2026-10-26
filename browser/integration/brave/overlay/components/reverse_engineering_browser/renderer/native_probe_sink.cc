@@ -7,7 +7,6 @@
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/page_guest_dispatch.h"
-#include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
 #include <algorithm>
 #include <array>
@@ -253,12 +252,12 @@ std::string_view RuntimeScriptIdentityLabel(
     std::uint64_t script_id,
     std::array<char, kNativeArtifactMaxUrlBytes>& output) noexcept {
   constexpr std::string_view kPrefix = "script://";
-  char digits[20];
+  std::array<char, 20> digits{};
   std::size_t count = 0;
   do {
     digits[count++] = static_cast<char>('0' + static_cast<int>(script_id % 10U));
     script_id /= 10U;
-  } while (script_id != 0 && count < sizeof(digits));
+  } while (script_id != 0 && count < digits.size());
   if (kPrefix.size() + count > output.size()) {
     return {};
   }
@@ -411,7 +410,8 @@ void MaskScriptSource(const std::span<char> text,
              IsIdentCont(static_cast<unsigned char>(text[index + 1U]))) {
         ++index;
       }
-      const std::string_view word(text.data() + start, index - start + 1U);
+      const auto word_bytes = text.subspan(start, index - start + 1U);
+      const std::string_view word(word_bytes.data(), word_bytes.size());
       if (!property_name && word == "class") {
         // Pending classes are stack entries too: an extends expression can
         // contain another class or function without losing the outer body.
@@ -1580,8 +1580,7 @@ std::uint64_t NativeProbeSink::RecordRuntimeBufferEvent(const NativeProbeType ty
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
   event.header.frame_id = frame_id;
   SetPayload(event, reason);
-  const auto emitter = emitter_.load(std::memory_order_acquire);
-  return emitter && CanAdmitEvent(event, generation) && emitter(event, generation)
+  return EmitStatus(event, generation) == NativeProbeEmitStatus::kAdmitted
              ? event.header.sequence_number
              : 0;
 }
@@ -1714,7 +1713,7 @@ std::uint64_t NativeProbeSink::RecordSurfaceOperation(
       frame_id_provider_.load(std::memory_order_relaxed);
   event.header.frame_id = frame_id_provider ? frame_id_provider() : 0;
   SetPayload(event, operation);
-  if (!emitter(event, config_generation)) {
+  if (emitter(event, config_generation) != NativeProbeEmitStatus::kAdmitted) {
     if (observed_generation) {
       std::uint64_t claimed = config_generation;
       // Never erase a newer configuration's claim or its failure watermark.
@@ -1834,6 +1833,13 @@ void NativeProbeSink::NoteVmDispatchLoss(const std::uint64_t generation,
   }
 }
 
+NativeProbeEmitStatus NativeProbeSink::EmitStatus(const NativeProbeEvent& event,
+                                                  const std::uint64_t generation) const noexcept {
+  const auto emitter = emitter_.load(std::memory_order_acquire);
+  return emitter && CanAdmitEvent(event, generation) ? emitter(event, generation)
+                                                     : NativeProbeEmitStatus::kRejected;
+}
+
 void NativeProbeSink::PublishVmDispatchBudgetGap() noexcept {
   // EmitEvent publishes pending losses before a normal event. The gap emit
   // re-enters EmitEvent, which must not publish again on this thread.
@@ -1846,9 +1852,8 @@ void NativeProbeSink::PublishVmDispatchBudgetGap() noexcept {
   }
   publishing = true;
   struct ClearPublish {
-    bool& flag;
-    ~ClearPublish() { flag = false; }
-  } clear{publishing};
+    ~ClearPublish() { publishing = false; }
+  } clear;
 
   for (int attempt = 0; attempt < 4; ++attempt) {
     const std::uint64_t generation = dispatch_loss_generation_.load(std::memory_order_relaxed);
@@ -1873,7 +1878,7 @@ void NativeProbeSink::PublishVmDispatchBudgetGap() noexcept {
     NativeProbeEvent gap = MakeNativeProbeGapEvent(reference, weight);
     gap.header.frame_id = reference.header.frame_id;
     gap.header.artifact_id = dispatch_loss_artifact_id_.load(std::memory_order_relaxed);
-    const NativeProbeEmitStatus status = NativeProbeTransport::EmitStatus(gap, generation);
+    const NativeProbeEmitStatus status = EmitStatus(gap, generation);
     if (status == NativeProbeEmitStatus::kAdmitted) {
       continue;
     }
@@ -1937,7 +1942,7 @@ void NativeProbeSink::RecordVmDispatchSample(const NativeVmDispatchSamplePayload
   // gap is queued first and its sequence stays below this sample.
   PublishVmDispatchBudgetGap();
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-  switch (NativeProbeTransport::EmitStatus(event, config_generation)) {
+  switch (EmitStatus(event, config_generation)) {
     case NativeProbeEmitStatus::kAdmitted:
       return;
     case NativeProbeEmitStatus::kQueueFull:
@@ -2011,8 +2016,8 @@ void NativeProbeSink::IngestOwnedRegisterInvocation(const std::uint64_t invocati
   if (!SnapshotVmAdmission(admission)) {
     return;
   }
-  constexpr char kLabel[] = "owned-register-v1";
-  constexpr std::uint16_t kLabelSize = sizeof(kLabel) - 1;
+  constexpr std::string_view kLabel = "owned-register-v1";
+  constexpr std::uint16_t kLabelSize = kLabel.size();
   static_assert(kLabelSize <= kNativeVmFindingLabelCapacity);
   NativeVmFindingPayload payload{};
   payload.kind = NativeVmFindingKind::kInvocation;
@@ -2043,7 +2048,7 @@ void NativeProbeSink::IngestOwnedRegisterInvocation(const std::uint64_t invocati
   static_assert(sizeof(payload) <= kNativeProbeInlinePayloadSize);
   const auto payload_bytes = std::bit_cast<std::array<std::byte, sizeof(payload)>>(payload);
   std::ranges::copy(payload_bytes, event.inline_payload.begin());
-  static_cast<void>(NativeProbeTransport::EmitStatus(event, admission.generation));
+  static_cast<void>(EmitStatus(event, admission.generation));
 }
 
 void NativeProbeSink::IngestOwnedRegisterStep(const std::uint32_t instruction_pointer,
@@ -2140,7 +2145,7 @@ void NativeProbeSink::EmitPageGuestInvocation(const std::string_view label,
   static_assert(sizeof(payload) <= kNativeProbeInlinePayloadSize);
   const auto payload_bytes = std::bit_cast<std::array<std::byte, sizeof(payload)>>(payload);
   std::ranges::copy(payload_bytes, event.inline_payload.begin());
-  static_cast<void>(NativeProbeTransport::EmitStatus(event, admission.generation));
+  static_cast<void>(EmitStatus(event, admission.generation));
 }
 
 void NativeProbeSink::EmitPageGuestStep(const PageGuestIds ids,

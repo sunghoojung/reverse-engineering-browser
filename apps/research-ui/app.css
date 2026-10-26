@@ -1504,7 +1504,7 @@
       .native-console-head-spacer { flex: 1; }
       .native-console-head select { width: min(34%, 250px); height: 24px; min-width: 0; margin-left: 4px; padding: 0 5px; border: 1px solid transparent; border-left-color: var(--line); border-radius: 0; background: transparent; color: var(--muted); font: 10px var(--sans); text-overflow: ellipsis; }
       .native-console-head select:hover:enabled { background: var(--panel-3); }
-      .native-console-panel[data-session="idle"] #native-console-target, .native-console-panel[data-session="idle"] #native-console-refresh, .native-console-panel[data-session="idle"] #native-console-stop { display: none; }
+      .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) #native-console-target, .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) #native-console-refresh, .native-console-panel[data-session="idle"] #native-console-stop { display: none; }
       .native-console-panel[data-session="ready"] .native-console-controls { display: none; }
       .native-console-button { height: 24px; flex-shrink: 0; padding: 0 7px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: var(--muted); font: 10px var(--sans); }
       .native-console-button:hover:enabled { color: var(--text); background: var(--panel-3); }
@@ -1518,7 +1518,7 @@
       .native-console-connection-body strong { font-size: 11px; font-weight: 500; }
       .native-console-connection-body p { margin: 8px 0 0; color: var(--faint); font: 10px/1.5 var(--sans); }
       .native-console-controls, .native-console-session-actions { display: flex; gap: 6px; align-items: center; padding: 8px 0 0; }
-      .native-console-panel[data-session="idle"] .native-console-session-actions { display: none; }
+      .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) .native-console-session-actions { display: none; }
       #native-console-clear { font-size: 17px; }
       .native-console-controls input { flex: 1; min-width: 0; height: 26px; padding: 0 7px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 11px var(--mono); }
       .native-console-notice { flex-shrink: 0; max-height: 40px; padding: 4px 10px; overflow: auto; color: var(--muted); font: 10px/1.5 var(--sans); overflow-wrap: anywhere; border-bottom: 1px solid var(--line-soft); }
@@ -2857,7 +2857,7 @@
       @media (max-width: 480px) { .request-window > span { flex-basis: 100%; } }
       .selection-strip { min-height: 35px; gap: 5px; padding: 5px 8px; flex-wrap: wrap; }
       .selection-strip .secondary-button { min-height: 25px; padding: 3px 6px; font-size: 10px; }
-      .selection-url { min-width: 80px; flex: 1 1 160px; max-height: 2.8em; overflow: hidden; overflow-wrap: anywhere; white-space: normal; font-size: 11px; }
+      .selection-url { min-width: 80px; flex: 1 1 160px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; white-space: normal; font-size: 11px; }
       .detail-pane { display: grid; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
       .detail-pane.showing-exchange { grid-template-rows: auto auto minmax(0, 1fr); }
       .detail-pane.showing-exchange > .inspector-tabs { display: flex; }
@@ -3316,7 +3316,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-title { font: 600 11px var(--sans); color: var(--text); }
 .native-console-context { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; max-width: 480px; color: var(--faint); font: 10px var(--sans); }
 .native-console-context select { flex: 1; width: 100%; margin: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); }
-.native-console-panel[data-session="idle"] .native-console-context { visibility: hidden; }
+.native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) .native-console-context { visibility: hidden; }
 .native-console-head-spacer { flex: 1; }
 .native-console-badge { gap: 6px; font: 10px var(--sans); white-space: nowrap; }
 .native-console-badge[data-state="disconnected"], .native-console-badge[data-state="unavailable"] { color: var(--red); }
@@ -3360,7 +3360,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .native-console-head { flex-wrap: wrap; gap: 4px 6px; }
   .native-console-title { margin-right: auto; }
   .native-console-context { order: 5; flex-basis: 100%; max-width: none; }
-  .native-console-panel[data-session="idle"] .native-console-context { display: none; }
+  .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) .native-console-context { display: none; }
   .native-console-context select { width: 100%; flex: 1; }
   .native-console-head-spacer, .native-console-extended-help, .native-console-private { display: none; }
   .native-console-composer-footer { font-size: 9px; }
@@ -3805,6 +3805,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #captured-client-review > label[hidden] { display: none; }
 #captured-client-review > [data-client-apply] { min-height: 30px; }
 /* Compact export dialog: policy and destination are explicit, never a long action menu. */
+#traffic-capture-export > summary { width: auto; height: auto; min-height: 25px; padding: 3px 6px; border-radius: 4px; font: 10px var(--sans); white-space: nowrap; }
 #traffic-capture-export .exchange-options-menu { width: 200px; max-height: none; }
 .captured-export-dialog { width: min(480px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 20px 70px #0006; overflow: hidden; }
 .captured-export-dialog[open] { display: flex; flex-direction: column; }

@@ -24,6 +24,7 @@
   }
   function renderControls() {
     root.dataset.session = session ? 'ready' : 'idle';
+    root.dataset.documentSource = documentSource;
     const busy = pending || submitting;
     const live = documentSource === 'live_capture';
     const status = checking ? 'checking' : disconnected ? 'disconnected' : busy ? 'working' : session ? 'connected' : initialized && !available && !live ? 'unavailable' : 'idle';

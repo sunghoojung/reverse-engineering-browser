@@ -3805,6 +3805,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #captured-client-review > label[hidden] { display: none; }
 #captured-client-review > [data-client-apply] { min-height: 30px; }
 /* Compact export dialog: policy and destination are explicit, never a long action menu. */
+#traffic-capture-export > summary { width: auto; height: auto; min-height: 25px; padding: 3px 6px; border-radius: 4px; font: 10px var(--sans); white-space: nowrap; }
 #traffic-capture-export .exchange-options-menu { width: 200px; max-height: none; }
 .captured-export-dialog { width: min(480px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 20px 70px #0006; overflow: hidden; }
 .captured-export-dialog[open] { display: flex; flex-direction: column; }

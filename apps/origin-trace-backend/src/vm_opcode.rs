@@ -13,12 +13,14 @@ use std::{
 
 #[path = "vm_opcode_native_guest.rs"]
 mod native_guest;
+#[path = "vm_opcode_native_module.rs"]
+mod native_module;
 #[path = "vm_opcode_native_wasm.rs"]
 mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.6.0";
+const PRODUCER_VERSION: &str = "2.7.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1099,8 +1101,19 @@ pub(crate) fn workspace(
             }
         }
     }
-    let observations = native_wasm::collect(artifact, bytes, events);
-    let guest_samples = native_guest::collect(root, artifact, bytes, snapshot_artifacts, events);
+    // One lazily decoded index serves both native streams for this artifact.
+    let mut module = (artifact["kind"] == "wasm")
+        .then(|| native_module::Module::parse(bytes))
+        .flatten();
+    let observations = native_wasm::collect(artifact, module.as_mut(), events);
+    let guest_samples = native_guest::collect(
+        root,
+        artifact,
+        bytes,
+        module.as_mut(),
+        snapshot_artifacts,
+        events,
+    );
     let budget_dropped = budget_losses
         .iter()
         .filter(|loss| {
@@ -1114,10 +1127,18 @@ pub(crate) fn workspace(
         omissions.push(json!({"reason":"caller-samples-unverified", "detail":
             "Caller-supplied dispatch reports were retained, not independently observed by a native sampler. They cannot confirm handlers, PC units, invocation identity or host-call causality."}));
     }
+    let undecodable = observations.undecodable + guest_samples.undecodable;
+    if undecodable > 0 {
+        omissions.push(json!({"reason":"native-wasm-module-undecodable","detail":format!(
+            "The captured module's sections did not decode, so {} native Wasm observations and {} native guest samples could not be checked against an exact site.",
+            observations.undecodable, guest_samples.undecodable
+        )}));
+    }
     if native_samples.is_empty()
         && observations.count == 0
         && guest_samples.count == 0
         && budget_dropped == 0
+        && undecodable == 0
     {
         omissions.push(json!({"reason":"sampler-unavailable", "detail":
             "No native dispatch samples were retained. Rebuild with native guest capture, enable an exact matching adapter, and inspect capture omissions. Static dispatch, Canvas calls and snapshots alone do not prove a guest PC."}));
@@ -1293,7 +1314,9 @@ pub(crate) fn workspace(
         "source_artifact_sha256": artifact["sha256"],
         "runtime": result["runtime"],
         "capture_mode": "unknown",
-        "sample_count": sample_count + observations.count + guest_samples.count,
+        // Physical and guest callbacks fire for the same br_table execution at
+        // an adapter site, so each native stream keeps its own count below.
+        "sample_count": sample_count,
         "samples": retained_samples,
         "finding_id": result["finding_id"],
         "model": model,
@@ -1435,7 +1458,7 @@ mod tests {
             let (_, _, document) = analyze_artifact(&bytes, "wasm", &[event.clone(), event]);
             assert_schema(&document);
             let workspace = &document["workspaces"][0];
-            assert_eq!(workspace["sample_count"], 1);
+            assert_eq!(workspace["sample_count"], 0);
             assert_eq!(workspace["native_wasm_observation_count"], 1);
             assert_eq!(workspace["samples"], json!([]));
             let observed = workspace["handlers"]

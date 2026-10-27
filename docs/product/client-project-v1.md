@@ -40,9 +40,10 @@ with an explanation; it never pretends an unsupported download succeeded.
 ## Offline exact-response export
 
 Coding agents can use the same project generator without opening the UI or
-sending a request. Save an authorized `get_network_request` response using the
-[local coding-agent guide](../development/local-coding-agents.md), review its
-raw contents locally, then run from the repository with Node.js 22+:
+sending a request. The input is a previously saved `reb-network-request-v1`
+response; the `get_network_request` operation that produced it was removed with
+CDP. Review its raw contents locally, then run from the repository with
+Node.js 22+:
 
 ```sh
 node tools/export-captured-client.mjs --input request.json --output project.zip

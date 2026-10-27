@@ -65,7 +65,12 @@ Rust verifies artifact digest and exact session/frame/artifact scope, then parse
 the real module function/site/count before matching a selector to a static arm.
 Imported function indices and multiple sites sharing a selector are distinct.
 Native observations are separate from legacy guest-VM samples; no sentinel or
-overloaded guest fields are used. The viewer labels guest PC unknown. Context
+overloaded guest fields are used. At an adapter dispatch site the same execution
+also produces a `wasm_guest_dispatch` record, so workspace counts for the two
+streams overlap and are never summed. Each function body is decoded at most once,
+when a record names it, within the 16 MiB module bound. A module whose sections
+do not decode keeps its records visible as `native-wasm-module-undecodable` with
+their counts instead of dropping them. The viewer labels guest PC unknown. Context
 links can be correlated, but host-call causality and guest positions remain
 unproven without genuine parent/invocation evidence.
 

@@ -2463,7 +2463,16 @@
             row.to_offset !== null && instructions.has(key(row.artifact_id, row.to_offset))));
       }
 
-      function isVmOpcodeHandler(handler) {
+      // Producers before 2.7.0 added physical and guest native counts into
+      // sample_count. One br_table execution at an adapter site emits both, so
+      // later producers keep each stream separate and sample_count holds only
+      // dispatch report records.
+      function vmProducerSumsNativeCounts(version) {
+        const match = /^([0-9]+)\.([0-9]+)\.[0-9]+$/.exec(version);
+        return match !== null && (Number(match[1]) < 2 || (Number(match[1]) === 2 && Number(match[2]) < 7));
+      }
+
+      function isVmOpcodeHandler(handler, summed = false) {
         if (!isPlainObject(handler) || !hasOnlyKeys(handler, new Set([
           'opcode', 'handler_index', 'state', 'source', 'label', 'operand_width', 'sample_count', 'notes', 'effects', 'native_wasm_sample_count', 'native_guest_sample_count'
         ])) || !(handler.opcode === null || isSafeIntegerInRange(handler.opcode, 0, 0xffffffff)) ||
@@ -2473,12 +2482,13 @@
           (handler.label === undefined || isBoundedText(handler.label, 80)) &&
           isSafeIntegerInRange(handler.operand_width, 0, 8) &&
           isSafeIntegerInRange(handler.sample_count, 0, Number.MAX_SAFE_INTEGER) && isBoundedText(handler.notes, 240) &&
-          (handler.native_guest_sample_count === undefined || isSafeIntegerInRange(handler.native_guest_sample_count,1,handler.sample_count)) &&
-          (handler.native_wasm_sample_count === undefined || isSafeIntegerInRange(handler.native_wasm_sample_count, 1, handler.sample_count)) &&
+          (handler.native_guest_sample_count === undefined || isSafeIntegerInRange(handler.native_guest_sample_count,1,summed ? handler.sample_count : Number.MAX_SAFE_INTEGER)) &&
+          (handler.native_wasm_sample_count === undefined || isSafeIntegerInRange(handler.native_wasm_sample_count, 1, summed ? handler.sample_count : Number.MAX_SAFE_INTEGER)) &&
           (handler.opcode !== null || (handler.handler_index === undefined && handler.effects.length === 0 &&
             ((handler.state === 'unknown' && handler.sample_count === 0 && handler.native_wasm_sample_count === undefined) ||
-             (handler.state === 'observed' && (handler.native_wasm_sample_count ?? 0) + (handler.native_guest_sample_count ?? 0) === handler.sample_count &&
-              handler.sample_count > 0 && /^br_table(?: f[0-9]+)? default$/.test(handler.label)))));
+             (handler.state === 'observed' && (handler.native_wasm_sample_count ?? 0) + (handler.native_guest_sample_count ?? 0) > 0 &&
+              (summed ? (handler.native_wasm_sample_count ?? 0) + (handler.native_guest_sample_count ?? 0) === handler.sample_count : handler.sample_count === 0) &&
+              /^br_table(?: f[0-9]+)? default$/.test(handler.label)))));
       }
 
       function isVmOpcodeSnapshot(snapshot) {
@@ -2746,7 +2756,7 @@
             : handler.opcode === row.selector);
       }
 
-      function isVmOpcodeWorkspace(workspace) {
+      function isVmOpcodeWorkspace(workspace, summed = false) {
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
           'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory',
@@ -2757,7 +2767,7 @@
           !['stack', 'register', 'unknown'].includes(workspace.model) ||
           !['javascript', 'webassembly'].includes(workspace.runtime) || !vmWorkspaceDigest(workspace.source_artifact_sha256) ||
           !vmWorkspaceMode(workspace.capture_mode) || !Array.isArray(workspace.handlers) || workspace.handlers.length > 1024 ||
-          !workspace.handlers.every(isVmOpcodeHandler) || !Array.isArray(workspace.snapshots) || workspace.snapshots.length > 16 ||
+          !workspace.handlers.every(handler => isVmOpcodeHandler(handler, summed)) || !Array.isArray(workspace.snapshots) || workspace.snapshots.length > 16 ||
           !workspace.snapshots.every(isVmOpcodeSnapshot) ||
           (workspace.dispatch_inventory !== undefined && (workspace.runtime !== 'webassembly' ||
             !isVmDispatchInventory(workspace.dispatch_inventory))) ||
@@ -2780,7 +2790,7 @@
         if ((workspace.native_guest_samples === undefined) !== (workspace.native_guest_sample_count === undefined) ||
           (workspace.native_guest_samples !== undefined && workspace.runtime !== 'webassembly') ||
           !Array.isArray(guestRows) || guestRows.length > 4096 || !guestRows.every(row => isNativeGuestSample(row,workspace)) ||
-          !isSafeIntegerInRange(guestCount,guestRows.length,workspace.sample_count)) return false;
+          !isSafeIntegerInRange(guestCount,guestRows.length,summed ? workspace.sample_count : Number.MAX_SAFE_INTEGER)) return false;
         const guestTruncated = guestCount > guestRows.length;
         if (guestTruncated !== workspace.coverage.omissions.some(row => row.reason === 'native-guest-sample-limit') ||
           (guestTruncated && guestRows.length !== 4096)) return false;
@@ -2789,13 +2799,13 @@
         if ((workspace.native_wasm_observations === undefined) !== (workspace.native_wasm_observation_count === undefined) ||
           (workspace.native_wasm_observations !== undefined && workspace.runtime !== 'webassembly') ||
           !Array.isArray(nativeRows) || nativeRows.length > 4096 || !nativeRows.every(row => isNativeWasmObservation(row,workspace)) ||
-          !isSafeIntegerInRange(nativeCount,nativeRows.length,workspace.sample_count) ||
+          !isSafeIntegerInRange(nativeCount,nativeRows.length,summed ? workspace.sample_count : Number.MAX_SAFE_INTEGER) ||
           new Set([...workspace.samples,...nativeRows,...guestRows].map(row => vmSampleEventKey(row.event))).size !== workspace.samples.length + nativeRows.length + guestRows.length) return false;
         if (nativeRows.some(row => workspace.handlers.filter(handler => nativeWasmMatchesHandler(row,handler)).length > 1)) return false;
         const nativeTruncated = nativeCount > nativeRows.length;
         if (nativeTruncated !== workspace.coverage.omissions.some(row => row.reason === 'native-wasm-observation-limit') ||
           (nativeTruncated && nativeRows.length !== 4096)) return false;
-        const legacyCount = workspace.sample_count - nativeCount - guestCount;
+        const legacyCount = summed ? workspace.sample_count - nativeCount - guestCount : workspace.sample_count;
         if (legacyCount < workspace.samples.length) return false;
         const truncated = legacyCount > workspace.samples.length;
         if (truncated !== workspace.coverage.omissions.some(row => row.reason === 'sample-limit') ||
@@ -2822,7 +2832,7 @@
             (handlerGuest > 0 && (workspace.runtime !== 'webassembly' || handler.state !== 'observed'))) return false;
           if (handlerNative > nativeCount || handlerNative < nativeRetained || (!nativeTruncated && handlerNative !== nativeRetained) ||
             (handlerNative > 0 && (workspace.runtime !== 'webassembly' || handler.state !== 'observed'))) return false;
-          const handlerLegacy = handler.sample_count - handlerNative - handlerGuest;
+          const handlerLegacy = summed ? handler.sample_count - handlerNative - handlerGuest : handler.sample_count;
           if (repeatedSelector) {
             if (handlerLegacy !== 0 || (handlerNative === 0 && handlerGuest === 0 && handler.state === 'observed')) return false;
           } else if (handlerLegacy < retained || (!truncated && handlerLegacy !== retained)) return false;
@@ -2847,7 +2857,7 @@
           !vmWorkspaceDigest(document.analysis_digest) || !vmWorkspaceDigest(document.document_digest) ||
           !vmWorkspaceExact(document.inputs, ['artifact_manifest_digest', 'event_store_digest', 'capture_provenance_digest']) ||
           !Object.values(document.inputs).every(value => value === null || vmWorkspaceDigest(value)) ||
-          !Array.isArray(document.workspaces) || document.workspaces.length > 256 || !document.workspaces.every(isVmOpcodeWorkspace) ||
+          !Array.isArray(document.workspaces) || document.workspaces.length > 256 || !document.workspaces.every(workspace => isVmOpcodeWorkspace(workspace, vmProducerSumsNativeCounts(document.producer.version))) ||
           !vmWorkspaceExact(document.summary, ['workspace_count', 'handler_count', 'snapshot_count', 'sample_count', 'unknown_count'])) return false;
         const counts = {workspace_count: document.workspaces.length, handler_count: 0, snapshot_count: 0, sample_count: 0, unknown_count: 0};
         for (const workspace of document.workspaces) {
@@ -2914,6 +2924,12 @@
           `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`);
       }
 
+      // Physical and guest records can describe the same execution, so the
+      // displayed count is the largest single stream, never their sum.
+      function vmHandlerExecutionCount(handler) {
+        return Math.max(handler.sample_count, handler.native_wasm_sample_count ?? 0, handler.native_guest_sample_count ?? 0);
+      }
+
       function vmOpcodeHandlerRow(workspace, handler) {
         const retainedSamples = [...workspace.samples.filter(sample => sample.opcode === handler.opcode),
           ...(workspace.native_guest_samples ?? []).filter(row => nativeWasmMatchesHandler(row,handler)),
@@ -2923,7 +2939,7 @@
           opcode: handler.opcode === null ? 'unknown' : `0x${handler.opcode.toString(16).padStart(2, '0')}`,
           label: handler.label || (handler.opcode === null ? 'Unbound dispatch arm' : `handler ${handler.handler_index ?? handler.opcode}`),
           state: handler.state,
-          samples: handler.sample_count,
+          samples: vmHandlerExecutionCount(handler),
           operandWidth: handler.operand_width,
           retainedSamples,
           positions: vmOpcodeSamplePositions(retainedSamples),
@@ -2954,7 +2970,7 @@
           opcode: 'shared',
           label: `${brTable ? 'br_table' : 'Shared dispatch'} · ${countLabel}`,
           state: handlers.every(handler => handler.state === 'inferred') ? 'inferred' : 'unknown',
-          samples: handlers.reduce((total, handler) => total + handler.sample_count, 0),
+          samples: handlers.reduce((total, handler) => total + vmHandlerExecutionCount(handler), 0),
           operandWidth: sameWidth ? first.operand_width : 0,
           retainedSamples,
           positions: vmOpcodeSamplePositions(retainedSamples),

@@ -115,15 +115,12 @@ pub(crate) fn store(
         if !native_samples_available {
             omissions.push("dispatch-samples-unavailable");
         }
-        if workspace["sample_count"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_sub(
-                workspace["native_wasm_observation_count"]
-                    .as_u64()
-                    .unwrap_or(0),
-            )
-            > samples.len() as u64
+        let truncated = |rows: &str, count: &str| {
+            workspace[count].as_u64().unwrap_or(0)
+                > workspace[rows].as_array().map_or(0, Vec::len) as u64
+        };
+        if truncated("samples", "sample_count")
+            || truncated("native_guest_samples", "native_guest_sample_count")
         {
             omissions.push("dispatch-sample-retention-limit");
         }
@@ -203,6 +200,7 @@ mod tests {
     fn native_physical_dispatch_never_proves_guest_position() {
         let (mut workspace, artifact, host) = inputs();
         workspace["workspaces"][0]["samples"] = json!([]);
+        workspace["workspaces"][0]["sample_count"] = json!(0);
         workspace["workspaces"][0]["native_wasm_observation_count"] = json!(1);
         let document = analyze(&workspace, &[artifact], &[host]);
         let result = &document["workspaces"][0];

@@ -592,7 +592,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 37, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 35, "Review route coverage when the API changes");
     assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
     assert!(!ids.contains("debugger_action"));
     assert!(
@@ -675,7 +675,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 37);
+    assert_eq!(operation_count, 35);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -6126,86 +6126,6 @@ async fn workspace_native_lock_interoperability() {
     }
 }
 
-#[tokio::test]
-async fn api_observation_catalog_is_read_only_local_and_cli_discoverable() {
-    let server = Server::start_with_helper_canaries(true).await;
-    server.file("events.jsonl", b"not consulted by Traffic catalog\n");
-    let bytes = assert_contract_response(
-        server.get("/api/network/catalog").await,
-        "get",
-        "/api/network/catalog",
-        200,
-    )
-    .await;
-    let catalog: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(catalog["format"], "reb-api-observation-catalog-v1");
-    assert_eq!(catalog["coverage"]["capture_enabled"], false);
-    assert_eq!(catalog["coverage"]["window_records"], 0);
-    assert_eq!(catalog["endpoints"], json!([]));
-    assert_eq!(
-        std::fs::read(server.root.path().join("events.jsonl")).unwrap(),
-        b"not consulted by Traffic catalog\n"
-    );
-    assert!(
-        !server
-            .root
-            .path()
-            .join("unexpected-helper.sh.invoked")
-            .exists()
-    );
-    assert!(!server.root.path().join("collection.json").exists());
-    assert_contract_response(
-        server.get("/api/network/catalog?limit=1000").await,
-        "get",
-        "/api/network/catalog",
-        400,
-    )
-    .await;
-    let forbidden = server
-        .client
-        .get(format!("{}/api/network/catalog", server.url))
-        .header("Origin", "https://external.test")
-        .send()
-        .await
-        .unwrap();
-    assert_contract_response(forbidden, "get", "/api/network/catalog", 403).await;
-    let cli = |args: &[&str]| {
-        let result = Command::new(env!("CARGO_BIN_EXE_reb-api"))
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        result.stdout
-    };
-    assert!(
-        String::from_utf8(cli(&["list"]))
-            .unwrap()
-            .contains("get_api_observation_catalog")
-    );
-    let description: Value =
-        serde_json::from_slice(&cli(&["describe", "get_api_observation_catalog"])).unwrap();
-    assert!(description["components"]["schemas"]["ApiObservedJsonShape"].is_object());
-    assert_schema(
-        &description,
-        &description["components"]["schemas"]["ApiObservationCatalog"],
-        &catalog,
-        "Offline API catalog schema",
-    );
-    let live: Value = serde_json::from_slice(&cli(&[
-        "call",
-        "get_api_observation_catalog",
-        "--read-only",
-        "--base-url",
-        &server.url,
-    ]))
-    .unwrap();
-    assert_eq!(live, catalog);
-}
-
 #[test]
 fn cli_json_discovery_is_offline_and_preserves_legacy_list() {
     let cli = |args: &[&str]| {
@@ -6240,8 +6160,6 @@ fn cli_json_discovery_is_offline_and_preserves_legacy_list() {
         assert!(row["read_only_eligible"].is_boolean());
     }
     for (id, eligible) in [
-        ("get_api_observation_catalog", true),
-        ("get_network_request", true),
         ("get_origin_trace", true),
         ("compare_evidence_packages", true),
         ("get_vm_analysis", false),
@@ -6420,185 +6338,6 @@ async fn cli_read_only_malformed_response_is_not_replayed_and_default_calls_stil
             "The CLI must never retry requests or follow redirects"
         );
     }
-}
-
-#[tokio::test]
-async fn exact_network_request_has_closed_selection_safe_errors_and_offline_discovery() {
-    let server = Server::start_with_helper_canaries(true).await;
-    server.file(
-        "events.jsonl",
-        b"synthetic unrelated store must not be read or changed\n",
-    );
-    let before: Value = server.get("/api/health").await.json().await.unwrap();
-    let network = json!({"instance_id":before["instance_id"],"capture_epoch":0});
-    let params = [
-        (
-            "instance_id",
-            network["instance_id"].as_str().unwrap().to_owned(),
-        ),
-        ("capture_epoch", network["capture_epoch"].to_string()),
-        ("request_id", "synthetic-selected-request".to_owned()),
-        ("target_id", "synthetic-selected-target".to_owned()),
-        ("started_monotonic_ms", "100.0000001".to_owned()),
-    ];
-    let path = |params: &[(String, String)]| {
-        format!(
-            "/api/network/request?{}",
-            url::form_urlencoded::Serializer::new(String::new())
-                .extend_pairs(params.iter().map(|(key, value)| (key, value)))
-                .finish()
-        )
-    };
-    let params: Vec<(String, String)> = params
-        .into_iter()
-        .map(|(key, value)| (key.into(), value))
-        .collect();
-    let bytes = assert_contract_response(
-        server.get(&path(&params)).await,
-        "get",
-        "/api/network/request",
-        404,
-    )
-    .await;
-    let error: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(error["code"], "target_unavailable");
-    assert_eq!(
-        error["details"],
-        json!({"selection_reason":"request_not_retained"})
-    );
-    assert!(!String::from_utf8_lossy(&bytes).contains("synthetic"));
-    for index in 0..params.len() {
-        let mut missing = params.clone();
-        missing.remove(index);
-        assert_contract_response(
-            server.get(&path(&missing)).await,
-            "get",
-            "/api/network/request",
-            400,
-        )
-        .await;
-        let mut duplicate = params.clone();
-        duplicate.push(params[index].clone());
-        assert_contract_response(
-            server.get(&path(&duplicate)).await,
-            "get",
-            "/api/network/request",
-            400,
-        )
-        .await;
-    }
-    let mut extra = params.clone();
-    extra.push(("fallback".into(), "synthetic-private-diagnostic".into()));
-    assert_contract_response(
-        server.get(&path(&extra)).await,
-        "get",
-        "/api/network/request",
-        400,
-    )
-    .await;
-    for (field, invalid) in [
-        ("instance_id", ""),
-        ("request_id", ""),
-        ("capture_epoch", "01"),
-        ("capture_epoch", "9007199254740992"),
-        ("started_monotonic_ms", "NaN"),
-        ("started_monotonic_ms", "-1"),
-        ("started_monotonic_ms", " 1"),
-    ] {
-        let mut changed = params.clone();
-        changed.iter_mut().find(|(key, _)| key == field).unwrap().1 = invalid.into();
-        assert_contract_response(
-            server.get(&path(&changed)).await,
-            "get",
-            "/api/network/request",
-            400,
-        )
-        .await;
-    }
-    for invalid in ["%", "%GG", "%FF", "%C3%28"] {
-        let malformed = path(&params).replace("synthetic-selected-request", invalid);
-        assert_contract_response(
-            server.get(&malformed).await,
-            "get",
-            "/api/network/request",
-            400,
-        )
-        .await;
-    }
-    for field in ["instance_id", "capture_epoch"] {
-        let mut stale = params.clone();
-        stale.iter_mut().find(|(key, _)| key == field).unwrap().1 = if field == "capture_epoch" {
-            "1"
-        } else {
-            "synthetic-stale-owner"
-        }
-        .into();
-        let bytes = assert_contract_response(
-            server.get(&path(&stale)).await,
-            "get",
-            "/api/network/request",
-            409,
-        )
-        .await;
-        let error: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(error["code"], "state_conflict");
-        assert_eq!(
-            error["details"],
-            json!({"selection_reason":"stale_capture"})
-        );
-        assert!(!String::from_utf8_lossy(&bytes).contains("synthetic"));
-    }
-    let forbidden = server
-        .client
-        .get(format!("{}{}", server.url, path(&params)))
-        .header("Origin", "https://external.test")
-        .send()
-        .await
-        .unwrap();
-    assert_contract_response(forbidden, "get", "/api/network/request", 403).await;
-    let offline = Command::new(env!("CARGO_BIN_EXE_reb-api"))
-        .args(["describe", "get_network_request"])
-        .output()
-        .unwrap();
-    assert!(offline.status.success());
-    let description: Value = serde_json::from_slice(&offline.stdout).unwrap();
-    assert!(description["components"]["schemas"]["NetworkRequestResponse"].is_object());
-    let mut cli = Command::new(env!("CARGO_BIN_EXE_reb-api"));
-    cli.args([
-        "call",
-        "get_network_request",
-        "--read-only",
-        "--json-errors",
-        "--base-url",
-        &server.url,
-    ]);
-    for (key, value) in &params {
-        cli.arg("--param").arg(format!("{key}={value}"));
-    }
-    let result = cli.output().unwrap();
-    assert_eq!(result.status.code(), Some(1));
-    assert!(result.stdout.is_empty());
-    let error: Value = serde_json::from_slice(&result.stderr).unwrap();
-    assert_eq!(error["http_status"], 404);
-    assert_eq!(
-        error["details"],
-        json!({"selection_reason":"request_not_retained"})
-    );
-    assert!(!String::from_utf8_lossy(&result.stderr).contains("synthetic"));
-    let after: Value = server.get("/api/health").await.json().await.unwrap();
-    assert_eq!(before, after);
-    assert_eq!(
-        std::fs::read(server.root.path().join("events.jsonl")).unwrap(),
-        b"synthetic unrelated store must not be read or changed\n"
-    );
-    assert!(
-        !server
-            .root
-            .path()
-            .join("unexpected-helper.sh.invoked")
-            .exists()
-    );
-    assert!(!server.root.path().join("collection.json").exists());
 }
 
 #[tokio::test]
@@ -7097,6 +6836,40 @@ fn response_event_for_vm_test(root: &Value) -> Value {
     response["sequence_number"] = json!("12");
     response["type"] = json!("response_started");
     response
+}
+
+// The CDP Traffic ledger behind these reads is gone, and native network
+// records keep no bodies to rebuild it. They are not routes or operations.
+#[tokio::test]
+async fn retired_network_catalog_and_request_routes_are_absent() {
+    let server = Server::start_with_helper_canaries(true).await;
+    let spec: Value = serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+    for (path, id) in [
+        ("/api/network/catalog", "get_api_observation_catalog"),
+        ("/api/network/request", "get_network_request"),
+    ] {
+        assert!(spec["paths"].get(path).is_none(), "{path}");
+        assert!(!spec.to_string().contains(id), "{id}");
+        assert_eq!(server.get(path).await.status(), 404, "{path}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let listing = String::from_utf8(output.stdout).unwrap();
+    assert!(!listing.contains("get_api_observation_catalog"));
+    assert!(!listing.contains("get_network_request"));
+    let deobfuscation = &spec["paths"]["/api/deobfuscation"]["get"];
+    assert!(
+        deobfuscation["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|parameter| parameter["name"] != "script_id")
+    );
+    let response = server.get("/api/deobfuscation?script_id=1").await;
+    assert_eq!(response.status(), 400, "live script input is gone");
 }
 
 #[tokio::test]

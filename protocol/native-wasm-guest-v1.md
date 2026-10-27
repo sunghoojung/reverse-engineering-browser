@@ -60,8 +60,10 @@ sequence holes in broker/Rust/JS/Swift summaries. Explicit drops remain drops.
 
 ## Host causality and limits
 
-Configured direct import call offsets are validated against module code,
-including helper functions. At a synchronous native host probe the actual Wasm
+Configured direct import call offsets must be strictly increasing, and each one
+must be a direct call to an imported function in module code, including helper
+functions. Native parsing and Rust admission apply the same 8192-byte adapter
+and 65536-byte snapshot limits. At a synchronous native host probe the actual Wasm
 stack must contain the same instance and interpreter activation as the current
 retained instruction. Reentry uses its own activation; returns, traps, exceptions
 and new dispatch failures invalidate stale parents. An empty import list proves

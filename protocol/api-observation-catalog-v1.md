@@ -1,10 +1,13 @@
 # API observation catalog v1
 
+> **Retired.** The catalog read CDP Traffic bodies through `GET /api/network/catalog` (`get_api_observation_catalog`). Native network records carry no bodies to infer shapes from, so that route was also removed and returns 404. No operation or schema in [openapi.json](openapi.json) implements this contract. This page is kept as a historical record for reading earlier captures and notes.
+
+
 `GET /api/network/catalog` is an explicit, read-only interpretation of the
 existing ephemeral CDP Traffic ledger. It does not enable capture, fetch data,
 send requests, save templates, modify raw values, or introduce MCP. Its OpenAPI
 operation ID is `get_api_observation_catalog`. The response is
-`reb-api-observation-catalog-v1`; the closed schema lives in
+`reb-api-observation-catalog-v1`; its schema was removed from
 [openapi.json](openapi.json). Requests take no query parameters.
 
 ## Endpoint and evidence identity

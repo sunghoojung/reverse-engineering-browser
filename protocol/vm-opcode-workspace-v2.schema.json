@@ -100,6 +100,7 @@
           "minimum": 0
         },
         "sample_count": {
+          "description": "Sum of workspace sample_count values. Native Wasm observation and native guest sample counts are reported per workspace and are not included.",
           "type": "integer",
           "minimum": 0
         },
@@ -528,6 +529,7 @@
           "maximum": 8
         },
         "sample_count": {
+          "description": "Accepted dispatch report or dispatch sample records for this handler. Native counts are separate fields; producer 2.7.0 and later never add them here.",
           "type": "integer",
           "minimum": 0
         },
@@ -543,10 +545,12 @@
           }
         },
         "native_wasm_sample_count": {
+          "description": "Accepted physical br_table executions at this exact site and arm. The same execution can also appear in native_guest_sample_count; never add the two.",
           "type": "integer",
           "minimum": 1
         },
         "native_guest_sample_count": {
+          "description": "Accepted native guest samples at this exact site and arm. The same execution can also appear in native_wasm_sample_count; never add the two.",
           "type": "integer",
           "minimum": 1
         }
@@ -579,9 +583,6 @@
                 "properties": {
                   "state": {
                     "const": "observed"
-                  },
-                  "sample_count": {
-                    "minimum": 1
                   },
                   "label": {
                     "pattern": "^br_table(?: f[0-9]+)? default$"
@@ -856,6 +857,7 @@
           }
         },
         "sample_count": {
+          "description": "Accepted dispatch report or dispatch sample records, matching samples. Producer 2.7.0 and later exclude native Wasm observations and native guest samples; documents from earlier producers summed all three streams.",
           "type": "integer",
           "minimum": 0
         },
@@ -876,6 +878,7 @@
           }
         },
         "native_wasm_observation_count": {
+          "description": "Accepted physical br_table executions. One execution at an adapter site also produces a native guest sample, so this count overlaps native_guest_sample_count.",
           "type": "integer",
           "minimum": 0
         },
@@ -887,6 +890,7 @@
           }
         },
         "native_guest_sample_count": {
+          "description": "Accepted native guest samples. Each one coincides with a physical br_table execution when the physical sampler is enabled, so this count overlaps native_wasm_observation_count.",
           "type": "integer",
           "minimum": 0
         }

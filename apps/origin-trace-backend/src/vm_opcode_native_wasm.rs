@@ -1,54 +1,20 @@
 //! Physical native Wasm observations, never inferred guest ISA or guest-PC samples.
+use super::native_module::Module;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use wasmparser::{Operator, Parser, Payload, TypeRef};
 
 #[derive(Default)]
 pub(super) struct Observations {
     pub rows: Vec<Value>,
     pub count: u64,
     pub invalid: u64,
+    /// Records for a module whose section structure did not decode. They are
+    /// neither accepted nor rejected and stay visible as an omission.
+    pub undecodable: u64,
     counts: BTreeMap<(u32, Option<u32>), u64>,
 }
 
-fn sites(bytes: &[u8]) -> Option<BTreeMap<u32, (u32, u32)>> {
-    let mut sites = BTreeMap::new();
-    let mut function = 0u32;
-    let mut instructions = 0usize;
-    for payload in Parser::new(0).parse_all(bytes) {
-        match payload.ok()? {
-            Payload::ImportSection(reader) => {
-                for import in reader {
-                    if matches!(import.ok()?.ty, TypeRef::Func(_)) {
-                        function = function.checked_add(1)?;
-                    }
-                }
-            }
-            Payload::CodeSectionEntry(body) => {
-                let mut reader = body.get_operators_reader().ok()?;
-                while !reader.eof() {
-                    instructions += 1;
-                    if instructions > 1_000_000 {
-                        return None;
-                    }
-                    let offset = u32::try_from(reader.original_position()).ok()?;
-                    if let Operator::BrTable { targets } = reader.read().ok()? {
-                        sites.insert(offset, (function, targets.len()));
-                    }
-                }
-                function = function.checked_add(1)?;
-            }
-            _ => {}
-        }
-    }
-    Some(sites)
-}
-
-fn observation(
-    event: &Value,
-    artifact: &Value,
-    sites: &BTreeMap<u32, (u32, u32)>,
-) -> Option<Value> {
+fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Option<Value> {
     if event["protocol_version"] != 3
         || event["payload_size"] != 128
         || event["payload_encoding"] != "hex"
@@ -83,7 +49,9 @@ fn observation(
         || !(8..16 * 1024 * 1024).contains(&offset)
         || count >= 16 * 1024 * 1024
         || index >= 16
-        || sites.get(&offset) != Some(&(function, count))
+        || module
+            .function(function)
+            .is_none_or(|facts| facts.br_tables.get(&offset) != Some(&count))
     {
         return None;
     }
@@ -93,20 +61,24 @@ fn observation(
     )
 }
 
-pub(super) fn collect(artifact: &Value, bytes: &[u8], events: &[Value]) -> Observations {
+pub(super) fn collect(
+    artifact: &Value,
+    mut module: Option<&mut Module<'_>>,
+    events: &[Value],
+) -> Observations {
     let mut output = Observations::default();
     if artifact["kind"] != "wasm" {
         return output;
     }
     // The caller verified the artifact digest and deduplicated event identities.
-    // Decode the module once per artifact, not once per sample or by URL.
-    let Some(sites) = sites(bytes) else {
-        return output;
-    };
     for event in events.iter().filter(|e| {
         e["type"] == "wasm_dispatch_observation" && e["artifact_id"] == artifact["artifact_id"]
     }) {
-        let Some(row) = observation(event, artifact, &sites) else {
+        let Some(module) = module.as_deref_mut() else {
+            output.undecodable += 1;
+            continue;
+        };
+        let Some(row) = observation(event, artifact, module) else {
             output.invalid += 1;
             continue;
         };
@@ -143,8 +115,6 @@ impl Observations {
             }
             if let Some(count) = self.counts.get(&(offset, selector)) {
                 handler["native_wasm_sample_count"] = json!(count);
-                handler["sample_count"] =
-                    json!(handler["sample_count"].as_u64().unwrap_or(0) + count);
                 handler["state"] = json!("observed");
             }
         }
@@ -156,6 +126,41 @@ pub(super) mod tests {
     use super::*;
     fn module() -> Vec<u8> {
         hex::decode("0061736d010000000104016000000302010005030100010a1d011b01017f0340200041016a210041002d00001a41000e020000000b0b").unwrap()
+    }
+    fn read(artifact: &Value, bytes: &[u8], events: &[Value]) -> Observations {
+        collect(artifact, Module::parse(bytes).as_mut(), events)
+    }
+    fn leb(mut value: usize, out: &mut Vec<u8>) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            out.push(if value == 0 { byte } else { byte | 0x80 });
+            if value == 0 {
+                break;
+            }
+        }
+    }
+    /// The `module()` fixture with `nops` extra instructions before its loop.
+    /// Returns the module and the module byte offset of its br_table.
+    pub(crate) fn padded_module(nops: usize) -> (Vec<u8>, u32) {
+        let original = module();
+        let mut body = vec![1, 1, 0x7f];
+        body.extend(std::iter::repeat_n(0x01, nops));
+        body.extend_from_slice(&original[30..]);
+        let mut entry = Vec::new();
+        leb(body.len(), &mut entry);
+        let site_in_entry = entry.len() + 3 + nops + 17;
+        entry.extend_from_slice(&body);
+        let mut section = vec![1];
+        let site_in_section = section.len() + site_in_entry;
+        section.extend_from_slice(&entry);
+        let mut bytes = original[..23].to_vec();
+        bytes.push(0x0a);
+        leb(section.len(), &mut bytes);
+        let site = bytes.len() + site_in_section;
+        bytes.extend_from_slice(&section);
+        assert_eq!(bytes[site], 0x0e);
+        (bytes, site as u32)
     }
     fn artifact(event: &Value) -> Value {
         json!({"kind":"wasm","artifact_id":event["artifact_id"],"session_id":event["session_id"],"navigation_id":event["navigation_id"],"frame_id":event["frame_id"]})
@@ -172,7 +177,7 @@ pub(super) mod tests {
     fn native_wasm_exact_site_and_scope() {
         let event = event(u32::MAX);
         let artifact = artifact(&event);
-        let output = collect(&artifact, &module(), std::slice::from_ref(&event));
+        let output = read(&artifact, &module(), std::slice::from_ref(&event));
         assert_eq!(output.count, 1);
         assert_eq!(output.rows[0]["is_default"], true);
         assert_eq!(output.rows[0]["selected_arm"], 2);
@@ -193,32 +198,29 @@ pub(super) mod tests {
                 } else {
                     bad.as_object_mut().unwrap().remove(field);
                 }
-                assert_eq!(
-                    collect(&artifact, &module(), &[bad]).count,
-                    0,
-                    "field {field}"
-                );
+                assert_eq!(read(&artifact, &module(), &[bad]).count, 0, "field {field}");
             }
         }
         for field in ["session_id", "navigation_id", "frame_id"] {
             let mut bad = event.clone();
             bad[field] = json!("2");
-            assert_eq!(collect(&artifact, &module(), &[bad]).count, 0);
+            assert_eq!(read(&artifact, &module(), &[bad]).count, 0);
         }
         for (offset, value) in [(4, 1u32), (8, 46), (16, 3), (20, 16), (24, 1)] {
             let mut bad = event.clone();
             let mut bytes = hex::decode(bad["payload"].as_str().unwrap()).unwrap();
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             bad["payload"] = json!(hex::encode(bytes));
-            assert_eq!(collect(&artifact, &module(), &[bad]).count, 0);
+            assert_eq!(read(&artifact, &module(), &[bad]).count, 0);
         }
         let mut handlers = vec![
             json!({"source":{"byte_offset":47},"opcode":null,"label":"br_table default","sample_count":0}),
             json!({"source":{"byte_offset":70},"opcode":null,"label":"br_table default","sample_count":0}),
         ];
         output.attach(&mut handlers);
-        assert_eq!(handlers[0]["sample_count"], 1);
-        assert_eq!(handlers[1]["sample_count"], 0);
+        assert_eq!(handlers[0]["native_wasm_sample_count"], 1);
+        assert_eq!(handlers[0]["sample_count"], 0);
+        assert!(handlers[1].get("native_wasm_sample_count").is_none());
     }
     #[test]
     fn native_wasm_imported_function_index_and_retention() {
@@ -226,7 +228,9 @@ pub(super) mod tests {
         let mut bytes = original[..14].to_vec();
         bytes.extend_from_slice(&[2, 7, 1, 1, b'm', 1, b'f', 0, 0]);
         bytes.extend_from_slice(&original[14..]);
-        assert_eq!(sites(&bytes).unwrap().get(&56), Some(&(1, 2)));
+        let mut index = Module::parse(&bytes).unwrap();
+        assert_eq!(index.function(1).unwrap().br_tables.get(&56), Some(&2));
+        assert!(index.function(0).is_none(), "imported function has no body");
         let mut event = event(0);
         let mut payload = hex::decode(event["payload"].as_str().unwrap()).unwrap();
         payload[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -234,13 +238,13 @@ pub(super) mod tests {
         event["payload"] = json!(hex::encode(&payload));
         let artifact = artifact(&event);
         assert_eq!(
-            collect(&artifact, &bytes, std::slice::from_ref(&event)).count,
+            read(&artifact, &bytes, std::slice::from_ref(&event)).count,
             1
         );
         payload[4..8].copy_from_slice(&0u32.to_le_bytes());
         let mut wrong = event.clone();
         wrong["payload"] = json!(hex::encode(payload));
-        assert_eq!(collect(&artifact, &bytes, &[wrong]).count, 0);
+        assert_eq!(read(&artifact, &bytes, &[wrong]).count, 0);
         let events = (1..=4097)
             .map(|i| {
                 let mut event = event.clone();
@@ -248,9 +252,37 @@ pub(super) mod tests {
                 event
             })
             .collect::<Vec<_>>();
-        let output = collect(&artifact, &bytes, &events);
+        let output = read(&artifact, &bytes, &events);
         assert_eq!(output.count, 4097);
         assert_eq!(output.rows.len(), 4096);
+    }
+    // Modules are bounded by the 16 MiB artifact limit, not by an
+    // instruction count that silently discards every record.
+    #[test]
+    fn native_wasm_large_module_keeps_exact_site_observations() {
+        let (bytes, site) = padded_module(1_000_001);
+        assert_eq!(padded_module(0), (module(), 47));
+        let mut event = event(0);
+        let mut payload = hex::decode(event["payload"].as_str().unwrap()).unwrap();
+        payload[8..12].copy_from_slice(&site.to_le_bytes());
+        event["payload"] = json!(hex::encode(&payload));
+        let artifact = artifact(&event);
+        let output = read(&artifact, &bytes, std::slice::from_ref(&event));
+        assert_eq!((output.count, output.invalid), (1, 0));
+        payload[8..12].copy_from_slice(&(site - 1).to_le_bytes());
+        event["payload"] = json!(hex::encode(&payload));
+        let output = read(&artifact, &bytes, std::slice::from_ref(&event));
+        assert_eq!(
+            (output.count, output.invalid),
+            (0, 1),
+            "a nop is not a site"
+        );
+        let output = collect(&artifact, None, std::slice::from_ref(&event));
+        assert_eq!(
+            (output.count, output.invalid, output.undecodable),
+            (0, 0, 1),
+            "an undecodable module is reported, not dropped"
+        );
     }
     #[test]
     #[ignore = "requires actual C++ producer; make check supplies REB_NATIVE_WASM_GOLDEN"]
@@ -284,7 +316,7 @@ pub(super) mod tests {
                 String::from_utf8_lossy(&process.stderr)
             );
             let event: Value = serde_json::from_slice(&process.stdout).expect("EventToJson output");
-            let output = collect(&artifact(&event), &module(), std::slice::from_ref(&event));
+            let output = read(&artifact(&event), &module(), std::slice::from_ref(&event));
             assert_eq!(
                 output.count,
                 u64::from(matches!(case, "default" | "arm" | "wide-identities")),

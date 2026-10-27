@@ -1,11 +1,12 @@
 # Deobfuscation response v1
 
-`GET /api/deobfuscation` accepts exactly one of `artifact_id` and `script_id`,
-plus `mode=analysis|derived` (default analysis). Native stored-evidence mode
-accepts artifacts; live scripts require the development debugger server.
+`GET /api/deobfuscation` requires `artifact_id` of a captured JavaScript
+artifact, plus `mode=analysis|derived` (default analysis). The `script_id` input
+for live debugger scripts was removed with CDP.
 
-Responses contain `schema: deobfuscation-analysis-v1`, `engine`, `mode`, both
-source identifiers (unused one null), `source_truncated`, `original_source`, and
+Responses contain `schema: deobfuscation-analysis-v1`, `engine`, `mode`,
+`artifact_id`, `script_id` (always null; kept so version 1 clients still parse
+the result), `source_truncated` (always false), `original_source`, and
 `analysis`. Derived mode also includes `representation` with text and segments.
 Original source is retained local evidence, never newly captured or executed.
 

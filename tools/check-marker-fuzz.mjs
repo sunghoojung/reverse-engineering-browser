@@ -7,14 +7,12 @@ import {markerPlan,validatePlan,digest,readMarkerFile,saveMarkerFile} from './ma
 // A text patch can land in a similar brace context while remaining valid JSON.
 // Verify semantic schema ownership and every local reference on the exact base.
 const spec=JSON.parse(await readFile(new URL('../protocol/openapi.json',import.meta.url),'utf8'));
+// The CDP Repeater runner and its debugger actions were removed. Plans stay
+// offline; the HTTP contract must not advertise a runner for them.
 const schemas=spec.components.schemas;
-for(const name of ['MarkerFuzzCaseGuard','MarkerFuzzExpectedExecution']){
-  assert.equal(schemas[name]?.type,'object',`${name} must live in components.schemas`);
-  assert(schemas[name].required.includes('instance_id'));
-}
-const actions=schemas.DebuggerAction.oneOf;
-assert.equal(actions.find(v=>v.properties.action.const==='run_repeater_request').properties.marker_fuzz.$ref,'#/components/schemas/MarkerFuzzCaseGuard');
-assert.equal(actions.find(v=>v.properties.action.const==='cancel_repeater_request').properties.expected_execution.$ref,'#/components/schemas/MarkerFuzzExpectedExecution');
+for(const name of ['MarkerFuzzCaseGuard','MarkerFuzzExpectedExecution','DebuggerAction'])
+  assert.equal(schemas[name],undefined,`${name} must not return to the HTTP contract`);
+assert(!JSON.stringify(spec).includes('run_repeater_request'),'No Repeater action is advertised');
 function references(value){
   if(!value || typeof value!=='object')return;
   if(typeof value.$ref==='string' && value.$ref.startsWith('#/')){

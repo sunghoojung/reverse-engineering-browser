@@ -13,7 +13,8 @@ validation and name/value-free review remain. Run
 no-browser-launch refusal checks; browser acceptance is no longer supported.
 
 Use `node tools/export-captured-client.mjs --input request.json --output project.zip`
-with Node.js 22+ to export a reviewed saved `get_network_request` response through
+with Node.js 22+ to export a reviewed, previously saved `reb-network-request-v1`
+response (the retired `get_network_request` format) through
 the existing Go/JavaScript client generator. Raw is the default;
 `--mode redacted_copy` requests an explicit best-effort copy. This offline tool
 never contacts a target or replaces an output. See

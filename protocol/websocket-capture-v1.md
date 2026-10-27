@@ -1,11 +1,9 @@
 # WebSocket message capture v1
 
-`GET /api/debugger` includes `network.websockets` when the backend supports this
-projection. It is exposed by the existing read-only `get_debugger` operation:
+> **Retired.** WebSocket messages were captured through CDP and exposed in `GET /api/debugger` `network.websockets`. CDP and the `/api/debugger` routes were removed; every `/api/debugger` route now returns 410 `debugger_unavailable`, and no operation or schema in [openapi.json](openapi.json) implements this contract. This page is kept as a historical record for reading earlier captures and notes.
 
-```sh
-reb-api call get_debugger --base-url http://127.0.0.1:PORT --read-only
-```
+The `reb-websocket-capture-v1` projection below was part of the debugger
+snapshot.
 
 In Origin Trace, open **Traffic → WebSockets**. Select a retained connection and
 Both directions, Sent or Received. Expand a message to inspect inert UTF-8 text

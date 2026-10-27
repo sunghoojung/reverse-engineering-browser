@@ -272,7 +272,7 @@ index a695fec..e6b0060 100644
    TracedHandles traced_handles_;
    EternalHandles* eternal_handles_ = nullptr;
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index c3b231c..73310ec 100644
+index c3b231c..6803466 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -2,6 +2,8 @@
@@ -302,7 +302,7 @@ index c3b231c..73310ec 100644
  
  #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
  #include "src/wasm/interpreter/wasm-interpreter.h"
-@@ -149,47 +152,308 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+@@ -149,47 +152,312 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
    return ret;
  }
  
@@ -603,7 +603,12 @@ index c3b231c..73310ec 100644
 +    callback(context, bytes.data(), bytes.size(),
 +             static_cast<uint32_t>(function_index), offset, info->selector,
 +             info->table_count);
-+  if (guest_enabled) {
++  // Physical observers may replace or revoke the guest callback/policy.
++  // Recheck before accessing guest state so setter, epoch and disable
++  // invalidation take effect at this boundary, not just the next dispatch.
++  if (guest_enabled && wasm::GuestCaptureEnabled(isolate)) {
++    auto guest_callback = isolate->wasm_guest_dispatch_callback();
++    DCHECK_NOT_NULL(guest_callback);  // The admission predicate cannot call V8.
 +    const auto &sites = frame->wasm_code()->reb_guest_sites();
 +    auto *identity = wasm::FindGuestFrame(isolate, frame);
 +    const auto *site =
@@ -624,8 +629,7 @@ index c3b231c..73310ec 100644
 +                                      &access,
 +                                      &wasm::ReadGuestNumericLocal,
 +                                      &wasm::CopyGuestMemory};
-+    isolate->wasm_guest_dispatch_callback()(context, bytes.data(), bytes.size(),
-+                                            view);
++    guest_callback(context, bytes.data(), bytes.size(), view);
 +  }
    return ReadOnlyRoots(isolate).undefined_value();
  }
@@ -887,7 +891,7 @@ index 5e62f08..2d49d36 100644
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c541..dfd3cb3 100644
+index 7f4c541..0047a9c 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,13 +6,17 @@
@@ -908,7 +912,7 @@ index 7f4c541..dfd3cb3 100644
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1359,458 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1359,566 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1109,6 +1113,114 @@ index 7f4c541..dfd3cb3 100644
 +  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
 +}
 +
++namespace {
++enum class GuestCallbackMutation { kNone, kClear, kDisabled, kEnabled };
++thread_local GuestCallbackMutation guest_callback_mutation = GuestCallbackMutation::kNone;
++thread_local int guest_mutation_physical_calls = 0, guest_mutation_replacement_calls = 0,
++                 guest_mutation_admissions = 0;
++thread_local uint64_t guest_mutated_instance = 0, guest_mutated_invocation = 0;
++bool DisableGuestCapture() {
++  return false;
++}
++bool AdmitReplacementGuestModule(v8::Local<v8::Context>, const uint8_t*, size_t, uint32_t) {
++  ++guest_mutation_admissions;
++  return true;
++}
++void ObserveReplacementGuest(v8::Local<v8::Context> context,
++                             const uint8_t* bytes,
++                             size_t size,
++                             const v8::WasmGuestStateView& view) {
++  ++guest_mutation_replacement_calls;
++  // A replacement during a live dispatch must receive an explicit omission,
++  // never either identity admitted under the previous callback/policy.
++  CHECK_EQ(view.instance_id == 0, view.invocation_id == 0);
++  ObserveNativeGuest(context, bytes, size, view);
++}
++void MutateGuestCallbackFromPhysical(v8::Local<v8::Context>,
++                                     const uint8_t*,
++                                     size_t,
++                                     uint32_t function,
++                                     uint32_t,
++                                     uint32_t,
++                                     uint32_t) {
++  ++guest_mutation_physical_calls;
++  if (guest_callback_mutation == GuestCallbackMutation::kNone)
++    return;
++  auto* isolate = v8::Isolate::GetCurrent();
++  v8::WasmGuestContext previous{};
++  CHECK(isolate->GetCurrentWasmGuestContext(function, &previous));
++  guest_mutated_instance = previous.instance_id;
++  guest_mutated_invocation = previous.invocation_id;
++  if (guest_callback_mutation == GuestCallbackMutation::kClear) {
++    isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++  } else {
++    isolate->SetWasmGuestDispatchCallback(
++        ObserveReplacementGuest,
++        guest_callback_mutation == GuestCallbackMutation::kDisabled ? DisableGuestCapture
++                                                                    : EnableGuestCapture,
++        nullptr, AdmitReplacementGuestModule);
++  }
++  // Do not query context after mutation: that would refresh the policy on
++  // behalf of the runtime and could hide its missing post-observer check.
++  guest_callback_mutation = GuestCallbackMutation::kNone;
++}
++void CheckGuestCallbackMutation(GuestCallbackMutation mutation) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  WasmRunner<int32_t> r(TestExecutionTier::kLiftoff);
++  r.Build({B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))), WASM_I32V_1(7)});
++  auto* isolate = reinterpret_cast<v8::Isolate*>(r.isolate());
++  guest_calls = guest_failures = 0;
++  guest_high_local = false;
++  guest_callback_mutation = GuestCallbackMutation::kNone;
++  guest_mutation_physical_calls = guest_mutation_replacement_calls = guest_mutation_admissions = 0;
++  isolate->SetWasmGuestDispatchCallback(ObserveNativeGuest, EnableGuestCapture);
++  isolate->SetWasmBrTableDispatchCallback(MutateGuestCallbackFromPhysical);
++  CHECK_EQ(7, r.Call());
++  CHECK_EQ(1, guest_calls);
++  const uint64_t old_instance = guest_instance, old_invocation = guest_invocation;
++  guest_callback_mutation = mutation;
++  CHECK_EQ(7, r.Call());
++  CHECK_EQ(2, guest_mutation_physical_calls);
++  CHECK_EQ(old_instance, guest_mutated_instance);
++  CHECK_NE(uint64_t{0}, guest_mutated_invocation);
++  CHECK_NE(old_invocation, guest_mutated_invocation);
++  CHECK_EQ(1, guest_calls);  // No old callback or admitted replacement delivery.
++  const int omissions = mutation == GuestCallbackMutation::kEnabled ? 1 : 0;
++  CHECK_EQ(omissions, guest_failures);
++  CHECK_EQ(omissions, guest_mutation_replacement_calls);
++  CHECK_EQ(0, guest_mutation_admissions);
++  for (const auto& instance : r.isolate()->reb_guest_capture_state().instances)
++    CHECK_NULL(instance.root);
++  for (const auto& frame : r.isolate()->reb_guest_capture_state().frames)
++    CHECK_EQ(uint64_t{0}, frame.invocation_id);
++  // Both configurations omit epoch providers. Replacement must still revoke
++  // the old identities; only a fresh function entry may admit new ones.
++  if (mutation != GuestCallbackMutation::kEnabled) {
++    isolate->SetWasmGuestDispatchCallback(ObserveReplacementGuest, EnableGuestCapture, nullptr,
++                                          AdmitReplacementGuestModule);
++  }
++  CHECK_EQ(7, r.Call());
++  CHECK_EQ(3, guest_mutation_physical_calls);
++  CHECK_EQ(1, guest_mutation_admissions);
++  CHECK_EQ(omissions + 1, guest_mutation_replacement_calls);
++  CHECK_EQ(2, guest_calls);
++  CHECK_EQ(omissions, guest_failures);
++  CHECK_NE(old_instance, guest_instance);
++  CHECK_NE(guest_mutated_invocation, guest_invocation);
++  isolate->SetWasmBrTableDispatchCallback(nullptr);
++  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++}
++}  // namespace
++
++TEST(RebNativeGuestPhysicalObserverClearsCallback) {
++  CheckGuestCallbackMutation(GuestCallbackMutation::kClear);
++}
++TEST(RebNativeGuestPhysicalObserverDisablesReplacement) {
++  CheckGuestCallbackMutation(GuestCallbackMutation::kDisabled);
++}
++TEST(RebNativeGuestPhysicalObserverReplacesPolicy) {
++  CheckGuestCallbackMutation(GuestCallbackMutation::kEnabled);
++}
 +namespace {
 +uint32_t selected_ancestor_site = 0;
 +uint64_t selected_outer_invocation = 0;

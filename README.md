@@ -42,10 +42,9 @@ v0.3.0/v0.3.1 lacks newer native runtime-buffer and VM capture features. A match
 bundle ID does not establish compatibility. Before starting a discovered browser,
 Origin Trace warns about these limits and defaults to **Continue Offline**;
 **Start Unverified Session** remains an explicit choice for each session.
-Offline evidence inspection remains available. Stock Chrome CDP package checks
-exercise the launcher, backend and relocated UI, not native Brave instrumentation
-or Finder automatic launch. Stock Chrome is not automatically discovered by the
-native app's normal live-session flow.
+Offline evidence inspection remains available. Packaging checks do not establish
+native Brave instrumentation or Finder automatic launch. The current source
+provides no CDP or stock-browser capture fallback.
 
 The companion workflow records source/run identity, SHA256 checksums and these
 compatibility limits. It uses ad-hoc signing, without Apple notarization. The
@@ -53,6 +52,9 @@ paired workflow and historical browser-equivalence guard remain separate and are
 not relaxed. See [companion release procedure](docs/development/companion-release.md).
 
 ### Latest release: v0.3.1
+
+These published artifacts and their validation history are unchanged; they do
+not describe the current branch's native-only capabilities.
 
 - **Native Close/Quit repair:** an aborted Close sheet cannot approve a fresh
   Quit. Stay preserves the exact draft and save state; Close Anyway requires a
@@ -136,37 +138,34 @@ boundaries and the [capture policy](SAFETY.md) before starting a session.
 
 ## Features
 
-- **Live network traffic:** inspect requests in a full-width table with readable
-  paths, hosts, methods, status codes, and timing; select one to inspect its full
-  URL, headers, request body, and response body captured through CDP.
+- **Native network observations:** inspect bounded method/host and request
+  lifecycle metadata from the custom Brave build. Native metadata does not
+  provide full URLs, headers, request bodies or arbitrary response bodies.
 - **Tab and domain organization:** separate traffic by browser tab, then narrow
   a tab to a specific destination domain or resource type.
 - **Native browser evidence:** record calls and property reads across Canvas,
   WebGL, Web Audio, device and layout APIs, Permissions, Storage, WebRTC, and
   JavaScript runtime fingerprinting, plus request lifecycle metadata from a
   custom Brave build.
-- **Origin tracing:** follow a request backward through the observed events,
-  scripts, frames, execution contexts, and captured artifacts that contributed
-  to it.
-- **Source inspection and debugging:** browse page sources, set breakpoints,
-  pause and step through JavaScript, inspect scopes, evaluate watches, and use a
-  live console.
+- **Evidence navigation:** follow retained event and artifact identities;
+  missing links and correlations do not establish request-value provenance.
+- **Source inspection and native Console:** inspect retained sources and static
+  analysis, or explicitly run commands in a selected native Console document.
+  Live page breakpoints, stepping, paused scopes and watches are unavailable.
 - **Artifact capture:** retain bounded copies of network-delivered and
   runtime-generated JavaScript and WebAssembly with hashes and provenance, plus
   explicitly authorized Canvas image output.
-- **Memory and backtrace tools:** inspect heap snapshots, live objects, decoded
-  stack frames, and VM-related findings.
-- **Research workflows:** save requests to collections, replay isolated
-  requests, run controlled experiments, and keep local analyst notes.
-- **Local and bounded capture:** evidence remains on the machine. Enabled CDP
-  content capture retains raw URLs and headers, including credentials. Bodies
-  are capped at 128 KiB; native queues and artifact transfers have explicit limits.
-- **Native quiet mode:** run native evidence capture without attaching DevTools
-  when request and response content is not required.
-- **Stealth VM capture:** combine `REB_NATIVE_QUIET_MODE=1` with the VM category
-  to capture bounded runtime byte buffers without enabling `Runtime` or
-  `Debugger`. This avoids the `Runtime.enable` signal used by obfuscator.io
-  `vmDebugProtection.inspectorDetection`.
+- **VM evidence:** inspect retained VM findings and bounded native runtime
+  buffers. Opt-in Wasm guest observations require a rebuilt browser and a
+  reviewed adapter; they do not provide arbitrary interpreter guest-PC recovery.
+  See the [guest observation contract](protocol/native-wasm-guest-v1.md).
+- **Research workflows:** save request definitions and evidence-linked analyst
+  notes locally. Collections do not send requests; replay and CDP experiments
+  are unavailable.
+- **Local and bounded capture:** native queues and artifact transfers have
+  explicit limits. Artifacts and historical captures may contain sensitive
+  content; review them before sharing. No DevTools attachment or fallback is
+  used, and no undetectability guarantee is made.
 
 ## How to use it
 
@@ -189,9 +188,9 @@ Read the selected release's validation results and limits. Origin Trace contains
 no bundled sample evidence. The applications are ad-hoc signed but not
 Apple-notarized.
 
-Opening Origin Trace automatically starts an isolated one-hour research session
-with the implemented capture categories, bounded request/response content and
-Canvas artifacts enabled. Use it only for authorized targets. **New Live
+In these published releases, opening Origin Trace starts an isolated one-hour
+research session with the implemented capture categories, bounded request/response
+content and Canvas artifacts enabled. Use it only for authorized targets. **New Live
 Session…** offers metadata-only controls. Enabled content capture can retain
 credentials without automatic masking; review captures before sharing.
 
@@ -216,10 +215,10 @@ Windows porting requirements. The complete packaged application remains macOS-on
 
 ### Run a live capture with an existing custom Brave build
 
-From the repository root:
+From the current repository source, select a custom Brave build containing the
+required native patches. Previously published browsers lack newer probes:
 
 ```sh
-REB_CDP_NETWORK_CAPTURE=1 \
 REB_BRAVE_BINARY="/path/to/Brave Browser Development.app/Contents/MacOS/Brave Browser Development" \
 make live
 ```
@@ -228,12 +227,13 @@ Origin Trace and the custom Brave browser open together. Browse in that Brave
 window and select requests in the **Traffic** tab. Close Brave to end the
 session. Captured evidence is stored under `build/sessions/live/`.
 
-CDP content capture is explicit because it can retain raw page content, URLs,
-and headers, including authorization and cookies, without automatic masking.
+Capture is native-only. Do not set `REB_CDP_NETWORK_CAPTURE` or configure a
+debugger transport: the launcher rejects those removed paths. Native network
+metadata is not a complete HTTP recorder; missing headers and bodies remain
+unavailable. Retained artifacts and historical captures can still be sensitive.
 An explicitly selected best-effort redacted copy does not modify the raw capture
 and is not a guarantee that the copy contains no secrets; see the
-[Traffic copy contract](protocol/traffic-capture-copy-v1.md). Streaming, cached,
-internal, or already-evicted response bodies may be unavailable.
+[Traffic copy contract](protocol/traffic-capture-copy-v1.md).
 
 Fingerprint operation names are captured by default. To also retain the exact
 image returned by `HTMLCanvasElement.toDataURL()` for this one session, add
@@ -267,18 +267,13 @@ The first full build can take several hours. Later builds are incremental and
 normally reuse the existing checkout and compiled objects. After it completes,
 start live capture with the command from the previous section.
 
-### Run without CDP content capture
+### Native-only capability limits
 
-For native metadata and artifact capture without a live DevTools attachment:
-
-```sh
-REB_NATIVE_QUIET_MODE=1 \
-REB_BRAVE_BINARY="/path/to/Brave Browser Development.app/Contents/MacOS/Brave Browser Development" \
-make live
-```
-
-Sources, breakpoints, stepping, watches, the console, full URLs, headers, and
-bodies are unavailable in native quiet mode.
+Native capture never attaches a CDP debugger. Retained Sources/static analysis,
+native Console and owned-VM debugging remain available; live page breakpoints,
+stepping, watches and CDP memory inspection do not. The native Console requires
+explicit commands and is separate from observational capture. See the
+[workspace guide](apps/research-ui/README.md#native-only-capture).
 
 Usage, authorization, capture, and privacy boundaries are defined in
 [`SAFETY.md`](SAFETY.md).

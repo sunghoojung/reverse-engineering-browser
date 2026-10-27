@@ -9,7 +9,7 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
  #include <stdint.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -4529,6 +4530,209 @@
+@@ -4529,6 +4530,219 @@
        });
  }
  
@@ -70,7 +70,7 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +}
 +void ObservePublicQuickJS(v8::Local<v8::Context>, const uint8_t *bytes,
 +                          size_t size, const v8::WasmGuestStateView &view) {
-+  if (view.function_index != 414)
++  if (view.function_index != 414 || view.module_byte_offset != 0x20677)
 +    return;
 +  CHECK_EQ(public_quickjs_bytes.size(), size);
 +  CHECK_EQ(0, memcmp(bytes, public_quickjs_bytes.data(), size));
@@ -85,8 +85,6 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +      break;
 +    }
 +  }
-+  if (view.module_byte_offset != 0x20677)
-+    return;
 +  CHECK_NE(uint64_t{0}, view.instance_id);
 +  CHECK_NE(uint64_t{0}, view.invocation_id);
 +  CHECK_EQ(244u, view.table_count);
@@ -157,6 +155,18 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +  v8::Context::Scope context_scope(context);
 +  public_quickjs_bytes = ReadPublicQuickJSFile("REB_PUBLIC_QUICKJS_WASM");
 +  const auto bundle = ReadPublicQuickJSFile("REB_PUBLIC_QUICKJS_BUNDLE");
++  // Test-only filter regression, separate from the real execution below.
++  // An unrelated handler br_table must preserve the configured guest boundary.
++  public_quickjs_latest = {{1, 2, 7, 0, 8, 9}};
++  v8::WasmGuestStateView unrelated{};
++  unrelated.instance_id = 1;
++  unrelated.invocation_id = 2;
++  unrelated.function_index = 414;
++  unrelated.module_byte_offset = 0x20676;
++  ObservePublicQuickJS(context, public_quickjs_bytes.data(),
++                       public_quickjs_bytes.size(), unrelated);
++  CHECK_EQ(size_t{1}, public_quickjs_latest.size());
++  CHECK_EQ(7u, public_quickjs_latest[0].pc);
 +  public_quickjs_latest.clear();
 +  public_quickjs_hosts.clear();
 +  public_quickjs_dispatches = 0;

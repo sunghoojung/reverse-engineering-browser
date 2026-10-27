@@ -159,9 +159,22 @@ void NativeGuestAdmission() {
   assert(guest_dispatches.size() == before_reentry_dispatch + 1);
   sink.RecordApiCall(kRuntime, "Math.acos");
   assert(guest_hosts.size() == before_reentry_host + 1);
+  const auto direct_parent = guest_hosts.back().header.parent_event_id;
+  view.module_byte_offset = 9;  // Unrelated br_table within the same activation.
+  sink.InvalidateNativeWasmGuest(view);
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == before_reentry_host + 2);
+  assert(guest_hosts.back().header.parent_event_id == direct_parent);
+  view.module_byte_offset = 8;
+  sink.InvalidateNativeWasmGuest(view);
+  // Model Blink's selected dispatch followed by a metadata admission refusal.
+  sink.RecordNativeWasmGuest(1, 8, "", module, view, 5, 6);
+  assert(guest_dispatches.size() == before_reentry_dispatch + 1);
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == before_reentry_host + 2);
   sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
   sink.RecordApiCall(kRuntime, "Math.acos");
-  assert(guest_hosts.size() == before_reentry_host + 1);
+  assert(guest_hosts.size() == before_reentry_host + 2);
   sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
   std::cout
       << "PASS guest sink exact invocation/import parents, reentry, cap/read/transport/identity "

@@ -6,6 +6,8 @@ on:
       - 'browser/config/v8.rev'
       - 'browser/integration/brave/patches/v8/**'
       - 'tools/check-native-v8-runtime.py'
+      - 'tools/install-native-llvm.py'
+      - 'tools/native-llvm23-packages.json'
       - '.github/workflows/native-v8-runtime.yml'
       - 'tools/quickjs-native-fixture/**'
 permissions:
@@ -27,14 +29,21 @@ jobs:
       - name: Install source-build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-22 llvm-22 libclang-rt-22-dev ninja-build pkg-config libglib2.0-dev ccache
+          sudo apt-get install -y g++-15 ninja-build pkg-config libglib2.0-dev ccache libedit2 libffi8 libxml2-16 libz3-4 libzstd1 zlib1g libpfm4 libcurl4t64
+      - name: Extract verified LLVM23 privately and check required compiler flags
+        run: |
+          python3 tools/install-native-llvm.py --self-test
+          python3 tools/install-native-llvm.py \
+            --prefix "$RUNNER_TEMP/reb-llvm23" --receipt build/native-llvm23.json
+          echo "$RUNNER_TEMP/reb-llvm23/usr/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/reb-llvm23/usr/lib/x86_64-linux-gnu:$RUNNER_TEMP/reb-llvm23/usr/lib/llvm-23/lib" >> "$GITHUB_ENV"
       - name: Restore bounded compiler objects (never source or credentials)
         id: compiler-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/reb-native-ccache
-          key: native-v8-ubuntu26-clang22-${{ hashFiles('browser/config/v8.rev') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: native-v8-ubuntu26-clang22-${{ hashFiles('browser/config/v8.rev') }}-
+          key: native-v8-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-packages.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: native-v8-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-packages.json') }}-
       - name: Validate standalone adaptation
         run: python3 tools/check-native-v8-runtime.py --self-test
       - name: Compile pinned native runtime and execute real C++ tests
@@ -55,6 +64,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: native-v8-runtime-${{ github.run_id }}
-          path: build/native-v8-runtime.json
+          path: |
+            build/native-v8-runtime.json
+            build/native-llvm23.json
           if-no-files-found: warn
           retention-days: 7

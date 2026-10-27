@@ -53,7 +53,7 @@ index 09606fb..677685d 100644
  
    void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
 diff --git a/src/api/api.cc b/src/api/api.cc
-index c128c92..74f2a90 100644
+index c128c92..67a212b 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -164,6 +164,7 @@
@@ -64,7 +64,7 @@ index c128c92..74f2a90 100644
  #endif  // V8_ENABLE_WEBASSEMBLY
  
  #ifdef V8_INTL_SUPPORT
-@@ -11012,6 +11013,27 @@ void Isolate::SetWasmBrTableDispatchCallback(
+@@ -11012,6 +11013,39 @@ void Isolate::SetWasmBrTableDispatchCallback(
    i_isolate->set_wasm_br_table_dispatch_callback(callback);
  }
  
@@ -74,20 +74,32 @@ index c128c92..74f2a90 100644
 +    WasmGuestCaptureEpochCallback epoch,
 +    WasmGuestModuleAdmissionCallback admit_module) {
 +  i::Isolate *isolate = reinterpret_cast<i::Isolate *>(this);
++#if V8_ENABLE_WEBASSEMBLY
++  // Previously admitted instances must never bypass a replacement policy,
++  // including when both configurations omit an epoch provider.
++  i::wasm::ResetRebGuestCapture(isolate);
++#endif
 +  isolate->set_wasm_guest_epoch_callback(epoch);
 +  isolate->set_wasm_guest_module_admission(admit_module);
 +  isolate->set_wasm_guest_enabled_callback(enabled);
 +  isolate->set_wasm_guest_dispatch_callback(callback);
-+  if (!callback)
-+    i::wasm::ResetRebGuestCapture(isolate);
 +}
 +bool Isolate::GetCurrentWasmGuestContext(uint32_t dispatcher_function_index,
 +                                         WasmGuestContext *result) {
++  if (result)
++    *result = {};
++#if V8_ENABLE_WEBASSEMBLY
 +  return i::wasm::GetCurrentRebGuestContext(
 +      reinterpret_cast<i::Isolate *>(this), dispatcher_function_index, result);
++#else
++  USE(dispatcher_function_index);
++  return false;
++#endif
 +}
 +void Isolate::ResetWasmGuestCapture() {
++#if V8_ENABLE_WEBASSEMBLY
 +  i::wasm::ResetRebGuestCapture(reinterpret_cast<i::Isolate *>(this));
++#endif
 +}
  CALLBACK_SETTER(WasmModuleBytesCallback, WasmModuleBytesCallback,
                  wasm_module_bytes_callback)
@@ -799,7 +811,7 @@ index 7227a1b..9e74de9 100644
    const uint32_t instructions_size_;
    const uint32_t reloc_info_size_;
 diff --git a/src/wasm/wasm-tracing.h b/src/wasm/wasm-tracing.h
-index 5e62f08..e762bcd 100644
+index 5e62f08..2d49d36 100644
 --- a/src/wasm/wasm-tracing.h
 +++ b/src/wasm/wasm-tracing.h
 @@ -9,6 +9,7 @@
@@ -810,23 +822,32 @@ index 5e62f08..e762bcd 100644
  #include <cstdint>
  
  #include "src/codegen/machine-type.h"
-@@ -34,7 +35,11 @@ struct RebBrTableTracingInfo {
+@@ -30,11 +31,19 @@ struct MemoryTracingInfo {
+ };
+ 
+ // Created on the native stack by Liftoff, following MemoryTracingInfo's ABI.
+-struct RebBrTableTracingInfo {
++// Exact-size stack reservations on x64/other targets must preserve word
++// alignment before entering the runtime. This is not a serialized wire record.
++struct alignas(uintptr_t) RebBrTableTracingInfo {
    uint32_t function_byte_offset;
    uint32_t selector;
    uint32_t table_count;
 +  uint32_t descriptor_index;
 +  uint32_t is_entry;
  };
++static_assert(alignof(RebBrTableTracingInfo) >= alignof(uintptr_t));
++static_assert(sizeof(RebBrTableTracingInfo) % sizeof(uintptr_t) == 0);
 +bool GetCurrentRebGuestContext(Isolate *, uint32_t, v8::WasmGuestContext *);
 +void ResetRebGuestCapture(Isolate *);
  
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c541..08f16f6 100644
+index 7f4c541..4e2248b 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
-@@ -6,6 +6,7 @@
+@@ -6,13 +6,16 @@
  #include <stdlib.h>
  #include <string.h>
  
@@ -834,15 +855,16 @@ index 7f4c541..08f16f6 100644
  #include "src/base/functional/function-ref.h"
  #include "src/base/overflowing-math.h"
  #include "src/utils/utils.h"
-@@ -13,6 +14,7 @@
+ #include "src/wasm/code-space-access.h"
  #include "src/wasm/compilation-environment-inl.h"
  #include "src/wasm/wasm-opcodes-inl.h"
++#include "src/wasm/wasm-tracing.h"
  #include "test/cctest/cctest.h"
 +#include "test/cctest/heap/heap-utils.h"
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1357,300 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1358,360 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -917,6 +939,8 @@ index 7f4c541..08f16f6 100644
 +}
 +} // namespace
 +TEST(RebNativeGuestLargeLocalIndexAndMemory) {
++  CHECK_EQ(size_t{0}, sizeof(RebBrTableTracingInfo) % sizeof(uintptr_t));
++  CHECK_GE(alignof(RebBrTableTracingInfo), alignof(uintptr_t));
 +  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
 +  WasmRunner<int32_t, int32_t, int64_t> r(TestExecutionTier::kLiftoff);
 +  r.AllocateLocals(319, kWasmI32); // parameters 0/1, through local 320
@@ -983,6 +1007,64 @@ index 7f4c541..08f16f6 100644
 +  CHECK_EQ(0, guest_failures);
 +  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
 +}
++namespace {
++bool guest_policy_replaced = false;
++bool DenyGuestModule(v8::Local<v8::Context>, const uint8_t *, size_t,
++                     uint32_t) {
++  return false;
++}
++void ReplaceGuestPolicyFromHost(
++    const v8::FunctionCallbackInfo<v8::Value> &args) {
++  auto *isolate = args.GetIsolate();
++  v8::WasmGuestContext context{};
++  if (!guest_policy_replaced) {
++    CHECK(isolate->GetCurrentWasmGuestContext(guest_dispatcher, &context));
++    CHECK_EQ(guest_instance, context.instance_id);
++    // Replace the policy while the old dispatcher/helper activation is live.
++    // Both configurations use null epoch providers, so only setter invalidation
++    // can revoke the previously admitted identities.
++    isolate->SetWasmGuestDispatchCallback(
++        ObserveNativeGuest, EnableGuestCapture, nullptr, DenyGuestModule);
++    guest_policy_replaced = true;
++  }
++  CHECK(!isolate->GetCurrentWasmGuestContext(guest_dispatcher, &context));
++  CHECK_EQ(uint64_t{0}, context.instance_id);
++  CHECK_EQ(uint64_t{0}, context.invocation_id);
++}
++} // namespace
++
++TEST(RebNativeGuestAdmissionPolicyReplacement) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  HandleScope handles(CcTest::InitIsolateOnce());
++  auto *isolate = CcTest::isolate();
++  auto function = v8::Function::New(isolate->GetCurrentContext(),
++                                    ReplaceGuestPolicyFromHost)
++                      .ToLocalChecked();
++  TestSignatures sigs;
++  ManuallyImportedJSFunction import{
++      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*function))};
++  WasmRunner<int32_t> r(TestExecutionTier::kLiftoff, kWasmOrigin, &import);
++  auto &helper = r.NewFunction<void>();
++  helper.Build({WASM_CALL_FUNCTION0(0)});
++  r.Build({B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++           WASM_CALL_FUNCTION0(helper.function_index()), WASM_I32V_1(9)});
++  guest_high_local = guest_policy_replaced = false;
++  guest_calls = guest_failures = 0;
++  isolate->SetWasmGuestDispatchCallback(ObserveNativeGuest, EnableGuestCapture);
++  CHECK_EQ(9, r.Call());
++  CHECK_EQ(1, guest_calls);
++  const uint64_t old_instance = guest_instance;
++  CHECK_EQ(9, r.Call());
++  CHECK_EQ(1, guest_calls);
++  CHECK_EQ(1, guest_failures);
++  guest_policy_replaced = false;
++  isolate->SetWasmGuestDispatchCallback(ObserveNativeGuest, EnableGuestCapture);
++  CHECK_EQ(9, r.Call());
++  CHECK_EQ(2, guest_calls);
++  CHECK_NE(old_instance, guest_instance);
++  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++}
++
 +TEST(RebNativeGuestDepthAndCounterExhaustionFailClosed) {
 +  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
 +  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff);

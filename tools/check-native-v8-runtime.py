@@ -2,8 +2,8 @@
 """Build the pinned native V8 runtime tests, not a Brave/browser acceptance run.
 
 This independent system-Clang profile does not fetch Chromium's binary
-toolchains. Production C++ patches are unchanged; only Brave-specific GN wiring
-is omitted because this checkout has no Brave embedder.
+toolchains. Authored C++ patches are unchanged. Brave-specific GN wiring is
+omitted; modernized upstream lifetime-attribute spellings are receipt-recorded.
 """
 
 import argparse
@@ -29,6 +29,7 @@ TEST_NAMES = [
     "RebNativeBrTableDisabledCompilation",
     "RebNativeGuestLargeLocalIndexAndMemory",
     "RebNativeGuestHelperImportAndExceptionScope",
+    "RebNativeGuestAdmissionPolicyReplacement",
     "RebNativeGuestDepthAndCounterExhaustionFailClosed",
     "RebNativeGuestDistinctInstances",
     "RebNativeGuestWeakIdentityLifetime",
@@ -84,6 +85,26 @@ def binary_dependencies(deps):
     raise ValueError("Missing DEPS dictionary")
 
 
+ABSEIL_CAPTURE_COUNTS = {
+    "status/statusor.h": 1,
+    "synchronization/mutex.h": 8,
+    "base/internal/spinlock.h": 1,
+    "container/internal/raw_hash_map.h": 8,
+    "container/internal/raw_hash_set.h": 4,
+    "container/internal/btree_container.h": 5,
+}
+
+
+def modernize_abseil_capture(source, expected):
+    # Preserve lifetime analysis: Clang23 replaced the deprecated spelling for
+    # captures by this with a dedicated attribute, not an absent annotation.
+    pattern = r"ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY\((?:\s|\\\n)*this\s*\)"
+    result, count = re.subn(pattern, "[[clang::lifetime_capture_by_this]]", source)
+    if count != expected:
+        raise ValueError("Pinned Abseil lifetime annotations changed; review required")
+    return result
+
+
 def create_clang_toolchain_view(destination, system_base, resource_dir, builtins):
     """Expose the real distro archive at Chromium's expected x64 runtime path."""
     if not builtins.is_file() or not (resource_dir / "include").is_dir():
@@ -92,7 +113,7 @@ def create_clang_toolchain_view(destination, system_base, resource_dir, builtins
         raise ValueError("Compiler-reported builtins must be a real archive")
     destination.mkdir()
     (destination / "bin").symlink_to(system_base / "bin", target_is_directory=True)
-    resource_view = destination / "lib/clang/22"
+    resource_view = destination / "lib/clang/23"
     runtime_view = resource_view / "lib/x86_64-unknown-linux-gnu"
     runtime_view.mkdir(parents=True)
     (resource_view / "include").symlink_to(resource_dir / "include", target_is_directory=True)
@@ -116,6 +137,18 @@ def self_test():
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }
+    original = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(this)"
+    assert modernize_abseil_capture(original, 1) == "[[clang::lifetime_capture_by_this]]"
+    multiline = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(" + "\\" + "\n this)"
+    assert modernize_abseil_capture(multiline, 1) == "[[clang::lifetime_capture_by_this]]"
+    other_owner = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(owner)"
+    assert modernize_abseil_capture(other_owner, 0) == other_owner
+    try:
+        modernize_abseil_capture(original, 2)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Changed Abseil annotations must fail closed")
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         system = root / "system"
@@ -125,7 +158,7 @@ def self_test():
         builtins = root / "libclang_rt.builtins-x86_64.a"
         builtins.write_bytes(b"!<arch>\n")
         view = create_clang_toolchain_view(root / "view", system, resource, builtins)
-        linked = view / "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a"
+        linked = view / "lib/clang/23/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a"
         assert linked.resolve() == builtins and linked.read_bytes() == builtins.read_bytes()
         assert (view / "bin").resolve() == system / "bin"
         builtins.write_text("not an archive")
@@ -156,7 +189,7 @@ def main():
         raise ValueError("Use a fresh work directory; existing checkouts are never reset")
     work.mkdir(parents=True)
     receipt = {
-        "status": "running", "profile": "standalone-system-clang22-hardened-libcxx-not-Brave",
+        "status": "running", "profile": "standalone-system-clang23-hardened-libcxx-not-Brave",
         "tests": {}, "patches": [], "brave_validated": False,
         "public_native_hook_validated": False,
     }
@@ -187,7 +220,7 @@ def main():
                    CCACHE_BASEDIR=str(work), CCACHE_COMPRESS="true")
         receipt["compiler_cache"] = {"path": str(cache_dir), "max_size": "2G",
                                      "compiler_check": "content", "sloppiness": "none"}
-    env.update(DEPOT_TOOLS_UPDATE="0", DEPOT_TOOLS_METRICS="0", CC="clang-22", CXX="clang++-22")
+    env.update(DEPOT_TOOLS_UPDATE="0", DEPOT_TOOLS_METRICS="0", CC="clang-23", CXX="clang++-23")
 
     def run(command, cwd=work, capture=False):
         receipt["stage"] = " ".join(map(str, command))
@@ -234,20 +267,20 @@ def main():
             raise RuntimeError("Need at least 8 GiB free before standalone source setup")
         base_path = env["PATH"]
         compiler_paths = {}
-        for name in ("clang-22", "clang++-22"):
+        for name in ("clang-23", "clang++-23"):
             resolved = shutil.which(name, path=base_path)
             if resolved is None:
                 raise RuntimeError("Missing required compiler: " + name)
             compiler_paths[name] = str(Path(resolved).resolve())
-        clang_base = Path(compiler_paths["clang-22"]).parent.parent
+        clang_base = Path(compiler_paths["clang-23"]).parent.parent
         for name in ("clang", "clang++", "llvm-ar", "llvm-nm", "llvm-readelf"):
             if not (clang_base / "bin" / name).is_file():
                 raise RuntimeError("Incomplete system LLVM toolchain: " + name)
-        receipt["compiler"] = run([compiler_paths["clang++-22"], "--version"], capture=True).splitlines()[0]
-        receipt["c_compiler"] = run([compiler_paths["clang-22"], "--version"], capture=True).splitlines()[0]
+        receipt["compiler"] = run([compiler_paths["clang++-23"], "--version"], capture=True).splitlines()[0]
+        receipt["c_compiler"] = run([compiler_paths["clang-23"], "--version"], capture=True).splitlines()[0]
         receipt["compiler_paths"] = compiler_paths
-        resource_dir = Path(run([compiler_paths["clang-22"], "-print-resource-dir"], capture=True).strip()).resolve()
-        builtins = Path(run([compiler_paths["clang-22"], "--rtlib=compiler-rt",
+        resource_dir = Path(run([compiler_paths["clang-23"], "-print-resource-dir"], capture=True).strip()).resolve()
+        builtins = Path(run([compiler_paths["clang-23"], "--rtlib=compiler-rt",
                              "-print-libgcc-file-name"], capture=True).strip()).resolve()
         system_clang_base = clang_base
         clang_base = create_clang_toolchain_view(work / "clang-toolchain-view",
@@ -300,12 +333,25 @@ def main():
                     run(["git", "apply", "--check", str(temporary)], v8)
                     run(["git", "apply", str(temporary)], v8)
             receipt["patches"].append(entry)
+        receipt["standalone_upstream_annotations"] = []
+        for relative, count in ABSEIL_CAPTURE_COUNTS.items():
+            path = v8 / "third_party/abseil-cpp/absl" / relative
+            original = path.read_text()
+            modernized = modernize_abseil_capture(original, count)
+            path.write_text(modernized)
+            receipt["standalone_upstream_annotations"].append({
+                "path": str(path.relative_to(v8)), "count": count,
+                "change": "lifetime_capture_by(this) to lifetime_capture_by_this",
+                "before_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                "after_sha256": hashlib.sha256(modernized.encode()).hexdigest(),
+            })
+        save_receipt()
         # Temporal alone pulls Rust into this standalone build; guest capture
         # and the public QuickJS fixture do not use the Temporal API.
         gn_args = " ".join((
             'is_debug=false', 'is_component_build=false', 'symbol_level=0',
             'is_clang=true', 'use_lld=false',
-            'clang_use_chrome_plugins=false', 'clang_version="22"', 'clang_base_path=' + json.dumps(str(clang_base)), 'use_custom_libcxx=true', 'use_sysroot=false',
+            'clang_use_chrome_plugins=false', 'clang_version="23"', 'clang_base_path=' + json.dumps(str(clang_base)), 'use_custom_libcxx=true', 'use_sysroot=false',
             'use_custom_libcxx_for_host=true', 'v8_enable_sandbox=true',
             'enable_rust=false', 'v8_enable_temporal_support=false',
             'use_remoteexec=false', 'treat_warnings_as_errors=true',

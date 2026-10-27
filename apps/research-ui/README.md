@@ -64,16 +64,16 @@ Traffic rows come only from native network lifecycle events. A row's exact
 identity is the session, process and sequence of its unique retained
 `request_started` (or `request_initiated`) event plus its non-zero request ID;
 URLs, hosts and timing never substitute for it. Rows whose events carry no
-request ID stay visible but cannot open traces, signal profiles, comparisons or
-Related VM candidates. Native network metadata retains hosts and lifecycle
-status only, so header and body panes report that content was not captured.
+request ID stay visible but cannot open traces, signal profiles or Related VM
+candidates. Native network metadata retains the method, URL or host and
+lifecycle status only; the inspector states that headers and bodies were not
+captured instead of showing empty panes.
 
 Traffic selection updates only the mounted rows and selection summary when the
 retained snapshot, filters, ordering and page are unchanged. Keyboard navigation
-does not repeat content search or sorting and does not rebuild rows or reset
-ledger scrolling. A changed snapshot, filter, page or explicit refresh still
-recomputes the whole bounded retained window; partial-content coverage remains
-visible. `node tools/check-traffic-selection-work.mjs` checks production
+does not repeat search or sorting and does not rebuild rows or reset ledger
+scrolling. A changed snapshot, filter, page or explicit refresh still recomputes
+the whole bounded retained window. `node tools/check-traffic-selection-work.mjs` checks production
 controller work and selection invariants. Add `--baseline-ref=<commit>` for a
 reproducible authored 5,000-record/500-row before-and-after Node benchmark. Those
 timings are not rendered browser or native-app latency; the Requests browser
@@ -106,8 +106,8 @@ trace; unsafe numeric identities and ambiguous rows are rejected. **Open retaine
 that step's session and artifact identity. A Facts **Original bytes** link
 verifies complete retained UTF-8 bytes and SHA-256; **Decode range** copies those
 exact bytes, up to 64 KiB, into Decoder. **Open original evidence** retains the
-source identity and half-open byte range. Request inspector and Field trace
-handoffs distinguish selected string bytes from unavailable raw HTTP offsets.
+source identity and half-open byte range. Evidence field handoffs distinguish
+selected string bytes from unavailable raw HTTP offsets.
 Evidence source links use the selected native record’s exact retained artifact
 identity. Back restores both observation-list and record-inspector scroll, the
 visible trigger and current scope/search without selecting package exports.
@@ -258,8 +258,7 @@ Paths, queries, headers and bodies are excluded. Source links search retained ca
 They do not automatically open a source or claim an exact artifact relationship.
 
 Closing the dock preserves the session; Disconnect removes its browser/profile.
-The Sources Logs drawer remains the debugger log viewer. Console values and
-history remain ephemeral. See [Native Console v2](../../protocol/native-console-v2.md)
+Console values and history remain ephemeral. See [Native Console v2](../../protocol/native-console-v2.md)
 for exact operation, bounds, contracts and required post-build verification.
 The synthetic wire fixture supplies scripted responses and never executes JS.
 
@@ -303,8 +302,8 @@ Trace/sessions/live/`.
 Origin Trace looks beside its app bundle, in the reused browser output recorded
 at packaging time, in the local `browser/worktree/`
 build output, and among registered applications for Brave Browser Development.
-A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust live
-debugger and VM analyzer, so Python is not required. A startup problem is shown explicitly
+A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust backend
+and VM analyzer, so Python is not required. A startup problem is shown explicitly
 and leaves the stored-evidence interface available offline.
 Pass an explicit evidence-store or demo argument, or set
 `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`, when opening the native stored-evidence
@@ -319,8 +318,7 @@ connection and offers retry instead of silently leaving a failed session running
 The coordinator signals all owned helpers together, allows a shared five-second
 shutdown grace, then stops remaining children. An active analyzer worker has a
 shorter two-second grace so its supervising shell can reap it before exiting.
-Runtime experiments and Console commands still require explicit actions in their
-disposable contexts. Worker/proxy foundations do not yet have runtime adapters.
+Console commands still require explicit actions in their disposable contexts. Worker/proxy foundations do not yet have runtime adapters.
 
 For an explicit development session with deterministic sample evidence:
 
@@ -419,15 +417,15 @@ The macOS CI job runs this check before uploading the app preview.
 
 The failed-start smoke uses a deliberately missing browser and follows the offline
 branch without showing a modal dialog. It does not automate the Retry/Continue
-Offline buttons. Headless Chrome tests live debugger startup and packaged routing,
-not custom Brave probe capture. These checks do not replace interactive native
+Offline buttons. Headless Chrome stands in for the browser to test live session
+startup and packaged routing, not custom Brave probe capture. These checks do not replace interactive native
 keyboard, resize and visual QA. On other platforms, `--contract-only` checks
 source wiring only and does not claim native runtime coverage.
 
 ## Workspace layout
 
-Traffic, Collection, Sources, and Fingerprinting are available in the sidebar.
-Expand **Advanced** for Backtraces, Memory, Experiments, Analyst, and Tools.
+Traffic, Collection, Sources, VM, Console and Fingerprinting are available in
+the toolbar. Expand **Advanced** for Backtraces, Analyst, and Tools.
 Navigation into an advanced tool reveals its group automatically on desktop. On
 narrow windows navigation moves above the workspace and closes after selection.
 
@@ -437,12 +435,15 @@ has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
-the evidence order. The selected request opens Headers, Payload, Preview,
-Response, Initiator, and Timing beside the ledger above 1100 px, or below it in
-narrow windows. Both panes stay within the available workspace height; the
-request ledger and inspector body scroll independently. Captured-tab and domain
-filters share a compact row at narrow widths. REB's Signals and Evidence tools remain separate tabs. Missing
-headers, bodies, initiators, and timing phases stay explicitly unavailable.
+the evidence order. The selected request opens General, Initiator, Timing,
+Signals and Evidence beside the ledger above 1100 px, or below it in narrow
+windows. Both panes stay within the available workspace height; the request
+ledger and inspector body scroll independently. Captured-tab and domain filters
+share a compact row at narrow widths. Native capture records the method, URL or
+host, status and lifecycle timing of each request. Request and response headers
+and bodies are not captured, so Traffic has no header, body, preview, comparison
+or content-search views; General states that coverage. Missing initiators and
+timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
 event. Late responses cannot replace a newer selection or refresh. Malformed or
 failed refreshes preserve only the last validated profile for that same identity
@@ -450,34 +451,6 @@ and require a full response on retry; changed or ambiguous owners clear it.
 No cache, recording, throttling, or invented waterfall controls are implied.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
-
-Traffic’s **Compare** tab pins one exact retained request as a baseline. Select
-another request to compare method, URL, status, request/response headers, and
-request/response bodies without replaying either request. **Clear baseline**
-releases the reference. Concise baseline and selected-request summaries stay
-visible; their disclosure expands the full exact capture identifiers. Demo/sample
-rows cannot be pinned. References use exact native session/process/event/request
-IDs. Loss of the exact retained record, duplicate identities, or an evidence-mode
-change expires the baseline permanently until explicitly selected again.
-
-JSON changes use escaped JSON Pointers, preserve number lexemes (including
-integers above 2^53), ignore object-key order, and compare arrays by index. The
-view separately labels exact retained UTF-8 byte equality and structural equality.
-Duplicate keys (including equivalent escaped names), malformed JSON/UTF-8,
-binary MIME types, incomplete capture and unavailable content remain explicitly
-unsupported or inconclusive. Header names are case-insensitive and duplicate
-values retain their order; redacted values never prove equality. Header capture
-completeness cannot be established by the current capture contract.
-
-Comparison is a local interpretation of current retained snapshots, not a frozen
-capture or an assertion about original wire bytes or causation. It retains no body
-copy in navigation, storage, or the baseline reference. Work is capped at 128 KiB
-per body, 4,096 JSON nodes and 24 levels. Each section shows at most 64 changed
-rows, with a shared 64 Ki-character report budget, bounded value previews, and
-explicit omitted counts. Existing bodies are never rewritten. Unchanged refreshes
-preserve the result DOM, focus and scroll; changed results preserve section disclosures
-and summary focus. At most four 128 KiB byte snapshots detect in-place changes;
-leaving the tab releases the result DOM and these snapshots.
 
 The ledger mounts at most 500 fixed-height rows. Previous/Next page through the
 retained window without changing the evidence: the Rust native-event API returns separate newest general and network lifecycle
@@ -501,22 +474,14 @@ labeled. An actually evicted selection reports that it left the retained window
 instead of silently selecting another request.
 
 Arrow keys select adjacent request rows; inspector tabs use Left/Right and
-Home/End. Escape dismisses Find or viewer options first, or closes the inspector and
-returns focus to the ledger. The close button has the same behavior. A dismissed
-inspector stays closed across refreshes; selecting a request reopens it. Full
-URLs remain available in Headers and Copy URL, and host-only metadata never
-implies a captured path or query.
+Home/End. Escape closes the inspector and returns focus to the ledger. The close
+button has the same behavior. A dismissed inspector stays closed across
+refreshes; selecting a request reopens it. Full URLs remain available in General
+and Copy URL, and host-only metadata never implies a captured path or query.
 
-Choose **Include headers and bodies** beside Traffic search to find a literal,
-case-insensitive value in retained request or response text. Each result names
-its first matching location; selecting a content match opens Headers, Payload, or Response
-with Find filled in. URL, method, and status remain searchable.
-Tab, domain, and resource filters scope the search before content is inspected.
-Search never enables capture or fetches missing bodies. Binary and uncaptured
-bodies are excluded, and retained prefixes and missing headers limit coverage.
-Large captures use an explicit 8-million UTF-16-unit search budget, newest
-requests first. A partial-search notice reports inspected and omitted coverage
-and suggests narrowing filters. See the [content search design](../../docs/product/traffic-content-search-v1.md).
+Traffic search is a literal, case-insensitive match over the URL or host,
+method and status that native rows carry. Tab, domain, and resource filters
+scope it. Search never enables capture or fetches anything.
 
 Collection uses a saved-request library, template editor, and submitted-response
 pane. Headers, Body, and Variables are keyboard-accessible request sections;
@@ -530,12 +495,6 @@ The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
 slightly brighter secondary labels for legibility. Appearance switches to the
 existing light theme.
 
-Field trace can send its original request string through explicit Decoder steps
-and search attached sources for the selected result. Original evidence remains
-visible beside a derived search value and transformation history; matches are
-labeled decoded candidates. The handoff rejects binary or oversized results,
-edited inputs, and changed field selections.
-
 Fingerprinting starts with an Overview of active surfaces and captured Canvas
 output. **Show inactive surfaces** reveals the rest of the supported families.
 Surface chips open filtered Activity. Each Canvas card keeps replay comparison,
@@ -546,45 +505,13 @@ result statistics are likewise available in expanders beside their controls.
 
 Advanced workspaces keep the primary task visible and secondary information in
 expandable sections. Backtraces groups correlation identifiers separately from
-relationship facts. Memory places its four modes above the search and results.
-Each Memory mode keeps criteria, explicit action, and inspection separate. The
-result receipt records the submitted target, time, and criteria; diff receipts
-also retain the submitted baseline's native target/time/size metadata. Baselines
-are target-scoped; the native contract does not provide document identity. Draft
-scope changes do not rewrite an existing result. Captures can briefly pause the
-target, and origin tracing explicitly controls debugger stepping until stopped.
-Completed debugger polls are reconciled when actions settle, including after a
-lost acknowledgement; a matching terminal trace poll can retire an unread
-acknowledgement immediately. Memory HTTP waits have explicit headers-and-body
-deadlines: 30 seconds for live search, 90 for baseline capture, 120 for snapshot
-search, 150 for diff, and 15 for trace controls or baseline reset. These include
-margin beyond the existing native command/worker timeouts and do not limit or
-cancel an already-running native trace. Target/context/epoch expiry also retires
-the wait. Only that HTTP read is aborted; completion stays unconfirmed, no
-action is automatically retried, and a retired request cannot release a newer
-action's pending latch. Other debugger callers keep their existing request behavior;
-an older reply cannot overwrite a newer terminal trace or baseline.
-Trace-ID ordering is scoped to the observed native restart epoch.
-Acknowledgements require a valid generation before reporting reset or clear.
-No action is automatically retried. Lost, malformed, or stale replies report an
-unconfirmed outcome: discarding a reply does not stop native work. Target or
-observed execution-context changes expire previews without relabeling them as
-current. Only the current bounded result is retained, with no heap-file history.
-
-Memory result rows keep their identity during unchanged refreshes, preserving
-keyboard selection, focus, detail scroll, and incoming-reference disclosures.
-Snapshot paths and incoming references remain separate; heap diffs show retained
-owners even when no signature groups changed. Partial results qualify absence
-and dominator claims. Origin traces expose the recorded location as text, but do
-not open a live source using only a possibly reused script ID or URL: the trace
-contract lacks the execution-context/source-hash identity needed for that link.
-Request-field pivots only fill criteria and do not run captures; a pending action
-keeps its criteria and receipt when the workspace is reopened.
-
-Experiments separates setup, request, and response, with activity logs collapsed.
-Analyst prioritizes the editor and evidence permissions; folder settings, storage,
-variables, execution limits, and history can be expanded as needed. Tools keeps
-input and output visible with transformation history available on demand.
+relationship facts. Origin traces expose the recorded location as text; they do
+not open a source using only a possibly reused script ID or URL, because the
+trace contract lacks the execution-context/source-hash identity needed for that
+link. Analyst prioritizes the editor and evidence permissions; folder settings,
+storage, variables, execution limits, and history can be expanded as needed.
+Tools keeps input and output visible with transformation history available on
+demand.
 
 Analyst keeps unsaved file and folder changes with their selected owners. Clicking
 the same file, refreshing, or visiting another workspace preserves the draft.
@@ -643,11 +570,10 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
-| `field_provenance.js` | Selected request strings, bounded source candidates, source identity checks, and explicit value-flow gaps |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js`, `traffic_comparison.js` | Bounded request/response views, exact retained comparison ownership, lossless structural JSON comparison, explicit missing-data states, and labeled sample exchanges |
+| `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status search, the General coverage view, and the saved-capture export document |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
-| `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
+| `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
@@ -662,17 +588,11 @@ Live refresh and DOM updates belong in `app.js`.
 The native scheme handler and packaging script explicitly list shipped assets.
 
 Traffic shows every native request row independently; host, method and time
-never merge or hide rows. Live
-source text is retained only for the current validated script catalog and matching
-target/hash identity. A failed refresh preserves the last valid cache, and a
-detached pending load is cancelled and cannot restore obsolete source text.
-Source fetches have a 15-second deadline, including body reads; a timed-out load
-can be retried by selecting the source again.
-
-Debugger support modules must not import the session coordinator or the HTTP
-server. Pure request validation does not require a browser connection. The
-coordinator owns session locks, authorization, cancellation, and feature
-lifecycle transitions.
+never merge or hide rows. Sources reads retained artifact bytes only. A failed
+refresh preserves the last valid catalog, and a detached pending load is
+cancelled and cannot restore obsolete source text. Artifact loads have a
+10-second deadline, including body reads; a timed-out load can be retried
+explicitly.
 
 ## Validate
 
@@ -700,10 +620,10 @@ This runs the packaged app, not a browser. `tools/check-origin-trace-rendered-ui
 copies `build/Origin Trace.app` to a temporary directory, verifies its signature,
 and starts the bundled `OriginTraceBackend` on loopback with a bounded synthetic
 session: the `make e2e` demo stores, 72 native network rows, a 400-line retained
-source, and Wasm dispatch and guest events emitted by the real C++ encoders
-(`build/reb-native-wasm-dispatch-golden` and
-`build/reb-native-wasm-guest-golden`). Captured strings include markup that
-would execute if it were inserted as HTML.
+source, a synthetic guest bytecode buffer, and Wasm dispatch and guest events
+emitted by the real C++ encoders (`build/reb-native-wasm-dispatch-golden` and
+`build/reb-native-wasm-guest-golden`). Captured strings and bytecode include
+markup that would execute if it were inserted as HTML.
 
 The hosted XCTest bundle in
 [`tools/origin-trace-rendered-ui`](../../tools/origin-trace-rendered-ui/) is
@@ -720,6 +640,10 @@ window and the enforced 760×560 minimum it checks:
 - VM: the opcode workspace for the guest artifact shows the native guest row
   with its wide instance identity, and the physical artifact never claims a
   guest PC;
+- native-only coverage: Traffic offers only General, Initiator, Timing, Signals
+  and Evidence with no content search or Compare; Export offers only local-file
+  SDL and says why; golden and hostile guest bytecode render as an inert hex
+  view with an unclipped kind icon;
 - keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard
   Access is off, as in Safari), and Shift+Tab reversal;
 - no removed CDP control or markup anywhere in the shipped screens.
@@ -837,11 +761,7 @@ local broker without closing the browser. Clear events is available after
 capture stops, requires confirmation, and truncates only this session's event,
 trace, and request-profile stores. Canvas artifact files and other saved files
 remain on disk. Detailed identifiers stay behind a disclosure. The
-captured-tab buttons are historical evidence, not an open-tab count. In a live
-debugger session, the browser target list supplies a separately labeled current
-page-tab count, refreshed as targets open and close. Quiet mode and a lost
-debugger connection show that count as unavailable rather than guessing from
-captured events. The footer separates missing per-process sequence IDs from
+captured-tab buttons are historical evidence, not an open-tab count. The footer separates missing per-process sequence IDs from
 reported queue drops, since a gap report can describe the same missing IDs.
 The custom browser observes generated Web IDL callbacks for a selected native
 allowlist across all eight families, in addition to the lower-level Canvas,
@@ -913,9 +833,12 @@ version or intrinsic assumption cannot restore a stale representation window.
 Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
-The Sources sidebar starts closed without an attached debugger. Details opens
-source metadata and connection status; attached sessions show debugger controls
-by default. The toggle remains available at narrow window sizes.
+The Sources sidebar starts closed. Details opens source metadata, JavaScript
+facts and static cleanup; the toggle remains available at narrow window sizes.
+Wasm modules and native guest bytecode buffers open as an inert hex view of
+their retained bytes (offset, hex and printable columns, labeled **WebAssembly
+hex** or **Guest bytecode hex**); bytecode is never decoded as text. Guest
+adapter recipes are JSON text.
 
 VM analysis is a secondary Traffic view, reached through Related VM candidates
 for a selected native request with a complete root identity. Incomplete native
@@ -936,83 +859,10 @@ prove a guest PC.
 Workspace failures retain the last valid workspace and never remove detection
 findings.
 
-Experiments puts its mode switcher and current connection state in one compact
-toolbar above three stable setup, editor, and result panes. Each pane scrolls
-independently on wide windows; narrow windows stack the results below the forms.
-Scope, session metadata, resource limits, request restrictions, response
-comparison, and advanced object search use native disclosures. Switching tools
-preserves form drafts and disclosure state. Scope is shown only for Interceptor
-and Automation, which support it.
-
-An action is acknowledged only after its `ok: true`, generation and required
-result groups validate for the submitted disposable lifetime. A transport success
-alone is insufficient. Missing, rejected, stale or malformed receipts leave the
-draft available and never trigger an automatic retry or a chained Repeater send.
-A newer validated poll is never replaced by an older receipt; changed newer
-groups also prevent that receipt from acknowledging the current draft; an already-running
-poll cannot undo an accepted receipt. Automation recipe/run aliases must match
-the validated records. Additive response fields are bounded to 64 levels, 65,536
-values and 4 Mi characters before retention or iterative comparison.
-
-Refreshes within the same lifetime preserve drafts and consent. A changed
-creation time, disposable target/session identity or observed generation reset
-erases disposable form values, confirmations, selections and hidden result DOM.
-Late replies cannot restore them, including an identity that leaves and returns.
-Expired in-flight reads release their UI busy controls even if transport stalls;
-this does not cancel native work or resend an action.
-Ownership is checked again after each awaited receipt, including the gap before
-its caller resumes. Repeater keeps the original complete request draft and
-selection/edit revision through Apply and Send; changed drafts require a fresh
-explicit Send. Collection keeps the original saved recipe and inherited variables,
-and rejects a changed lifetime, edited recipe or newer draft before sending.
-Changing the Collection selection alone never substitutes the newly selected
-recipe. Disposable run ownership is erased on lifetime replacement while saved
-Collection definitions and drafts remain intact.
-Saved automation definitions remain in authoritative backend state. Disposed
-Interceptor results may be inspected until creating another context; that new
-lifetime starts with an empty result, audit and rule even if creation fails.
-The browser-free production-function regressions run in the existing debugger
-checker under `make javascript-check`; they do not establish rendered/native QA.
-
-Repeater keeps method, URL, and Send in one command row above a persistent
-request-response split. Compare responses includes a Rust-generated body line diff
-with source line numbers, nearby context, newline markers, and explicit limits.
-Polling preserves the diff's focus and scroll position. Session actions appear only after a browser target is
-connected. Request tabs share the pane header, while idle badges and footers stay
-hidden until they contain useful state. Headers and query parameters use compact
-key-value rows with per-row enable and remove controls; query rows preserve
-duplicate names and update the request URL.
-
-Traffic's Headers tab groups General, Response Headers, and Request Headers.
-Payload keeps Query, Body, and Raw request views; Preview shows a safe JSON tree,
-formatted retained text, or the existing isolated HTML preview. Response offers
-Raw and Formatted text. Find, Wrap, Copy, field selection, Decode, and Trace value
-continue to operate on bounded retained content. Equal-length body edits and
-header-only refreshes invalidate the selected viewer without replacing its
-controls or losing its scroll position. Captured values always remain inert.
-Live traffic remains grouped by captured browser tab with an All tabs scope and
-a domain selector. Protocol v3 carries the stable top-level tab identifier;
-older evidence remains Unattributed. Evidence retains the original payload and
-trace actions; Initiator and Timing display only recorded observations.
-
-The viewer distinguishes uncaptured, redacted, loading, failed, explicitly
-empty, and truncated bodies. Its local preview is bounded to 128 KiB, 1,000 JSON
-nodes, 24 levels, and 2,000 displayed text lines; limits are visible and raw/copy
-operate on the retained preview. Sample exchanges are labeled in both panes.
-Default native network metadata supplies no request/response header or body
-bytes, so the viewer reports them as not captured.
-
-Captured `text/html` responses use the inspector's **Preview** tab.
-Preview reconstructs a bounded, presentation-only HTML tree inside an opaque
-sandboxed frame. It blocks scripts, navigation, submission, network resources,
-and external stylesheets; supported inline presentation styles survive.
-Short windows scroll the request ledger and inspector instead of collapsing
-the preview beneath its controls.
-Omitted images appear as text placeholders. Capture truncation and the
-1,000-node / 24-level rendering limits remain visible. Preview never fetches
-the original URL, changes captured bytes, or enables content capture. Body and
-Raw body continue to show inert source text. See
-[HTML Response Preview v1](../../docs/product/html-response-preview-v1.md).
+Traffic remains grouped by captured browser tab with an All tabs scope and a
+domain selector. Protocol v3 carries the stable top-level tab identifier; older
+evidence remains Unattributed. Evidence retains the original payload and trace
+actions; General, Initiator and Timing display only recorded observations.
 
 ## Deobfuscation engines
 
@@ -1048,14 +898,14 @@ input guards.
 over captured artifacts. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
 The Rust backend preserves classification, formatting, and literal-table
-analysis for captured artifacts and live scripts. The Deobfuscation details
+analysis for captured artifacts. The Deobfuscation details
 name the engine. Dynamic decoding remains unimplemented and is reported as an omission. Static table substitution is
 restricted to non-escaping local tables with proven own-index reads.
 
 Failed analysis remains visible until **Retry analysis** is selected. A failed
 retry retains the last successful result. Source selection does not switch the
 Sources editor away from original evidence. The UI retains at most eight analysis
-documents and distinguishes source hashes and debugger targets in its cache.
+documents and distinguishes source hashes and artifact identities in its cache.
 The report retains the last successful summary and snippets during a retry or
 failure. **Cancel analysis** retires the current request; a worker may still
 finish, but its late response cannot replace the report. Cancellation and errors
@@ -1067,9 +917,7 @@ limited to 2,048 UTF-16 units each. Snippets scroll independently; truncation is
 visible and never splits a surrogate pair. In the HTTP live workspace or browser
 development UI, **Reveal original range** verifies captured original bytes
 through the existing Facts path. Stored-evidence native mode displays an explicit
-unavailable reason for that navigation. Live scripts require
-their currently owned complete source text and target identity. Neither path
-executes source. Pretty printing remains a separate display layer.
+unavailable reason for that navigation. Neither path executes source. Pretty printing remains a separate display layer.
 
 Transformation families, heuristic classification signals, recovered table
 summaries, and assumptions/limits have explicit counts and four-row paging.
@@ -1095,8 +943,7 @@ worker makes AST operations unavailable with an explicit error. Deob stays insid
 In **Sources**, select a captured JavaScript artifact and choose **Facts**.
 The existing Rust/Oxc worker returns bounded lexical scopes, declarations,
 callables, regions and operations for that exact session, artifact and SHA-256.
-This is an explicit, inert analysis action. Live debugger scripts and derived
-text are not accepted. The Details pane shows complete-within-profile, partial,
+This is an explicit, inert analysis action. Derived text is not accepted. The Details pane shows complete-within-profile, partial,
 unavailable and truncated states, diagnostics and unknown-effect frontiers.
 Each category displays 100 rows per page; fact details are capped at 4,096
 characters. In **Bindings**, search declaration names and choose **Find lexical
@@ -1157,8 +1004,8 @@ itself an HTTP server.
 
 ## Pane sizes
 
-Drag the shared borders in Traffic, Repeater, Sources navigator,
-Memory criteria/results/details, and Tools Decoder to resize adjacent panes.
+Drag the shared borders in Traffic, Sources navigator, and Tools Decoder to
+resize adjacent panes.
 The divider shows an accent on hover or keyboard focus. Tab to a divider and use
 the arrow keys along its axis; Shift changes the step from 10 to 50 pixels.
 Home or double-click restores that split's default. Escape cancels an active
@@ -1166,9 +1013,8 @@ drag. Traffic saves wide column and narrow row splits separately. Sizes persist 
 proportions in the local `origin-trace.layout.v1` preference, independently of evidence and backend state.
 
 Minimum pane sizes keep controls and empty states usable. The Sources toolbar
-wraps within the editor; its narrow debugger overlay starts below those controls. Saved widths are suspended when the
-responsive layout stacks panes, shows a single exchange side, or lacks enough
-space. Returning to a wide window restores them. Handles follow scrolling and
+wraps within the editor; its narrow details overlay starts below those controls. Saved widths are suspended when the
+responsive layout stacks panes or lacks enough space. Returning to a wide window restores them. Handles follow scrolling and
 are clipped to the active workspace. `pane_layout.js` owns the shared layout controller;
 no captured evidence is modified by resizing.
 
@@ -1305,16 +1151,10 @@ rendered WebKit behavior.
 
 Opening a file reads its preview only. **Deob** explicitly starts inert static
 analysis; entering Sources from another workspace never starts it. Analyzer
-responses must match the submitted artifact or live script, its session or
-actual page/worker target, SHA-256, source byte size, intrinsic assumptions and
-original-source map. SHA-256 is recomputed over the returned original text.
-Live CDP hashes remain opaque owner/version tokens. The analyzer's original
-UTF-8 text must equal the exact complete live text held by that submitted
-preview owner, and its UTF-8 SHA-256 is recomputed separately. Missing, loading
-or truncated live previews cannot authenticate analysis. Replacing the preview
-owner retires pending results; a cached derived result is shown only while its
-original text still equals the current complete owned live text. No V8 hash
-normalization or pinned-engine implementation is inferred.
+responses must match the submitted artifact, its session, SHA-256, source byte
+size, intrinsic assumptions and original-source map. SHA-256 is recomputed over
+the returned original text. Missing, loading or truncated previews cannot
+authenticate analysis. Replacing the preview owner retires pending results.
 Changed or closed owners cannot accept a late response, and analyzer text never
 replaces the original preview. A failed explicit retry preserves only the last
 successful analysis for the same identity. URLs are display/search hints, not
@@ -1323,17 +1163,16 @@ proof of ownership.
 Artifact catalog refreshes preserve an exact pending preview owner. Changing
 its session, hash or descriptor retires that read. Preview failures and deadlines
 show **Retry source**; they do not silently retry during refresh. Preview bodies
-reuse the Facts bounded streaming reader: 2 MiB raw artifact bytes, 13 MiB for
-escaped live-source JSON, and 33 MiB for an analyzer envelope, with at most
-65,536 chunks. Artifact and analyzer deadlines are ten seconds, including body
-reads and SHA-256 work; the live-source deadline is fifteen seconds. Cancellation
+reuse the Facts bounded streaming reader: 2 MiB raw artifact bytes and 33 MiB
+for an analyzer envelope, with at most 65,536 chunks. Artifact and analyzer
+deadlines are ten seconds, including body reads and SHA-256 work. Cancellation
 retires ownership without waiting for a stalled producer's cleanup. Full artifact
 previews verify SHA-256 when WebCrypto is available; partial or lossy text is
 visibly a preview. Exact byte navigation still belongs to the existing Facts
 verified-original reader.
 
 The editor retains at most eight preview owners and 16 MiB of UTF-16 preview
-text across captured and live files. The selected owner is pinned; older preview
+text across captured files. The selected owner is pinned; older preview
 bytes can be evicted while their tab and immutable catalog metadata remain.
 **Retry source** or reopening the file loads it again. Closing a file cancels its
 preview/Deob reads and releases its preview, Deob and formatting cache entries.
@@ -1713,10 +1552,8 @@ offers every retained snapshot; the compact handler listing keeps its four-sampl
 preview. A workspace with `sampler-unavailable` says static-only: host links keep
 `dispatch-samples-unavailable` and `guest_position` null, and that is the missing
 sampler rather than an empty workspace. Session sources lists same-session stored
-artifacts and, for the live evidence window only, CDP JavaScript scripts.
-`chrome://` rows are browser-UI noise. Live scripts are not artifact records
-and are not guest positions. Shared session or target is correlation, not loader
-provenance.
+artifacts only. `chrome://` rows are browser-UI noise. Shared session is
+correlation, not loader provenance, and never a guest position.
 Operand width zero means unknown, matching the producer contract. Source locations
 show exact retained byte ranges without guessing a source line number.
 

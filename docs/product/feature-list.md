@@ -87,10 +87,10 @@ privacy, and implementation limits are documented in
 ## Network Workspace
 
 - Request and response capture, filtering, search, highlighting, and inspection.
-- [Bounded retained-content search](./traffic-content-search-v1.md) with match locations and explicit partial coverage.
+- [Bounded retained-content search](./traffic-content-search-v1.md) with match locations and explicit partial coverage (retired with CDP body capture).
 - Optional size-limited body capture with sensitive fields redacted by default.
 - Request and response editing, blocking, forwarding, dropping, and replacement.
-- [Isolated HTML response preview](./html-response-preview-v1.md) over retained content.
+- [Isolated HTML response preview](./html-response-preview-v1.md) over retained content (retired with CDP body capture).
 - Links from network values to memory, source, fingerprints, WASM, and Value Trace.
 - Editable Repeater with cancellation, history, variables, and response comparison.
 - API Collection with folders, scoped variables, saved requests, and execution history.

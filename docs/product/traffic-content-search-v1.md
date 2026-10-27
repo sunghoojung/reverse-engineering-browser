@@ -1,5 +1,7 @@
 # Traffic retained-content search v1
 
+> **Retired.** Content search read the request/response exchange that only CDP capture retained. Native Traffic rows carry no headers or bodies, so Origin Trace removed **Include headers and bodies**; Traffic search matches URL or host, method and status only. This page is kept as a historical record.
+
 Traffic can find a literal value across retained request and response headers
 and text bodies, then open the matching evidence directly. The URL, method, and
 status filter remains the default. **Include headers and bodies** explicitly

@@ -20,15 +20,11 @@ The Tools workspace has two explicit modes:
    Creation supports HS256, HS384, HS512, and an explicitly confirmed unsigned
    test token.
 
-Traffic can copy a selected request value into a fresh decoder chain. This is
-an ephemeral text pivot. It does not modify or persist the request value.
-Starting from **Decode value** in Request Field Trace also retains the original
-field identity. **Find sources for result** searches attached sources for a
-complete selected UTF-8 result of up to 4 KiB, retaining the explicit chain as
-researcher-applied transformations. Binary results, changed inputs, pending
-transforms, and changed field selections cannot use this handoff. Source matches
-remain candidates, and replay continues to use the original field. See
-[Request Field Provenance](./request-field-provenance-v1.md).
+Sources **Decode range** can copy a verified original byte range into a fresh
+decoder chain. This is an ephemeral pivot. It does not modify or
+persist the evidence. The former Request Field Trace handoff and **Find sources
+for result** read CDP-retained request bodies and were retired with them; see the
+historical [Request Field Provenance](./request-field-provenance-v1.md) design.
 
 ## Transform set
 

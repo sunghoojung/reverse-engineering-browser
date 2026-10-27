@@ -44,31 +44,31 @@ or unavailable result; never weaken the sandbox to obtain a pass.
 
 ## Prepare a real capture session
 
-1. Record the exact REB revision, dirty status, OS, browser version, capture mode,
-   and whether the browser is the pinned instrumented Brave build or ordinary
-   Chrome/Chromium. Verify the normal build/start prerequisites in the
+1. Record the exact REB revision, dirty status, OS, pinned custom Brave version
+   and capture mode. Native capture requires the pinned instrumented Brave
+   build; ordinary Chrome/Chromium produces no REB evidence. Verify the normal
+   build/start prerequisites in the
    [workspace guide](../../apps/research-ui/README.md) and
    [browser setup](../../browser/README.md).
 2. Start a fresh isolated session through the supported product launcher. On a
    supported development host with the pinned custom Brave build, use
    `make live`. Keep Canvas image retention off unless separately authorized.
-   Native Traffic retains host-level metadata only, so mark request/response
-   content assertions unavailable. CDP content capture was removed.
+   Native Traffic records method, URL or host, status and lifecycle timing
+   only, so request/response content assertions are not applicable.
 3. Keep the session and its loopback backend private. Confirm browser readiness
    and the active capture mode before navigation. Open no unrelated
-   sites: current native events do not enforce an origin allowlist. Do not attach
-   REB to an existing managed browser with unrelated tabs.
+   sites: current native events do not enforce an origin allowlist. Use the session's
+   own isolated profile, never an existing browser profile with unrelated tabs.
 4. Navigate once to each allowed page in the session's own browser. Wait for
    ordinary page rendering within a short, recorded observation window, then
    stop the session. For simultaneous-tab acceptance, all five targets must remain
    open throughout the same observation window; sequential visits do not
    establish that property.
 
-Ordinary managed-browser viewing is useful for availability and page-state
-observations, but it does not establish that REB attached, ingested, retained,
-or displayed any event. Ordinary Chrome can establish CDP-only behavior only
-when the actual REB backend and UI are connected and independently verified;
-it cannot establish custom Brave native fingerprint probes.
+Ordinary browser viewing is useful for availability and page-state
+observations, but it does not establish that REB captured, ingested, retained,
+or displayed any event. Only the pinned custom Brave build running under the
+REB session produces native network and fingerprint evidence.
 
 ## Inspect and record
 
@@ -80,12 +80,12 @@ For each target, record pass, fail, unavailable, or not observed separately:
 - Traffic: the relevant target/session ownership, a retained navigation/request
   row, status, and whether changing the UI filter preserves ownership. A missing
   row is a capture observation, not proof that the page made no request.
-- Content: available header/body state, encoding, displayed truncation or error,
-  and capture-mode limits. Never turn a missing/blocked body into an empty-body
-  success. Do not export real content simply to complete this smoke check.
-- Coverage: visible attached/pending/failed target counts, gaps, drops, and
-  incomplete-coverage warnings. Passive attachment may miss early requests;
-  do not claim lossless collection from a few visible rows.
+- Coverage statement: the request's General view states that headers and bodies
+  are not captured. Record that as expected native coverage, never as an
+  empty-body success.
+- Coverage: visible pending/failed request counts, sequence gaps, queue drops,
+  and incomplete-coverage warnings. Do not claim lossless collection from a few
+  visible rows.
 - Fingerprinting: native operation/category rows and their session/document
   attribution in the actual REB workspace. A vendor's own signal table is not
   native probe evidence. Absence of an operation means **not observed**, unless
@@ -105,53 +105,12 @@ Continue using the backend tests, the offline UI model checks, and
 they explicitly assert, not native probe capture of a live site. Full
 required validation remains defined by [AGENTS.md](../../AGENTS.md).
 
-## Optional manually dispatched CI observation
+## No CI observation
 
-The separate `Optional public demo passive smoke` workflow uses installed stock
-Chrome, one fresh shared profile with five distinct tabs, and the real REB
-backend/debugger transport.
-Dispatch once with authorization text `passive-one-visit-per-demo`. It is not
-triggered by ordinary pushes, pull requests or a schedule, and never retries
-site visits. A single explicitly authorized bootstrap exception runs only on
-creation of the exact `qa/public-matrix-20261018` branch, only on run attempt 1.
-Later pushes and GitHub reruns of that push do not revisit sites. Creating that
-branch is reserved for publishing the reviewed, bounded matrix run; do not
-recreate it to retry public requests.
-It arms all five exact blank targets before concurrently issuing one navigation
-per demo, keeps all five open for the same 15-second observation window, verifies
-all five targets remain present and capture-ready, then closes owned processes.
-Per-target counts include only rows with that exact top-level target identity;
-rows from separate child/worker targets are reported as unattributed counts,
-never silently assigned to a tab. Same-process frame traffic may share the
-parent CDP target and is not separately frame-attributed. Global coverage
-remains distinct from per-target counts. A request row is an observation,
-not an assertion of successful page behavior or complete collection. This path
-checks the backend only; rendered Traffic UI and native fingerprint probes stay
-explicitly **not tested**. The released macOS app/custom Brave path is separate;
-this workflow neither downloads it nor substitutes stock Chrome for its probes.
-
-The three added targets also report fixed expected-feature evidence counts:
-302 document responses (at least two), the named fruit API request (at least
-one), and the worker script request (at least one). Missing expected evidence
-fails this optional smoke run, but does not establish a recorder defect: site
-availability, blocking and passive attachment timing remain possible causes.
-Complete, failed and pending/unknown request counts are reported separately.
-Feature counts observe requests, not successful API results or script execution.
-No server-side public-site oracle exists here. Independent recorder agreement is
-explicitly `not-run`; controlled-fixture expectations are never reused to claim
-public-site completeness. These assertions must not be described as lossless
-capture, rendered UI success or native custom-Brave validation.
-
-Only `public-demo-summary.json` is uploaded, for three days. Its schema contains
-fixed target labels, outcome/stage enums, counts, known endpoint hosts,
-validated 40-character revision and numeric browser version,
-resource types and HTTP statuses. Simultaneous open/ready flags are backend
-observations; they do not prove the rendered UI panels work at once. Unrecognized hosts become `other`; paths,
-queries, bodies, headers, errors, titles, IP addresses, IDs and screenshots are
-omitted. Unknown coverage counts stay null, not fabricated zeros. Browser and
-backend output is discarded; backend snapshots have a 16 MiB read cap; private profiles are removed after process exit.
-A cleanup failure is reported without exposing a private directory. Required CI
-runs only the deterministic opt-in/summary privacy contract test, not websites.
+No workflow visits these sites. The former manually dispatched public-demo
+smoke drove stock Chrome through the removed debugger transport and was retired
+with it; there is no native replacement in CI. Run this check manually under
+the procedure above.
 
 ## Recorded cloud observation: 2026-10-17 UTC
 

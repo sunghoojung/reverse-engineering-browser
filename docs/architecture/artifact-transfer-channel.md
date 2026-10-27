@@ -192,14 +192,12 @@ sandbox content-security policy. The Sources workspace fetches at most 2 MiB,
 decodes text or displays WASM as hex, and creates DOM text nodes. Captured HTML
 or JavaScript never enters an HTML parsing or execution sink.
 
-The Sources workspace follows the Chrome DevTools organization model: Page
+The Sources workspace follows a familiar source-browser organization: Captured
 navigator, origin and directory tree, editor tabs, line numbers, open-file and
-find shortcuts, a readable derived view, and debugger side panes. The Captured
-tree remains immutable and never becomes a debugger source of truth. During an
-authorized live session, a separate Page tree reads Chromium debugger scripts
-and provides runtime pause, stack, scope, watch, breakpoint, and console state.
-No runtime value is copied back into the immutable artifact store.
-`GET /api/artifacts` therefore does not list the live Debugger script catalog.
+find shortcuts, a readable derived view, and a details side pane. It reads only
+the immutable artifact store; there is no live script catalog, debugger or
+runtime state. Wasm modules and native guest bytecode buffers display as an
+inert hex view of their retained bytes.
 
 A response body becomes a stored JavaScript artifact only when the network tee
 classifies it as a script resource or a JavaScript MIME type. `application/wasm`

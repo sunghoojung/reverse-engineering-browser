@@ -65,20 +65,20 @@ discovery. Native console and owned VM fixture controls are separate capabilitie
 not fallbacks for the removed debugger. Physical Wasm observations use the
 [typed native contract](../../protocol/native-wasm-dispatch-v1.md).
 
-Memory inspection uses bounded C++ heap analysis; Decoder Lab uses a separate
-native transform helper. API Collection and Local Analyst Workspace persist
-user-authored templates and scripts separately from captured evidence. Analyst
-scripts run explicitly in a restricted helper with selected evidence inputs.
+Decoder Lab uses a separate native transform helper. API Collection and Local
+Analyst Workspace persist user-authored templates and scripts separately from
+captured evidence. Analyst scripts run explicitly in a restricted helper with
+selected evidence inputs.
 
-Request interception, Repeater, Object Lab, Runtime Hook Studio, and automation
-recipes share a disposable experiment BrowserContext. Mutating operations are
-explicit and do not inherit the baseline target's cookies or storage. This
-experiment path is distinct from observational native capture.
+The CDP experiment tools (request interception, Repeater, Object Lab, Runtime
+Hook Studio, automation recipes and Memory) were removed with the debugger.
+Explicit page mutation is limited to the native Console, which defaults to a
+disposable profile and is distinct from observational native capture.
 
-`REB_NATIVE_QUIET_MODE=1 make live` omits the DevTools endpoint and debugger
-transport. Native capture and Captured Sources remain available; live debugger
-and CDP-dependent tools are unavailable. This mode also explicitly enables the
-patched V8 behavior that ignores page-authored `debugger;` statements.
+`REB_NATIVE_QUIET_MODE=1 make live` additionally enables the patched V8
+behavior that ignores page-authored `debugger;` statements. Native capture and
+Captured Sources are unchanged; Origin Trace has no debugger transport in any
+mode.
 
 See the [Origin Trace operating guide](../../apps/research-ui/README.md) and
 [live-session launcher](../../scripts/run-live-session.sh) for mode-specific

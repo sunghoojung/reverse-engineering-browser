@@ -8,6 +8,9 @@ import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+// Inputs come only from REB_NATIVE_WASM_* variables. Rendered acceptance is
+// `make rendered-ui-check`; a stale or misspelled flag must fail, not be ignored.
+if (process.argv.length > 2) throw new Error(`Unexpected arguments: ${process.argv.slice(2).join(' ')}`);
 const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
 const model = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const fixture = JSON.parse(await readFile(join(root, 'tests/research_ui/fixtures/vm-opcode-workspace-v2.json'), 'utf8'));
@@ -437,6 +440,26 @@ assert.equal(nativePageRows().children.length,32);
 const nativeNext=findButton(nativePanel,'Next native Wasm observations');nativeNext.click();nativeNext.click();
 assert.equal(nativePageRows().children.length,1);assert(nativePageRows().textContent.includes('selector 64'));assert(nativeNext.disabled);
 assert(renderApi.renderNativeWasmObservations({...nativeWorkspace,native_wasm_observations:[],native_wasm_observation_count:0}).textContent.includes('No native Wasm dispatch observations retained'));
+// Every native row exposes time, source, category/operation and its exact correlation identity.
+assert(nativePanel.textContent.includes('time outside retained event window · session 1 · process 1 · seq 1 · native probe · vm/wasm_dispatch_observation'));
+renderApiState.events=[{session_id:'1',process_id:1,sequence_number:'1',monotonic_time_ns:'4242',category:'vm',type:'wasm_dispatch_observation'}];
+assert(renderApi.renderNativeWasmObservations({...nativeWorkspace,native_wasm_observations:[nativeRow],native_wasm_observation_count:1}).textContent
+  .includes('time 4242 ns · session 1 · process 1 · seq 1 · native probe · vm/wasm_dispatch_observation'));
+delete renderApiState.events;
+const guestRow={event:{session_id:'101',process_id:3,sequence_number:'105'},invocation_event:{session_id:'101',process_id:3,sequence_number:'104'},
+  instance_id:'18446744073709551615',instruction_pointer:1,instruction_pointer_units:'byte-offset',opcode:66,interpretation:'explicit-adapter',module_byte_offset:58};
+const guestPanel=renderApi.renderNativeWasmObservations({native_wasm_observations:[],native_wasm_observation_count:0,native_guest_samples:[guestRow],native_guest_sample_count:3});
+assert(guestPanel.textContent.includes('session 101 · process 3 · seq 105 · native probe · vm/wasm_guest_dispatch'));
+assert(guestPanel.textContent.includes('PC 1 bytes · opcode 66 · instance 18446744073709551615 · explicit-adapter'));
+assert(guestPanel.textContent.includes('2 accepted guest samples are outside the retained window.'));
+// Older or partially migrated documents: missing, malformed or summed counts never invent or hide rows.
+for (const legacy of [{native_guest_samples:[guestRow]},{native_guest_samples:[guestRow],native_guest_sample_count:'7'},
+  {native_guest_samples:[guestRow],native_guest_sample_count:0},{native_guest_samples:'bad'},{}]) {
+  const text=renderApi.renderNativeWasmObservations(legacy).textContent;
+  assert(!text.includes('outside the retained window'),JSON.stringify(legacy));
+  assert(!text.includes('NaN'),JSON.stringify(legacy));
+}
+console.log('PASS native physical and guest rows expose time/source/operation/correlation identity and separate retained-window notices');
 if (process.env.REB_NATIVE_WASM_WORKSPACE_INPUT) {
   const actual=JSON.parse(await readFile(process.env.REB_NATIVE_WASM_WORKSPACE_INPUT,'utf8'));
   assert(validateModule(actual),'actual C++ → Rust workspace accepted by shipped viewer');
@@ -455,5 +478,3 @@ if (process.env.REB_NATIVE_WASM_GOLDEN) {
   console.log('PASS actual C++ → viewer typed payload, unsigned fields, envelope and reserved-byte cases');
 }
 console.log('PASS native exact-site/default/counter schema regressions');
-
-if (process.argv.includes('--browser')) throw new Error('CDP browser automation was removed; use the native-only DOM-model startup regression. No rendered QA is claimed.');

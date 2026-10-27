@@ -207,7 +207,7 @@ async function checkFloat32HostLifecycle(root, fixture) {
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const section=(start,end)=>{const first=app.indexOf(start),last=app.indexOf(end,first);assert(first>=0&&last>first);return app.slice(first,last);};
   const api=runInNewContext((await readFile(join(root,'apps/research-ui/source_facts.js'),'utf8'))+'\n'+(await readFile(join(root,'apps/research-ui/evidence_package.js'),'utf8'))+'\n'+(await readFile(join(root,'apps/research-ui/float32_inspector.js'),'utf8'))+'\n'+
-    section('      function liveScriptIdentity(','      function capturedSources(')+section('      const float32Panel =','      function renderTools()')+section('      async function refreshArtifacts()','      function showScreen(')+';({panel:float32Panel,refreshArtifacts,syncFloat32Panel})',env);
+    section('      function sourceIdentity(','      function capturedSources(')+section('      const float32Panel =','      function renderTools()')+section('      async function refreshArtifacts()','      function showScreen(')+';({panel:float32Panel,refreshArtifacts,syncFloat32Panel})',env);
   const panel=api.panel,snapshot=panel.controller.snapshot,select=field('input','artifact');
   let refreshCalls=0;const refresh=panel.refresh;panel.refresh=()=>{refreshCalls++;refresh();};
   const update=async(artifacts,status=200,valid=true)=>{catalog=artifacts;catalogStatus=status;catalogValid=valid;await api.refreshArtifacts();};

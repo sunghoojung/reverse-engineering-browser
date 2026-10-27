@@ -13,7 +13,9 @@ const {parseHTML} = require('./ui-startup-deps/node_modules/linkedom');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'apps/research-ui');
 
-async function main() {
+// Shared with check-native-only-ui.mjs: one offline loader for every shipped
+// script, so both checks exercise the same production controllers.
+function loadShippedUi() {
   const {window} = parseHTML(fs.readFileSync(path.join(ui, 'index.html'), 'utf8'));
   const storage = new Map(), forbidden = [], asyncErrors = [];
   const onRejection = error => asyncErrors.push(error);
@@ -69,6 +71,12 @@ async function main() {
     assert(filename.startsWith(ui + path.sep), 'only shipped local scripts may execute');
     vm.runInContext(fs.readFileSync(filename, 'utf8'), context, {filename: relative, timeout: 10000});
   }
+  const release = () => process.removeListener('unhandledRejection', onRejection);
+  return {window, context, scripts, forbidden, asyncErrors, release};
+}
+
+async function main() {
+  const {context, scripts, forbidden, asyncErrors, release} = loadShippedUi();
   // These are the actual production controllers, not copied definitions.
   vm.runInContext(`
     showScreen('sources'); showScreen('traffic'); showScreen('api-collection');
@@ -91,7 +99,8 @@ async function main() {
   assert(text.includes('4294967295'));
   assert(text.includes('default arm'));
   assert(text.includes('No host causality is inferred'));
-  context.nativeGuestStartupFixture = {native_guest_sample_count: 1, native_guest_samples: [{
+  context.nativeGuestStartupFixture = {native_guest_sample_count: 2, native_guest_samples: [{
+    event: {session_id: '101', process_id: 3, sequence_number: '105'},
     instruction_pointer: 7, opcode: 42, instance_id: '18446744073709551615', interpretation: 'explicit-adapter'
   }]};
   const guestText = vm.runInContext('renderNativeWasmObservations(nativeGuestStartupFixture).textContent', context);
@@ -99,11 +108,14 @@ async function main() {
   assert(guestText.includes('PC 7 bytes'));
   assert(guestText.includes('18446744073709551615'));
   assert(guestText.includes('explicit-adapter'));
+  assert(guestText.includes('session 101 · process 3 · seq 105 · native probe · vm/wasm_guest_dispatch'));
+  assert(guestText.includes('1 accepted guest samples are outside the retained window.'));
   await nextTurn();
   await nextTurn();
   assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
   assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
-  process.removeListener('unhandledRejection', onRejection);
+  release();
   console.log(`PASS ${scripts.length} actual shipped scripts, retained navigation and native observation panel (offline DOM model; no browser rendering/focus or live capture claimed)`);
 }
-main().catch(error => {console.error(error); process.exitCode = 1;});
+module.exports = {loadShippedUi};
+if (require.main === module) main().catch(error => {console.error(error); process.exitCode = 1;});

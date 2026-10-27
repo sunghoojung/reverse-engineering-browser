@@ -1400,7 +1400,7 @@ console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes
 // An unchanged event ETag must not prevent artifact-only updates reaching Evidence.
 const packageRefreshState = {artifactRefreshing:false,artifactEtag:null,artifactCatalogSignature:null,artifacts:[],openArtifactIds:[],selectedArtifactId:null,sessionMode:'live'};
 let packageRefreshBody={artifacts:packageGolden.records.artifacts.map(row=>({...row,...row.key}))}, packageRefreshSyncs=0;
-const packageArtifactRefresh=runInNewContext(appSection('      function liveScriptIdentity(', '      function capturedSources(') + appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
+const packageArtifactRefresh=runInNewContext(appSection('      function sourceIdentity(', '      function capturedSources(') + appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
   canvasGalleryVisible:()=>false, retireCanvasPreviews(){},
   syncFloat32Panel(){}, // Actual Float32 host integration is exercised in check-float32-ui.mjs.
   sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, state:packageRefreshState,location:{protocol:'http:'},fetch:async()=>Response.json(packageRefreshBody),isArtifactResponse:()=>true,
@@ -1519,13 +1519,13 @@ function sourceProductionFunction(name) {
   assert(end, name);
   return appSource.slice(start, start + end.index + end[0].length);
 }
-const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceIsCurrent', 'sourceReference', 'setSourceCursor', 'sourceCursorFor',
+const ownershipFunctionNames = ['sourceIdentity', 'sourceIsCurrent', 'sourceReference',
   'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
-  'capturedSources', 'selectedSource', 'deobfuscationKey', 'sourceOwnedLiveText', 'validateSourceAnalysis', 'loadDeobfuscation',
+  'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
-  'closeSource', 'sourceRuntimeLine', 'sourceRuntimeColumn',
-  'sourceDisplayName', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
-  'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
+  'closeSource',
+  'sourceDisplayName', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent',
+  'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'discardStaticCleanup', 'toggleStaticCleanupComparison', 'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(
   appSection('      const nativeCanvasCaptureDisplayLimit =','      const nativeCanvasDrawingMethods')+
@@ -1545,16 +1545,14 @@ const ownedPayload = (source, text) => ({schema:'deobfuscation-analysis-v1', eng
   analysis:{source:{sha256:source.sha256 ?? source.hash,byte_size:Buffer.byteLength(text)},assumptions:[]},
   representation:{text,offset_unit:'utf-8-byte',segments:text ? [{kind:'verbatim',original_start:0,original_end:Buffer.byteLength(text),derived_start:0,derived_end:Buffer.byteLength(text)}] : []}});
 function ownedContext(patch = {}) {
-  const state = {artifacts:[], openArtifactIds:[], openScriptIds:[], selectedArtifactId:null, selectedScriptId:null,
-    liveScriptContent:new Map(), staleScriptIds:new Set(), deobfuscationRequests:new Map(), deobfuscationCache:new Map(),
+  const state = {artifacts:[], openArtifactIds:[], selectedArtifactId:null, deobfuscationRequests:new Map(), deobfuscationCache:new Map(),
     sourceFormatCache:new Map(), wasmRequests:new Map(), wasmCache:new Map(),
     sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
   const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout,
     sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsUnavailable:sourceFactsUI.sourceFactsUnavailable, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
-    appendSourceSyntax:(node,tokens)=>{node.textContent=tokens.map(value=>value.text).join('');}, sourceOccurrenceRange:()=>null, memoryOriginTraceActive:()=>false,
+    appendSourceSyntax:(node,tokens)=>{node.textContent=tokens.map(value=>value.text).join('');}, sourceOccurrenceRange:()=>null,
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, investigationPassiveSource:false, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){}, applySourceSearch(){},
-    runtimeHooksState:()=>({workers:[], isolated:true, target_id:state.debuggerSession?.target?.id}),
     elements:{signalRenderList:new TrafficFixtureNode()}, ...canvasProductionRules,
     sourceName:source=>source.url, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
@@ -1622,7 +1620,6 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   assert.equal(api.sourceDisplayView(api.selectedSource()).content,original);
   sourceOwnershipReceipt.push({test:'deob_identity_hash_assumptions_map_original_separation',status:'passed',rejections:malformed.length});
 }
-// Retired live CDP source/hook assertion; captured-artifact checks remain below.
 {
   const artifact=await ownedArtifact('1'); const held=ownedDeferred(); const {state,api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>held.promise});
   const pending=api.loadDeobfuscation(api.selectedSource());
@@ -1631,8 +1628,6 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   assert.equal(state.deobfuscationCache.size,0);
   sourceOwnershipReceipt.push({test:'late_analysis_new_session_same_id_hash_rejected',status:'passed'});
 }
-// Retired live CDP source/hook assertion; captured-artifact checks remain below.
-// Retired live CDP source/hook assertion; captured-artifact checks remain below.
 {
   const text='x'.repeat(2097152), artifacts=await Promise.all(Array.from({length:12},(_,index)=>ownedArtifact(String(index+1),text)));
   const {state,api}=ownedContext({state:{artifacts,openArtifactIds:artifacts.map(value=>value.artifact_id)},fetch:async()=>new Response(text)});
@@ -1694,7 +1689,6 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   await api.loadArtifactContent(artifact);assert.equal(artifact.content,undefined);assert.match(artifact.loadError,/byte limit/);
   sourceOwnershipReceipt.push({test:'preview_reader_rejects_oversized_body_before_decode',status:'passed'});
 }
-// Retired live CDP source/hook assertion; captured-artifact checks remain below.
 {
   const artifact=await ownedArtifact('1');const source={...artifact,source_type:'artifact',content:'retained preview',deobfuscation:{original_source:'retained analysis'},controller:new AbortController()};
   const {api}=ownedContext();const reference=api.sourceReference(source);
@@ -1702,7 +1696,6 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   for(const field of ['content','deobfuscation','controller'])assert.equal(Object.hasOwn(reference,field),false);
   sourceOwnershipReceipt.push({test:'ui_source_references_do_not_retain_evicted_payloads',status:'passed'});
 }
-// Retired live CDP source/hook assertion; captured-artifact checks remain below.
 // Minimal DOM fixture checks identity-stable remount avoidance and actual tab
 // handlers. Real keyboard, hit-testing and geometry remain the browser gate.
 {
@@ -1720,7 +1713,7 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   const doc={createElement:tag=>new Node(tag),querySelector:()=>({hidden:false}),get activeElement(){return active;}};
   const context=ownedContext({state:{artifacts:[artifact,second],openArtifactIds:['1','2'],selectedArtifactId:'1'},elements,document:doc,
     renderSources(){api?.renderSourceTabs();},updateSourceDecorations(){},appendSourceSyntax(node,tokens){node.textContent=tokens.map(value=>value.text).join('');},
-    applySourceSearch(){searches++;},memoryOriginTraceActive:()=>false,fetch:async()=>new Response('a\nb\nc')});api=context.api;
+    applySourceSearch(){searches++;},fetch:async()=>new Response('a\nb\nc')});api=context.api;
   const source=api.selectedSource();api.renderSourceContent(source,{content:source.content,lineMap:null});const row=elements.sourceCode.children[0];
   elements.sourceCodeWrap.scrollTop=713;elements.sourceCodeWrap.scrollLeft=143;context.state.sourceSearchIndex=3;const oldRenders=renders,oldSearches=searches;
   api.renderSourceContent(api.selectedSource(),{content:source.content,lineMap:null});assert.equal(elements.sourceCode.children[0],row);
@@ -1855,7 +1848,7 @@ function ownedDerivedPayload(source, original, replacements) {
   document.querySelector=selector=>selector==='#deobfuscation-details'?details:screen;
   elements.sourceSidebar=document.createElement('aside');elements.sourceSidebar.hidden=true;
   elements.sourceSidebarToggle=document.createElement('button');
-  const state={sourceSidebarOpen:false,sourceDeobfuscated:false,debuggerSession:{state:'unavailable'}};
+  const state={sourceSidebarOpen:false,sourceDeobfuscated:false};
   let renders=0,cancellations=0;
   const context={document,elements,state,investigationPassiveSource:true,sourceFactsPanel:{cancel(){cancellations++;}},renderSources(){renders++;}};
   runInNewContext(sourceProductionFunction('renderSourceSidebar')+appSection("      elements.sourceDeob.addEventListener('click'", "      elements.sourceWasm.addEventListener('click'"),context);
@@ -1960,28 +1953,24 @@ function ownedDerivedPayload(source, original, replacements) {
   sourceOwnershipReceipt.push({test:'deob_owned_reveal_cancellation_preserves_unrelated_facts',status:'passed'});
 }
 
-// Retired live CDP source/hook assertion; captured-artifact checks remain below.
-
 {
-  const text='const a = 1;', script={script_id:'mapped',target_id:'page-1',hash:'opaque-mapped-version',language:'JavaScript',length:text.length,source_type:'script',kind:'javascript',start_line:0,start_column:0,content:text};
+  const text='const a = 1;', artifact={...await ownedArtifact('mapped',text),source_type:'artifact',content:text};
   for(const mode of ['pretty','derived']) {
     const {document,elements}=sourceReviewDOM();let navigation;
-    const {api,state}=ownedContext({state:{debuggerSession:{target:{id:'page-1'},state:'running',scripts:[script]},selectedScriptId:script.script_id,sourceFormatted:mode==='pretty',sourceDeobfuscated:mode==='derived'},document,elements,
-      appendSourceSyntax:(node,tokens)=>{node.textContent=tokens.map(value=>value.text).join('');},applySourceSearch(){},memoryOriginTraceActive:()=>false,
+    const {api,state}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id,sourceFormatted:mode==='pretty',sourceDeobfuscated:mode==='derived'},document,elements,
+      appendSourceSyntax:(node,tokens)=>{node.textContent=tokens.map(value=>value.text).join('');},applySourceSearch(){},
       revealOriginalLine:(source,line,column)=>{navigation={source,line,column};}});
     const view={content:text,lineMap:[{originalLine:0,originalColumn:4}],...(mode==='pretty'?{formatted:{}}:{derived:{}})};
-    api.renderSourceContent(script,view);const gutter=elements.sourceCode.children[0].querySelector('.source-gutter');
-    for(let refresh=0;refresh<3;refresh++){api.renderSourceContent(script,view);api.updateSourceDecorations();assert.equal(gutter.disabled,false);assert.equal(gutter.getAttribute('aria-label'),'Show original source at line 1');}
+    api.renderSourceContent(artifact,view);const gutter=elements.sourceCode.children[0].querySelector('.source-gutter');
+    for(let refresh=0;refresh<3;refresh++){api.renderSourceContent(artifact,view);assert.equal(gutter.disabled,false);assert.equal(gutter.getAttribute('aria-label'),'Show original source at line 1');}
     gutter.listeners.click[0]({stopPropagation(){}});assert.equal(navigation.line,0);assert.equal(navigation.column,4);
-    // Retained original source is read-only even when stale debugger metadata exists.
-    state.sourceFormatted=false;state.sourceDeobfuscated=false;api.renderSourceContent(script,{content:text,lineMap:null});
-    state.debuggerSession.breakpoints=[{script_id:'mapped',line:0,locations:[{script_id:'mapped',line:0}]}];api.updateSourceDecorations();
+    // Retained original source is read-only; its gutter never becomes an action.
+    state.sourceFormatted=false;state.sourceDeobfuscated=false;api.renderSourceContent(artifact,{content:text,lineMap:null});
     assert.equal(elements.sourceCode.children[0].querySelector('.source-gutter').getAttribute('aria-label'),'Retained source line');
     assert.equal(elements.sourceCode.children[0].querySelector('.source-gutter').disabled,true);
   }
-  sourceOwnershipReceipt.push({test:'review_mapped_live_gutters_survive_real_decoration_refresh',status:'passed',representations:['pretty','derived']});
+  sourceOwnershipReceipt.push({test:'review_mapped_artifact_gutters_survive_refresh',status:'passed',representations:['pretty','derived']});
 }
-// Retired live CDP source/hook assertion; captured-artifact checks remain below.
 {
   const {document,elements}=sourceReviewDOM();const first=await ownedArtifact('retry-1'),second=await ownedArtifact('retry-2','second');
   first.loadError='Synthetic preview error';second.content='second';
@@ -1998,8 +1987,6 @@ function ownedDerivedPayload(source, original, replacements) {
   assert(received);for(const key of ['content','deobfuscation','controller'])assert.equal(Object.hasOwn(received,key),false);
   sourceOwnershipReceipt.push({test:'review_hidden_retry_dom_and_bound_reference_release',status:'passed',hiddenRetryNodes:0});
 }
-// Retired live CDP source/hook assertion; captured-artifact checks remain below.
-
 // Shared history must restore only after the actual preview renderer settles.
 // The DOM is inert: scroll clamping, geometry and keyboard acceptance still need CI.
 const sourceHistoryNavigation = await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
@@ -2009,7 +1996,6 @@ async function sourceHistoryFixture(kind = 'artifact') {
   const text=Array.from({length:100},(_,line)=>`const row${line} = "${'x'.repeat(120)}";`).join('\n');
   const artifact={...await ownedArtifact('7',text),content:text};
   if(kind==='wasm'){artifact.kind='wasm';artifact.mime_type='application/wasm';}
-  const script={script_id:'live-7',target_id:'page-1',hash:'opaque-version',language:'JavaScript',length:text.length,url:artifact.url};
   for(const name of ['sourceLocation','sourceSize','sourceHash','sourceViewKind','sourceWasm','sourcePretty','sourceDeob','sourceHookPivot','requestFilter'])elements[name]=document.createElement('button');
   const screens=Object.fromEntries(['sources','tools','signals'].map(name=>[name,document.createElement('section')]));
   for(const [name,node] of Object.entries(screens)){node.id=`screen-${name}`;node.hidden=name!=='sources';}
@@ -2034,12 +2020,11 @@ async function sourceHistoryFixture(kind = 'artifact') {
   bar.querySelector=()=>({open:false});
   const noop=()=>{};
   const fixture=ownedContext({elements,document,CSS:{escape:value=>value},requestAnimationFrame:fn=>frames.push(fn),
-    state:{artifacts:[artifact],requests:[],decoderSteps:[],selectedArtifactId:kind==='script'?null:'7',selectedScriptId:kind==='script'?'live-7':null,
-      sourceCollection:kind==='script'?'page':'captured',debuggerSession:{target:{id:'page-1'},scripts:[script]},
-      sourceFactsOpen:false,openArtifactIds:['7'],openScriptIds:kind==='script'?['live-7']:[]},
+    state:{artifacts:[artifact],requests:[],decoderSteps:[],selectedArtifactId:'7',
+      sourceCollection:'captured',sourceFactsOpen:false,openArtifactIds:['7']},
     sourceFactsPanel:{original:()=>undefined,sync:noop,cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop,sync:noop},
     renderDebugger:noop,renderSourceTree:noop,renderSourceTabs:noop,renderSourceFacts:noop,renderDeobfuscationReport:noop,
-    renderTools:noop,refreshDecoderEngine:noop,formatByteSize:String,applySourceSearch:noop,memoryOriginTraceActive:()=>false,
+    renderTools:noop,refreshDecoderEngine:noop,formatByteSize:String,applySourceSearch:noop,
     appendSourceSyntax(node,tokens){node.textContent=tokens.map(token=>token.text).join('');},
     fetch:async(url,options)=>{reads.push({url,signal:options.signal});if(url.startsWith('/api/artifacts?'))return Response.json({count:1,artifacts:[Object.fromEntries(sourceFactsUI.sourceFactsFields.filter(key=>Object.hasOwn(artifact,key)).map(key=>[key,artifact[key]]))]});return held.promise;},
     productionFunctions:[...ownershipFunctionNames.filter(name=>!['renderSourceTabs','renderDeobfuscationReport'].includes(name)), 'renderSources','showScreen','wasmKey','loadWasmInspection'],
@@ -2048,11 +2033,9 @@ async function sourceHistoryFixture(kind = 'artifact') {
   const {state,api}=fixture;
   // Observe the actual production promises. A fixed number of setImmediate
   // turns can expire before WebCrypto finishes, even though the UI is correct.
-  const completion=sourceOwnershipOperationObserver({artifact:api.loadArtifactContent,script:api.loadScriptContent,wasm:api.loadWasmInspection},api.sourceIdentity);
+  const completion=sourceOwnershipOperationObserver({artifact:api.loadArtifactContent,wasm:api.loadWasmInspection},api.sourceIdentity);
   fixture.sandbox.loadArtifactContent=completion.wrappers.artifact;
-  fixture.sandbox.loadScriptContent=completion.wrappers.script;
   fixture.sandbox.loadWasmInspection=completion.wrappers.wasm;
-  if(kind==='script')state.liveScriptContent.set(script.script_id,{identity:api.liveScriptIdentity(script),content:text,loading:false});
   if(kind==='wasm'){
     state.sourceWasm=true;
     state.wasmCache.set(api.wasmKey(artifact),{...wasmReport,artifact_id:'7',sha256:artifact.sha256,byte_size:artifact.byte_size});
@@ -2080,7 +2063,7 @@ for(const kind of ['artifact']) {
   const fixture=await sourceHistoryFixture(kind),{api,held,reads,elements,document,text,flush}=fixture;
   assert(api.history.back());await flush();assert.equal(reads.length,1,'Shared Back deduplicates the selected preview read');
   assert.match(elements.sourceCodeEmpty.textContent,/Loading/);
-  held.resolve(kind==='script'?Response.json({protocol_version:1,script_id:'live-7',source:text,truncated:false}):new Response(text));
+  held.resolve(new Response(text));
   await fixture.settle();
   assert.equal(elements.sourceCodeWrap.scrollTop,713,`${kind}: Back restores vertical scroll after preview completion`);
   assert.equal(elements.sourceCodeWrap.scrollLeft,143,`${kind}: Back restores horizontal scroll after preview completion`);
@@ -2093,12 +2076,11 @@ for(const kind of ['artifact']) for(const interruption of ['interaction','forwar
   if(interruption==='interaction')api.retireInvestigationReturn();
   if(interruption==='forward')assert(api.history.forward());
   if(interruption==='identity'){
-    if(kind==='artifact')state.artifacts[0]={...state.artifacts[0],session_id:'2',content:'newer source',loading:false};
-    else state.debuggerSession.scripts[0]={...state.debuggerSession.scripts[0],hash:'newer-version'};
+    state.artifacts[0]={...state.artifacts[0],session_id:'2',content:'newer source',loading:false};
     api.renderSources();
   }
   elements.sourceTree.scrollTop=777;elements.sourceTree.focus();
-  held.resolve(interruption==='error'?new Response('{}',{status:503}):kind==='script'?Response.json({protocol_version:1,script_id:'live-7',source:text,truncated:false}):new Response(text));
+  held.resolve(interruption==='error'?new Response('{}',{status:503}):new Response(text));
   await fixture.settle();
   if(interruption==='error'){
     assert.match(elements.sourceCodeEmpty.textContent,/unavailable/i);
@@ -2579,21 +2561,13 @@ if (process.env.REB_SOURCE_OWNERSHIP_RECEIPT) await writeFile(process.env.REB_SO
 const fieldHandoff = runInNewContext(
   (await readFile(join(root, "apps/research-ui/field_provenance.js"), "utf8")) +
     `;function decoderCurrentInputKey() {return currentKey;}
-    function liveSources() {return sourceCatalog;}
-    function liveScriptIdentity(source) {return source.target_id + ':' + source.script_id + ':' + source.hash;}
-    function loadScriptContent() {return loadGate;}
     ({decodedFieldCandidate, clearDecoderFieldOrigin, provenanceDecoderBytes,
       setup(selection, steps, selected, key = 'original') {
         fieldProvenanceSelection = selection;
         decoderFieldOrigin = {selection, key: 'original'};
         state.decoderSteps = steps; state.decoderSelectedStepId = selected;
         state.decoderPending = false; currentKey = key;
-      }, changeField() {fieldProvenanceSelection = {};}, pending() {state.decoderPending = true;},
-      setSearch(selection, sources, loaded, gate) {
-        fieldProvenanceSelection = selection; sourceCatalog = sources; loadGate = gate;
-        state.liveScriptContent = new Map(loaded.map(([source, record]) => [source.script_id,
-          {...record, identity: liveScriptIdentity(source)}]));
-      }, setCatalog(sources) {sourceCatalog = sources;}})`,
+      }, changeField() {fieldProvenanceSelection = {};}, pending() {state.decoderPending = true;}})`,
   {
     TextDecoder,
     TextEncoder,
@@ -2601,8 +2575,6 @@ const fieldHandoff = runInNewContext(
     document: { querySelector: () => ({ hidden: true, addEventListener() {} }) },
     state: {},
     currentKey: "original",
-    sourceCatalog: [],
-    loadGate: null,
     decoderBase64ToBytes: (value) => new Uint8Array(Buffer.from(value, "base64")),
   },
 );

@@ -10,6 +10,10 @@ import ledgerModel from '../apps/research-ui/vm_opcode_ledger.js';
 import staticModel from '../apps/research-ui/vm_static.js';
 import staticView from '../apps/research-ui/vm_static_view.js';
 import contextualEvidence from '../apps/research-ui/vm_contextual_evidence.js';
+
+// Rendered VM composition is covered by `make rendered-ui-check` in the packaged
+// app; this check takes no flags, so a stale or misspelled one fails loudly.
+if (process.argv.length > 2) throw new Error(`Unexpected arguments: ${process.argv.slice(2).join(' ')}`);
 import debuggerModel from '../apps/research-ui/vm_debugger.js';
 import {recordCompatibilityDemo} from './generate-vm-compatibility-demo.mjs';
 import {contextualFixture} from './check-vm-contextual-ui.mjs';
@@ -165,7 +169,7 @@ const server = createServer(async (request, response) => {
     response.end(await readFile(join(root, 'apps/research-ui', name)));
   } catch { response.writeHead(500).end(); }
 });
-if (process.argv.includes('--fixture-only')) {
+{
   const brokenSelector = 'document.querySelectorAll("[data-vm-paged-rows="retained samples"] > details").length';
   assert.throws(() => compileLiteralEvaluations('evaluate(' + JSON.stringify(brokenSelector) + ')'), SyntaxError);
   assert.equal(compileLiteralEvaluations('evaluate("1 + 2"); evaluate(\'3 + 4\'); evaluate(`5 + 6`); evaluate(`${neverRun()}`);'), 3);
@@ -184,6 +188,4 @@ if (process.argv.includes('--fixture-only')) {
   }
   server.close();
   console.log("PASS full-shell literal-parser checks, authored HTTP contracts, populated native inputs and read-only refusal (not rendered)");
-  process.exit(0);
 }
-throw new Error("CDP browser automation was removed; use --fixture-only or the native-only startup DOM-model regression.");

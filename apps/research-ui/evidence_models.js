@@ -2887,6 +2887,28 @@
       function vmNativeWasmPositionText(row) {
         return `Native Wasm byte ${row.module_byte_offset} · function ${row.function_index} · selector ${row.selector} · ${row.is_default ? 'default arm' : `arm ${row.selected_arm}`} · guest PC unknown`;
       }
+      function vmNativeGuestPositionText(row) {
+        return `PC ${row.instruction_pointer} bytes · opcode ${row.opcode} · instance ${row.instance_id} · ${row.interpretation}`;
+      }
+      function vmNativeIsGuestRow(row) {
+        return row?.instance_id !== undefined && row?.instruction_pointer !== undefined;
+      }
+      // Workspace rows carry the exact native event identity but not its time.
+      // Time comes only from the same retained event; it is never estimated.
+      function vmNativeRowIdentityText(row, events = []) {
+        const operation = vmNativeIsGuestRow(row) ? 'wasm_guest_dispatch' : 'wasm_dispatch_observation';
+        const event = row?.event;
+        if (!isPlainObject(event)) return `native probe · vm/${operation} · event identity unavailable`;
+        const key = [event.session_id, event.process_id, event.sequence_number].map(String);
+        const retained = Array.isArray(events) ? events.find(candidate => candidate &&
+          [candidate.session_id, candidate.process_id, candidate.sequence_number].map(String).every((value, index) => value === key[index])) : null;
+        const time = retained?.monotonic_time_ns;
+        return `${time === undefined ? 'time outside retained event window' : `time ${time} ns`} · session ${key[0]} · process ${key[1]} · seq ${key[2]} · native probe · vm/${operation}`;
+      }
+      // Older documents may omit a per-kind count; never subtract a malformed one.
+      function vmNativeAcceptedCount(value, retained) {
+        return Number.isSafeInteger(value) && value >= retained ? value : retained;
+      }
       function vmOpcodeSamplePositions(samples) {
         return samples.slice(0, 4).map(sample => sample.instruction_pointer_units === 'byte-offset' && sample.instance_id !== undefined ? `PC ${sample.instruction_pointer} bytes · instance ${sample.instance_id}` : sample.module_byte_offset !== undefined ? vmNativeWasmPositionText(sample) :
           `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`);

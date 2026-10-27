@@ -7,8 +7,8 @@ not an executable live comparison or a losslessness guarantee.
 ## Run
 
 The retained offline models are checked by `make capture-completeness-check`.
-`make capture-completeness-browser-check` fails explicitly because its CDP runner
-was removed. Native live-browser acceptance instead requires the rebuilt Brave
+The former CDP comparison target was removed with its runner. Native live-browser
+acceptance instead requires the rebuilt Brave
 and the [native observation contract](../../protocol/native-wasm-dispatch-v1.md).
 Historical browser commands in archived reports must not be treated as current
 capabilities. Full handoff gates remain `make lint`, `make check`, `make e2e`, and
@@ -177,20 +177,10 @@ Here `complete` means only that diagnostic metadata was retained within its
 bounds, even if zero response events were observed. It never means that HTTP
 requests or response events were captured completely.
 
-Browser setup diagnosis exports bounded `lifecycle.browserSetupObservations`
-entries `{stage, reason, samples}` from the optional fixed producer diagnostic.
-Samples count observed snapshots, not distinct failures. The producer clears its
-last setup failure after successful browser setup; observed aggregates retain the
-history. Unknown values are ignored by the observer and rejected by the report
-sanitizer; raw diagnostics, URLs, and identifiers are never exported. This separates
-transport startup failures from discovery-command failures without changing the
-30-second failure backoff or attributing an aggregate fallback to a specific cause.
-
-Focused producer ExtraInfo controls run with `REB_EXTRA_STATUS_ONLY=1` in
-`tools/check-traffic-browser-sessions.mjs`. Synthetic events cover before/after
-request order, responseReceived precedence, cached effective 200 versus wire 304,
-304-only evidence, duplicate and malformed observations, redirect/raw-ID reuse,
-separate owners and replacement sessions, and dropped-history refusal. Assertions
-check both effective status provenance and separate wire status. The fixture
-processing barrier uses a separate completed request; it does not infer processing
-from an arbitrary sleep. These controls do not establish real-browser completeness.
+Archived reports may carry `lifecycle.browserSetupObservations` entries
+`{stage, reason, samples}` and `lifecycle.errorObservations` entries
+`{code, samples}`. The report sanitizer accepts only the closed identifier
+vocabularies in `tools/capture-completeness-lifecycle.mjs` and rejects anything
+else; raw diagnostics, URLs and identifiers are never exported. The CDP producer
+that classified live status messages into these codes was removed, so no current
+code maps message text to them.

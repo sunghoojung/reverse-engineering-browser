@@ -54,8 +54,6 @@
               <p id="console-traffic-notice" role="status"></p>
               <div id="console-traffic-events" class="console-traffic-events" role="log" aria-label="Experiment resource events"></div>
             </section>
-            <section id="runtime-hook-traffic" class="runtime-hook-traffic" aria-label="Isolated worker request trail" tabindex="-1" hidden></section>
-            <details id="websocket-inspector" class="websocket-inspector" aria-label="Captured WebSocket messages" hidden></details>
             <div class="traffic-grid" data-detail-open="false">
               <div class="request-pane">
                 <div class="network-tools">
@@ -145,7 +143,6 @@
                     <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
 
                     <button id="request-decoder-pivot" class="secondary-button" type="button">Decode value</button>
-                    <button id="request-memory-pivot" class="secondary-button" type="button">Find in Memory</button>
                     <button id="request-vm-candidates" class="secondary-button" type="button">Related VM candidates</button>
                     <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
                   </div>

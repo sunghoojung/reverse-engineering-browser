@@ -82,13 +82,14 @@ ui: e2e heap-snapshot decoder deob-worker-build
 origin-trace-backend:
 	cargo build --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 
-# CDP-backed live-browser operations were removed, not silently emulated.
-traffic-capture-check backend-e2e element-screenshot-ui-check:
-	@echo "Removed CDP workflow: use native capture checks and backend tests." >&2
-	@exit 2
-
 app-build: heap-snapshot decoder broker artifact-receiver native-console-build $(NATIVE_VM_FIXTURE_BINARY)
 	./scripts/build-research-app.sh
+
+# Rendered acceptance of the packaged app: a hosted XCTest drives its real
+# WKWebView with native AppKit input against the packaged backend. macOS and
+# full Xcode only; screenshots land in build/rendered-ui-qa/screenshots.
+rendered-ui-check: app-build e2e $(NATIVE_WASM_GUEST_GOLDEN) $(NATIVE_WASM_DISPATCH_GOLDEN)
+	node tools/check-origin-trace-rendered-ui.mjs
 
 app: app-build
 	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app"

@@ -5,10 +5,7 @@ function initializePaneLayout() {
     { id: 'native-console', parent: '#workspace', panes: ['.main', '#native-console-panel'], axis: 'y', minimum: [180, 240], label: 'workspace and console' },
     { id: 'traffic', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'y', minimum: [220, 220], label: 'Traffic list and inspector' },
     { id: 'traffic-columns', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'x', minimum: [380, 360], label: 'Traffic list and inspector' },
-    { id: 'repeater', parent: '.repeater-split', panes: ['.repeater-request-pane', '.repeater-response-pane'], axis: 'x', minimum: [320, 260], label: 'Repeater request and response' },
     { id: 'sources', parent: '#screen-sources', panes: ['.sources-navigator', '.sources-editor'], axis: 'x', minimum: [140, 320], label: 'Source navigator and editor' },
-    { id: 'memory', parent: '.memory-grid', panes: ['.memory-search-pane', '.memory-output'], axis: 'x', minimum: [220, 460], label: 'Memory criteria and results' },
-    { id: 'memory-detail', parent: '.memory-results-pane', panes: ['.memory-results-list', '.memory-detail'], axis: 'x', minimum: [210, 220], label: 'Memory matches and details' },
     { id: 'decoder', parent: '.decoder-grid', panes: ['.decoder-column:first-child', '.decoder-column:last-child'], axis: 'x', minimum: [340, 300], label: 'Decoder pipeline and output' }
   ];
   let saved = {};
@@ -24,7 +21,7 @@ function initializePaneLayout() {
   const persist = () => {
     try { localStorage.setItem(storageKey, JSON.stringify(saved)); } catch { /* Keep the current layout. */ }
   };
-  // Track actual scroll owners, not every descendant of all eight panes. Read
+  // Track actual scroll owners, not every descendant of all configured panes. Read
   // their current offsets at refresh time so selection-driven moves still win.
   const scrollOwners = new Set();
   const rememberScroll = node => {
@@ -219,7 +216,7 @@ function initializePaneLayout() {
   });
   const observer = new MutationObserver(schedule);
   observer.observe(document.querySelector('main'), { subtree: true, attributes: true,
-    attributeFilter: ['hidden', 'data-empty', 'data-sidebar-open', 'data-hooks-open'] });
+    attributeFilter: ['hidden', 'data-empty', 'data-sidebar-open'] });
   observer.observe(document.querySelector('#exchange-inspector'), { childList: true });
   observer.observe(document.querySelector('#native-console-panel'), { attributes: true, attributeFilter: ['hidden'] });
   window.addEventListener('resize', schedule);

@@ -292,9 +292,9 @@ MCP client configuration, native-mode limits, and approval boundaries.
 
 ## Development and validation
 
-Repository CI covers source checks, native/Rust tests, the event path, rendered
-UI journeys, and macOS app packaging. The packaged-app lifecycle gate uses
-synthetic local Analyst workspaces and real WKWebView/AppKit decisions:
+Repository CI covers source checks, native/Rust tests, the event path, macOS app
+packaging and rendered acceptance of the packaged app. The packaged-app gates use
+synthetic local stores and real WKWebView/AppKit input:
 
 ```sh
 make lint
@@ -305,7 +305,16 @@ make sanitize
 make app-build
 codesign --verify --deep --strict "build/Origin Trace.app"
 node tools/check-origin-trace-native-close.mjs
+make rendered-ui-check
 ```
+
+`make rendered-ui-check` injects a hosted XCTest bundle into a relocated copy of
+the packaged app and drives its WKWebView with native pointer and keyboard input
+at the default and minimum window sizes. It covers Traffic, Sources,
+Investigation navigation and VM native guest rows built from the real C++
+encoders, checks layout, focus order and visible focus, scrolling and inert
+captured text, and writes screenshots to `build/rendered-ui-qa/`. See the
+[Origin Trace UI guide](apps/research-ui/README.md#rendered-ui-acceptance).
 
 The native close gate exercises 14 scenarios, including clean close/Quit,
 Return/Escape safety, missing or late save-state replies, navigation, and

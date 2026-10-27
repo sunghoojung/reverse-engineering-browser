@@ -1,140 +1,18 @@
 import assert from 'node:assert/strict';
 import {
-  classifyCaptureError,
-  createLifecycleObserver,
+  browserSetupReasons,
+  browserSetupStages,
+  captureReadinessEnums,
   lifecycleErrorCodes,
-  captureReadiness,
 } from './capture-completeness-lifecycle.mjs';
-const state = (epoch, error = '', extra = {}) => ({
-  network: {
-    capture_epoch: epoch,
-    dropped: 2,
-    capture_status: {
-      gaps: 3,
-      attached_targets: 5,
-      eligible_targets: 6,
-      last_error: error,
-      ...extra,
-    },
-  },
-});
-const observer = createLifecycleObserver();
-observer.observe(state(0));
-observer.observe(state(1));
-observer.observe(state(1));
-assert.equal(observer.snapshot().setupEpochTransitions, 1);
-assert.equal(observer.snapshot().epochChanges, 0);
-observer.observe(state(2, 'Capture detach failed: https://PRIVATE.invalid/token'));
-observer.observe(state(2, 'SECRET arbitrary transport failure'));
-observer.observe(
-  state(2, 'Browser target or ancestor detached; unfinished evidence is unavailable.'),
-);
-const result = observer.snapshot();
-assert.equal(result.epochChanges, 1);
-assert.equal(result.maxima.gaps, 3);
-assert.equal(result.maxima.dropped, 2);
-assert.deepEqual(
-  result.errorObservations.map((x) => x.code),
-  ['detach-failed', 'unknown', 'target-or-ancestor-detached'],
-);
-assert(!/PRIVATE|SECRET|https:/.test(JSON.stringify(result)));
-result.epochTransitions[0].to = 999;
-result.maxima.gaps = 999;
-assert.equal(observer.snapshot().epochTransitions[0].to, 1);
-assert.equal(observer.snapshot().maxima.gaps, 3);
-for (let i = 3; i < 1000; i++) observer.observe(state(i, `secret ${i}`));
-assert.equal(observer.snapshot().epochTransitions.length, 16);
-assert(observer.snapshot().omittedEpochTransitions > 0);
-assert(observer.snapshot().errorObservations.length <= lifecycleErrorCodes.length);
-for (const epoch of [NaN, Infinity, -1, 'SECRET', Number.MAX_SAFE_INTEGER + 1])
-  observer.observe(state(epoch));
-observer.observe(null);
-assert.equal(observer.snapshot().invalidSamples, 6);
-assert.equal(classifyCaptureError(''), null);
-assert.equal(classifyCaptureError(null), null);
-assert.equal(classifyCaptureError('Capture detach failed'), 'unknown');
-const reconnect = createLifecycleObserver();
-for (const n of [1, 0, 1]) reconnect.observe(state(n));
-assert.equal(reconnect.snapshot().setupEpochTransitions, 0);
-assert.equal(reconnect.snapshot().epochChanges, 2);
-console.log(
-  'Capture lifecycle: bounded aggregates, epoch setup/reconnect separation, error allowlist and privacy passed.',
-);
+import {sanitizeCaptureReport} from './sanitize-capture-completeness-report.mjs';
 
-const absent = createLifecycleObserver();
-absent.observe({network: {capture_epoch: 0, capture_status: {}}});
-assert(Object.values(absent.snapshot().maxima).every((value) => value === null));
-absent.observe({
-  network: {capture_epoch: 0, dropped: 0, capture_status: {gaps: 0}},
-});
-assert.equal(absent.snapshot().maxima.gaps, 0);
-assert.equal(absent.snapshot().maxima.dropped, 0);
-assert.equal(absent.snapshot().maxima.attached_targets, null);
-
-const cleanup = createLifecycleObserver();
-cleanup.observe(
-  state(1, 'Debugger WebSocket closed: SECRET stderr', {
-    cleanup_already_gone: 3,
-    cleanup_failures: 1,
-  }),
-);
-assert.equal(cleanup.snapshot().maxima.cleanup_already_gone, 3);
-assert.equal(cleanup.snapshot().maxima.cleanup_failures, 1);
-assert.deepEqual(cleanup.snapshot().errorObservations, [{code: 'transport-closed', samples: 1}]);
-assert(!JSON.stringify(cleanup.snapshot()).includes('SECRET'));
-assert.equal(classifyCaptureError('Debugger WebSocket closedSECRET'), 'unknown');
-
-assert.equal(
-  classifyCaptureError('Target discovery unavailable: PRIVATE_PATH'),
-  'target-discovery-unavailable',
-);
-assert.equal(
-  classifyCaptureError('HTTP capture setup task failed: PRIVATE'),
-  'fallback-setup-task-failed',
-);
-assert.deepEqual(
-  captureReadiness(
-    state(1, '', {
-      transport_mode: 'page-fallback',
-      scope: 'http-page-targets',
-      state: 'ready',
-    }),
-  ),
-  {transport: 'page-fallback', scope: 'http-page-targets', state: 'ready'},
-);
-assert.deepEqual(
-  captureReadiness(
-    state(1, '', {
-      transport_mode: 'PRIVATE',
-      scope: 'PRIVATE',
-      state: 'PRIVATE',
-    }),
-  ),
-  {transport: null, scope: null, state: null},
-);
-
-const setupObserver = createLifecycleObserver();
-setupObserver.observe(
-  state(1, 'later error', {
-    browser_setup_failure: {
-      stage: 'get-targets',
-      reason: 'timeout',
-      raw: 'SECRET',
-    },
-  }),
-);
-setupObserver.observe(state(1, '', {browser_setup_failure: null}));
-setupObserver.observe(
-  state(1, '', {
-    browser_setup_failure: {stage: 'SECRET', reason: 'timeout'},
-  }),
-);
-setupObserver.observe(
-  state(1, '', {
-    browser_setup_failure: {stage: 'endpoint', reason: 'SECRET'},
-  }),
-);
-assert.deepEqual(setupObserver.snapshot().browserSetupObservations, [
-  {stage: 'get-targets', reason: 'timeout', samples: 1},
-]);
-assert(!JSON.stringify(setupObserver.snapshot()).includes('SECRET'));
+// Archived reports may only carry these closed values; they never carry text.
+for (const list of [lifecycleErrorCodes, browserSetupStages, browserSetupReasons, ...Object.values(captureReadinessEnums)]) {
+  assert(Object.isFrozen(list) && list.length > 0, 'archived vocabularies are closed');
+  assert.equal(new Set(list).size, list.length, 'archived vocabulary values are unique');
+  for (const value of list) assert.match(value, /^[a-z][a-z0-9-]*$/, 'codes are identifiers, never captured text');
+}
+assert(lifecycleErrorCodes.includes('unknown'));
+assert.equal(typeof sanitizeCaptureReport, 'function');
+console.log('PASS archived capture lifecycle vocabularies are closed identifiers (no live CDP classifier remains)');

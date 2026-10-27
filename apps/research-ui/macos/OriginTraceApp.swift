@@ -3336,7 +3336,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               artifacts: document.querySelectorAll('.source-tree-row[data-artifact-id]').length,
               sourceLines: document.querySelectorAll('.source-line').length,
               broker: document.querySelector('#broker-status')?.textContent,
-              liveDebuggerUnavailable: state.debuggerSession === null,
+              retiredLiveControlsAbsent: !Object.hasOwn(state, 'debuggerSession') &&
+                !document.querySelector('#websocket-inspector, #runtime-hook-traffic, #request-memory-pivot'),
               nativeWorkspace: window.__rebSmokeNativeWorkspace,
               apiCollectionContractValid: isApiCollection(state.apiCollection),
               apiCollectionGeneration: state.apiCollection?.generation,

@@ -1264,7 +1264,8 @@ fn session_context_reports_actual_mcp_admission_and_action_guidance() {
         if !allow_effects {
             continue;
         }
-        for (name, valid) in [("capture_action", "stop")] {
+        {
+            let (name, valid) = ("capture_action", "stop");
             let response = mcp.request("tools/call", json!({"name":name,"arguments":{"body":{}}}));
             assert_eq!(response["result"]["isError"], true);
             let error = &response["result"]["structuredContent"];

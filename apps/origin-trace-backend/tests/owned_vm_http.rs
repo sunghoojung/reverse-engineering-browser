@@ -420,7 +420,7 @@ async fn owned_vm_real_helper_http_cli_lifecycle() {
         while count(&view) < 9 {
             let next = count(&view) + 1;
             let body = request(&view, "step", &format!("step-{next}"));
-            view = if next % 2 == 0 {
+            view = if next.is_multiple_of(2) {
                 server.action(&body).await
             } else {
                 server.cli("vm_debugger_action", Some(&body), &[], false)

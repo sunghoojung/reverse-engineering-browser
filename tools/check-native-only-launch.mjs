@@ -32,7 +32,7 @@ assert(flagsStart >= 0 && flagsEnd > flagsStart);
 const flagsCode = launch.slice(flagsStart, flagsEnd);
 for (const quiet of [0, 1]) for (const dispatch of [0, 1]) {
   const result = spawnSync('bash', ['-c', `set -eu; brave_arguments=(); native_quiet_mode=${quiet}; native_wasm_dispatch=${dispatch}; ${flagsCode}
-printf '%s' "${'${brave_arguments[*]}'}"`], {encoding:'utf8'});
+printf '%s' "${'${brave_arguments[*]-}'}"`], {encoding:'utf8'});
   assert.equal(result.status, 0, result.stderr);
   const expected = [quiet ? '--reb-ignore-debugger-statements' : '', dispatch ? '--reb-wasm-br-table-dispatch' : ''].filter(Boolean);
   assert.equal(result.stdout, expected.length ? '--js-flags=' + expected.join(' ') : '');

@@ -12,7 +12,7 @@ async function main() {
   const asset = await readOverrideAsset(options['--file']);
   if (!options['--output']) {
     if (Object.keys(options).length !== 1) throw new Error(usage);
-    console.log(JSON.stringify({format:'reb-local-override-preview-v1',bytes:asset.bytes,sha256:asset.sha256,armed:false,network_requests:0,instruction:'Review this file locally. To prepare an expiring action, pass its reviewed digest and exact disposable target, experiment and URL. No content was uploaded.'}));
+    console.log(JSON.stringify({format:'reb-local-override-preview-v1',bytes:asset.bytes,sha256:asset.sha256,armed:false,network_requests:0,instruction:'Review this file locally. Offline historical preparation requires its reviewed digest and exact target, experiment and URL. Execution was removed; no content was uploaded.'}));
     return;
   }
   for (const field of ['--experiment-id','--ttl-ms']) if (options[field] !== undefined && !/^[1-9][0-9]*$/.test(options[field])) throw new Error(usage);
@@ -20,6 +20,6 @@ async function main() {
     ...(options['--content-type'] ? {contentType:options['--content-type']} : {}),...(options['--method'] ? {method:options['--method']} : {}),...(options['--ttl-ms'] ? {ttlMs:Number(options['--ttl-ms'])} : {})});
   const cleanupPending = await saveOverrideAction(options['--output'],action);
   console.log(JSON.stringify({format:'reb-local-override-prepared-v1',armed:false,network_requests:0,expires_at_ms:action.local_override.expires_at_ms,temporary_cleanup_pending:cleanupPending,
-    instruction:'Private action file prepared. Review it, select the exact target scope, then explicitly arm with tools/manage-local-override.mjs --arm ACTION --base-url ORIGIN. Preparing never arms or sends. File content may be sensitive; do not share it.'}));
+    instruction:'Private historical action file prepared offline. Execution was removed; this file cannot arm an override. File content may be sensitive; do not share it.'}));
 }
 main().catch(error => {console.error(error.message);process.exitCode = 1;});

@@ -39,7 +39,7 @@ local recorder and deterministic fixture export. Browser capture and VM-view
 ingestion are not implemented by that contract.
 
 [Literal marker fuzz workflow v1](marker-fuzz-v1.md) defines offline reviewed
-plans and explicitly armed, bounded disposable Repeater execution.
+plans only. Browser/Repeater execution is removed and its CLI fails closed.
 
 [VM analysis packs v1](vm-analysis-pack-v1.md) defines inert relevance overlays
 and conservative offline comparison of exact workspace v2 documents.
@@ -289,9 +289,9 @@ pages and the local HTTP/CLI contract.
 
 ## Scoped local response overrides
 
-[Local overrides v1](local-overrides-v1.md) defines the optional exact URL,
-method, target, experiment, digest and expiry guard on existing fulfillment,
-with explicit offline preparation and local CLI arming/disarming.
+[Local overrides v1](local-overrides-v1.md) documents the historical exact URL,
+method, target, experiment, digest and expiry format. Offline preparation remains;
+live fulfillment and CLI arming/disarming were removed with CDP.
 
 Runtime allocating-script provenance adds artifact capture origin 8,
 `runtime_allocating_script`, valid only for JavaScript with a nonzero execution

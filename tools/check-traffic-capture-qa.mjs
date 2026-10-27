@@ -53,65 +53,69 @@ async function checkTrafficActivation(root) {
     assert(first >= 0 && last > first, `Missing production boundary: ${start}`);
     return app.slice(first, last);
   };
-  const refresh = extract('      async function refreshDebugger(', '      async function refreshArtifacts()');
+  const refresh = extract('      async function refresh()', '      function useStandalonePreview()');
   const show = extract('      function showScreen(', '      async function refresh()');
-  const screens = ['traffic', 'sources', 'experiments', 'api-collection'].map(name =>
+  const screens = ['traffic', 'sources', 'signals', 'api-collection'].map(name =>
     ({id: 'screen-' + name, hidden: name !== 'sources'}));
   const old = {id: 'old'}, added = {id: 'captured-while-hidden'};
-  const state = {debuggerSession: {scripts: [], breakpoints: [], state: 'running'},
-    requests: [old], openScriptIds: [], openArtifactIds: [], selectedScriptId: null,
-    selectedRequestId: old.id, editingBreakpointId: null};
+  const state = {events: [], requests: [old], nativeRequests: [old], selectedRequestId: old.id,
+    signalKnownKeys: null, signalNewKeys: new Set(), refreshing: false};
   let painted = [old], summary = old, inspector = old, status = 200, fetches = 0;
-  let body = {scripts: [], breakpoints: [], state: 'running', network: {requests: [old, added]}};
+  let body = {events: [], network_events: [old, added], capture_mode: 'live', broker_connected: true};
   const context = {
-    state, location: {protocol: 'http:'},
+    state, location: {protocol: 'http:'}, elements: {gaps: {}},
     document: {hidden: false, activeElement: null,
+      getElementById: id => screens.find(screen => screen.id === id),
       querySelector(selector) {
         if (selector === '#advanced-navigation') return {contains: () => false};
         return screens.find(screen => '#' + screen.id === selector);
       },
       querySelectorAll: selector => selector === '.screen' ? screens : []},
-    fetch: async () => {
+    fetch: async path => {
+      assert.equal(path, '/api/events?limit=5000', 'Refresh must use native broker events, not a debugger endpoint');
       fetches++;
-      return {status, ok: true, json: async () => body, headers: {get: () => '"debugger-fixture"'}};
+      return {status, ok: status < 400, text: async () => JSON.stringify(body), headers: {get: () => '"native-fixture"'}};
     },
-    isDebuggerResponse: () => true, debuggerScriptCatalogSignature: () => '',
-    syncExperimentSession: (_, next) => next,
-    rebuildTrafficRequests: () => { state.requests = body.network.requests; },
-    resetRequestSelection: () => { state.selectedRequestId = null; },
-    renderRequests: () => { painted = state.requests.slice(); },
-    updateSelectionSummary: selected => { summary = selected; },
-    renderInspector: () => { inspector = state.requests.find(row => row.id === state.selectedRequestId) ?? null; },
+    isBrokerResponse: value => Array.isArray(value.events),
+    fingerprintEventsFromEvents: () => [], signalEventKey: value => value,
+    vmFindingsFromEvents: () => ({findings: [], malformedCount: 0}), vmVisibleFindings: () => [],
+    requestsFromEvents: rows => rows,
+    rebuildTrafficRequests: () => {state.requests = state.nativeRequests;},
+    resetRequestSelection: () => {state.selectedRequestId = null;},
+    shownSequenceGaps: () => 0n, shownQueueDrops: () => 0n, eventGapLabel: () => '',
+    renderRequests: () => {painted = state.requests.slice();},
+    updateSelectionSummary: selected => {summary = selected ?? null;},
+    renderInspector: () => {inspector = state.requests.find(row => row.id === state.selectedRequestId) ?? null;},
     evidenceWorkspace: {setVisible() {}}, sourceFactsPanel: {cancel() {}}, float32Panel: {cancel() {}}
   };
-  for (const name of ['syncMemorySession', 'applyMemoryOriginTrace', 'renderLiveBrowserTabCount',
-    'pruneLiveScriptContent', 'renderDebugger', 'renderShellStatus', 'renderNetworkNotice',
-    'renderMemory', 'renderFieldProvenance', 'scheduleDebuggerRefresh', 'investigationBeforeScreen',
-    'retireCanvasPreviews', 'renderRuntimeHookTraffic']) context[name] = () => {};
-  const api = runInNewContext(refresh + '\n' + show + '\n;({refreshDebugger, showScreen})', context);
+  for (const name of ['acceptEventWindow', 'refreshRequestSignalProfile', 'refreshArtifacts',
+    'refreshVmAnalysis', 'renderShellStatus', 'renderNetworkNotice', 'renderEvidence',
+    'renderVmLab', 'renderFingerprintActivity', 'investigationBeforeScreen', 'retireCanvasPreviews']) context[name] = () => {};
+  const api = runInNewContext(refresh + '\n' + show + '\n;({refresh, showScreen})', context);
   const navigationButton = {classList: {contains: () => true}};
-  await api.refreshDebugger();
-  assert.equal(state.debuggerError, null);
-  assert.deepEqual(painted, [old], 'Hidden refresh must not repaint the ledger');
-  assert.deepEqual(state.requests, [old, added], 'Hidden refresh retains new requests');
+  await api.refresh();
+  assert.equal(state.eventFailureKind, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.requests)), [old, added], 'Native refresh retains requests received while Traffic is hidden');
   const beforeActivation = fetches;
   api.showScreen('traffic', navigationButton);
   assert.equal(screens[0].hidden, false);
-  assert.deepEqual(painted, [old, added], 'Traffic activation paints already retained requests');
-  assert.equal(summary, old); assert.equal(inspector, old);
+  assert.deepEqual(JSON.parse(JSON.stringify(painted)), [old, added]);
+  assert.equal(summary.id, old.id); assert.equal(inspector.id, old.id);
   assert.equal(fetches, beforeActivation, 'Activation needs no request or capture action');
   status = 304;
-  await api.refreshDebugger();
-  assert.deepEqual(painted, [old, added], 'Quiet 304 responses preserve the current ledger');
-  // A reconnect/clear while hidden also invalidates the old detail selection.
+  await api.refresh();
+  assert.deepEqual(JSON.parse(JSON.stringify(painted)), [old, added], 'Quiet native 304 responses preserve the ledger');
+  status = 503;
+  await api.refresh();
+  assert.equal(state.eventFailureKind, 'disconnected');
+  assert.deepEqual(JSON.parse(JSON.stringify(state.requests)), [old, added], 'Failed native refresh preserves last valid evidence');
   screens[0].hidden = true; screens[1].hidden = false;
-  status = 200; body = {...body, network: {requests: []}};
-  await api.refreshDebugger();
-  assert.equal(state.debuggerError, null); assert.equal(state.selectedRequestId, null);
-  assert.equal(summary, old, 'Hidden refresh has not repainted the old summary');
+  status = 200; body = {...body, network_events: []};
+  await api.refresh();
+  assert.equal(state.eventFailureKind, null); assert.equal(state.selectedRequestId, null);
   api.showScreen('traffic', navigationButton);
-  assert.deepEqual(painted, []); assert.equal(summary, null); assert.equal(inspector, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(painted)), []); assert.equal(summary, null); assert.equal(inspector, null);
   api.showScreen('traffic', navigationButton);
-  assert.deepEqual(painted, [], 'Repeated activation keeps the empty state');
-  console.log('PASS Traffic activation after hidden capture/clear, quiet 304, retained/expired selection and repeated navigation (function harness; not rendered/native runtime)');
+  assert.deepEqual(JSON.parse(JSON.stringify(painted)), [], 'Repeated activation keeps the empty state');
+  console.log('PASS native Traffic refresh/activation, quiet 304, failed-refresh retention, expired selection and repeated navigation (function model; not rendered runtime)');
 }

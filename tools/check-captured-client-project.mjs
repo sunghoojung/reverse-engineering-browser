@@ -117,51 +117,9 @@ await checkGeneratedProject();
 await checkConfiguredProject();
 if(process.argv.includes('--go')) await checkGeneratedGoProject();
 if(process.argv.includes('--mimic')) await checkGeneratedMimicProject();
-await checkController();
-await checkRepeaterIntegration();
+// The retired repeater controller is not part of native-only export.
+// check-captured-export-ui.mjs exercises the shipped dialog and native save bridge.
 
-async function checkRepeaterIntegration() {
-  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
-  const section=(start,end)=>{const begin=app.indexOf(start),finish=app.indexOf(end,begin+start.length);assert(begin>=0&&finish>begin);return app.slice(begin,finish);};
-  const state={requests:requests(fixture()),selectedRequestId:'synthetic-json',repeaterDraftDirty:true,repeaterDraftRevision:1,
-    repeaterCaptureSource:{source,context:'ctx',importRevision:1}};
-  const elements=Object.fromEntries(['Url','Method','Headers','Body','Timeout'].map(name=>['repeaterRequest'+name,{value:''}]));
-  Object.assign(elements.repeaterRequestUrl,{value:source.input.url});Object.assign(elements.repeaterRequestMethod,{value:'POST'});
-  Object.assign(elements.repeaterRequestHeaders,{value:JSON.stringify(Object.fromEntries(source.input.headers))});
-  Object.assign(elements.repeaterRequestBody,{value:inputBody});Object.assign(elements.repeaterRequestTimeout,{value:'15000'});
-  let textarea='';Object.defineProperty(elements.repeaterRequestBody,'value',{get:()=>textarea,set:value=>{textarea=value.replace(/\r\n?/g,'\n');}});
-  elements.repeaterRequestBody.value=inputBody;state.repeaterBodyRepresentation={text:inputBody,display:elements.repeaterRequestBody.value};
-  let execution=0;const payloads=[];
-  const production=runInNewContext(section('      function prefillRepeaterRequest(', '      function setRepeaterEditorTab(')+
-    section('      async function runRepeaterRequest()', '      async function compareRepeaterResponses()')+
-    '\n;({prefillRepeaterRequest,loadRepeaterHistoryEntry,runRepeaterRequest})',{
-    state,elements,URL,refreshRepeaterStructuredEditors(){},renderRepeaterVariableStatus(){},renderRepeater(){},renderExperiment(){},
-    repeaterSubmissionKey:()=> 'submission',experimentContextKey:()=> 'ctx',repeaterState:()=>({history:execution?[{id:execution}]:[]}),
-    currentExperimentReceipt:value=>value,applyRepeaterVariables:async()=>({}),parseExperimentHeaders:text=>Object.entries(JSON.parse(text)).map(([name,value])=>({name,value})),
-    repeaterHeaderObject:headers=>Object.fromEntries(headers.map(({name,value})=>[name,value])),
-    runExperimentAction:async payload=>{payloads.push(payload);return {repeater:{active_execution:{execution_id:++execution},history:[]}};}
-  });
-  await production.runRepeaterRequest();assert.equal(payloads.length,1);assert.equal(payloads[0].body,inputBody);
-  assert.equal(state.repeaterDraftDirty,false);production.prefillRepeaterRequest();
-  assert.equal(elements.repeaterRequestBody.value,inputBody.replace(/\r\n?/g,'\n'),'Textarea display uses normalized line endings');
-  assert.equal(state.repeaterBodyRepresentation.text,inputBody,'Retained request preserves original CRLF');
-  assert.equal(state.repeaterCaptureRuns.source,source);assert.equal(state.repeaterCaptureRuns.links[0].id,1);
-  state.repeaterDraftRevision++;state.repeaterDraftDirty=true;await production.runRepeaterRequest();
-  assert.equal(state.repeaterCaptureRuns.links.length,2);assert.match(state.repeaterCaptureRuns.links[1].relation,/edited after/);
-  production.loadRepeaterHistoryEntry({...run,id:1});
-  assert.equal(state.repeaterCaptureSource,null,'Selecting another draft retires its active import');
-  production.prefillRepeaterRequest();assert.equal(elements.repeaterRequestBody.value,inputBody.replace(/\r\n?/g,'\n'),'History display is not overwritten by ordinary Traffic prefill');
-  assert.equal(state.repeaterBodyRepresentation.text,inputBody);
-  assert.equal(state.repeaterCaptureRuns.links.length,2,'Inspecting history retains established capture provenance');
-  const getRunCapture=runInNewContext('('+section('        getRunCapture: (run,context) => {','        openRepeater:').trim().replace(/^getRunCapture: /,'').replace(/,$/, '')+')',{state});
-  assert.equal(getRunCapture({id:1},'ctx').evidence,source.evidence);
-  assert.equal(getRunCapture({id:2},'ctx').evidence,source.evidence);
-  assert.equal(getRunCapture({id:3},'ctx'),null);assert.equal(getRunCapture({id:1},'replacement'),null);
-  assert.match(section('      function clearExperimentLifetime()', '      function '),/state\.repeaterCaptureRuns = null/);
-  state.repeaterBodyRepresentation=null;await production.runRepeaterRequest();
-  assert.equal(payloads.at(-1).body,inputBody.replace(/\r\n?/g,'\n'),'Explicit body edit uses editor text rather than secretly restoring CRLF');
-  console.log('PASS production Repeater Send/prefill/history integration: full draft preserved after Send, bounded per-run provenance retained and context mismatches refused');
-}
 
 async function command(command,args,cwd,options={}) {
   return new Promise((done,reject)=>{
@@ -314,65 +272,6 @@ async function checkGeneratedGoProject() {
   console.log('PASS generated Go build/test/vet and actual net/http loopback fidelity, explicit send/origin/configuration gates, unsupported matrix, redirects, timeout and response bounds');
 }
 
-async function checkController() {
-  class Node {
-    constructor(tag='div'){this.tagName=tag;this.children=[];this.events={};this.dataset={};this.text='';this.open=false;this.disabled=false;this.checked=false;}
-    set textContent(value){this.text=String(value);this.children=[];}get textContent(){return this.text+this.children.map(child=>child.textContent).join('');}
-    append(...children){this.children.push(...children);}replaceChildren(...children){this.children=children;this.text='';}
-    addEventListener(type,handler){this.events[type]=handler;}click(){if(!this.disabled)return this.events.click?.({currentTarget:this});}
-    focus(){}remove(){}showModal(){this.open=true;}close(){this.open=false;this.events.close?.();}
-  }
-  const selectors=['#captured-client-review','[data-client-review-content]','[data-client-review-status]','[data-client-apply]','[data-client-replace]','[data-client-replace-label]','[data-client-close]'];
-  const nodes=new Map(selectors.map(selector=>[selector,new Node()]));
-  const drafts=new Node(),exports=['raw','redacted_copy'].map(mode=>{const node=new Node();node.dataset.clientCapture=mode;return node;});
-  const runExports=['raw','redacted_copy'].map(mode=>{const node=new Node();node.dataset.clientRunExport=mode;return node;});
-  let native=false,bridgeMode='saved',bridgeCalls=0;
-  const bridge={postMessage:async payload=>{bridgeCalls++;assert.equal(payload.format,'reb-client-project-save-v1');assert.equal(payload.mode,'raw');assert.equal(Buffer.from(payload.base64,'base64').readUInt32LE(0),0x04034b50);if(bridgeMode==='failed')throw new Error('authored save denial');return {status:bridgeMode};}};
-  const document={querySelector:selector=>selector==='[data-client-capture="draft"]'?drafts:selector.startsWith('[data-client-provider=')?{value:'standard'}:nodes.get(selector),
-    querySelectorAll:selector=>selector==='[data-client-capture]'?[drafts,...exports]:selector==='[data-client-run-export]'?runExports:selector==='[data-client-capture="raw"], [data-client-capture="redacted_copy"]'?exports:[],
-    createElement:tag=>new Node(tag),body:new Node(),documentElement:{classList:{contains:()=>native}},events:{},addEventListener(type,handler){this.events[type]=handler;}};
-  const dialog=nodes.get('#captured-client-review');dialog.querySelector=selector=>nodes.get(selector);
-  const install=runInNewContext(code.join('\n')+'\ninstallCapturedClientWorkflow',{...globals,document,Blob,webkit:{messageHandlers:{rebClientProjectExport:bridge}},URL:class extends URL {static createObjectURL(){downloads++;return 'blob:authored';}static revokeObjectURL(){}},setTimeout:()=>0});
-  let current=requests(fixture()),selected=current[0],context='ctx',edit=0,dirty=false,prepared=0,written=0,opened=0,downloads=0,release=null,notice='',createNew=false;
-  const options={getRequest:()=>selected,getRequests:()=>current,getRun:()=>null,contextKey:()=>context,editRevision:()=>edit,hasDraft:()=>dirty,
-    prepareContext:async()=>{prepared++;if(release==='hold')await new Promise(done=>{release=done;});return {key:'ctx',created:createNew};},
-    writeDraft:source=>{written++;assert.equal(source.input.body,inputBody);},openRepeater:()=>opened++,notice:message=>{notice=message;}};
-  const workflow=install(options);
-  const apply=nodes.get('[data-client-apply]'),replace=nodes.get('[data-client-replace]'),close=nodes.get('[data-client-close]'),status=nodes.get('[data-client-review-status]');
-  assert.equal(prepared+written+downloads,0);workflow.sync();assert.equal(prepared+written+downloads,0);
-  drafts.click();assert.equal(dialog.open,true);assert.equal(apply.disabled,false);assert.equal(prepared+written+downloads,0);
-  assert(nodes.get('[data-client-review-content]').textContent.includes(inputBody));
-  close.click();assert.equal(written,0);
-  dirty=true;drafts.click();assert.equal(apply.disabled,true);replace.checked=true;replace.events.change();assert.equal(apply.disabled,false);
-  await apply.click();assert.equal(prepared,1);assert.equal(written,1);assert.equal(opened,1);assert.equal(dialog.open,false);
-  dirty=false;drafts.click();selected.captureRecord.request.body.text='changed';workflow.sync();assert.equal(apply.disabled,true);assert.match(status.textContent,/changed or expired/);close.click();
-  current=requests(fixture());selected=current[0];drafts.click();current=[];await apply.click();assert.equal(written,1);close.click();
-  current=[selected,{...selected}];drafts.click();assert.equal(dialog.open,false);assert.match(notice,/ambiguous/);
-  current=[selected];
-  for(const interruption of ['close','edit','context','expiry']) {
-    context='ctx';current=[selected];release='hold';drafts.click();const pending=apply.click();assert.equal(apply.disabled,true);
-    const before=written;
-    if(interruption==='close')close.click();else if(interruption==='edit')edit++;else if(interruption==='context')context='replacement';else current=[];
-    release();await pending;assert.equal(written,before,interruption+' rejects late draft write');close.click();
-  }
-  context='ctx';current=[selected];release=null;drafts.click();
-  for(const key of [{key:'F8'},{key:'ArrowLeft',altKey:true},{key:'p',ctrlKey:true},{key:'j',metaKey:true}]) {
-    let stopped=false,prevented=false;document.events.keydown({...key,preventDefault:()=>prevented=true,stopImmediatePropagation:()=>stopped=true});assert(stopped&&prevented);
-  }
-  close.click();assert.equal(downloads,0,'Review never starts an export');
-  assert.equal(written,1);assert.equal(opened,1);
-  createNew=true;
-  for(const transition of ['cleared-by-create','new-selection','new-edit']) {
-    current=[selected];workflow.sync();release='hold';drafts.click();const pending=apply.click(),before=written;
-    if(transition==='new-selection') {current=requests(fixture());current[0].captureOwner=['new-owner',3];selected=current[0];}
-    else {current=[];selected=null;if(transition==='new-edit')edit++;}
-    release();await pending;
-    assert.equal(written,before+(transition==='cleared-by-create'?1:0),transition+' only confirmed source reset can import');
-    close.click();current=requests(fixture());selected=current[0];
-  }
-  createNew=false;release=null;
-  console.log('PASS capture review controller: explicit-only creation/export, dirty guard, changed/expired/ambiguous sources, canceled or edited late creation, context ownership and modal shortcut isolation');
-}
 
 async function checkConfiguredProject() {
   const seen=[];

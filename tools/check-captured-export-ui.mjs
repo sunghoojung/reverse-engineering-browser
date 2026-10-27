@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Real dialog/controller routes with authored evidence and an in-memory DOM.
-// Rendered coverage lives in the API-catalog browser lane, not this model.
+// Offline controller coverage only; CDP browser lanes have been removed.
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
@@ -111,6 +111,7 @@ for(const native of [false,true]){
   previous=count();h.expire();assert(f.submit.disabled&&!h.triggers.capture.disabled);h.set('format','sdl');h.set('source','file');await selectFile(JSON.stringify(schema));await f.submit.click();assert.equal(count(),++previous);h.open();assert.equal(f.format.value,'sdl');assert.equal(f.source.value,'file');assert(f.submit.disabled,'Closing clears prepared schema');assert(f.format.options.filter(o=>o.value!=='sdl').every(o=>o.disabled));await selectFile(JSON.stringify(schema));await f.submit.click();assert.equal(count(),++previous);assert.equal(h.notices.length,0,'Export status stays in the dialog, not unrelated navigation');
 }
 const html=await readFile(new URL('../apps/research-ui/index.html',import.meta.url),'utf8');
-for(const token of ['data-export-open="capture"','data-export-open="run"','data-export-format','data-export-policy','data-export-file','captured_export_formats.js'])assert(html.includes(token));
+for(const token of ['data-export-open="capture"','data-export-format','data-export-policy','data-export-file','captured_export_formats.js'])assert(html.includes(token));
+assert(!html.includes('data-export-open="run"'), 'The retired live repeater has no export action in the shipped UI');
 assert.match(html,/<button id="open-captured-export" type="button" data-export-open="capture"/,'Traffic export uses the compact toolbar button, not inspector exchange-button height');
 console.log('PASS compact export dialog: redacted default, explicit modes and destinations, runtime/capture/run parity, local file preparation without automatic output, exact-source invalidation, strict timing/schema/size bounds, cancel and focus return, native handoff and clipboard failure');

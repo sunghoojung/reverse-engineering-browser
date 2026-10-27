@@ -53,10 +53,9 @@ empty hash-bound ledger on stdout, or
 `node tools/vm-semantics.mjs create-ledger VM.json NEW-LEDGER.json` for a private,
 no-overwrite local file. Both create the existing reimportable ledger contract.
 
-`make traffic-capture-check`, `make backend-e2e`, and the browser capture
-comparison target are retired CDP workflows and return a removal error rather
-than claiming a pass. Native event transport tests and offline UI model tests
-remain in the normal gates. Full live-browser acceptance requires a rebuilt
+The CDP Traffic, debugger and browser capture comparison workflows were removed
+with their make targets. Native event transport tests and offline UI model tests
+remain in the normal gates; `make rendered-ui-check` drives the packaged app. Full live-browser acceptance requires a rebuilt
 instrumented Brave and is not established by these offline checks.
 
 ## Integrated browser inputs

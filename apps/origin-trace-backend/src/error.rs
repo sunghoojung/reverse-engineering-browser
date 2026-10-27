@@ -24,6 +24,9 @@ pub enum Code {
     CommandOutcomeUnknown,
     ApplicationFailed,
     IdleBackend,
+    /// A live backend whose native capture broker is disconnected. `reb-api
+    /// --require-live` reports it; the HTTP routes do not.
+    NativeCaptureUnavailable,
     DebuggerUnavailable,
 }
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -221,6 +224,7 @@ mod tests {
             Code::CommandOutcomeUnknown,
             Code::ApplicationFailed,
             Code::IdleBackend,
+            Code::NativeCaptureUnavailable,
             Code::DebuggerUnavailable,
         ];
         assert_eq!(

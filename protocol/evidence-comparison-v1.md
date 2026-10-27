@@ -137,11 +137,6 @@ this component does not replace its investigation controller or landing screen.
 Stored-evidence native mode retains the existing explicit 503; live workspaces
 use the local Rust backend. Native asset/build allowlists include the component.
 
-The existing debugger fixture has an optional real Chromium component path:
-`REB_UI_CHROMIUM=/path/to/chromium node tools/check-origin-trace-debugger.mjs
---evidence-comparison-ui-browser`. It mounts an isolated secondary disclosure
-in the existing theme, exercises real file controls, hit-tested Compare,
-references, failure retention, cancellation, close/reopen, keyboard Clear and
-wide/narrow/phone geometry, and writes screenshots. This fixture does not claim
-that the final parent Evidence landing integration has been verified. No
-sandbox flags are overridden; unavailable Chromium is a validation gap.
+The former Chromium component path of `tools/check-origin-trace-debugger.mjs`
+was removed with CDP browser automation; that script now runs only its offline
+model assertions. `make rendered-ui-check` is the packaged-app rendered gate.

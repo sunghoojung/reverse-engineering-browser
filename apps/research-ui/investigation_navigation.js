@@ -2,7 +2,6 @@
  * No raw captures, drafts or DOM nodes are retained in history or browser storage. */
 /** @typedef {{type:'captured-artifact',session:string,artifact:string,sha256:string,bytes:number}} InvestigationArtifact
  * @typedef {{type:'captured-request',session:string,process:string,sequence:string,request:string}} InvestigationRequest
- * @typedef {{type:'debugger-request',id:string,target:string,protocol:string,started:string,instance?:string,epoch?:number,startedMonotonicMs?:number}} InvestigationDebuggerRequest
  * All references are exact retained identities, never URL or name matches. */
 const INVESTIGATION_HISTORY_LIMIT = 24;
 const investigationId = value => {
@@ -22,19 +21,6 @@ function investigationArtifactIdentity(artifact) {
 }
 function investigationRequestIdentity(request) {
   if (!request || request.origin !== 'live') return null;
-  // CDP/native correlation is currently host+method+time. It cannot promote a
-  // debugger request to an exact native-event identity.
-  if (request.protocolRequestId || String(request.operation).startsWith('cdp_')) {
-    if (request.captureRecord) {
-      const exact = apiCatalogRequestIdentity(request);
-      if (!exact || typeof request.protocolRequestId !== 'string' || request.protocolRequestId.length > 4096) return null;
-      return {type: 'debugger-request', id: exact.request, target: exact.target, protocol: request.protocolRequestId,
-        started: String(request.firstTimestamp), instance: exact.instance, epoch: exact.epoch, startedMonotonicMs: exact.started};
-    }
-    if (typeof request.id !== 'string' || request.id.length > 256 || typeof request.tabId !== 'string' || request.tabId.length > 256 || typeof request.protocolRequestId !== 'string' || request.protocolRequestId.length > 256) return null;
-    const started = investigationId(request.firstTimestamp);
-    return started ? {type: 'debugger-request', id: request.id, target: request.tabId, protocol: request.protocolRequestId, started} : null;
-  }
   const root = requestTraceRoot(request), event = investigationEventIdentity(root);
   const requestId = investigationId(root?.request_id);
   return event && requestId && requestId !== '0' ? {...event, type: 'captured-request', request: requestId} : null;
@@ -42,7 +28,7 @@ function investigationRequestIdentity(request) {
 function investigationSame(left, right) {
   if (!left || !right || left.type !== right.type) return false;
   const fields = { 'captured-event': ['session','process','sequence'], 'captured-request': ['session','process','sequence','request'],
-    'captured-artifact': ['session','artifact','sha256','bytes'], 'debugger-request': ['id','target','protocol','started','instance','epoch','startedMonotonicMs'] }[left.type];
+    'captured-artifact': ['session','artifact','sha256','bytes'] }[left.type];
   return Boolean(fields) && fields.every(field => left[field] === right[field]);
 }
 function investigationResolve(identity, records, identityOf) {

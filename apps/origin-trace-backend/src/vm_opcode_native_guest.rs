@@ -397,7 +397,7 @@ fn resolve(
         return None;
     }
     Some(
-        json!({"event":super::event_reference(event),"invocation_event":super::event_reference(marker),"invocation_id":invocation.to_string(),"instance_id":instance.to_string(),"parent_invocation_id":le64(&m,64).to_string(),"function_index":function,"module_byte_offset":site,"selector":selector,"table_count":count,"selected_arm":selector.min(count),"is_default":selector>=count,"sample_index":index,"instruction_pointer":pc,"instruction_pointer_units":"byte-offset","raw_pc_bits":raw.to_string(),"pc_local_index":local,"pc_adjustment":adjustment.to_string(),"pc_value_type":pc_recipe["value_type"],"pc_subtract_memory_base":pc_recipe["subtract_memory_base"],"memory_index":memory,"memory_base":base.to_string(),"memory_length":length,"opcode":opcode,"opcode_width":width,"opcode_endian":op_recipe["endian"],"adapter_artifact_id":adapter["artifact_id"],"adapter_sha256":recipe_sha,"bytecode_artifact_id":snapshot["artifact_id"],"bytecode_sha256":snapshot["sha256"],"interpretation":interpretation,"host_import_call_offsets":import_sites}),
+        json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"invocation_event":super::event_reference(marker),"invocation_id":invocation.to_string(),"instance_id":instance.to_string(),"parent_invocation_id":le64(&m,64).to_string(),"function_index":function,"module_byte_offset":site,"selector":selector,"table_count":count,"selected_arm":selector.min(count),"is_default":selector>=count,"sample_index":index,"instruction_pointer":pc,"instruction_pointer_units":"byte-offset","raw_pc_bits":raw.to_string(),"pc_local_index":local,"pc_adjustment":adjustment.to_string(),"pc_value_type":pc_recipe["value_type"],"pc_subtract_memory_base":pc_recipe["subtract_memory_base"],"memory_index":memory,"memory_base":base.to_string(),"memory_length":length,"opcode":opcode,"opcode_width":width,"opcode_endian":op_recipe["endian"],"adapter_artifact_id":adapter["artifact_id"],"adapter_sha256":recipe_sha,"bytecode_artifact_id":snapshot["artifact_id"],"bytecode_sha256":snapshot["sha256"],"interpretation":interpretation,"host_import_call_offsets":import_sites}),
     )
 }
 pub(super) fn collect(
@@ -1005,6 +1005,18 @@ mod tests {
             .unwrap();
             assert_eq!(doc["workspaces"][0]["native_guest_sample_count"], 1);
             assert_eq!(doc["workspaces"][0]["sample_count"], 0);
+            let guest = &doc["workspaces"][0]["native_guest_samples"][0];
+            let sampled = all
+                .iter()
+                .find(|e| {
+                    e["type"] == "wasm_guest_dispatch"
+                        && e["sequence_number"] == guest["event"]["sequence_number"]
+                })
+                .expect("accepted guest event");
+            assert_eq!(
+                guest["monotonic_time_ns"], sampled["monotonic_time_ns"],
+                "guest row carries the accepted event time {mode}"
+            );
             let schema: Value = serde_json::from_str(include_str!(
                 "../../../protocol/vm-opcode-workspace-v2.schema.json"
             ))
@@ -1046,6 +1058,12 @@ mod tests {
                     serde_json::to_vec(&links).unwrap(),
                 )
                 .unwrap();
+            }
+            if mode == "wide-identities" && !quickjs {
+                super::super::export_golden_evidence(
+                    root.path(),
+                    "REB_NATIVE_GUEST_EVIDENCE_OUTPUT",
+                );
             }
         }
     }

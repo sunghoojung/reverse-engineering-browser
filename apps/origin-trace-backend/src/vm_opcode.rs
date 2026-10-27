@@ -20,7 +20,7 @@ mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.7.0";
+const PRODUCER_VERSION: &str = "2.8.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1410,6 +1410,26 @@ pub(crate) fn store(root: &Path, analysis: &Value, mut workspaces: Vec<Value>) -
         &vm::canonical(&document)?,
     )?;
     Ok(document)
+}
+
+// The C++ golden tests build a real evidence store from native encoder output.
+// When the named variable is set, copy that exact store (manifest, events and
+// content-addressed blobs) for consumers such as the rendered UI acceptance, so
+// they never mirror the fixture by hand.
+#[cfg(test)]
+fn export_golden_evidence(root: &std::path::Path, variable: &str) {
+    let Ok(out) = std::env::var(variable) else {
+        return;
+    };
+    let out = std::path::Path::new(&out);
+    std::fs::create_dir_all(out.join("blobs")).unwrap();
+    for name in ["manifest.jsonl", "events.jsonl"] {
+        std::fs::copy(root.join(name), out.join(name)).unwrap();
+    }
+    for entry in std::fs::read_dir(root.join("blobs")).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(&path, out.join("blobs").join(path.file_name().unwrap())).unwrap();
+    }
 }
 
 #[cfg(test)]

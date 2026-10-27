@@ -610,7 +610,7 @@ assert.equal(completionQuery("a".repeat(129) + ".", 130), null);
 console.log("PASS bounded local console completions, lexical exclusions, property chains and UTF-16 replacement");
 const ui = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
-    ";({isBrokerEvent,isDebuggerResponse,isRequestInterception,isActionScope,isObjectExperiment,isRuntimeHooks,isAutomationRecipes,isRepeater,isWasmInspection})",
+    ";({isBrokerEvent,isWasmInspection})",
   { TextEncoder, URL },
 );
 // Reject foreign, malformed and unbounded binary listings before rendering them.
@@ -633,197 +633,8 @@ for (const patch of [{sha256: "b".repeat(64)}, {artifact_id: "2"}, {byte_size: 3
   assert.equal(ui.isWasmInspection({...wasmReport, ...patch}, wasmSource), false);
 }
 console.log("PASS WASM inspection identity, coordinate and resource bounds");
-// Count the expensive operations deterministically instead of setting timing
-// thresholds that depend on the host. These fixtures never contact a browser.
-let networkUrlCalls = 0;
-let networkBodyDecodes = 0;
-const networkModels = runInNewContext(
-  (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
-  (await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8")) +
-  ";({requestsFromDebuggerNetwork,trafficRowsForLiveCapture,isDebuggerNetwork,trafficSearchRequests})",
-  {TextEncoder, TextDecoder, Uint8Array,
-    URL: class extends URL {constructor(...args) {networkUrlCalls += 1; super(...args);}},
-    atob(value) {networkBodyDecodes += 1; return atob(value);}},
-);
-const emptyNetworkBody = () => ({state: "empty", mime: "", text: "", base64: "", truncated: false, reason: ""});
-const networkRecord = (id, patch = {}) => ({
-  id, protocol_request_id: id, target_id: "target", target_title: "Fixture",
-  url: "http://fixture.invalid/path", url_truncated: false, method: "GET", method_truncated: false,
-  resource_type: "Fetch", document_url: "http://fixture.invalid/", started_monotonic_ms: 100,
-  wall_time_ms: 100, state: "complete", status: 200, status_text: "OK", protocol: "HTTP/1.1",
-  mime_type: "text/plain", duration_ms: 1, encoded_data_length: 0,
-  from_disk_cache: false, from_service_worker: false, error_text: "",
-  request: {headers: [], body: emptyNetworkBody()}, response: {headers: [], body: emptyNetworkBody()}, ...patch,
-});
-const networkSnapshot = requests => ({capture_enabled: true, target_id: "target", requests, dropped: 0,
-  limits: {requests: 1000, body_bytes: 128 * 1024, headers: 128, header_bytes: 64 * 1024}});
-const nativeRequest = (id, time, path = "fixture.invalid", method = "GET") => ({
-  id, path, method, firstTimestamp: BigInt(time) * 1_000_000n, event: {id}, events: [{id}],
-});
-// The reference intentionally uses the old stable-sort selection, including
-// native order for equal distances and the inclusive ten-second cutoff.
-function referenceNativeIds(records, native) {
-  const claimed = new Set();
-  return records.map(record => {
-    const host = new URL(record.url).host;
-    const match = native.filter(candidate => {
-      let domain;
-      try {domain = new URL(candidate.path).host;} catch {domain = candidate.path.replace(/^\/\//, "").split("/")[0];}
-      return !claimed.has(candidate.id) && candidate.method === record.method && domain === host;
-    }).sort((left, right) => Math.abs(Number(left.firstTimestamp) / 1e6 - record.started_monotonic_ms) -
-      Math.abs(Number(right.firstTimestamp) / 1e6 - record.started_monotonic_ms))[0];
-    if (!match || Math.abs(Number(match.firstTimestamp) / 1e6 - record.started_monotonic_ms) > 10_000) return null;
-    claimed.add(match.id);
-    return match.id;
-  });
-}
-const correlationNative = [nativeRequest("tie-first", 110), nativeRequest("tie-second", 90),
-  nativeRequest("native-post", 100, "fixture.invalid", "POST"), nativeRequest("other-host", 100, "other.invalid")];
-const correlationRecords = [networkRecord("first"), networkRecord("second"), networkRecord("third"),
-  networkRecord("post", {method: "POST"}), networkRecord("other", {url: "http://other.invalid/redirect"})];
-const nativeIds = (records, native) => Array.from(networkModels.requestsFromDebuggerNetwork(networkSnapshot(records), native), request => request.event?.id ?? null);
-assert.deepEqual(nativeIds(correlationRecords, correlationNative), ["tie-first", "tie-second", null, "native-post", "other-host"]);
-const correlatedProjection = networkModels.requestsFromDebuggerNetwork(networkSnapshot(correlationRecords), correlationNative);
-const visibleWithMiss = networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative.concat([nativeRequest("missed-document", 100, "only-native.invalid")]));
-assert.deepEqual(visibleWithMiss.map(request => request.id), ["first", "second", "third", "post", "other", "tie-first", "tie-second", "native-post", "other-host", "missed-document"]);
-assert.deepEqual(networkModels.trafficRowsForLiveCapture(correlatedProjection, correlationNative).slice(correlatedProjection.length), correlationNative);
-const otherTargetNative = {...nativeRequest("native-other-tab", 100), tabId:"999", hostOnly:true};
-const otherTargetProjection = networkModels.requestsFromDebuggerNetwork(networkSnapshot([networkRecord("cdp-other-tab")]), [otherTargetNative]);
-assert.equal(otherTargetProjection[0].event, otherTargetNative.event, "Existing heuristic association is not an exact target join");
-assert.deepEqual(networkModels.trafficRowsForLiveCapture(otherTargetProjection, [otherTargetNative]).map(request => request.id), ["cdp-other-tab", "native-other-tab"], "Same host/method/time on another target cannot erase native evidence");
-const repeatedNative = ["native-repeat-1", "native-repeat-2"].map(id => ({...nativeRequest(id, 100), tabId:"999", hostOnly:true}));
-const repeatedProjection = networkModels.requestsFromDebuggerNetwork(networkSnapshot([networkRecord("cdp-repeat-1"), networkRecord("cdp-repeat-2")]), repeatedNative);
-const repeatedVisible = networkModels.trafficRowsForLiveCapture(repeatedProjection, repeatedNative);
-assert.deepEqual(repeatedVisible.map(request => request.id), ["cdp-repeat-1", "cdp-repeat-2", "native-repeat-1", "native-repeat-2"], "Ambiguous repeated requests retain every independent row");
-assert.equal(repeatedVisible[2], repeatedNative[0], "Native evidence stays host-only and is not merged with CDP content");
-assert.equal(repeatedVisible[3], repeatedNative[1]);
-assert.deepEqual(networkModels.trafficRowsForLiveCapture([], repeatedNative), repeatedNative);
-assert.equal(networkModels.trafficRowsForLiveCapture(correlatedProjection, []), correlatedProjection);
-console.log('PASS independent native Traffic rows survive cross-target and repeated-request heuristic correlations');
-assert.deepEqual(nativeIds([networkRecord("limit", {started_monotonic_ms: 10_100}), networkRecord("past", {started_monotonic_ms: 10_100.001})],
-  [nativeRequest("one", 100), nativeRequest("two", 100)]), ["one", null]);
-const variedNative = Array.from({length: 250}, (_, i) => nativeRequest(`native-${i}`, i * 7,
-  `${i % 2 ? "http://" : ""}host-${i % 9}.invalid`, i % 3 ? "GET" : "POST"));
-const variedRecords = Array.from({length: 125}, (_, i) => networkRecord(`cdp-${i}`, {
-  url: `http://host-${i % 11}.invalid/path`, method: i % 4 ? "GET" : "POST", started_monotonic_ms: i * 13,
-}));
-assert.deepEqual(nativeIds(variedRecords, variedNative), referenceNativeIds(variedRecords, variedNative));
-const beforeNative = structuredClone(variedNative);
-const beforeRecords = structuredClone(variedRecords);
-nativeIds(variedRecords, variedNative);
-assert.deepEqual(variedNative, beforeNative);
-assert.deepEqual(variedRecords, beforeRecords);
-const unmatchedNative = Array.from({length: 1000}, (_, i) => nativeRequest(`native-${i}`, i, `http://native-${i % 50}.invalid`));
-const unmatchedRecords = Array.from({length: 500}, (_, i) => networkRecord(`cdp-${i}`, {url: `http://other-${i % 50}.invalid/path`}));
-networkUrlCalls = 0;
-assert(nativeIds(unmatchedRecords, unmatchedNative).every(id => id === null));
-assert.equal(networkUrlCalls, 1500);
-
-const binaryBody = text => ({...emptyNetworkBody(), state: "available", mime: "text/plain",
-  base64: Buffer.from(text).toString("base64")});
-const binaryNetwork = networkSnapshot([networkRecord("binary", {
-  request: {headers: [["authorization", "<redacted>"]], body: binaryBody("request text")},
-  response: {headers: [["content-type", "text/plain"]], body: binaryBody("response marker")},
-})]);
-assert.equal(networkModels.isDebuggerNetwork(binaryNetwork), true);
-const binaryOriginal = structuredClone(binaryNetwork);
-const bodyCache = new Map();
-networkBodyDecodes = 0;
-let projected = networkModels.requestsFromDebuggerNetwork(binaryNetwork, [], bodyCache);
-assert.equal(networkBodyDecodes, 2);
-const firstRequestBytes = projected[0].exchange.request.bytes;
-const firstResponseBytes = projected[0].exchange.response.bytes;
-const repeatedNetwork = structuredClone(binaryNetwork);
-repeatedNetwork.requests[0].response.headers.push(["x-new-header", "latest"]);
-repeatedNetwork.requests[0].response.body.truncated = true;
-projected = networkModels.requestsFromDebuggerNetwork(repeatedNetwork, [nativeRequest("arrived", 100)], bodyCache);
-assert.equal(networkBodyDecodes, 2);
-assert.equal(projected[0].exchange.request.bytes, firstRequestBytes);
-assert.equal(projected[0].exchange.response.bytes, firstResponseBytes);
-assert.equal(projected[0].exchange.response.truncated, true);
-assert.equal(projected[0].exchange.response.headers.at(-1)[1], "latest");
-assert.equal(projected[0].event.id, "arrived");
-assert.equal(networkModels.trafficSearchRequests(projected, "marker", true).matches.get("binary").side, "Response");
-assert.equal(networkModels.trafficSearchRequests(projected, "marker", false).matches.size, 0);
-repeatedNetwork.requests[0].response.body = binaryBody("changed response");
-projected = networkModels.requestsFromDebuggerNetwork(repeatedNetwork, [], bodyCache);
-assert.equal(networkBodyDecodes, 3);
-assert.equal(projected[0].exchange.request.bytes, firstRequestBytes);
-assert.notEqual(projected[0].exchange.response.bytes, firstResponseBytes);
-repeatedNetwork.requests[0].response.body = {...emptyNetworkBody(), state: "loading"};
-projected = networkModels.requestsFromDebuggerNetwork(repeatedNetwork, [], bodyCache);
-assert.equal(projected[0].exchange.response.bytes, undefined);
-assert.equal(projected[0].exchange.response.state, "loading");
-assert.equal(bodyCache.get("binary").response.bytes, undefined);
-assert.deepEqual(binaryNetwork, binaryOriginal);
-for (let i = 0; i < 100; i += 1) {
-  const window = networkSnapshot([networkRecord(`window-${i}`, {response: {headers: [], body: binaryBody("bounded")}})]);
-  networkModels.requestsFromDebuggerNetwork(window, [], bodyCache);
-  assert.deepEqual([...bodyCache.keys()], [`window-${i}`]);
-}
-networkModels.requestsFromDebuggerNetwork(networkSnapshot([]), [], bodyCache);
-assert.equal(bodyCache.size, 0);
-networkModels.requestsFromDebuggerNetwork(binaryNetwork, [], bodyCache);
-assert.equal(networkModels.requestsFromDebuggerNetwork({...binaryNetwork, capture_enabled: false}, [], bodyCache).length, 0);
-assert.equal(bodyCache.size, 0);
-const truncatedMethodNetwork=networkSnapshot([networkRecord('method-truncated',{method_truncated:true})]);
-assert.equal(networkModels.requestsFromDebuggerNetwork(truncatedMethodNetwork)[0].methodTruncated,true);
-const pendingExtra = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
-  networkRecord('worker', {state: 'pending', status: 200, duration_ms: null, resource_type: 'Script'})
-]))[0];
-assert.equal(pendingExtra.status, 'pending');
-assert.equal(pendingExtra.provisionalStatus, 200);
-assert.equal(pendingExtra.time, 'pending');
-assert.equal(pendingExtra.operation, 'cdp_pending');
-const finishedStatus = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
-  networkRecord('done', {state: 'complete', status: 200})
-]))[0];
-assert.equal(finishedStatus.status, 200);
-assert.equal(finishedStatus.provisionalStatus, null);
-assert.equal(networkModels.requestsFromDebuggerNetwork(networkSnapshot([
-  networkRecord('aborted', {state: 'failed', status: 200})
-]))[0].status, 'failed');
-console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
-
-// Public row IDs own selection, search and body-cache entries. Raw CDP IDs may
-// legitimately repeat across targets and redirect hops, public row IDs may not.
-for (const patch of [{}, {target_id:'other-target'}, {protocol_request_id:'other-protocol-id'},
-  {started_monotonic_ms:101, url:'http://fixture.invalid/redirect'}]) {
-  assert.equal(networkModels.isDebuggerNetwork(networkSnapshot([
-    networkRecord('duplicate'), networkRecord('duplicate', patch)
-  ])), false, 'A duplicate public row ID must invalidate the snapshot');
-}
-const distinctOwners = networkSnapshot([
-  networkRecord('cdp:1:1', {protocol_request_id:'raw-shared'}),
-  networkRecord('cdp:2:2', {protocol_request_id:'raw-shared', target_id:'other-target'}),
-  networkRecord('cdp:1:3', {protocol_request_id:'raw-shared', started_monotonic_ms:101, url:'http://fixture.invalid/redirect'})
-]);
-assert.equal(networkModels.isDebuggerNetwork(distinctOwners), true);
-assert.equal(networkModels.isDebuggerNetwork(networkSnapshot([])), true);
-assert.equal(networkModels.isDebuggerNetwork(networkSnapshot(Array.from({length:1000}, (_,i)=>networkRecord(`row-${i}`)))), true);
-assert.equal(networkModels.isDebuggerNetwork(networkSnapshot(Array.from({length:1001}, (_,i)=>networkRecord(`row-${i}`)))), false);
-const types = new Map([['Fetch','xhr'],['XHR','xhr'],['Other','other'],['Document','doc'],
-  ['Script','js'],['Stylesheet','css'],['Image','img'],['Media','media'],['Font','font'],
-  ['WebSocket','socket'],['Manifest','other'],['Unknown','other']]);
-for (const [resource_type, fallback] of types) {
-  for (const [mime_type, expected] of [
-    ['application/wasm','wasm'],['APPLICATION/WASM','wasm'],[' application/wasm ; charset=binary ','wasm'],
-    ['',fallback],['application/wasm-extra',fallback],['application/wasm+json',fallback],
-    ['text/application/wasm',fallback],['application/octet-stream',fallback],['text/plain',fallback]
-  ]) {
-    const snapshot=networkSnapshot([networkRecord('mime', {resource_type,mime_type,url:'http://fixture.invalid/module.wasm'})]);
-    const original=JSON.stringify(snapshot);
-    assert.equal(networkModels.isDebuggerNetwork(snapshot),true);
-    const rows=networkModels.requestsFromDebuggerNetwork(snapshot);
-    assert.equal(rows[0].type,expected,`${resource_type}/${mime_type}: MIME token must match exactly`);
-    assert.equal(rows.filter(row=>row.type==='wasm').length,expected==='wasm'?1:0);
-    assert.equal(JSON.stringify(snapshot),original,'Classification cannot mutate captured evidence');
-  }
-}
-console.log('PASS exact Wasm MIME/resource-type filter matrix and duplicate-public-ID rejection with distinct owner/redirect IDs retained');
-
 // A minimal DOM verifies the real reconciliation code and bounded state, not
-// pixels. --traffic-ui-browser below is the separate rendered interaction path.
+// pixels. `make rendered-ui-check` is the separate rendered interaction path.
 class TrafficFixtureNode {
   constructor(tag = "div") {
     this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = new Map();
@@ -956,7 +767,7 @@ const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,traf
   createSourceTokenizer: () => ({}), sourceSyntaxTokens: text => [{type: "plain", text}],
 });
 const uiRequest = (id, patch = {}) => ({id, path: `https://fixture.invalid/${id}`, method: "GET", status: "pending",
-  time: "pending", type: "xhr", origin: "live", tabId: "fixture-tab", operation: "cdp_pending", events: [],
+  time: "pending", type: "xhr", origin: "live", tabId: "fixture-tab", operation: "request_started", events: [],
   exchange: {request: {state: "empty", headers: []}, response: {state: "loading", headers: []}}, ...patch});
 const retainedTraffic = Array.from({length: 5000}, (_, index) => uiRequest(String(index), {time: index % 20}));
 assert.equal(trafficUI.TRAFFIC_ROW_LIMIT, 500);
@@ -1311,52 +1122,9 @@ for (const unavailable of ['missing', 'sample', 'file']) {
   assert.equal(fixture.state.signalProfileStatus, 'ready', 'Unchanged exact tuples survive catalog object replacement');
 }
 console.log('PASS request signal profile late headers/bodies/errors, exact owner and response identity, cache recovery and unavailable states (production functions; not rendered QA)');
-// Same-host simultaneous requests in different tabs cannot establish an exact
-// native association. Preserve the candidate metadata but never query with it.
-{
-  const fixture = signalProfileFixture();
-  const native = fixture.state.requests.map((request, index) => ({...request,
-    path:'fixture.invalid', method:'GET', tabId:`native-tab-${index}`,
-    firstTimestamp:100_000_000n, event:request.events[0]}));
-  const cdp = networkModels.requestsFromDebuggerNetwork(networkSnapshot([
-    networkRecord('cdp-tab-b', {target_id:'cdp-tab-b'})
-  ]), native)[0];
-  assert.equal(cdp.event, native[0].event, 'The heuristic can choose the first wrong-tab candidate');
-  assert.equal(cdp.events.length, 1, 'Raw candidate metadata is not silently removed');
-  await fixture.refresh(); const calls = fixture.calls.length;
-  fixture.state.requests = [cdp]; fixture.state.selectedRequestId = cdp.id;
-  assert.equal(fixture.selection(), null); await fixture.refresh();
-  assert.equal(fixture.calls.length, calls, 'CDP correlation must not fetch a native signal profile');
-  assert.equal(fixture.state.signalProfile, null, 'Prior exact profile must not label the CDP request');
-  delete cdp.protocolRequestId;
-  assert.equal(fixture.selection(), null, 'CDP operation marker independently rejects the native root');
-  const linkedEvent = {session_id:'11', request_id:'345', process_id:19, sequence_number:'77', type:'request_initiated'};
-  const linked = {...cdp, id:'cdp-joined', protocolRequestId:'12.345', operation:'cdp_complete',
-    nativeLink:{kind:'devtools-request-id', nativeRequestId:'native-devtools', requestId:'345'},
-    events:[linkedEvent, {session_id:'11', request_id:'200', process_id:23, sequence_number:'78', type:'request_started'}]};
-  fixture.state.requests = [linked]; fixture.state.selectedRequestId = linked.id;
-  fixture.state.signalProfile = null; fixture.state.signalProfileKey = null; fixture.state.signalProfileEtag = null;
-  const linkedSelection = fixture.selection();
-  assert.equal(linkedSelection.requestID, '345');
-  assert.equal(linkedSelection.rootProcessID, 19);
-  assert.equal(linkedSelection.rootSequenceNumber, '77');
-  const linkedBody = signalProfileBody(1);
-  linkedBody.request_id = '345';
-  linkedBody.root_event = {process_id:19, sequence_number:'77'};
-  linkedBody.signals[0].first_event.process_id = 19;
-  linkedBody.signals[0].last_event.process_id = 19;
-  fixture.reply = () => signalProfileResponse(linkedBody);
-  await fixture.refresh();
-  assert.equal(fixture.state.signalProfileStatus, 'ready');
-  assert.match(fixture.calls.at(-1).url, /request_id=345/);
-  assert.match(fixture.calls.at(-1).url, /root_process_id=19/);
-}
-// Related VM uses an exact native request start. A DevTools request-id join
-// supplies that start only from the joined native events; the renderer id is
-// not the browser request_started id. Unlinked debugger rows stay in Traffic.
-// The production-controller suite covers the exact pivot, including the join.
+// Related VM uses an exact native request start; rows without one stay in Traffic.
 await checkVmRequestLinkageUI(root);
-console.log('PASS cross-tab heuristic candidates cannot become exact Signal/VM queries; native pivot and raw metadata preserved');
+console.log('PASS unlinked rows cannot become exact VM queries; native pivot preserved');
 
 // Additive machine-readable failure reasons must not make the bundled UI
 // reject its existing application result envelope. Exercise the actual validators.
@@ -1468,7 +1236,7 @@ evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'headers
 console.log('PASS explicit Evidence tab selection preserves sticky selection while its shortcut deliberately toggles to Headers');
 
 const pivotProfile = {signals: [{category: "canvas", event_count: "1", confidence: "observed", relation: "parent_chain"}]};
-const pivotState = {requests: [uiRequest("selected", {protocolRequestId:undefined, operation:"request_started"})], selectedRequestId: "selected", signalProfile: pivotProfile,
+const pivotState = {requests: [uiRequest("selected", {operation:"request_started"})], selectedRequestId: "selected", signalProfile: pivotProfile,
   signalProfileStatus: "ready", trafficDetailOpen: false, inspectorTab: "headers"};
 const pivotElements = {signalRequestProfile: new TrafficFixtureNode(), signalDetail: new TrafficFixtureNode()};
 const signalTab = new TrafficFixtureNode("button");
@@ -1494,21 +1262,7 @@ for (const render of [() => signalPivots.renderSignalRequestProfile(), () => sig
   assert.equal(pivotState.inspectorTab, "signals");
   assert.equal(pivotState.signalProfile, pivotProfile, "Pivots retain the already loaded signal profile");
 }
-pivotState.requests[0].protocolRequestId = 'raw-cdp';
-pivotState.events = [{category:'canvas'},{category:'canvas'},{category:'network'}];
-signalPivots.renderSignalRequestProfile();
-assert.match(pivotElements.signalRequestProfile.textContent, /no native request id/);
-assert.match(pivotElements.signalRequestProfile.textContent, /2 fingerprint events on 1 tab scope/);
-assert.equal(pivotElements.signalRequestProfile.textContent.includes('SELECTED REQUEST'), false, 'Stale native profile cannot label a CDP request');
-assert.equal(pivotElements.signalRequestProfile.querySelector('.signal-request-family'), null);
-const openFingerprint = pivotElements.signalRequestProfile.querySelector('button');
-assert.equal(openFingerprint.textContent, 'Open Fingerprinting');
-pivotScreen = null;
-openFingerprint.click();
-assert.equal(pivotScreen, 'signals');
-assert.equal(pivotState.signalTabId, 'all');
-assert.equal(pivotState.inspectorTab, 'signals', 'Opening Fingerprinting must not retarget the Traffic inspector');
-console.log("PASS Fingerprinting native request-profile/event-detail pivots and session-scoped retained historical fingerprint evidence");
+console.log("PASS Fingerprinting native request-profile/event-detail pivots");
 
 // Adversarial Sources ownership tests run production functions, not a second
 // controller. Transport/DOM fixtures are inert and are not rendered acceptance.
@@ -1524,7 +1278,7 @@ const ownershipFunctionNames = ['sourceIdentity', 'sourceIsCurrent', 'sourceRefe
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource',
-  'sourceDisplayName', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent',
+  'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent',
   'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'discardStaticCleanup', 'toggleStaticCleanupComparison', 'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(
@@ -2637,23 +2391,9 @@ async function sourceFactsBrowserFixture() {
   const artifacts = [artifact('7'),artifact('8')];
   const snow = Buffer.byteLength('\ufeffconst ');
   const documents = new Map(artifacts.map(source=>[source.artifact_id,bytes]));
-  const debuggerState=JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
-  const liveDocuments=new Map();
-  const fixture = {mode:'partial',pending:[],requests:[],artifacts,bytes,snow,documents,debuggerState,liveDocuments,
+  const fixture = {mode:'partial',pending:[],requests:[],artifacts,bytes,snow,documents,
     previewMode:'ready',previewPending:[],deobMode:'ready',deobPending:[],analysisRequests:[],previewRequests:[],
-    liveMode:'ready',livePending:[],liveRequests:[],rejectedWrites:[],factsReports:new Map()};
-  fixture.addLiveSource = (id,text) => {
-    const lines=text.split('\n');
-    const source={script_id:id,url:`https://fixture.invalid/${id}.js`,hash:`opaque-${id}-v1`,source_map_url:'',language:'JavaScript',
-      start_line:0,start_column:0,end_line:lines.length-1,end_column:lines.at(-1).length,execution_context_id:31,
-      length:text.length,has_source_url:false,is_module:false};
-    liveDocuments.set(id,{source,text});
-    debuggerState.state='running';debuggerState.generation++;
-    debuggerState.target??={id:'qa-source-page-one',type:'page',title:'Synthetic Sources owner',url:'https://fixture.invalid/sources'};
-    debuggerState.targets=[debuggerState.target];debuggerState.live_tab_count=1;
-    debuggerState.scripts=[...liveDocuments.values()].map(value=>value.source);
-    return source;
-  };
+    rejectedWrites:[],factsReports:new Map()};
   fixture.addSource = async (id,text) => {
     const content=Buffer.from(text),source={...artifact(id),byte_size:content.length,sha256:await ownershipHash(content)};
     artifacts.push(source);documents.set(id,content);return source;
@@ -2668,21 +2408,10 @@ async function sourceFactsBrowserFixture() {
   fixture.handle = async (request,response) => {
     const url = new URL(request.url,'http://127.0.0.1');
     const json = (status,value) => {if(!response.destroyed){response.writeHead(status,{'Content-Type':'application/json'});response.end(JSON.stringify(value));}};
-    if(url.pathname==='/api/debugger/actions'){
-      fixture.rejectedWrites.push({method:request.method??'POST',path:url.pathname});
-      json(405,{error:'The Sources fixture never executes debugger mutations'});return true;
-    }
-    if(url.pathname==='/api/debugger'){json(200,debuggerState);return true;}
-    if(url.pathname==='/api/debugger/source'){
-      const live=liveDocuments.get(url.searchParams.get('script_id'));
-      if(!live){json(404,{error:'Synthetic live source unavailable'});return true;}
-      // Capture the old reply before a fixture target changes. It must never
-      // become the new owner's text when the held body is delivered later.
-      const reply=JSON.stringify({protocol_version:1,script_id:live.source.script_id,source:live.text,truncated:false});
-      fixture.liveRequests.push(live.source.script_id);
-      response.writeHead(200,{'Content-Type':'application/json'});
-      if(fixture.liveMode==='pending-body'){response.flushHeaders?.();await new Promise(resolve=>fixture.livePending.push(resolve));}
-      if(!response.destroyed)response.end(reply);return true;
+    // Every route is read-only. Record attempted writes instead of serving them.
+    if((request.method??'GET')!=='GET'){
+      fixture.rejectedWrites.push({method:request.method,path:url.pathname});
+      json(405,{error:'The Sources fixture is read-only'});return true;
     }
     if(url.pathname==='/api/events'){json(200,{count:0,events:[],capture_mode:'demo',broker_connected:false,capture_controls_available:false});return true;}
     if(url.pathname==='/api/artifacts'){json(200,{count:artifacts.length,artifacts});return true;}
@@ -2698,10 +2427,9 @@ async function sourceFactsBrowserFixture() {
     }
     if(url.pathname==='/api/deobfuscation'){
       fixture.analysisRequests.push(url.search);
-      const live=liveDocuments.get(url.searchParams.get('script_id'));
-      const source=live?{...live.source,source_type:'script'}:artifacts.find(value=>value.artifact_id===url.searchParams.get('artifact_id'));
+      const source=artifacts.find(value=>value.artifact_id===url.searchParams.get('artifact_id'));
       if(!source){json(404,{error:'Synthetic source unavailable'});return true;}
-      const text=live?live.text:documents.get(source.artifact_id).toString('utf8');
+      const text=documents.get(source.artifact_id).toString('utf8');
       if(fixture.deobMode==='error'){json(503,{error:'Authored analyzer retry failure'});return true;}
       const payload=fixture.changedSource&&source.artifact_id===fixture.changedSource?ownedDerivedPayload(source,text,Array.from({length:7},(_,i)=>[`1+${i}`,`(${i+1})`])):ownedPayload(source,text);
       if(fixture.changedSource&&source.artifact_id===fixture.changedSource){
@@ -2730,15 +2458,14 @@ async function sourceFactsBrowserFixture() {
     return false;
   };
   fixture.releasePreview = () => {for(const resolve of fixture.previewPending.splice(0)) resolve();};
-  fixture.releaseLive = () => {for(const resolve of fixture.livePending.splice(0)) resolve();};
-  fixture.release = () => {for(const resolve of [...fixture.pending.splice(0),...fixture.previewPending.splice(0),...fixture.deobPending.splice(0),...fixture.livePending.splice(0)]) resolve();};
+  fixture.release = () => {for(const resolve of [...fixture.pending.splice(0),...fixture.previewPending.splice(0),...fixture.deobPending.splice(0)]) resolve();};
   return fixture;
 }
 
 // Keep fixture routing admissible to the normal refresh path before launching
 // Chrome; a blanket offline events response would prevent artifact discovery.
 const sourcesFixtureControl = await sourceFactsBrowserFixture();
-const sourcesFixtureModels = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+';({isBrokerResponse,isArtifactResponse,isDebuggerResponse})',{TextEncoder});
+const sourcesFixtureModels = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+';({isBrokerResponse,isArtifactResponse})',{TextEncoder});
 async function sourcesFixtureResponse(url) {
   const response={destroyed:false,writeHead(status,headers){this.status=status;this.headers=headers;},end(body){this.body=body;}};
   assert(await sourcesFixtureControl.handle({url},response));return response;
@@ -2752,22 +2479,13 @@ assert.equal(JSON.parse(sourcesFactsControl.body).source.artifact_id,'7');
 assert.equal((await sourcesFixtureResponse('/api/source-facts?session_id=12&artifact_id=7')).status,404);
 const sourcesBytesControl=await sourcesFixtureResponse('/api/artifacts/7/content?offset=0&limit=2097152');
 assert.equal(sourcesBytesControl.headers['X-Artifact-Truncated'],'false');assert.deepEqual(sourcesBytesControl.body,sourcesFixtureControl.bytes);
-const emptyDebuggerControl=JSON.parse((await sourcesFixtureResponse('/api/debugger')).body);
-assert(sourcesFixtureModels.isDebuggerResponse(emptyDebuggerControl));
-const liveControl=sourcesFixtureControl.addLiveSource('qa-control','const inert = "雪";');
-assert(sourcesFixtureModels.isDebuggerResponse(JSON.parse((await sourcesFixtureResponse('/api/debugger')).body)));
-assert.equal(JSON.parse((await sourcesFixtureResponse('/api/debugger/source?script_id=qa-control')).body).source,'const inert = "雪";');
-const liveAnalysisControl=JSON.parse((await sourcesFixtureResponse('/api/deobfuscation?script_id=qa-control&mode=derived')).body);
-assert.equal(liveAnalysisControl.script_id,liveControl.script_id);assert.equal(liveAnalysisControl.artifact_id,null);
-assert.equal(liveAnalysisControl.analysis.source.sha256,await ownershipHash(liveAnalysisControl.original_source));
-// Held replies capture their old text, even when the fixture's current text is
-// replaced before release. This checks the adversarial route itself.
-sourcesFixtureControl.liveMode='pending-body';const heldLiveControl=sourcesFixtureResponse('/api/debugger/source?script_id=qa-control');
-await new Promise(resolve=>setImmediate(resolve));assert.equal(sourcesFixtureControl.livePending.length,1);
-sourcesFixtureControl.liveDocuments.get('qa-control').text='const newer = 1;';sourcesFixtureControl.releaseLive();
-assert.equal(JSON.parse((await heldLiveControl).body).source,'const inert = "雪";');
-sourcesFixtureControl.liveMode='ready';
-console.log('PASS Sources browser fixture event/artifact/debugger admission, exact source text, inert analysis replies and held-body ownership routes (not rendered QA)');
+const analysisControl=JSON.parse((await sourcesFixtureResponse('/api/deobfuscation?artifact_id=7&mode=derived')).body);
+assert.equal(analysisControl.artifact_id,'7');assert.equal(analysisControl.script_id,null);
+assert.equal(analysisControl.analysis.source.sha256,await ownershipHash(analysisControl.original_source));
+const rejectedControl={destroyed:false,writeHead(status){this.status=status;},end(){}};
+assert(await sourcesFixtureControl.handle({url:'/api/artifacts',method:'POST'},rejectedControl));assert.equal(rejectedControl.status,405);
+assert.equal(sourcesFixtureControl.rejectedWrites.length,1);
+console.log('PASS Sources browser fixture event/artifact admission, exact source text, inert analysis replies and read-only routes (not rendered QA)');
 await checkSourcesHistoryFixture(await sourceFactsBrowserFixture(),root);
 await checkSourcesTreeFixture(await sourceFactsBrowserFixture(),root);
 
@@ -2905,9 +2623,6 @@ const observationCollision=structuredClone(observationContext);observationCollis
 assert.equal(observationUI.evidenceObservationModel(observationCollision).rows.find(row=>row.key==='7:42:102').group,'unlinked');
 observationCollision.artifacts.push({...observationCollision.artifacts[0],session_id:'8'});
 assert.equal(observationUI.evidenceObservationModel(observationCollision).rows.find(row=>row.key==='7:42:101').artifact.status,'ambiguous');
-const observationCDP={...observationContext,request:{...observationContext.request,protocolRequestId:'cdp-7',operation:'cdp_complete',tabId:'target',firstTimestamp:1320000000n}};
-assert.equal(observationUI.evidenceObservationModel(observationCDP).correlatedRequest,true);
-assert.notEqual(observationUI.evidenceRequestKey(observationCDP.request),observationUI.evidenceRequestKey({...observationCDP.request,firstTimestamp:1320000001n}));
 const observationReused={...observationContext.request,events:observationContext.request.events.map(event=>({...event,session_id:'8'}))};
 assert.notEqual(observationUI.evidenceRequestKey(observationContext.request),observationUI.evidenceRequestKey(observationReused));
 const observationLarge={...observationContext,request:null,events:Array.from({length:6000},(_,index)=>observationEvent(index+1,'runtime','api_call','Date.now'))};
@@ -2917,7 +2632,7 @@ const observationCycle=structuredClone(observationContext);observationCycle.even
 assert.equal(observationUI.evidenceObservationModel(observationCycle).parentCycle,true);
 const observationBinary=structuredClone(observationContext);observationBinary.events[0].payload='ff';observationBinary.events[0].payload_size=1;
 assert.equal(observationUI.evidenceObservationModel(observationBinary).rows[0].payload.encoding,'hex');
-console.log('PASS Evidence observation model: contract-valid records, scoped parents, nonzero context, CDP qualification, unknown outcomes, exact artifact identity, ambiguity, eviction and bounds');
+console.log('PASS Evidence observation model: contract-valid records, scoped parents, nonzero context, unknown outcomes, exact artifact identity, ambiguity, eviction and bounds');
 
 function observationPanelFixture(narrow = false, options = {}) {
   const document={activeElement:null};
@@ -2980,9 +2695,6 @@ assert.equal(observations.document.activeElement.dataset.evidenceKey,'7:42:102')
 observations.context={...observations.context,events:observations.context.events.filter(event=>event.sequence_number!=='102')};observations.panel.sync();
 assert.equal(observations.panel.snapshot().selectedKey,null);assert.match(observations.nodes['evidence-workspace-notice'].textContent,/left the retained window/);
 observations.panel.sync();assert.equal(observations.panel.snapshot().selectedKey,null,'Eviction must not silently choose a neighboring record');
-observations.context=observationCDP;observations.panel.sync();assert.match(observations.nodes['evidence-context-note'].textContent,/No exact producer request key/);
-assert.match(observations.nodes['evidence-context-note'].textContent,/Matched by method, host and time/);
-observationRows().find(row=>row.dataset.evidenceKey==='7:42:102').click();assert.match(observations.nodes['evidence-inspector'].textContent,/association does not become exact/);
 observations.context=observationLarge;observations.panel.sync();assert.equal(observationRows().length,50);observations.nodes['evidence-next'].click();assert.match(observations.nodes['evidence-window-count'].textContent,/51–100 of 5000/);
 observationRows()[0].emit('keydown',{key:'End'});assert.match(observations.nodes['evidence-window-count'].textContent,/4951–5000 of 5000/);
 assert.equal(observations.document.activeElement.dataset.evidenceKey,'7:42:6000');
@@ -3294,6 +3006,6 @@ console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported,
 
 
 const canvasFixtureOptions={artifact:canvasArtifact,png:canvasPngFixture,pngUrl:canvasPngUrl,chunk:canvasPngChunk};
-await checkCanvasFixture(await canvasEvidenceFixture(root,canvasFixtureOptions),sourcesFixtureModels,canvasProductionRules.inspectCanvasPng);
+await checkCanvasFixture(await canvasEvidenceFixture(canvasFixtureOptions),sourcesFixtureModels,canvasProductionRules.inspectCanvasPng);
 
 console.log('PASS retained native/offline UI models; no rendered browser QA performed');

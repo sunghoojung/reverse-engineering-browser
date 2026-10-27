@@ -27,9 +27,9 @@ for (let index = 0; index < argv.length; index += 1) {
 
 assert.equal(process.platform, 'darwin', 'Rendered UI acceptance runs in the packaged macOS app');
 const app = join(root, 'build/Origin Trace.app');
-for (const required of [app, join(root, 'build/sessions/demo.jsonl'), join(root, 'build/reb-native-wasm-guest-golden'),
-  join(root, 'build/reb-native-wasm-dispatch-golden')]) {
-  assert(existsSync(required), `Missing ${required}; run make app-build e2e native-wasm-guest-golden native-wasm-dispatch-golden`);
+const goldenStores = {guestStore: join(root, 'build/native-golden/guest-evidence'), dispatchStore: join(root, 'build/native-golden/wasm-evidence')};
+for (const required of [app, join(root, 'build/sessions/demo.jsonl'), ...Object.values(goldenStores).map(store => join(store, 'manifest.jsonl'))]) {
+  assert(existsSync(required), `Missing ${required}; run make app-build e2e native-wasm-golden-check`);
 }
 
 // Full Xcode provides XCTest. Respect an explicit DEVELOPER_DIR, otherwise use
@@ -94,8 +94,7 @@ try {
   const host = join(temporary, 'Origin Trace.app');
   await cp(app, host, {recursive: true});
   execFileSync('codesign', ['--verify', '--deep', '--strict', host], {stdio: 'pipe'});
-  const stores = await buildEvidence({root: join(temporary, 'evidence'), sessions: join(root, 'build/sessions'),
-    guestGolden: join(root, 'build/reb-native-wasm-guest-golden'), dispatchGolden: join(root, 'build/reb-native-wasm-dispatch-golden')});
+  const stores = await buildEvidence({root: join(temporary, 'evidence'), sessions: join(root, 'build/sessions'), ...goldenStores});
 
   const endpointFile = join(temporary, 'endpoint');
   backend = spawn(join(host, 'Contents/MacOS/OriginTraceBackend'), ['--host', '127.0.0.1', '--port', '0',

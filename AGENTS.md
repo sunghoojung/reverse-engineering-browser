@@ -203,13 +203,18 @@ git diff --check
 ```
 
 For Origin Trace HTML, JavaScript, Swift, native packaging, application assets,
-or user-visible behavior, also use `reb-ui-e2e`. For app, packaging, or icon
-changes, run:
+or user-visible behavior, also use `reb-ui-e2e` and run:
 
 ```sh
 make app-build
 codesign --verify --deep --strict "build/Origin Trace.app"
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make rendered-ui-check
 ```
+
+`make rendered-ui-check` drives the packaged app with a hosted XCTest and needs
+full Xcode. Point `DEVELOPER_DIR` at it for that command only; never change the
+global Xcode selection with `xcode-select`. Inspect the screenshots it writes to
+`build/rendered-ui-qa/screenshots/`.
 
 For changes under `browser/integration/brave/`, browser pins, bootstrap, or
 synchronization:

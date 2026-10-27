@@ -125,16 +125,10 @@ function trafficWindow(requests, start, anchor = null) {
   return {start: offset, rows: requests.slice(offset, offset + TRAFFIC_ROW_LIMIT)};
 }
 
-// CDP Network.loadingFailed and the Failed row label are not queue drops.
+// Native request failures and the Failed row label are not queue drops.
 // Counting them must not write error_code or change dropped_connections.
 function trafficRequestFailed(request) {
-  if (!request || typeof request !== 'object') return false;
-  if (request.failed === true || request.status === 'failed') return true;
-  const record = request.captureRecord && typeof request.captureRecord === 'object'
-    ? request.captureRecord
-    : (typeof request.state === 'string' || (request.timing_evidence && typeof request.timing_evidence === 'object') ? request : null);
-  if (!record) return false;
-  return record.state === 'failed' || record.timing_evidence?.completion_source === 'loadingFailed';
+  return Boolean(request && typeof request === 'object' && (request.failed === true || request.status === 'failed'));
 }
 
 function trafficFailedRequestCount(requests) {
@@ -371,7 +365,7 @@ function trafficNode(tag, className, text) {
 function trafficOriginLabel(request) {
   return request?.origin === 'sample' ? 'Sample data'
     : request?.origin === 'demo' ? 'Demo evidence'
-      : request?.exchange ? 'Live CDP capture'
+      : request?.exchange ? 'Live capture'
         : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
 }
 
@@ -724,10 +718,7 @@ function syncTrafficComparison() {
 function trafficComparisonLabel(request) {
   const identity = investigationRequestIdentity(request);
   if (!identity) return 'No exact captured request selected';
-  const context = identity.type === 'debugger-request'
-    ? `CDP target ${identity.target} · request ${identity.protocol} · start ${identity.started} ns`
-    : `session ${identity.session} · process ${identity.process} · event ${identity.sequence} · request ${identity.request}`;
-  return `${request.method} ${request.path} · ${context}`;
+  return `${request.method} ${request.path} · session ${identity.session} · process ${identity.process} · event ${identity.sequence} · request ${identity.request}`;
 }
 
 function renderTrafficComparison(container, request, active) {
@@ -887,61 +878,6 @@ function trafficCaptureDocument(request, mode = 'raw') {
     },
     record
   };
-}
-
-function installTrafficCaptureExport(host, getRequest) {
-  if (!host) return {sync() {}};
-  const status = host.querySelector('[data-traffic-export-status]');
-  const buttons = [...host.querySelectorAll('[data-traffic-export]')];
-  const nativeShell = document.documentElement.classList.contains('native-shell');
-  let busy = false, selection = null, revision = 0;
-  const identityOf = request => request?.captureRecord ? JSON.stringify([request.captureOwner,
-    request.tabId, request.id, request.captureRecord.started_monotonic_ms, request.captureRecord.wall_time_ms]) : null;
-  function sync() {
-    const request = getRequest();
-    const identity = identityOf(request);
-    if (identity !== selection) { selection = identity; revision++; status.textContent = ''; host.open = false; }
-    host.hidden = !request?.captureRecord;
-    for (const button of buttons) {
-      const unsupported = nativeShell && button.dataset.trafficDestination === 'download';
-      button.disabled = busy || !request?.captureRecord || unsupported;
-      button.title = unsupported ? 'Native file download is unavailable. Use Copy and save locally.' : '';
-    }
-  }
-  host.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && host.open) {
-      event.preventDefault(); event.stopPropagation(); host.open = false;
-      host.querySelector('summary').focus();
-    }
-  });
-  for (const button of buttons) button.addEventListener('click', async () => {
-    if (button.disabled || busy) return;
-    const request = getRequest();
-    sync();
-    const identity = identityOf(request), started = revision;
-    const mode = button.dataset.trafficExport;
-    try {
-      const text = JSON.stringify(trafficCaptureDocument(request, mode), null, 2) + '\n';
-      if (button.dataset.trafficDestination === 'clipboard') {
-        busy = true; sync();
-        await navigator.clipboard.writeText(text);
-        if (selection === identity && identityOf(getRequest()) === identity && revision === started) status.textContent = mode === 'raw'
-          ? 'Raw capture copied. Clipboard contains unmasked values.'
-          : 'Redacted copy copied. Review for remaining secrets before sharing.';
-      } else {
-        const url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
-        const link = document.createElement('a');
-        link.href = url; link.download = mode === 'raw' ? 'selected.reb-traffic.raw.json' : 'selected.reb-traffic.redacted.json';
-        link.hidden = true; document.body.append(link); link.click(); link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        status.textContent = 'Download requested. Check your browser downloads for completion.';
-      }
-    } catch {
-      if (selection === identity && identityOf(getRequest()) === identity && revision === started) status.textContent = 'Export failed. The captured record is unchanged.';
-    } finally { busy = false; sync(); }
-  });
-  sync();
-  return {sync};
 }
 
 // Reuse the explicit export-copy policy from the offline client-project command.

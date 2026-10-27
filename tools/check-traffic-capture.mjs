@@ -14,26 +14,8 @@ const request = () => ({id:'same-id', tabId:'same-tab', captureOwner:['synthetic
     request:{headers:[['Authorization','Bearer synthetic-auth'],['Cookie','synthetic-cookie'],
       ['Proxy-Authorization','synthetic-proxy'],['X-Custom-Token','synthetic-custom']], headers_truncated:false, body:body()},
     response:{headers:[['Set-Cookie','synthetic-response-cookie']], headers_truncated:true, body:body()}}});
-let selected = request(), clipboard = [], resolveCopy;
-const status = {textContent:''}, summary = {focus() {this.focused = true;}};
-const buttons = ['raw','redacted_copy'].flatMap(mode => ['download','clipboard'].map(destination => ({
-  dataset:{trafficExport:mode, trafficDestination:destination}, disabled:false,
-  addEventListener(name, handler) {this[name] = handler;}
-})));
-const host = {open:false, events:{}, querySelector(selector) {return selector === 'summary' ? summary : status;},
-  querySelectorAll() {return buttons;}, addEventListener(name, handler) {this.events[name] = handler;}};
-let native = false, downloads = 0, objectUrls = 0, revoked = 0;
-const document = {documentElement:{classList:{contains:() => native}}, body:{append() {}},
-  createElement() {return {click() {downloads++;}, remove() {}};}};
-class TestURL extends URL {
-  static createObjectURL() {objectUrls++; return 'blob:synthetic';}
-  static revokeObjectURL() {revoked++;}
-}
-const api = runInNewContext(source + ';({trafficCaptureDocument, installTrafficCaptureExport})', {
-  URL:TestURL, Blob, TextEncoder, TextDecoder, document,
-  navigator:{clipboard:{writeText(text) {clipboard.push(text); return new Promise(resolve => {resolveCopy = resolve;});}}},
-  setTimeout(callback) {callback();}
-});
+let selected = request();
+const api = runInNewContext(source + ';({trafficCaptureDocument})', {URL, TextEncoder, TextDecoder});
 for (const text of ['{"password":"synthetic-json","n":9007199254740993,"dup":1,"dup":2}',
   'token=synthetic-form&token=second+value', '\ufeff雪\r\n<script>synthetic-plain</script>']) {
   selected.captureRecord.request.body = body(text);
@@ -66,43 +48,15 @@ for (const state of ['missing','loading','error','empty']) {
   assert.equal(exported.record.request.body.truncated,true);
   assert.equal(api.trafficCaptureDocument(selected).record.request.body.reason,'Synthetic capture limitation');
 }
-const ui = api.installTrafficCaptureExport(host,() => selected);
-const copyRaw = buttons.find(button => button.dataset.trafficExport === 'raw' && button.dataset.trafficDestination === 'clipboard');
-const saveRaw = buttons.find(button => button.dataset.trafficExport === 'raw' && button.dataset.trafficDestination === 'download');
-let pending = copyRaw.click();
-assert.equal(buttons.every(button => button.disabled),true);
-await copyRaw.click(); assert.equal(clipboard.length,1, 'Repeated click while pending must not copy twice');
-resolveCopy(); await pending; assert.match(status.textContent,/unmasked/);
-assert.deepEqual(JSON.parse(clipboard[0]).record,selected.captureRecord);
-for (const replace of [
-  old => ({...old,captureOwner:['synthetic-instance',2]}),
-  old => ({...old,captureOwner:['new-instance',1]}),
-  old => ({...old,id:'new-id'}),
-  () => null,
-]) {
-  selected = request(); ui.sync(); pending = copyRaw.click();
-  selected = replace(selected); ui.sync(); resolveCopy(); await pending;
-  assert.equal(status.textContent,'', 'Late clipboard completion must not label a different owner');
-}
-selected=request();ui.sync();pending=copyRaw.click();const old=selected;selected=null;ui.sync();selected=old;ui.sync();resolveCopy();await pending;
-assert.equal(status.textContent,'', 'Eviction followed by identical ID restoration must retire the previous copy');
-await saveRaw.click();assert.equal(downloads,1);assert.equal(objectUrls,1);assert.equal(revoked,1);
-host.open=true;let prevented=false,stopped=false;
-host.events.keydown({key:'Escape',preventDefault(){prevented=true;},stopPropagation(){stopped=true;}});
-assert.equal(host.open,false);assert(prevented && stopped && summary.focused);
-native=true;api.installTrafficCaptureExport(host,() => selected);
-assert(buttons.filter(button => button.dataset.trafficDestination === 'download').every(button => button.disabled));
-assert.match(saveRaw.title,/Native file download is unavailable/);
-console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JSON/form/plain/binary preservation, nonmutating explicit redaction, original-byte equality, bounds disclosure, duplicate-click and stale-copy ownership, native download restriction and Escape (DOM model; not native runtime)');
+console.log('PASS saved reb-traffic-capture-v1 export copy: synthetic credentials/URLs/JSON/form/plain/binary preservation, nonmutating explicit redaction, original-byte equality and limitation disclosure (offline exporter library; no live UI)');
 
-// Retained historical record validation and native failed-request notices.
+// Native failed-request notices.
 {
   const models = await readFile(new URL('../apps/research-ui/evidence_models.js', import.meta.url), 'utf8');
   const app = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
   const start=app.indexOf('      function renderNetworkNotice()');
   const end=app.indexOf('      function textElement(',start);
   assert(start>=0 && end>start);
-  const status={scope:'http-page-targets',state:'ready',attached_targets:2,eligible_targets:2,target_limit:8,target_overflow:0,failed_targets:0,gaps:0,last_error:null,message:'Synthetic coverage'};
   const state={sessionMode:'live',broker:'connected',events:[{category:'network',type:'request_completed',error_code:0,session_id:'1',process_id:1,sequence_number:'1'}],requests:[]};
   let notice;
   const networkNotice={hidden:false,textContent:'',dataset:{}};
@@ -110,39 +64,19 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   const standingProse=/CDP capture|debugger is disconnected/;
   const helperStart=source.indexOf('function trafficRequestFailed(');
   const helperEnd=source.indexOf('function renderTrafficRows(',helperStart);
-  const checks=runInNewContext(source.slice(helperStart,helperEnd)+'\n'+models+'\n'+app.slice(start,end)+';({isDebuggerNetworkCaptureStatus,isDebuggerNetwork,renderNetworkNotice,trafficRequestFailed,trafficFailedRequestCount,trafficFailedRequestNotice})',{
+  const checks=runInNewContext(source.slice(helperStart,helperEnd)+'\n'+models+'\n'+app.slice(start,end)+';({renderNetworkNotice,trafficRequestFailed,trafficFailedRequestCount,trafficFailedRequestNotice})',{
     state,TextEncoder,shownSequenceGaps:()=>0n,shownQueueDrops:()=>0n,eventCountScopeLabel:()=>"authored fixture",elements:{networkNotice},
     setNetworkNotice(kind,text){notice={kind,text};networkNotice.hidden=false;networkNotice.textContent=text;networkNotice.dataset.kind=kind;}
   });
-  assert.equal(checks.isDebuggerNetworkCaptureStatus(status),true);
-  for (const limit of [1, 8, 32, 128]) {
-    const expanded = {...status,scope:'http-browser-targets',transport_mode:'browser-sessions',startup_mode:'passive',target_limit:limit,
-      attached_targets:limit,eligible_targets:limit,failed_targets:0,
-      attached_target_ids:Array.from({length:limit},(_,index)=>'owner-'+index)};
-    assert.equal(checks.isDebuggerNetworkCaptureStatus(expanded),true,`Configured ${limit}-target scope is valid`);
-  }
-
-  for (const invalid of [{startup_mode:'hold'},{transport_mode:'browser-sessions'},{discovery_stale:'true'},{catalog_incomplete:'true'},{unattached_targets:[{id:'page',title:'x'.repeat(129)}]},{unattached_targets_omitted:513},{attached_targets:129},{attached_target_ids:Array(129).fill('page')},{attached_target_ids:['x'.repeat(4097)]},{attached_target_ids:[1]},{eligible_targets:513},{target_limit:129},{target_limit:0},
-    {target_overflow:512},{failed_targets:-1},{gaps:NaN},{document_navigation_gaps:-1},{document_navigation_gaps:1.5},{document_navigation_gaps:'1'},{scope:'all-tabs'},
-    {state:'complete'},{last_error:'x'.repeat(513)},{message:'x'.repeat(1025)}]) {
-    assert.equal(checks.isDebuggerNetworkCaptureStatus({...status,...invalid}),false);
-  }
-  const network={capture_enabled:true,capture_status:status,dropped:0,websockets:{dropped_connections:0,dropped_frames:0},target_id:null,requests:[],
-    limits:{requests:1000,body_bytes:131072,headers:128,header_bytes:65536}};
-  assert.equal(checks.isDebuggerNetwork(network),true);
-  assert.equal(checks.isDebuggerNetwork({...network,capture_status:undefined}),true,'Older snapshots remain compatible');
-  assert.equal(checks.isDebuggerNetwork({...network,capture_status:{...status,attached_targets:129}}),false);
-  const loadingFailed={id:'cdp-failed',path:'https://example.com/logo.png',method:'GET',status:200,failed:true,
-    captureRecord:{state:'failed',status:200,url:'https://example.com/logo.png',timing_evidence:{completion_source:'loadingFailed'}}};
-  const nativeFailed={id:'row-failed',path:'https://example.com/asset',method:'GET',status:'failed',failed:true};
-  const ok={id:'ok',path:'https://example.com/ok',method:'GET',status:200,failed:false,
-    captureRecord:{state:'complete',status:200,url:'https://example.com/ok',timing_evidence:{completion_source:'loadingFinished'}}};
-  const httpError={id:'missing',path:'https://example.com/missing',method:'GET',status:404,failed:false,
-    captureRecord:{state:'complete',status:404,url:'https://example.com/missing',timing_evidence:{completion_source:'loadingFinished'}}};
-  const rawLoadingFailed={id:'raw-failed',url:'https://example.com/raw',method:'GET',status:200,state:'failed',timing_evidence:{completion_source:'loadingFailed'}};
+  // Native rows from requestsFromEvents: request_failed sets failed and the Failed status label.
+  const loadingFailed={id:'row-failed-1',path:'https://example.com/logo.png',method:'GET',status:'failed',failed:true,operation:'request_failed'};
+  const nativeFailed={id:'row-failed-2',path:'https://example.com/asset',method:'GET',status:'failed',failed:true,operation:'request_failed'};
+  const ok={id:'ok',path:'https://example.com/ok',method:'GET',status:200,failed:false,operation:'request_completed'};
+  const httpError={id:'missing',path:'https://example.com/missing',method:'GET',status:404,failed:false,operation:'request_completed'};
+  const interrupted={id:'interrupted',path:'https://example.com/redirect',method:'GET',status:'incomplete',failed:false,interrupted:true,operation:'request_failed'};
   assert.equal(checks.trafficRequestFailed(loadingFailed),true);
   assert.equal(checks.trafficRequestFailed(nativeFailed),true);
-  assert.equal(checks.trafficRequestFailed(rawLoadingFailed),true);
+  assert.equal(checks.trafficRequestFailed(interrupted),false,'An observation handoff is not a failed request');
   assert.equal(checks.trafficRequestFailed(ok),false);
   assert.equal(checks.trafficRequestFailed(httpError),false,'An HTTP error status is not the Failed row');
   assert.equal(checks.trafficRequestFailed({error_code:0,status:200,failed:false,path:'https://example.com/quiet'}),false);
@@ -166,7 +100,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   state.requests=[ok,httpError];
   checks.renderNetworkNotice();
   assertQuiet();
-  console.log('PASS historical schema validation and native failed-row notices without changing queue or error counters');
+  console.log('PASS native failed-row notices without changing queue or error counters');
 }
 
 // Native scope buttons label tabs by a known domain, else a positional fallback.

@@ -4,9 +4,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
-import {network} from './traffic-capture-qa.mjs';
+import {network,savedRequests} from './saved-traffic-fixture.mjs';
 import formats from '../apps/research-ui/captured_export_formats.js';
-const code=(await Promise.all(['evidence_models.js','traffic_view.js','api_catalog.js','captured_client.js','captured_export_formats.js'].map(name=>readFile(new URL('../apps/research-ui/'+name,import.meta.url),'utf8')))).join('\n');
+const code=(await Promise.all(['traffic_view.js','captured_client.js','captured_export_formats.js'].map(name=>readFile(new URL('../apps/research-ui/'+name,import.meta.url),'utf8')))).join('\n');
 const schema={data:{__schema:{queryType:{name:'Query'},mutationType:null,subscriptionType:null,types:[{kind:'SCALAR',name:'String',description:null},{kind:'OBJECT',name:'Query',description:'synthetic schema',interfaces:[],fields:[{name:'hello',description:null,args:[],type:{kind:'SCALAR',name:'String',ofType:null},isDeprecated:false,deprecationReason:null}]}],directives:[]}}};
 class Node {
   constructor(dataset={}){this.dataset=dataset;this.events={};this.children=[];this.disabled=false;this.files=[];this.options=[];this.textContent='';this.open=false;this.focused=false;}
@@ -25,12 +25,12 @@ function harness(native=false){
   const downloads=[],clips=[],bridges=[],notices=[],filenames=[];let bridgeResult={status:'saved'},clipboardError=false,bridgeWait=null;
   const document={querySelector:key=>({'#captured-export-dialog':dialog,'#captured-export-title':title,'#captured-export-context':context})[key],querySelectorAll:key=>key==='[data-export-open]'?Object.values(triggers):[],createElement:()=>{const link=new Node();link.click=()=>filenames.push(link.download);return link;},body:new Node(),documentElement:{classList:{contains:()=>native}},events:{},addEventListener(name,handler){this.events[name]=handler;}};
   const globals={TextEncoder,TextDecoder,Uint8Array,URL:class extends URL{static createObjectURL(blob){downloads.push(blob);return 'blob:authored';}static revokeObjectURL(){}},Blob,atob,btoa,setTimeout:()=>0,document,navigator:{clipboard:{writeText:async text=>{if(clipboardError)throw Error('authored clipboard denial');clips.push(text);}}},webkit:{messageHandlers:{rebClientProjectExport:{postMessage:async payload=>{bridges.push(payload);if(bridgeWait)await bridgeWait;return bridgeResult;}}}}};
-  const api=runInNewContext(code+'\n;({installCapturedExportDialog,requestsFromDebuggerNetwork,capturedClientCapture,capturedClientRun})',globals);
+  const api=runInNewContext(code+'\n;({installCapturedExportDialog,capturedClientCapture,capturedClientRun})',globals);
   const fixture=network(),row=fixture.requests[0];row.protocol='h2';row.started_monotonic_ms=1000;
   row.request.headers=[['X-Private','synthetic-secret']];row.response.headers=[['Content-Type','application/json']];row.response.body.base64='';row.response.body.text=JSON.stringify(schema);
   const a=value=>({state:'available',value}),u=()=>({state:'unavailable'});
   row.timing_evidence={format:'reb-network-timing-v1',request_monotonic_seconds:a(1),request_wall_seconds:a(1700000000),response_monotonic_seconds:a(1.06),completion_monotonic_seconds:a(1.1),response_observed:true,completion_observed:true,response_source:'responseReceived',completion_source:'loadingFinished',duplicate_response:false,duplicate_completion:false,response_after_completion:false,resource_timing:{state:'available',fields:{requestTime:a(1.005),proxyStart:u(),proxyEnd:u(),workerStart:u(),dnsStart:a(1),dnsEnd:a(3),connectStart:a(4),connectEnd:a(10),sslStart:a(5),sslEnd:a(9),sendStart:a(12),sendEnd:a(13),receiveHeadersStart:a(40),receiveHeadersEnd:a(45)}}};
-  let selected=api.requestsFromDebuggerNetwork(fixture)[0];const captured=api.capturedClientCapture(selected);
+  let selected=savedRequests(fixture)[0];const captured=api.capturedClientCapture(selected);
   const run={id:7,started_at_ms:123,request:{...captured.input,headers:captured.input.headers.map(([name,value])=>({name,value}))},response:{status:200,headers:[],body:'synthetic-secret'}};run.resolved_request=run.request;
   const options={getCaptureRequest:()=>{if(!selected)throw Error('Expired capture');return selected;},getRun:()=>run,getRunCapture:()=>null,contextKey:()=> 'ctx',notice:message=>notices.push(message)};
   const workflow=api.installCapturedExportDialog(options);

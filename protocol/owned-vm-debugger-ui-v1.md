@@ -128,13 +128,9 @@ inert until the user leaves it, then hides.
 `node tools/check-owned-vm-debugger-ui.mjs` runs deterministic strict-codec,
 controller and lightweight DOM checks. These are not rendered acceptance.
 
-`node tools/check-owned-vm-debugger-ui.mjs --browser` additionally runs authored
-HTTP-response UI checks with normal sandboxed Chromium, using the actual
-component and app CSS at 1440×900, 1024×768 and 390×844. Its page explicitly labels
-the responses as authored and never claims native execution. Set
-`REB_UI_CHROMIUM` for a supported browser and `REB_OWNED_VM_UI_OUTPUT` for the
-receipt/screenshot directory; default output is a temporary-directory folder.
-Do not bypass a browser sandbox or socket denial to run it.
+The former `--browser` Chromium mode was removed with CDP browser automation;
+`node tools/check-owned-vm-debugger-ui.mjs` covers controllers and DOM only and is
+not rendered QA. `make rendered-ui-check` is the packaged-app rendered gate.
 
 The exported `checkOwnedVmDebuggerInteractions({evaluate, viewport, click, key,
 screenshot, root, toolbarRoot})` requires an isolated actual backend and helper.

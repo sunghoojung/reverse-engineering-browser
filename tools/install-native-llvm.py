@@ -9,7 +9,6 @@ compiler, linker, archive tools and Clang resource directory are extracted.
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil

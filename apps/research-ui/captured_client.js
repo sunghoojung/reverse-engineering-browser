@@ -58,8 +58,21 @@ function capturedClientIssues(request) {
   return [...new Set(problems)];
 }
 
+/* Exact identity of a saved Traffic capture wrapper ({captureRecord, captureOwner}).
+ * Never derive identity from a displayed URL, rounded timestamps or a reusable
+ * protocol request ID. Live native Traffic rows carry no captureRecord. */
+function capturedRequestIdentity(request) {
+  const record = request?.captureRecord, owner = request?.captureOwner;
+  const bounded = (value, max) => typeof value === 'string' && value.length > 0 && new TextEncoder().encode(value).length <= max;
+  if (!record || !Array.isArray(owner) || owner.length !== 2 || request.id !== record.id || request.tabId !== record.target_id ||
+      !bounded(owner[0], 128) || !Number.isSafeInteger(owner[1]) || owner[1] < 0 ||
+      !bounded(record.id, 8192) || !bounded(record.target_id, 4096) ||
+      typeof record.started_monotonic_ms !== 'number' || !Number.isFinite(record.started_monotonic_ms) || record.started_monotonic_ms < 0) return null;
+  return {instance: owner[0], epoch: owner[1], request: record.id, target: record.target_id, started: record.started_monotonic_ms};
+}
+
 function capturedClientCapture(request) {
-  const identity = apiCatalogRequestIdentity(request);
+  const identity = capturedRequestIdentity(request);
   if (!identity) throw new TypeError('Select an exact retained CDP capture.');
   return capturedClientSource(identity, capturedClientTrafficDocument(request, 'raw'));
 }
@@ -1041,8 +1054,8 @@ function installCapturedExportDialog(options) {
       const run = options.getRun(), context = options.contextKey();
       return capturedClientRun(run,context,options.getRunCapture(run,context));
     }
-    const request = options.getCaptureRequest();
-    return {request,identity:apiCatalogRequestIdentity(request),evidence:capturedClientTrafficDocument(request,'raw')};
+    const request = options.getCaptureRequest?.() ?? null;
+    return {request,identity:capturedRequestIdentity(request),evidence:capturedClientTrafficDocument(request,'raw')};
   };
   const fingerprint = value => JSON.stringify(kind === 'run' ? value : [value.identity,value.evidence]);
   const current = () => { try { return snapshot !== null && fingerprint(source()) === snapshot; } catch { return false; } };

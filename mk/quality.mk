@@ -22,22 +22,8 @@ define ignored-rust-test
 		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
 endef
 
-check: native-wasm-guest-golden native-wasm-dispatch-golden all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
-	rm -f "$(abspath $(BUILD_DIR)/native-wasm-workspace.json)"
-	$(call ignored-rust-test,--lib,vm_opcode::native_wasm::tests::native_wasm_cpp_golden,\
-		REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
-		REB_NATIVE_WASM_WORKSPACE_OUTPUT="$(abspath $(BUILD_DIR)/native-wasm-workspace.json)")
-	REB_NATIVE_WASM_WORKSPACE_INPUT="$(abspath $(BUILD_DIR)/native-wasm-workspace.json)" \
-		REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
-		node tools/check-vm-opcode-workspace-ui.mjs
-	rm -f "$(abspath $(BUILD_DIR)/native-guest-workspace.json)" "$(abspath $(BUILD_DIR)/native-guest-workspace.json).host-links.json"
-	$(call ignored-rust-test,--lib,vm_opcode::native_guest::tests::native_guest_cpp_golden,\
-		REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
-		REB_NATIVE_GUEST_WORKSPACE_OUTPUT="$(abspath $(BUILD_DIR)/native-guest-workspace.json)")
-	REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
-		REB_NATIVE_GUEST_WORKSPACE_INPUT="$(abspath $(BUILD_DIR)/native-guest-workspace.json)" \
-		node tools/check-native-guest-wire.mjs
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
 		REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))")
@@ -45,6 +31,30 @@ check: native-wasm-guest-golden native-wasm-dispatch-golden all heap-snapshot-ch
 		REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))")
 	$(call ignored-rust-test,--test http,source_facts_real_worker_http_and_cli,\
 		REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker")
+
+# The actual C++ native Wasm encoders feed the Rust workspace builder, the
+# shipped viewer and the Python validator. The Rust tests also export the exact
+# evidence stores they built; make rendered-ui-check renders those stores
+# instead of a hand-mirrored copy.
+NATIVE_GOLDEN_DIR := $(abspath $(BUILD_DIR)/native-golden)
+.PHONY: native-wasm-golden-check
+native-wasm-golden-check: $(NATIVE_WASM_GUEST_GOLDEN) $(NATIVE_WASM_DISPATCH_GOLDEN)
+	rm -rf "$(NATIVE_GOLDEN_DIR)"
+	mkdir -p "$(NATIVE_GOLDEN_DIR)"
+	$(call ignored-rust-test,--lib,vm_opcode::native_wasm::tests::native_wasm_cpp_golden,\
+		REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
+		REB_NATIVE_WASM_WORKSPACE_OUTPUT="$(NATIVE_GOLDEN_DIR)/native-wasm-workspace.json" \
+		REB_NATIVE_WASM_EVIDENCE_OUTPUT="$(NATIVE_GOLDEN_DIR)/wasm-evidence")
+	REB_NATIVE_WASM_WORKSPACE_INPUT="$(NATIVE_GOLDEN_DIR)/native-wasm-workspace.json" \
+		REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
+		node tools/check-vm-opcode-workspace-ui.mjs
+	$(call ignored-rust-test,--lib,vm_opcode::native_guest::tests::native_guest_cpp_golden,\
+		REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
+		REB_NATIVE_GUEST_WORKSPACE_OUTPUT="$(NATIVE_GOLDEN_DIR)/native-guest-workspace.json" \
+		REB_NATIVE_GUEST_EVIDENCE_OUTPUT="$(NATIVE_GOLDEN_DIR)/guest-evidence")
+	REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
+		REB_NATIVE_GUEST_WORKSPACE_INPUT="$(NATIVE_GOLDEN_DIR)/native-guest-workspace.json" \
+		node tools/check-native-guest-wire.mjs
 
 # The public QuickJS module is a pinned development dependency installed with
 # npm ci --prefix tools/quickjs-native-fixture; it is not native capture.
@@ -209,7 +219,6 @@ javascript-check: capture-completeness-check
 	node tools/check-vm-observed-path.mjs
 	node tools/check-vm-compare-cli.mjs
 	node tools/check-python-client-project.mjs
-	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-launcher.mjs --cleanup-only
 	node tools/check-origin-trace-package.mjs --contract-only

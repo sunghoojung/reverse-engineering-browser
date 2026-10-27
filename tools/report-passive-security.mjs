@@ -2,7 +2,7 @@
 import {constants} from 'node:fs';
 import {open} from 'node:fs/promises';
 import client from '../apps/research-ui/captured_client.js';
-import passive from '../apps/research-ui/passive_security.js';
+import passive from './passive-security.cjs';
 import {captureDocument,saveArchive} from './captured-request-export.mjs';
 const usage='Usage: node tools/report-passive-security.mjs --input selected-request.json --output security-report.json';
 async function main() {

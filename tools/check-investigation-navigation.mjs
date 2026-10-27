@@ -15,8 +15,9 @@ export async function checkInvestigationCore(root) {
   for(const bad of ['01','-1','18446744073709551616','1e3',NaN,9007199254740992,{},null]) assert.equal(model.investigationId(bad),null);
   for(const field of ['session_id','sequence_number','process_id']) assert.equal(model.investigationEventIdentity({...event,[field]:'0'}),null);
   assert.equal(model.investigationRequestIdentity({...request,origin:'demo'}),null);
-  const cdp=model.investigationRequestIdentity({...request,operation:'cdp_completed',tabId:'target-1',protocolRequestId:'cdp-7',firstTimestamp:1n});
-  assert.equal(cdp.type,'debugger-request');assert.equal(model.investigationSame(cdp,identity),false,'A host/time correlation is not an exact native request');
+  const otherProcess=model.investigationRequestIdentity({...request,events:[{...event,process_id:18}]});
+  assert.equal(otherProcess.type,'captured-request');assert.equal(model.investigationSame(otherProcess,identity),false,'The same row id from another process is not the same request');
+  assert.equal(model.investigationRequestIdentity({...request,events:[{...event,request_id:'0'}]}),null,'A zero request id is not an exact identity');
   const artifact={session_id:'11',artifact_id:'7',sha256:'a'.repeat(64),byte_size:100};
   const artifactId=model.investigationArtifactIdentity(artifact);
   for(const altered of [{session_id:'12'},{sha256:'b'.repeat(64)},{byte_size:99},{artifact_id:'8'}]) assert.equal(model.investigationSame(artifactId,model.investigationArtifactIdentity({...artifact,...altered})),false);
@@ -75,12 +76,11 @@ export async function checkInvestigationCore(root) {
   await checkAdvancedNavigation(root);
   await checkInvestigationReturns(root);
   await checkCollectionNavigation(root, source);
-  console.log('PASS investigation exact identity, u64 boundaries, CDP correlation separation, stale/ambiguous resolution, bounded branching return history and packaged asset wiring (not rendered QA)');
+  console.log('PASS investigation exact identity, u64 boundaries, cross-process separation, stale/ambiguous resolution, bounded branching return history and packaged asset wiring (not rendered QA)');
 }
 
-// Content capture must not erase the native root merely because the CDP row
-// carries its events as a host/method/time candidate. Exercise the real chooser,
-// root selector and trace reader, with only DOM leaves and HTTP delivery faked.
+// Exercise the real chooser, root selector and trace reader for native Traffic
+// rows, with only DOM leaves and HTTP delivery faked.
 export async function checkNativeRequestBacktrace(root) {
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const models=await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8');
@@ -90,11 +90,6 @@ export async function checkNativeRequestBacktrace(root) {
   const initiated={...fixture.event,type:'request_initiated'};
   const started={...fixture.event,process_id:23,sequence_number:'52',request_id:'200',
     type:'request_started',initiator_process_id:17,initiator_request_id:91};
-  const emptyBody=()=>({state:'empty',mime:'',text:'',base64:'',truncated:false,reason:''});
-  const record={id:'cdp-native-candidate',protocol_request_id:'cdp-91',target_id:'target',target_title:'Fixture',
-    url:'http://fixture.invalid/path',method:'POST',resource_type:'Fetch',started_monotonic_ms:1,
-    state:'complete',status:200,mime_type:'text/plain',duration_ms:1,
-    request:{headers:[],body:emptyBody()},response:{headers:[],body:emptyBody()}};
   const trace={...fixture.trace,request_id:'200',steps:[
     {...fixture.trace.steps[0],event:{session_id:'11',process_id:23,sequence_number:'52'},request_id:'200'},
     {...fixture.trace.steps[0],operation:'request_initiated',relation:'request_initiator'}
@@ -117,22 +112,20 @@ export async function checkNativeRequestBacktrace(root) {
     section('      function requestTraceRoot(', '      function requestSignalProfileSelection(')+
     section('      function originTraceSelection(', '      function traceStepDetails(')+
     section('      function renderBacktrace(', '      function collectionFolder(')+
-    ';({isBrokerEvent,isOriginTraceResponse,requestsFromEvents,requestsFromDebuggerNetwork,trafficRowsForLiveCapture,requestTraceRoot,originTraceSelection,refreshOriginTrace,renderBacktrace})',context);
+    ';({isBrokerEvent,isOriginTraceResponse,requestsFromEvents,requestTraceRoot,originTraceSelection,refreshOriginTrace,renderBacktrace})',context);
   assert(api.isBrokerEvent(initiated));assert(api.isBrokerEvent(started));assert(api.isOriginTraceResponse(trace));
   const native=api.requestsFromEvents([initiated,started]);
   assert.equal(native.length,1,'Explicit initiator identifiers group the native observations');
-  const cdp=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[record]},native);
-  assert.equal(cdp[0].events.length,2,'Exercise a CDP row with heuristic native candidate events');
-  state.requests=api.trafficRowsForLiveCapture(cdp,native);
+  state.requests=native;
   api.renderBacktrace();
   assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),[native[0].id],
-    'The independent native row must remain a Backtraces choice during content capture');
+    'The native row is a Backtraces choice');
   assert.equal(elements.traceRequest.disabled,false);
   assert.equal(elements.traceEmptyTitle.textContent,'Choose a captured request');
   state.selectedRequestId=native[0].id;
   api.renderBacktrace();
   assert.equal(elements.traceLoad.disabled,false);
-  assert.equal(api.requestTraceRoot(native[0]),started,'Use the browser start, not the renderer or CDP id');
+  assert.equal(api.requestTraceRoot(native[0]),started,'Use the browser start, not the renderer id');
   await api.refreshOriginTrace();
   assert.equal(reads.length,1);assert.equal(reads[0].pathname,'/api/origin-trace');
   assert.deepEqual(Object.fromEntries(reads[0].searchParams),{
@@ -140,54 +133,17 @@ export async function checkNativeRequestBacktrace(root) {
   assert.equal(state.originTraceStatus,'ready');
   assert.equal(state.originTrace.steps[1].relation,'request_initiator');
   assert.equal(elements.traceContent.hidden,false);
-  state.selectedRequestId=cdp[0].id;
+  // A live row whose observations carry no request id has no exact trace root.
+  const unrooted={...native[0],id:'native-unrooted',events:native[0].events.map(value=>({...value,request_id:'0'}))};
+  state.requests=[...native,unrooted];state.selectedRequestId=unrooted.id;
   api.renderBacktrace();
-  assert.equal(api.requestTraceRoot(cdp[0]),null);
+  assert.equal(api.requestTraceRoot(unrooted),null);
   assert.equal(api.originTraceSelection(),null);
-  assert.equal(elements.traceLoad.disabled,true,'Candidate events must not enable a CDP trace');
+  assert.equal(elements.traceLoad.disabled,true,'A row without an exact root must not enable a trace');
   await api.refreshOriginTrace();
-  assert.equal(reads.length,1,'A CDP selection must not query the candidate native root');
-  assert.equal(elements.traceContent.hidden,true,'Do not show the previous native trace as CDP evidence');
-  assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),[cdp[0].id,native[0].id]);
-  assert.equal(cdp[0].nativeLink,null,'A non-numeric DevTools id is not a renderer request join');
-  const rendererPayload=Buffer.from('POST fixture.invalid').toString('hex');
-  const initiatedExact={...fixture.event,type:'request_initiated',request_id:'345',sequence_number:'77',process_id:19,
-    payload:rendererPayload,payload_size:Buffer.byteLength('POST fixture.invalid')};
-  const exactNative={id:'native-devtools',method:'POST',path:'fixture.invalid',firstTimestamp:9_000_000_000n,
-    events:[initiatedExact,{...fixture.event,type:'request_started',request_id:'200',sequence_number:'78',process_id:23}],
-    event:initiatedExact};
-  const heuristicNative={id:'native-heuristic',method:'POST',path:'fixture.invalid',firstTimestamp:1_000_000n,
-    events:[{id:'heuristic-marker'}],event:{id:'heuristic-marker'}};
-  const joinedRecord={...record,id:'cdp-joined',protocol_request_id:'12.345'};
-  const joined=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[joinedRecord]},[heuristicNative,exactNative]);
-  assert.equal(joined[0].nativeCandidateId,'native-heuristic','Timing correlation stays a separate navigation');
-  assert.equal(joined[0].nativeLink.kind,'devtools-request-id');
-  assert.equal(joined[0].nativeLink.nativeRequestId,'native-devtools');
-  assert.equal(joined[0].nativeLink.requestId,'345');
-  assert.equal(api.requestTraceRoot(joined[0]),initiatedExact,'The join uses the renderer id, not the browser request_started id');
-  state.requests=api.trafficRowsForLiveCapture(joined,[heuristicNative,exactNative]);
-  state.selectedRequestId=joined[0].id;
-  state.originTrace=null;state.originTraceKey=null;state.originTraceStatus='idle';
-  api.renderBacktrace();
-  assert.equal(elements.traceLoad.disabled,false);
-  assert.match(elements.backtraceSubtitle.textContent,/DevTools request id join/);
-  await api.refreshOriginTrace();
-  assert.equal(reads.at(-1).searchParams.get('request_id'),'345');
-  assert.equal(reads.at(-1).searchParams.get('root_process_id'),'19');
-  assert.equal(reads.at(-1).searchParams.get('root_sequence_number'),'77');
-  const bare=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[{...joinedRecord,protocol_request_id:'345'}]},[exactNative]);
-  assert.equal(bare[0].nativeLink.requestId,'345');
-  const padded=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[{...joinedRecord,protocol_request_id:'12.0345'}]},[exactNative]);
-  assert.equal(padded[0].nativeLink,null,'A non-canonical renderer id is not a join');
-  const startedOnly={...exactNative,id:'browser-counter',events:[{...fixture.event,type:'request_started',request_id:'345'}]};
-  const browserCounter=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[joinedRecord]},[startedOnly]);
-  assert.equal(browserCounter[0].nativeLink,null,'request_started ids are not DevTools renderer ids');
-  assert.equal(api.requestTraceRoot(browserCounter[0]),null);
-  const duplicate={...exactNative,id:'native-devtools-2'};
-  const ambiguous=api.requestsFromDebuggerNetwork({capture_enabled:true,requests:[joinedRecord]},[exactNative,duplicate]);
-  assert.equal(ambiguous[0].nativeLink,null,'Two renderer rows with the same id are not an exact join');
-  assert.equal(api.requestTraceRoot(ambiguous[0]),null);
-  console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; heuristic CDP root stays unavailable; unique DevTools renderer id joins (production functions, not rendered QA)');
+  assert.equal(reads.length,1,'An unrooted selection must not query any native root');
+  assert.equal(elements.traceContent.hidden,true,'Do not show the previous request trace for another row');
+  console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; unrooted rows stay unavailable (production functions, not rendered QA)');
 }
 
 // Exercise the actual shared-shell switch, rather than a navigation stub. A
@@ -341,7 +297,7 @@ async function checkInvestigationReturns(root) {
     assert(t.run('restoreInvestigation(entry)'));await t.flush();assert.equal(t.traceReads(),1);assert.equal(t.state.originTraceStatus,'ready');assert.equal(t.state.selectedTraceRow,'17:1');
   }
   {
-    const t=setup();t.setScreen('tools');const rows=['target-A','target-B'].map((target,index)=>({id:'same',origin:'live',operation:'cdp_completed',tabId:target,protocolRequestId:'native-1',firstTimestamp:BigInt(index+1)}));
+    const t=setup();t.setScreen('tools');const rows=[17,18].map(process=>({id:'same',origin:'live',operation:'request_started',events:[{session_id:'11',process_id:process,sequence_number:'5',request_id:'91',type:'request_started'}]}));
     t.state.requests=rows;t.state.selectedRequestId=null;t.context.route={kind:'request',identity:t.run('investigationRequestIdentity(state.requests[1])')};
     assert.equal(t.run('openInvestigation(route)'),false);assert.equal(t.state.selectedRequestId,null);assert.match(t.notice.textContent,/disambiguate/);
     assert.equal(t.run('selectRequest("same", route.identity)'),false,'Actual selection boundary must retain the exact identity, not first-match an ID');
@@ -464,15 +420,18 @@ async function checkCollectionNavigation(root, navigation) {
     const {state,elements,ui} = fixture;
     let screen='traffic', notice='', focus=0;
     const raf=[];
-    state.requests=[{id:'cdp-1',origin:'live',operation:'cdp_completed',tabId:'page-1',protocolRequestId:'7',firstTimestamp:1n,method:'POST',path:'https://fixture.invalid/path?secret=omitted#fragment'}];
-    state.selectedRequestId='cdp-1';
+    state.requests=[{id:'native-1',origin:'live',operation:'request_started',tabId:'1',method:'POST',path:'https://fixture.invalid/path?secret=omitted#fragment',
+      events:[{session_id:'11',process_id:17,sequence_number:'5',request_id:'7',type:'request_started'}]}];
+    state.selectedRequestId='native-1';
     elements.requestCollectionPivot={textContent:'Add to Collection'};
     elements.collectionRequestName.focus=()=>{focus++;};
     const context=createContext({state,elements,URL,Number,sourceFactsPanel:{},requestAnimationFrame:fn=>raf.push(fn),renderInspector(){},
       refreshApiCollection:ui.refreshApiCollection,createCollectionRequest:ui.createCollectionRequest,
       document:{querySelector:()=>({id:`screen-${screen}`})},
       showScreen:name=>{screen=name;}});
-    runInContext(navigation+`;investigationNotice=message=>{noticeWriter(message);};`,Object.assign(context,{noticeWriter:value=>{notice=value;}}));
+    const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+    const requestRoot=app.slice(app.indexOf('      function requestTraceRoot('),app.indexOf('      function requestSignalProfileSelection('));
+    runInContext(`function integerText(event,field){return String(event[field]);}\n${requestRoot}\n`+navigation+`;investigationNotice=message=>{noticeWriter(message);};`,Object.assign(context,{noticeWriter:value=>{notice=value;}}));
     return {...fixture,context,run:code=>runInContext(code,context),screen:()=>screen,notice:()=>notice,focus:()=>focus,flush:()=>raf.splice(0).forEach(fn=>fn())};
   };
   const settle=async(t,code,mutate)=>{
@@ -487,7 +446,7 @@ async function checkCollectionNavigation(root, navigation) {
   }
   for(const change of ['request','session','interaction']) {
     const t=await setup();assert.equal(await settle(t,'copyInvestigationRequestToCollection()',()=>{
-      if(change==='request')t.state.selectedRequestId='other';else if(change==='session')t.state.requests[0].tabId='other';else t.run('retireInvestigationReturn()');
+      if(change==='request')t.state.selectedRequestId='other';else if(change==='session')t.state.requests[0].events=[{...t.state.requests[0].events[0],session_id:'12'}];else t.run('retireInvestigationReturn()');
     }),null);assert.equal(t.pending.length,0);assert.equal(t.screen(),'traffic');
   }
   for(const outcome of ['success','newer','refused']) {
@@ -495,7 +454,7 @@ async function checkCollectionNavigation(root, navigation) {
     assert.equal(await t.run('copyInvestigationRequestToCollection()'),null,'Repeat copy must not start a second write');
     t.pending.shift().resolve({ok:true,status:304,headers:{get:()=>null}});for(let i=0;i<10;i++)await Promise.resolve();
     assert.equal(t.pending.length,1);const action=t.pending.shift();assert.equal(action.url,'/api/api-collection/actions');
-    const submitted=JSON.parse(action.options.body);assert(!action.options.body.includes('secret'));assert(!action.options.body.includes('protocolRequestId'));
+    const submitted=JSON.parse(action.options.body);assert(!action.options.body.includes('secret'));
     const saved=structuredClone(t.state.apiCollection);saved.generation++;
     saved.requests=submitted.requests.map(value=>({...value,created_at_ms:value.created_at_ms??2000,updated_at_ms:2000}));
     if(outcome==='newer')t.run('retireInvestigationReturn()');

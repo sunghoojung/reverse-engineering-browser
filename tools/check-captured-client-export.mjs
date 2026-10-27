@@ -8,7 +8,7 @@ import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
-import {network} from './traffic-capture-qa.mjs';
+import {network} from './saved-traffic-fixture.mjs';
 
 const script = fileURLToPath(new URL('./export-captured-client.mjs',import.meta.url));
 const directory = await mkdtemp(join(tmpdir(),'reb-offline-export-'));

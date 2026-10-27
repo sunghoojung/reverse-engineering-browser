@@ -14,8 +14,10 @@ The driver, [`check-origin-trace-rendered-ui.mjs`](../check-origin-trace-rendere
    signature, so nothing resolves through source-tree paths;
 2. builds a bounded synthetic session with
    [`evidence-fixture.mjs`](evidence-fixture.mjs) from the `make e2e` demo
-   stores and the events printed by `build/reb-native-wasm-guest-golden` and
-   `build/reb-native-wasm-dispatch-golden`;
+   stores and the native Wasm evidence stores that `make native-wasm-golden-check`
+   exports under `build/native-golden/`. Those stores are the exact artifacts and
+   events the Rust golden tests built from `build/reb-native-wasm-guest-golden`
+   and `build/reb-native-wasm-dispatch-golden`, so nothing is mirrored by hand;
 3. starts the bundled `OriginTraceBackend` on a loopback port chosen by the OS;
 4. builds this bundle with `xcodebuild build-for-testing`, then rewrites the
    generated `.xctestrun` so the bundle is hosted by the copied app

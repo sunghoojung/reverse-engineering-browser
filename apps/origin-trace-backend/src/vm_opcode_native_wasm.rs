@@ -56,7 +56,7 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
         return None;
     }
     Some(
-        json!({"event":super::event_reference(event),"function_index":function,"module_byte_offset":offset,
+        json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"function_index":function,"module_byte_offset":offset,
         "selector":selector,"table_count":count,"sample_index":index,"selected_arm":selector.min(count),"is_default":selector >= count}),
     )
 }
@@ -345,6 +345,11 @@ pub(super) mod tests {
                     document["workspaces"][0]["native_wasm_observation_count"], 1,
                     "golden product path {case}"
                 );
+                assert_eq!(
+                    document["workspaces"][0]["native_wasm_observations"][0]["monotonic_time_ns"],
+                    event["monotonic_time_ns"],
+                    "physical row carries the accepted event time {case}"
+                );
                 let schema: Value = serde_json::from_str(include_str!(
                     "../../../protocol/vm-opcode-workspace-v2.schema.json"
                 ))
@@ -357,6 +362,12 @@ pub(super) mod tests {
                     && let Ok(path) = std::env::var("REB_NATIVE_WASM_WORKSPACE_OUTPUT")
                 {
                     std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+                }
+                if case == "wide-identities" {
+                    super::super::export_golden_evidence(
+                        root.path(),
+                        "REB_NATIVE_WASM_EVIDENCE_OUTPUT",
+                    );
                 }
             }
         }

@@ -50,13 +50,12 @@ or unavailable result; never weaken the sandbox to obtain a pass.
    [workspace guide](../../apps/research-ui/README.md) and
    [browser setup](../../browser/README.md).
 2. Start a fresh isolated session through the supported product launcher. On a
-   supported development host with the pinned custom Brave build, the documented
-   content-capture route is `REB_CDP_NETWORK_CAPTURE=1 make live`. Keep Canvas
-   image retention off unless separately authorized. Explicitly opt into bounded
-   content capture only when the authorization covers request/response content;
-   otherwise choose metadata-only and mark content assertions unavailable.
-3. Keep the session and its loopback backend private. Confirm browser/debugger
-   readiness and the active capture mode before navigation. Open no unrelated
+   supported development host with the pinned custom Brave build, use
+   `make live`. Keep Canvas image retention off unless separately authorized.
+   Native Traffic retains host-level metadata only, so mark request/response
+   content assertions unavailable. CDP content capture was removed.
+3. Keep the session and its loopback backend private. Confirm browser readiness
+   and the active capture mode before navigation. Open no unrelated
    sites: current native events do not enforce an origin allowlist. Do not attach
    REB to an existing managed browser with unrelated tabs.
 4. Navigate once to each allowed page in the session's own browser. Wait for
@@ -101,10 +100,9 @@ is not sufficient evidence that a raw export is safe to publish.
 
 Public sites, network conditions and vendor classifications change. Their
 smoke observations must not gate builds or replace controlled pass/fail cases.
-Continue using the authored loopback CDP/browser tests, backend tests, and the
-[Traffic capture runtime fixture](traffic-capture-runtime-qa.md). That fixture
-covers UI/export contracts, not real CDP collection or native probe capture.
-The browser tests cover only the boundaries they explicitly assert. Full
+Continue using the backend tests, the offline UI model checks, and
+`make rendered-ui-check` for the packaged app. They cover only the boundaries
+they explicitly assert, not native probe capture of a live site. Full
 required validation remains defined by [AGENTS.md](../../AGENTS.md).
 
 ## Optional manually dispatched CI observation

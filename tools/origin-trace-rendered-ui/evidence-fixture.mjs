@@ -1,9 +1,9 @@
 // Builds one bounded, synthetic evidence session for rendered UI acceptance.
-// Inputs are the deterministic `make e2e` demo stores plus events emitted by
-// the real C++ native Wasm encoders. Nothing here is captured from a website.
+// Inputs are the deterministic `make e2e` demo stores plus the native Wasm
+// evidence stores exported by `make native-wasm-golden-check` from the real C++
+// encoders. Nothing here is captured from a website.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {execFileSync} from 'node:child_process';
 import {cp, mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 
@@ -17,13 +17,6 @@ export const SOURCE_LINE_COUNT = 400;
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const hex = text => Buffer.from(text, 'utf8').toString('hex');
-
-// Mirrors `crate::vm::canonical`: sorted object keys, compact, ASCII-only.
-function canonical(value) {
-  const sort = item => Array.isArray(item) ? item.map(sort)
-    : item && typeof item === 'object' ? Object.fromEntries(Object.keys(item).sort().map(key => [key, sort(item[key])])) : item;
-  return JSON.stringify(sort(value)).replace(/[\u0080-￿]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
-}
 
 async function writeBlob(root, bytes) {
   const hash = sha256(bytes);
@@ -42,42 +35,20 @@ function jsonLines(text) {
   return text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 }
 
-// Same module and recipe as the backend `native_guest_cpp_golden` host
-// fixture, so the C++ encoder's recipe digest binds a real adapter artifact.
-async function nativeGuestEvidence(root, guestGolden) {
-  const bytes = [...Buffer.from('0061736d010000000104016000000302010005030100010a1d011b01017f0340200041016a210041002d00001a41000e020000000b0b', 'hex')];
-  bytes[24] += 2; bytes[26] += 2;
-  bytes.splice(32, 0, 0x10, 0);
-  bytes.splice(14, 0, 2, 7, 1, 1, 0x68, 1, 0x66, 0, 0);
-  const identity = {session_id: '101', navigation_id: '0', frame_id: '103'};
-  const module = await artifact(root, {artifact_id: '107', ...identity, kind: 'wasm',
-    capture_origin: 'webassembly_compile', url: 'fixture://native-guest'}, Buffer.from(bytes));
-  const recipe = {version: 1, sample_limit: 16, module_sha256: module.sha256, function_index: 1, dispatch_module_offset: 58,
-    pc: {local_index: 0, value_type: 'i32', adjustment: '0', subtract_memory_base: true},
-    bytecode: {memory_index: 0, base: {kind: 'constant', value: '256'}, length: {kind: 'constant', value: '4'}},
-    opcode: {width: 1, endian: 'little'}, import_call_offsets: [41]};
-  const adapter = await artifact(root, {artifact_id: '108', ...identity, parent_artifact_id: '107', creator_event_id: '104',
-    kind: 'wasm_guest_adapter', capture_origin: 'native_wasm_guest', url: 'fixture://native-guest'},
-  Buffer.from(canonical(recipe), 'utf8'));
-  const bytecode = await artifact(root, {artifact_id: '109', ...identity, parent_artifact_id: '107', creator_event_id: '105',
-    kind: 'bytecode_buffer', capture_origin: 'native_wasm_guest', url: 'fixture://native-guest'}, Buffer.from([0, 0x42, 0, 0]));
-  const events = jsonLines(execFileSync(guestGolden,
-    ['--host-fixture', '--recipe-sha', adapter.sha256, '--case', 'wide-identities'], {encoding: 'utf8'}));
-  assert.equal(events.length, 2, 'guest encoder emits invocation and dispatch');
-  // A synchronous retained host child of the guest dispatch, as in the golden test.
-  const host = {...events[1], category: 'runtime', type: 'api_call', sequence_number: '106',
-    parent_event_id: '105', payload_size: 0, payload: ''};
-  return {artifacts: [module, adapter, bytecode], events: [...events, host]};
-}
-
-// Physical br_table observation with the widest identities the wire allows.
-async function nativeWasmEvidence(root, dispatchGolden) {
-  const [event] = jsonLines(execFileSync(dispatchGolden, ['--case', 'wide-identities'], {encoding: 'utf8'}));
-  const module = await artifact(root, {artifact_id: event.artifact_id, session_id: event.session_id,
-    navigation_id: event.navigation_id, frame_id: event.frame_id, kind: 'wasm', mime_type: 'application/wasm',
-    url: 'fixture://native-wasm-golden'},
-  Buffer.from('0061736d010000000104016000000302010005030100010a1d011b01017f0340200041016a210041002d00001a41000e020000000b0b', 'hex'));
-  return {artifacts: [module], events: [event]};
+// The exact evidence stores that `make native-wasm-golden-check` built from the
+// actual C++ encoders and validated through the Rust workspace builder: one
+// adapter-interpreted guest sample with its synchronous host child, and one
+// physical br_table observation with the widest identities the wire allows.
+async function goldenEvidence(root, store) {
+  const artifacts = jsonLines(await readFile(join(store, 'manifest.jsonl'), 'utf8'));
+  const events = jsonLines(await readFile(join(store, 'events.jsonl'), 'utf8'));
+  assert(artifacts.length && events.length, `${store} must hold an exported golden store`);
+  for (const record of artifacts) {
+    const bytes = await readFile(join(store, record.content_path));
+    assert.equal(sha256(bytes), record.sha256, `golden blob ${record.content_path}`);
+    await writeFile(join(root, record.content_path), bytes);
+  }
+  return {artifacts, events};
 }
 
 // Enough native network rows to require list scrolling, one with a hostile URL.
@@ -103,7 +74,7 @@ function syntheticRequests(template, firstSequence, firstTime) {
   return events;
 }
 
-export async function buildEvidence({root, sessions, guestGolden, dispatchGolden}) {
+export async function buildEvidence({root, sessions, guestStore, dispatchStore}) {
   const artifacts = join(root, 'artifacts');
   await mkdir(join(artifacts, 'blobs'), {recursive: true});
   for (const name of ['origin-trace.jsonl', 'request-signals.jsonl']) await cp(join(sessions, name), join(root, name));
@@ -119,8 +90,10 @@ export async function buildEvidence({root, sessions, guestGolden, dispatchGolden
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'javascript', mime_type: 'text/javascript', url: HOSTILE_SOURCE_URL},
   Buffer.from(lines.join('\n') + '\n', 'utf8'));
-  const guest = await nativeGuestEvidence(artifacts, guestGolden);
-  const physical = await nativeWasmEvidence(artifacts, dispatchGolden);
+  const guest = await goldenEvidence(artifacts, guestStore);
+  const physical = await goldenEvidence(artifacts, dispatchStore);
+  assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
+  assert(physical.events.some(event => event.type === 'wasm_dispatch_observation'), 'dispatch golden store holds an observation');
   const manifest = [...demoArtifacts, source, ...guest.artifacts, ...physical.artifacts];
   const events = [...demoEvents, ...requests, ...guest.events, ...physical.events];
   await writeFile(join(artifacts, 'manifest.jsonl'), manifest.map(record => JSON.stringify(record) + '\n').join(''));

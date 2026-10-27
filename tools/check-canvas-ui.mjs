@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {join} from 'node:path';
 import {deflateSync, inflateSync} from 'node:zlib';
 import {runInNewContext} from 'node:vm';
 
 // Authored HTTP evidence only. The production catalog, byte/hash reader,
 // ownership and PNG admission are checked offline; no browser driver is exported.
-export async function canvasEvidenceFixture(root, {artifact, png, pngUrl, chunk}) {
+export async function canvasEvidenceFixture({artifact, png, pngUrl, chunk}) {
   const pixels=Buffer.concat(Array.from({length:16},()=>Buffer.from([0,...Array.from({length:16},()=>[255,0,0,255]).flat()])));
   const valid=pngUrl(png({width:16,height:16,idat:[chunk('IDAT',deflateSync(pixels))]}));
   // Chrome CI loaded both authored malformed scanlines without error events.
@@ -24,7 +22,6 @@ export async function canvasEvidenceFixture(root, {artifact, png, pngUrl, chunk}
     session_id:1,sequence_number:Number(source.creator_event_id),monotonic_time_ns:Number(source.creator_event_id),
     navigation_id:1,frame_id:1,artifact_id:Number(source.artifact_id),parent_event_id:0,process_id:1,thread_id:1,
     payload_encoding:'hex',payload:Buffer.from('canvas.toDataURL').toString('hex'),payload_size:16}));
-  const debuggerState=JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
   const fixture={documents,artifacts,events,requests:[],pending:[],readError:true,hold:false,catalogError:false,revision:1,active:true,phase:'normal'};
   fixture.documentHeaders=raw=>{
     const url=new URL(raw,'http://127.0.0.1');
@@ -36,7 +33,6 @@ export async function canvasEvidenceFixture(root, {artifact, png, pngUrl, chunk}
     const json=(status,value,headers={})=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store',...headers});response.end(JSON.stringify(value));};
     if(!path.startsWith('/api/'))return false;
     if(request.method&&request.method!=='GET'){fixture.requests.push({path,method:request.method,status:405});json(405,{error:'Canvas QA never mutates a native capture'});return true;}
-    if(path==='/api/debugger'){json(200,debuggerState);return true;}
     if(path==='/api/events'||path==='/api/artifacts'){
       const etag=`"canvas-${path}-${fixture.revision}"`;
       if(path==='/api/artifacts'&&fixture.catalogError){json(503,{error:'Authored catalog failure'});return true;}
@@ -91,7 +87,6 @@ export async function checkCanvasFixture(fixture, models, inspect) {
     const reply=await response(`/api/${path}`);assert.equal(reply.status,200);assert(validator(JSON.parse(reply.body)));
     assert.equal((await response(`/api/${path}`,{headers:{'if-none-match':reply.headers.ETag}})).status,304);
   }
-  assert(models.isDebuggerResponse(JSON.parse((await response('/api/debugger')).body)));
   assert.deepEqual({...inspect(fixture.documents.get('5'))},{width:16,height:16,pixels:256});
   assert.match(inspect(fixture.documents.get('4')).reason,/4096-pixel/);
   assert.match(inspect(fixture.documents.get('3')).reason,/only static PNG/);
@@ -123,7 +118,7 @@ export async function checkCanvasFixture(fixture, models, inspect) {
   for(const id of ['5','2'])new FixtureImage().src=fixture.documents.get(id);
   assert.equal(nativeAssignments.length,2,'Only tiny decoder fixtures pass through unchanged');
   fixture.catalogError=true;assert.equal((await response('/api/artifacts')).status,503);fixture.catalogError=false;
-  assert.equal((await response('/api/debugger/actions',{method:'POST'})).status,405);
+  assert.equal((await response('/api/artifacts',{method:'POST'})).status,405);
   fixture.active=false;fixture.revision++;assert.equal(JSON.parse((await response('/api/artifacts')).body).count,0);
   console.log('PASS authored Canvas browser fixture routes, validators, hashes, bounded pixels, refusal inputs and isolated image-policy header, held body, retry and read-only boundary (not rendered QA)');
 }

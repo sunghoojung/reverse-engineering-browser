@@ -365,9 +365,6 @@ supported; no conflicting declaration is silently dropped.
   offline. CI requests both lanes. No toolchain is installed automatically.
   Tagged compile/runtime evidence must be reported separately; standard Go
   success is not profile-provider coverage.
-- `node tools/check-api-observation-catalog-ui.mjs --browser`: real UI catalog
-  handoff, unsupported review, dirty draft confirmation, narrow desktop window
-  geometry, exact draft values and explicit ZIP download. Uses authored data.
 - `make app-build`: compiled native archive checks and normal app build.
   Packaged WebKit smoke validates owned-page malformed-payload rejection and
   subframe refusal. A test-only Xcode UI bundle targets the already-built,

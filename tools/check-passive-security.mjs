@@ -7,8 +7,8 @@ import {createHash,webcrypto} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
-import {network} from './traffic-capture-qa.mjs';
-import passive from '../apps/research-ui/passive_security.js';
+import {network} from './saved-traffic-fixture.mjs';
+import passive from './passive-security.cjs';
 const copy=value=>JSON.parse(JSON.stringify(value));
 const identity={instance:'synthetic-instance',epoch:1,request:'synthetic-json',target:'synthetic-target',started:100};
 function record() {
@@ -92,49 +92,3 @@ try {
   const bad=join(directory,'bad.json');await writeFile(bad,Buffer.from([0xc0,0xaf]));assert.equal(cli(bad,join(directory,'unused.json')).status,1);
   console.log('PASS real CLI, source-byte hash, fixed source locations, private atomic no-overwrite, symlink/size/UTF-8/duplicate/identity/numeric refusal and content-free errors');
 } finally {await rm(directory,{recursive:true,force:true});}
-await controller();
-async function controller() {
-  const closeEvents=[];let queueClose=false;
-  class Node {
-    constructor(){this.children=[];this.events={};this.open=false;this.disabled=false;this.value='';}
-    set textContent(value){this.text=String(value);this.children=[];}get textContent(){return (this.text??'')+this.children.map(child=>child.textContent).join('');}
-    addEventListener(type,handler){this.events[type]=handler;}append(...nodes){this.children.push(...nodes);}replaceChildren(){this.children=[];this.text='';}
-    showModal(){this.open=true;}close(){this.open=false;if(queueClose)closeEvents.push(()=>this.events.close?.());else this.events.close?.();}focus(){document.activeElement=this;}
-    click(){if(!this.disabled)return this.events.click?.();}
-  }
-  const ids=new Map(['passive-security-open','passive-security','passive-security-status','passive-security-content','passive-security-close','request-rows'].map(id=>[id,new Node()]));
-  const document={getElementById:id=>ids.get(id),createElement:()=>new Node()},get=id=>ids.get('passive-security-'+id);
-  let current={captureRecord:sensitive},hold=false,release;
-  const crypto={subtle:{digest:async(...args)=>{if(hold)await new Promise(done=>{const previous=release;release=()=>{previous?.();done();};});return webcrypto.subtle.digest(...args);}}};
-  const code=await readFile(new URL('../apps/research-ui/passive_security.js',import.meta.url),'utf8');
-  const install=runInNewContext(code+'\ninstallPassiveSecurityReport',{document,TextEncoder,URL,crypto,apiCatalogRequestIdentity:r=>r?identity:null});
-  const ui=install({getRequest:()=>current});assert(!get('dialog')?.open);assert(!get('content').textContent);
-  await get('open').click();assert(ids.get('passive-security').open);
-  assert(get('status').textContent.includes('ready'));assert(!get('content').textContent.includes('AUTHORED'));
-  get('close').click();assert(!ids.get('passive-security').open);assert.equal(get('content').textContent,'');
-  hold=true;const pending=get('open').click();assert(get('open').disabled);get('close').click();release();await pending;assert.equal(get('content').textContent,'');
-  release=undefined;const late=get('open').click();current={captureRecord:{...sensitive,response:{...sensitive.response,headers:[['X','changed']]}}};ui.sync();release();await late;
-  assert(get('status').textContent.includes('changed'));assert.equal(get('content').textContent,'');
-  hold=false;get('close').click();await get('open').click();assert(get('status').textContent.includes('ready'));
-  // Native dialog.close() queues its close event. A reopened report must not
-  // inherit cleanup or focus restoration from the previous modal lifetime.
-  queueClose=true;get('close').click();
-  hold=true;release=undefined;const reopened=get('open').click();
-  const modalFocus={};document.activeElement=modalFocus;
-  closeEvents.shift()();
-  assert.equal(document.activeElement,modalFocus,'Old close must not steal reopened modal focus');
-  assert(get('open').disabled,'Old close must not clear the new analysis busy state');
-  release();await reopened;hold=false;
-  assert(get('status').textContent.includes('ready'));
-  current.captureRecord.response.body.text+=' authored revision';ui.sync();
-  assert.equal(get('content').textContent,'');
-  assert(get('status').textContent.includes('changed'),'Reopened ready report retains source revision tracking');
-  get('close').click();await get('open').click();
-  closeEvents.shift()();
-  assert(get('status').textContent.includes('ready'),'Queued close must also preserve an already ready report');
-  current.captureRecord.response.body.text+=' second authored revision';ui.sync();
-  assert.equal(get('content').textContent,'');assert(get('status').textContent.includes('changed'));
-  queueClose=false;
-  current=null;ui.sync();assert(get('open').disabled);assert.equal(get('content').textContent,'');get('close').click();assert.equal(document.activeElement,ids.get('request-rows'));
-  console.log('PASS explicit-only UI, zero network dependencies, close/reopen, double-click guard, delayed-result cancellation and same-identity content-change invalidation');
-}

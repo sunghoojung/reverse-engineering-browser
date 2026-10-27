@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import {execFileSync} from 'node:child_process';
 const root = new URL('../',import.meta.url);
 const source = fs.readFileSync(new URL('apps/research-ui/evidence_models.js',root),'utf8');
-const model = new Function(source+'\nreturn {isBrokerEvent,isVmOpcodeWorkspaceDocument,isVmHostLinksDocument};')();
+const model = new Function(source+'\nreturn {isBrokerEvent,isVmOpcodeWorkspaceDocument,isVmHostLinksDocument,vmNativeRowIdentityText};')();
 const path = process.env.REB_NATIVE_GUEST_WORKSPACE_INPUT;
 const exe = process.env.REB_NATIVE_GUEST_GOLDEN;
 assert(path && exe,'native golden encoder and Rust workspace required');
@@ -14,11 +14,20 @@ const row = doc.workspaces[0].native_guest_samples[0];
 assert.equal(row.instance_id,'18446744073709551615');
 assert.equal(doc.workspaces[0].native_guest_sample_count,1);
 assert.equal(doc.workspaces[0].sample_count,0,'native guest samples are not dispatch reports');
+// The producer copies the accepted event time, so the row keeps its time after
+// the event leaves the retained window. Older documents omit the field.
+assert.match(row.monotonic_time_ns,/^(0|[1-9][0-9]{0,19})$/,'guest row carries a canonical decimal event time');
+assert.match(model.vmNativeRowIdentityText(row,[]),new RegExp(`^time ${row.monotonic_time_ns} ns · session ${row.event.session_id} · process ${row.event.process_id} · seq ${row.event.sequence_number} · native probe · vm/wasm_guest_dispatch$`));
+{
+  const legacy=structuredClone(doc); delete legacy.workspaces[0].native_guest_samples[0].monotonic_time_ns;
+  assert(model.isVmOpcodeWorkspaceDocument(legacy),'documents without the optional time stay valid');
+  assert.match(model.vmNativeRowIdentityText(legacy.workspaces[0].native_guest_samples[0],[]),/^time outside retained event window · /);
+}
 const links = JSON.parse(fs.readFileSync(path+'.host-links.json','utf8'));
 if(row.interpretation === 'verified-dataflow') assert.equal(links.workspaces[0].links[0].guest_position.instruction_pointer,1);
 else assert.equal(links.workspaces[0].links[0].guest_position,null,'explicit adapter does not prove guest semantics');
 assert(model.isVmHostLinksDocument(links,doc),'shipped UI preserves verified versus explicit-adapter host semantics');
-for (const [key,value] of Object.entries({instruction_pointer:4,instruction_pointer_units:'instruction-index',raw_pc_bits:257,instance_id:'0',sample_index:256,memory_length:65537,pc_adjustment:'9223372036854775808',module_byte_offset:7,adapter_sha256:'bad',opcode_width:3,interpretation:'unknown'})) {
+for (const [key,value] of Object.entries({monotonic_time_ns:'01',instruction_pointer:4,instruction_pointer_units:'instruction-index',raw_pc_bits:257,instance_id:'0',sample_index:256,memory_length:65537,pc_adjustment:'9223372036854775808',module_byte_offset:7,adapter_sha256:'bad',opcode_width:3,interpretation:'unknown'})) {
  const bad=structuredClone(doc); bad.workspaces[0].native_guest_samples[0][key]=value;
  assert.equal(model.isVmOpcodeWorkspaceDocument(bad),false,key);
 }

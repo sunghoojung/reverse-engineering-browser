@@ -9,7 +9,7 @@ import {spawn} from 'node:child_process';
 import {join,dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {network} from './traffic-capture-qa.mjs';
+import {network} from './saved-traffic-fixture.mjs';
 
 const directory=await mkdtemp(join(tmpdir(),'reb-python-client-'));
 const script=fileURLToPath(new URL('./export-captured-client.mjs',import.meta.url));

@@ -2,8 +2,8 @@
 """Build the pinned native V8 runtime tests, not a Brave/browser acceptance run.
 
 This independent GCC profile does not fetch Chromium's binary Clang/Rust
-toolchains. Production C++ patches are unchanged; only Brave-specific GN wiring
-is omitted because this checkout has no Brave embedder.
+toolchains. Authored C++ patches are unchanged. Brave-specific GN wiring is
+omitted; one upstream unused-name annotation is recorded in the receipt.
 """
 
 import argparse
@@ -83,6 +83,14 @@ def binary_dependencies(deps):
     raise ValueError("Missing DEPS dictionary")
 
 
+def annotate_standalone_pointer_table_name(source):
+    """Annotate one upstream header variable; keep all compiler warnings enabled."""
+    declaration = 'static const char* kPointerTableAddressSpaceName = "v8-pointer-table";'
+    if source.count(declaration) != 1 or "[[maybe_unused]] " + declaration in source:
+        raise ValueError("Pinned pointer-table declaration changed; review required")
+    return source.replace(declaration, "[[maybe_unused]] " + declaration)
+
+
 def self_test():
     patches = sorted((ROOT / "browser/integration/brave/patches/v8").glob("*.patch"))
     assert patches
@@ -99,6 +107,16 @@ def self_test():
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }
+    declaration = 'static const char* kPointerTableAddressSpaceName = "v8-pointer-table";'
+    annotated = annotate_standalone_pointer_table_name(declaration)
+    assert annotated == "[[maybe_unused]] " + declaration
+    for invalid in ("", declaration + declaration, annotated):
+        try:
+            annotate_standalone_pointer_table_name(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Standalone annotation must reject changed source")
     print("PASS standalone adapter preserves every production C++ hunk and excludes only embedder GN wiring")
 
 
@@ -250,6 +268,20 @@ def main():
                     run(["git", "apply", "--check", str(temporary)], v8)
                     run(["git", "apply", str(temporary)], v8)
             receipt["patches"].append(entry)
+        # GCC diagnoses this header-local upstream name in translation units
+        # that do not use it. Annotate only this declaration, without suppressing
+        # warnings or changing any authored native-capture patch.
+        globals_path = v8 / "src/common/globals.h"
+        original_globals = globals_path.read_text()
+        annotated_globals = annotate_standalone_pointer_table_name(original_globals)
+        globals_path.write_text(annotated_globals)
+        receipt["standalone_upstream_annotations"] = [{
+            "path": "src/common/globals.h",
+            "change": "[[maybe_unused]] kPointerTableAddressSpaceName",
+            "before_sha256": hashlib.sha256(original_globals.encode()).hexdigest(),
+            "after_sha256": hashlib.sha256(annotated_globals.encode()).hexdigest(),
+        }]
+        save_receipt()
         # Temporal alone pulls Rust into this standalone build; guest capture
         # and the public QuickJS fixture do not use the Temporal API.
         gn_args = " ".join((

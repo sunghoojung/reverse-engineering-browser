@@ -2508,9 +2508,12 @@ const capturedExportPanel = installCapturedExportDialog({
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         const selectionCleared = state.selectedRequestId !== null && !state.requests.some(request => request.id === state.selectedRequestId);
         if (selectionCleared) resetRequestSelection();
-        const knownIds = state.trafficKnownIds;
-        const newIds = new Set(knownIds ? visible.filter(request => !knownIds.has(request.id)).map(request => request.id) : []);
+        // Only a live capture can deliver new requests. Stored, demo and idle
+        // evidence is a fixed set loaded at once, so none of it is "new".
+        const knownIds = state.trafficKnownIds, live = state.sessionMode === 'live';
+        const newIds = new Set(live && knownIds ? visible.filter(request => !knownIds.has(request.id)).map(request => request.id) : []);
         state.trafficKnownIds = new Set(state.requests.map(request => request.id));
+        if (!live) state.trafficNewIds.clear();
         if (!filterChanged) newIds.forEach(id => state.trafficNewIds.add(id));
         for (const id of state.trafficNewIds) if (!state.trafficKnownIds.has(id)) state.trafficNewIds.delete(id);
         const window = trafficWindow(visible, state.trafficWindowStart, state.trafficWindowAnchor);
@@ -5516,8 +5519,16 @@ const capturedExportPanel = installCapturedExportDialog({
         return `${sourceName(source)} · artifact ${source.artifact_id}`;
       }
 
+      // Every artifact kind the evidence contract admits, labeled by what its
+      // bytes are. Only javascript artifacts are JavaScript.
+      function sourceKindLabel(kind) {
+        return {javascript: ['JS', 'JavaScript'], wasm: ['W', 'WebAssembly'], source_map: ['{}', 'source map'],
+          response_body: ['R', 'response body'], wasm_guest_adapter: ['AD', 'guest adapter JSON'],
+          bytecode_buffer: ['BC', 'guest bytecode']}[kind] ?? null;
+      }
+
       function sourceDisplayMeta(source) {
-        return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${source.kind}`;
+        return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${sourceKindLabel(source.kind)?.[1] ?? source.kind}`;
       }
 
       function sourcePathParts(source) {
@@ -5525,10 +5536,7 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function sourceIcon(source) {
-        if (source.kind === 'wasm') return 'W';
-        if (source.kind === 'source_map') return '{}';
-        if (source.kind === 'response_body') return 'R';
-        return 'JS';
+        return sourceKindLabel(source.kind)?.[0] ?? '?';
       }
 
       function selectedSource() {
@@ -5759,6 +5767,7 @@ const capturedExportPanel = installCapturedExportDialog({
           row.setAttribute('aria-label', label);
           icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
           icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '›' : '⌄';
+          icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
           detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
           if (node.source) {
             row.dataset.artifactId = node.source.artifact_id;
@@ -5849,6 +5858,7 @@ const capturedExportPanel = installCapturedExportDialog({
           const icon = document.createElement('span');
           icon.className = `source-file-icon ${source.kind}`;
           icon.textContent = sourceIcon(source);
+          icon.title = sourceKindLabel(source.kind)?.[1] ?? source.kind;
           const name = document.createElement('span');
           name.textContent = sourceDisplayName(source);
           name.title = source.url || sourceDisplayName(source);

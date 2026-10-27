@@ -213,7 +213,7 @@ let windowSizes: [(name: String, width: CGFloat, height: CGFloat)] = [
 let removedFeaturePhrases = [
   "WebSocket", "Breakpoint", "breakpoint", "Paused frame", "paused frame", "Call stack", "Live scripts",
   "Cookie import", "Import cookies", "Element screenshot", "Marker execution", "Run marker", "Local override",
-  "Find in Memory", "Runtime hook", "Resume", "Step over", "Step into",
+  "Find in Memory", "Runtime hook", "Resume", "Step over", "Step into", "API catalog", "Passive security report", "Capture actions",
 ]
 
 final class OriginTraceRenderedUITests: XCTestCase {
@@ -263,6 +263,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await show(ui, "traffic")
       let rows = try await ui.value("__rebUiProbe.count('#screen-traffic .request-row') > 0 && document.querySelectorAll('#screen-traffic .request-row').length") as? Int ?? 0
       XCTAssertGreaterThanOrEqual(rows, expected.requestCount, "\(size.name): retained native requests are listed")
+      // A stored session is a fixed set; none of its requests is new.
+      let latestHidden = try await ui.value("document.querySelector('#request-latest').hidden") as? Bool
+      XCTAssertEqual(latestHidden, true, "\(size.name): a stored session must not claim new requests")
       try await assertLayout(ui, ".toolbar", "\(size.name) toolbar")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) traffic list")
       try await ui.screenshot("traffic-list-\(size.name)")
@@ -289,6 +292,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "sources")
+      // Native guest artifacts are an adapter JSON recipe and a bytecode buffer, not JavaScript.
+      for (artifact, icon, kind) in [("artifact 108", "AD", "guest adapter JSON"), ("artifact 109", "BC", "guest bytecode")] {
+        let find = "[...document.querySelectorAll('#source-tree [role=treeitem]')].find(row => row.innerText.includes('\(artifact)'))"
+        let shown = try await ui.value("\(find)?.querySelector('.source-file-icon')?.innerText ?? ''") as? String ?? ""
+        XCTAssertEqual(shown, icon, "\(size.name): \(artifact) is labeled \(icon), not JS")
+        // The kind detail is collapsed in the navigator; it is still the row's text.
+        let detail = try await ui.value("\(find)?.textContent ?? ''") as? String ?? ""
+        XCTAssertTrue(detail.contains(kind), "\(size.name): \(artifact) names its kind: \(detail)")
+      }
       try await ui.click("#source-tree [role=treeitem]", containing: "artifact 303")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('retainedLine')", "retained source did not render")
       let source = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
@@ -392,7 +404,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         XCTAssertFalse(text.contains(phrase), "\(screen) still offers removed CDP feature text: \(phrase)")
       }
     }
-    for id in ["websocket-inspector", "runtime-hook-traffic", "request-memory-pivot", "screen-memory", "screen-experiments"] {
+    for id in ["websocket-inspector", "runtime-hook-traffic", "request-memory-pivot", "screen-memory", "screen-experiments",
+      "open-api-catalog", "api-catalog", "passive-security", "traffic-capture-export"] {
       let count = try await ui.value("document.querySelectorAll('#\(id)').length") as? Int ?? -1
       XCTAssertEqual(count, 0, "#\(id) must be removed, not hidden")
     }

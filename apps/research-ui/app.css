@@ -1110,6 +1110,7 @@
       .source-file-icon { color: var(--amber); font: 11px var(--mono); }
       .source-file-icon.wasm { color: #c58af9; }
       .source-file-icon.response_body { color: var(--green); }
+      .source-file-icon.wasm_guest_adapter, .source-file-icon.bytecode_buffer { color: var(--muted); }
       .source-tree-empty { padding: 22px 14px; color: var(--muted); line-height: 1.6; }
       .source-health {
         max-height: 96px;

@@ -1,0 +1,80 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index b96abad..aaa9dde 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -80,6 +80,7 @@
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+ #include "third_party/blink/renderer/core/dom/events/event_dispatch_forbidden_scope.h"
+ #include "third_party/blink/renderer/core/events/error_event.h"
++#include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/execution_context/agent.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
+@@ -244,6 +245,58 @@ void CaptureDynamicJavaScript(v8::Local<v8::Context> context,
+                          content);
+ }
+ 
++bool NativeWasmBrTableDispatchEnabled() {
++  // V8 calls this before frame walking or creating handles.
++  return reb::NativeProbeSink::Get().IsNativeWasmDispatchEnabled();
++}
++
++void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
++                               const std::uint8_t* module_bytes,
++                               const std::size_t module_size,
++                               const std::uint32_t function_index,
++                               const std::uint32_t module_byte_offset,
++                               const std::uint32_t selector,
++                               const std::uint32_t table_count) {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
++  if (!sink.IsNativeWasmDispatchEnabled() || context.IsEmpty() ||
++      module_bytes == nullptr || module_size < 8 ||
++      module_size > reb::kNativeArtifactMaxContentBytes) {
++    return;
++  }
++  ExecutionContext* execution_context = ToExecutionContext(context);
++  if (!execution_context || execution_context->IsContextDestroyed()) {
++    return;
++  }
++  // Only a live local document has the browser-side ownership needed here.
++  // Workers and other realms remain unsupported instead of being retargeted.
++  auto* window = DynamicTo<LocalDOMWindow>(execution_context);
++  if (!window || !window->GetFrame() || !window->document()) {
++    return;
++  }
++  const auto execution_context_id = StableExecutionContextId(*execution_context);
++  const auto frame_id = StableFrameId(*execution_context);
++  if (execution_context_id == 0 || frame_id == 0) {
++    return;
++  }
++  // Bound conversion work before allocating the UTF-8 copy, then bound bytes.
++  const String& url = execution_context->Url().GetString();
++  if (url.empty() || url.length() > reb::kNativeArtifactMaxUrlBytes) {
++    return;
++  }
++  const std::string source_url = url.Utf8();
++  if (source_url.empty() || source_url.size() > reb::kNativeArtifactMaxUrlBytes) {
++    return;
++  }
++  const base::UnguessableToken& document_token =
++      window->document()->Token().value();
++  sink.RecordNativeWasmDispatch(
++      execution_context_id, frame_id, source_url,
++      UNSAFE_BUFFERS(base::span(module_bytes, module_size)), function_index,
++      module_byte_offset, selector, table_count,
++      document_token.GetHighForSerialization(),
++      document_token.GetLowForSerialization());
++}
++
+ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+                             const v8::WasmModuleBytesOrigin origin,
+                             const std::uint8_t* bytes,
+@@ -1275,6 +1328,8 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+   isolate->SetWasmModuleCallback(WasmModuleOverride);
+   isolate->SetWasmInstanceCallback(WasmInstanceOverride);
+   isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
++  isolate->SetWasmBrTableDispatchCallback(CaptureWasmBrTableDispatch,
++                                        NativeWasmBrTableDispatchEnabled);
+   isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);
+   isolate->SetWasmCustomDescriptorsEnabledCallback(
+       WasmCustomDescriptorsEnabledCallback);

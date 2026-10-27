@@ -710,39 +710,45 @@ index ff05192..a898c22 100644
    std::unique_ptr<AssemblerBuffer> instr_buffer;
    uint32_t frame_slot_count = 0;
 diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
-index 61d23d6..12d172e 100644
+index 61d23d6..7e92a26 100644
 --- a/src/wasm/wasm-code-manager.cc
 +++ b/src/wasm/wasm-code-manager.cc
-@@ -644,8 +644,14 @@ std::tuple<int, bool, SourcePosition> WasmCode::GetInliningPosition(
+@@ -644,8 +644,17 @@ std::tuple<int, bool, SourcePosition> WasmCode::GetInliningPosition(
  }
  
  size_t WasmCode::EstimateCurrentMemoryConsumption() const {
 -  UPDATE_WHEN_CLASS_CHANGES(WasmCode, 112);
-+  UPDATE_WHEN_CLASS_CHANGES(WasmCode, 136);
++  UPDATE_WHEN_CLASS_CHANGES(WasmCode, 120);
    size_t result = sizeof(WasmCode);
-+  result += reb_guest_sites_.capacity() * sizeof(RebGuestSiteDescriptor);
-+  for (const auto &site : reb_guest_sites_) {
-+    result += site.locals.capacity() * sizeof(RebGuestLocalDescriptor);
-+    if (site.budget)
-+      result += sizeof(RebGuestDescriptorCharge);
++  if (reb_guest_sites_) {
++    result += sizeof(*reb_guest_sites_);
++    result += reb_guest_sites_->capacity() * sizeof(RebGuestSiteDescriptor);
++    for (const auto &site : *reb_guest_sites_) {
++      result += site.locals.capacity() * sizeof(RebGuestLocalDescriptor);
++      if (site.budget)
++        result += sizeof(RebGuestDescriptorCharge);
++    }
 +  }
    // For meta_data_.
    result += trapping_instructions_size_ + reloc_info_size_ +
              source_positions_size_ + inlining_positions_size_ +
-@@ -2805,6 +2811,8 @@ std::vector<UnpublishedWasmCode> NativeModule::AddCompiledCode(
+@@ -2805,6 +2814,11 @@ std::vector<UnpublishedWasmCode> NativeModule::AddCompiledCode(
              result.effect_handlers.as_vector(), result.frame_has_feedback_slot,
              this_code_space, jump_tables),
          std::move(result.assumptions));
-+    generated_code.back().code->reb_guest_sites_ =
-+        std::move(result.reb_guest_sites);
++    if (!result.reb_guest_sites.empty()) {
++      generated_code.back().code->reb_guest_sites_ =
++          std::make_unique<std::vector<RebGuestSiteDescriptor>>(
++              std::move(result.reb_guest_sites));
++    }
    }
    DCHECK_EQ(0, code_space.size());
  
 diff --git a/src/wasm/wasm-code-manager.h b/src/wasm/wasm-code-manager.h
-index 7227a1b..9e74de9 100644
+index 7227a1b..8b5fa50 100644
 --- a/src/wasm/wasm-code-manager.h
 +++ b/src/wasm/wasm-code-manager.h
-@@ -54,6 +54,49 @@ class DebugInfo;
+@@ -54,6 +54,51 @@ class DebugInfo;
  class NamesProvider;
  class NativeModule;
  struct WasmCompilationResult;
@@ -782,8 +788,10 @@ index 7227a1b..9e74de9 100644
 +    // Logical allocation payload, not allocator bookkeeping/RSS. Explicit
 +    // doubling below needs at most three site slots per retained site during
 +    // reallocation (old + new arrays), plus its separately allocated charge.
-+    constexpr size_t overhead =
-+        3 * sizeof(RebGuestSiteDescriptor) + sizeof(RebGuestDescriptorCharge);
++    // Conservatively charge the lazy vector owner per site (one per code).
++    constexpr size_t overhead = 3 * sizeof(RebGuestSiteDescriptor) +
++                                sizeof(RebGuestDescriptorCharge) +
++                                sizeof(std::vector<RebGuestSiteDescriptor>);
 +    if (locals > (kFunctionLimit - overhead) / sizeof(RebGuestLocalDescriptor))
 +      return 0;
 +    return overhead + locals * sizeof(RebGuestLocalDescriptor);
@@ -792,21 +800,25 @@ index 7227a1b..9e74de9 100644
  class WasmEngine;
  template <typename CacheKey>
  class WasmWrapperCache;
-@@ -220,6 +263,9 @@ class V8_EXPORT_PRIVATE WasmCode final {
+@@ -220,6 +265,11 @@ class V8_EXPORT_PRIVATE WasmCode final {
      return {inlining_positions().end(), deopt_data_size_};
    }
  
-+  const std::vector<RebGuestSiteDescriptor> &reb_guest_sites() const {
-+    return reb_guest_sites_;
++  base::Vector<const RebGuestSiteDescriptor> reb_guest_sites() const {
++    if (!reb_guest_sites_)
++      return {};
++    return base::VectorOf(*reb_guest_sites_);
 +  }
    int index() const { return index_; }
    // Anonymous functions are functions that don't carry an index.
    bool IsAnonymous() const { return index_ == kAnonymousFuncIndex; }
-@@ -502,6 +548,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
+@@ -502,6 +552,9 @@ class V8_EXPORT_PRIVATE WasmCode final {
    //  - source positions of size {source_positions_size_}
    //  - deopt data of size {deopt_data_size_}
    // Note that the trapping instructions come first to ensure alignment.
-+  std::vector<RebGuestSiteDescriptor> reb_guest_sites_;
++  // Keep the hot WasmCode object within its upstream 128-byte size limit.
++  // No owner allocation exists when guest metadata was not admitted.
++  std::unique_ptr<std::vector<RebGuestSiteDescriptor>> reb_guest_sites_;
    std::unique_ptr<const uint8_t[]> meta_data_;
    const uint32_t instructions_size_;
    const uint32_t reloc_info_size_;
@@ -844,13 +856,14 @@ index 5e62f08..2d49d36 100644
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c541..4e2248b 100644
+index 7f4c541..c8d7eec 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
-@@ -6,13 +6,16 @@
+@@ -6,13 +6,17 @@
  #include <stdlib.h>
  #include <string.h>
  
++#include "include/v8-function.h"
 +#include "src/api/api-inl.h"
  #include "src/base/functional/function-ref.h"
  #include "src/base/overflowing-math.h"
@@ -864,7 +877,7 @@ index 7f4c541..4e2248b 100644
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1358,360 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1359,364 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1179,6 +1192,7 @@ index 7f4c541..4e2248b 100644
 +
 +TEST(RebNativeGuestZeroLocalDescriptorBudget) {
 +  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  static_assert(sizeof(WasmCode) <= 128);
 +  WasmCodeRefScope code_scope;
 +  WasmRunner<int32_t> admitted(TestExecutionTier::kLiftoff);
 +  admitted.Build(
@@ -1191,7 +1205,10 @@ index 7f4c541..4e2248b 100644
 +  const size_t charge = RebGuestSiteDescriptor::StorageBudget(0);
 +  CHECK_GT(charge, sizeof(RebGuestSiteDescriptor));
 +  CHECK_EQ(size_t{0}, RebGuestSiteDescriptor::StorageBudget(SIZE_MAX));
-+  size_t retained = sites.capacity() * sizeof(RebGuestSiteDescriptor);
++  // Explicit doubling retains less than twice the live site count, plus the
++  // lazily allocated vector owner; the charge also covers transient overlap.
++  size_t retained = 2 * sites.size() * sizeof(RebGuestSiteDescriptor) +
++                    sizeof(std::vector<RebGuestSiteDescriptor>);
 +  for (const auto &site : sites) {
 +    CHECK(site.locals.empty());
 +    CHECK_NOT_NULL(site.budget);

@@ -12439,10 +12439,10 @@
             "enum": [
               "ready",
               "idle",
-              "debugger_unavailable",
+              "native_capture_unavailable",
               "not_live_capture"
             ],
-            "description": "Whether this process is the ready live session. ready requires capture_mode live and an attached debugger, which no longer exists since CDP was removed, so a live backend reports debugger_unavailable. idle is an idle backend. not_live_capture is any other mode, including demo. This is not authorization or a completeness claim."
+            "description": "Whether this process is the ready live session. ready requires capture_mode live and a connected native capture broker; native_capture_unavailable is live capture whose broker is disconnected. idle is an idle backend. not_live_capture is any other mode, including demo. This is not authorization or a completeness claim."
           },
           "generation": {
             "$ref": "#/components/schemas/SafeInteger",
@@ -12694,6 +12694,7 @@
           "command_outcome_unknown",
           "application_failed",
           "idle_backend",
+          "native_capture_unavailable",
           "debugger_unavailable"
         ],
         "description": "Stable bounded application reason. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."

@@ -27,22 +27,15 @@ fn precondition_instance(value: &Value) -> Value {
         .map(|id| json!(id))
         .unwrap_or(Value::Null)
 }
-/// Answers whether this process is the ready live session. Availability only:
-/// it does not authorize effects or claim capture completeness.
-pub fn live_admission(
-    capture_mode: &str,
-    debugger_state: &str,
-    devtools_configured: bool,
-) -> &'static str {
-    let attached = matches!(debugger_state, "running" | "paused");
-    if capture_mode == "live" && attached {
-        "ready"
-    } else if !attached && (capture_mode == "live" || devtools_configured) {
-        "debugger_unavailable"
-    } else if capture_mode == "idle" {
-        "idle"
-    } else {
-        "not_live_capture"
+/// Answers whether this process is the ready live session: live capture mode
+/// with its native event broker connected. Availability only: it does not
+/// authorize effects or claim capture completeness.
+pub fn live_admission(capture_mode: &str, broker_connected: bool) -> &'static str {
+    match capture_mode {
+        "live" if broker_connected => "ready",
+        "live" => "native_capture_unavailable",
+        "idle" => "idle",
+        _ => "not_live_capture",
     }
 }
 fn url_label(value: &Value) -> Value {
@@ -198,18 +191,11 @@ mod tests {
         assert!(summary["target"].is_null());
         assert_eq!(summary["wasm_scripts"], json!([]));
         assert!(retired_debugger("instance-1")["instance_id"].is_null());
-        assert_eq!(live_admission("live", "running", false), "ready");
-        assert_eq!(live_admission("live", "paused", true), "ready");
-        assert_eq!(live_admission("idle", "unavailable", false), "idle");
-        assert_eq!(
-            live_admission("idle", "waiting", true),
-            "debugger_unavailable"
-        );
-        assert_eq!(
-            live_admission("live", "unavailable", false),
-            "debugger_unavailable"
-        );
-        assert_eq!(live_admission("demo", "running", false), "not_live_capture");
+        assert_eq!(live_admission("live", true), "ready");
+        assert_eq!(live_admission("live", false), "native_capture_unavailable");
+        assert_eq!(live_admission("idle", true), "idle");
+        assert_eq!(live_admission("idle", false), "idle");
+        assert_eq!(live_admission("demo", true), "not_live_capture");
         assert!(url_label(&json!("data:text/plain,secret_canary")).is_null());
         assert!(url_label(&json!("wasm://wasm/abcd?token=secret_canary")).is_null());
     }

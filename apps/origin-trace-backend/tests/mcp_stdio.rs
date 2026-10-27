@@ -817,7 +817,7 @@ impl LiveApi {
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}");
         let health = Arc::new(Mutex::new(json!({
-            "status": "ok", "instance_id": "1:100", "capture_mode": "live", "debugger_state": "running"
+            "status": "ok", "instance_id": "1:100", "capture_mode": "live", "broker_connected": true
         })));
         let paths = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -892,11 +892,11 @@ fn serve_live_request(
 }
 fn fixture_session_context(health: &Value) -> Value {
     let capture = health["capture_mode"].as_str().unwrap_or("unknown");
-    let debugger = health["debugger_state"].as_str().unwrap_or("unknown");
-    let admission = if capture == "live" && matches!(debugger, "running" | "paused") {
+    let broker = health["broker_connected"].as_bool() == Some(true);
+    let admission = if capture == "live" && broker {
         "ready"
     } else if capture == "live" {
-        "debugger_unavailable"
+        "native_capture_unavailable"
     } else if capture == "idle" {
         "idle"
     } else {
@@ -907,8 +907,8 @@ fn fixture_session_context(health: &Value) -> Value {
         "instance_id": health["instance_id"],
         "endpoint": "http://127.0.0.1:9",
         "capture_mode": capture,
-        "debugger_state": debugger,
-        "broker_connected": false,
+        "debugger_state": "unavailable",
+        "broker_connected": broker,
         "live_admission": admission,
         "generation": 0,
         "debugger_protocol_version": 1,
@@ -1007,7 +1007,7 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
         3,
         "reconnect, preflight and call use new endpoint"
     );
-    *second.health.lock().unwrap() = json!({"status": "ok", "instance_id": "1:100", "capture_mode": "idle", "debugger_state": "unavailable", "store": "PRIVATE_PATH"});
+    *second.health.lock().unwrap() = json!({"status": "ok", "instance_id": "1:100", "capture_mode": "idle", "broker_connected": true, "store": "PRIVATE_PATH"});
     let idle = reconnected.request("tools/call", json!({"name": "get_events"}));
     assert_eq!(idle["result"]["isError"], true, "{idle}");
     assert_eq!(idle["result"]["structuredContent"]["code"], "idle_backend");
@@ -1015,7 +1015,7 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
         &second.url,
         "code=idle_backend",
         "capture_mode=idle",
-        "debugger_state=unavailable",
+        "broker_connected=true",
     ] {
         assert!(tool_text(&idle).contains(expected), "{idle}");
     }
@@ -1064,15 +1064,15 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
             .count(),
         1
     );
-    *second.health.lock().unwrap() = json!({"status": "ok", "instance_id": "1:100", "capture_mode": "live", "debugger_state": "waiting"});
+    *second.health.lock().unwrap() = json!({"status": "ok", "instance_id": "1:100", "capture_mode": "live", "broker_connected": false});
     let unattached = reconnected.request("tools/call", json!({"name": "get_events"}));
     assert_eq!(
-        unattached["result"]["structuredContent"]["code"], "debugger_unavailable",
+        unattached["result"]["structuredContent"]["code"], "native_capture_unavailable",
         "{unattached}"
     );
-    assert!(tool_text(&unattached).contains("debugger_state=waiting"));
+    assert!(tool_text(&unattached).contains("broker_connected=false"));
     let before_replacement = second.paths.lock().unwrap().len();
-    *second.health.lock().unwrap() = json!({"status": "ok", "capture_mode": "live", "debugger_state": "running", "instance_id": "2:200"});
+    *second.health.lock().unwrap() = json!({"status": "ok", "capture_mode": "live", "broker_connected": true, "instance_id": "2:200"});
     let replacement = reconnected.request("tools/call", json!({"name": "get_events"}));
     assert_eq!(replacement["result"]["isError"], true, "{replacement}");
     assert!(tool_text(&replacement).contains("backend instance changed"));
@@ -1099,16 +1099,17 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
 
 #[test]
 fn live_requirement_rejects_idle_unknown_and_disconnected_health_without_leaks() {
-    for (capture, debugger, accepted) in [
-        ("live", "running", true),
-        ("live", "paused", true),
-        ("idle", "unavailable", false),
-        ("demo", "running", false),
-        ("live", "waiting", false),
-        ("live", "PRIVATE_STATE", false),
-        ("PRIVATE_MODE", "running", false),
+    // Live means a live-mode backend with its native event broker connected.
+    for (capture, broker, accepted) in [
+        ("live", json!(true), true),
+        ("idle", json!(true), false),
+        ("demo", json!(true), false),
+        ("live", json!(false), false),
+        ("live", json!("PRIVATE_STATE"), false),
+        ("live", Value::Null, false),
+        ("PRIVATE_MODE", json!(true), false),
     ] {
-        let health = serde_json::to_vec(&json!({"status": "ok", "instance_id": "1:100", "capture_mode": capture, "debugger_state": debugger, "store": "PRIVATE_PATH"})).unwrap();
+        let health = serde_json::to_vec(&json!({"status": "ok", "instance_id": "1:100", "capture_mode": capture, "broker_connected": broker, "debugger_state": "running", "store": "PRIVATE_PATH"})).unwrap();
         let url = serve_http("200 OK", &health);
         let output = mcp_output(&[
             "mcp",
@@ -1121,7 +1122,7 @@ fn live_requirement_rejects_idle_unknown_and_disconnected_health_without_leaks()
         assert_eq!(
             output.status.success(),
             accepted,
-            "{capture} {debugger}: {output:?}"
+            "{capture} {broker}: {output:?}"
         );
         assert!(output.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1129,11 +1130,11 @@ fn live_requirement_rejects_idle_unknown_and_disconnected_health_without_leaks()
         if !accepted {
             assert!(stderr.contains(&url), "{stderr}");
             assert!(stderr.contains("capture_mode="), "{stderr}");
-            assert!(stderr.contains("debugger_state="), "{stderr}");
+            assert!(stderr.contains("broker_connected="), "{stderr}");
             let code = if capture == "idle" {
                 "code=idle_backend"
             } else if capture == "live" {
-                "code=debugger_unavailable"
+                "code=native_capture_unavailable"
             } else {
                 "code=state_conflict"
             };

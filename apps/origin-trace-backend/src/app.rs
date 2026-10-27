@@ -343,13 +343,13 @@ impl App {
                     self.port
                 ));
                 value["capture_mode"] = json!(self.options.capture_mode());
+                let broker_connected =
+                    self.options.socket.is_some() && self.broker_connected().await;
                 value["live_admission"] = json!(session_context::live_admission(
                     self.options.capture_mode(),
-                    value["debugger_state"].as_str().unwrap_or("unavailable"),
-                    false,
+                    broker_connected,
                 ));
-                value["broker_connected"] =
-                    json!(self.options.socket.is_some() && self.broker_connected().await);
+                value["broker_connected"] = json!(broker_connected);
                 value["allow_effects"] = Value::Null;
                 value["effects_admission"] = json!("caller_specific_unknown");
                 value["limits"] = json!({"items_per_inventory":session_context::ITEMS,"url_policy":"origin_or_wasm_label","title_policy":"omitted","artifact_linkage":"not_inferred"});

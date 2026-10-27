@@ -1083,7 +1083,7 @@ pub async fn serve(
                         "error": refusal.message,
                         "details": {
                             "capture_mode": refusal.capture_mode,
-                            "debugger_state": refusal.debugger_state
+                            "broker_connected": refusal.broker_connected
                         }
                     });
                     write_message(&rpc_result(&id, payload))?;

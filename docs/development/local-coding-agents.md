@@ -89,16 +89,17 @@ session-id selection. A native handshake URL containing `native=1` is not the
 API root.
 
 `reb-api mcp` checks `/api/health` before reading stdio. With `--require-live`,
-it additionally requires `capture_mode=live`, `debugger_state=running` or
-`paused`, and a supported backend `instance_id`; it rechecks before valid tool
-calls. An idle, unavailable, missing-state, or older backend fails closed with
-the selected endpoint URL and bounded capture/debugger states, rather than
+it additionally requires `capture_mode=live`, `broker_connected=true` (the
+native capture broker is connected), and a supported backend `instance_id`; it
+rechecks before valid tool calls. An idle, disconnected, missing-state, or older
+backend fails closed with the selected endpoint URL and bounded capture/broker
+states, rather than
 empty artifacts. The health document and local store paths are not printed.
 A live health result is not capture completeness, target identity, or permission
 to share evidence. Missing/invalid endpoints and failed health checks never
 trigger port scans, alternate-session searches, or automatic backend startup.
-Startup refusal includes `code=idle_backend`, `code=debugger_unavailable`, or
-`code=state_conflict` with the endpoint URL and bounded capture/debugger states.
+Startup refusal includes `code=idle_backend`, `code=native_capture_unavailable`,
+or `code=state_conflict` with the endpoint URL and bounded capture/broker states.
 
 After a live connection is up, call `get_session_context` before other tools.
 If that same connection later leaves the ready state, other tools fail with
@@ -468,7 +469,7 @@ available through
 `reb-api call get_session_context --read-only --endpoint-file /path/to/selected.endpoint`.
 Fresh wrapper configs from `scripts/reb-api-mcp.sh --print-config` use the
 canonical live file and `--require-live` for all five clients. It reports
-`live_admission` (`ready`, `idle`, `debugger_unavailable`, or
+`live_admission` (`ready`, `idle`, `native_capture_unavailable`, or
 `not_live_capture`), capture mode, the same `instance_id` as `/api/health` and
 `X-REB-Expected-Instance`, and a bounded retained-artifact inventory. It does
 not fetch bytecode or reconnect a browser. Its version 1 debugger fields are
@@ -479,14 +480,13 @@ fixed retirement values since CDP was removed: `debugger_state` is
 mutate a target or share captures. Direct HTTP/CLI reads return `null` because
 those clients have no MCP admission state. Existing confirmations, ownership,
 and effects gates remain required. `live_admission` is availability only.
-`ready` means capture is live and the debugger is running or paused, which no
-longer happens since CDP was removed. `idle` means an idle backend.
-`debugger_unavailable` means live capture without an attached debugger, which is
-every live backend now. `not_live_capture` covers demo and any other non-live
-mode. An idle endpoint remains useful for stored evidence and local cleanup.
-`--require-live` uses `idle_backend` for idle capture, `debugger_unavailable`
-for a live capture, and `state_conflict` for demo or unknown health, so it
-currently refuses every backend. A capture stop whose
+`ready` means capture is live and the native capture broker is connected.
+`idle` means an idle backend. `native_capture_unavailable` means live capture
+whose broker is disconnected. `not_live_capture` covers demo and any other
+non-live mode. An idle endpoint remains useful for stored evidence and local
+cleanup. `--require-live` uses `idle_backend` for idle capture,
+`native_capture_unavailable` for a disconnected live capture, and
+`state_conflict` for demo or unknown health. A capture stop whose
 broker is disconnected returns `dependency_unavailable` and does not report
 success. Correct the endpoint or attachment explicitly rather than automatically
 retrying mutations.

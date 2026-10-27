@@ -451,7 +451,7 @@ fn resolve_mcp_endpoint(
 struct LiveRefusal {
     code: &'static str,
     capture_mode: String,
-    debugger_state: String,
+    broker_connected: Option<bool>,
     message: String,
 }
 struct McpHealth {
@@ -535,42 +535,35 @@ async fn confirm_mcp_health(
     Ok(health.instance_id)
 }
 
+// Live means native capture: a live-mode backend whose native event broker is
+// connected. The CDP debugger fields in health are retired and never consulted.
 fn live_refusal(base: &str, value: &Value) -> Option<LiveRefusal> {
     let capture = value["capture_mode"]
         .as_str()
         .filter(|mode| matches!(*mode, "live" | "idle" | "demo"))
         .unwrap_or("unknown");
-    let debugger = value["debugger_state"]
-        .as_str()
-        .filter(|state| {
-            matches!(
-                *state,
-                "running"
-                    | "paused"
-                    | "unavailable"
-                    | "disconnected"
-                    | "connecting"
-                    | "waiting"
-                    | "crashed"
-            )
-        })
-        .unwrap_or("unknown");
-    if capture == "live" && matches!(debugger, "running" | "paused") {
+    let broker = value["broker_connected"].as_bool();
+    if capture == "live" && broker == Some(true) {
         return None;
     }
     let code = if capture == "idle" {
         "idle_backend"
     } else if capture == "live" {
-        "debugger_unavailable"
+        "native_capture_unavailable"
     } else {
         "state_conflict"
+    };
+    let broker_label = match broker {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
     };
     Some(LiveRefusal {
         code,
         capture_mode: capture.to_owned(),
-        debugger_state: debugger.to_owned(),
+        broker_connected: broker,
         message: format!(
-            "code={code} Live capture is unavailable at {base}: capture_mode={capture}, debugger_state={debugger}. Reconnect after the intended live debugger is ready, or explicitly select a stored-evidence endpoint without --require-live. No tool request was sent."
+            "code={code} Live capture is unavailable at {base}: capture_mode={capture}, broker_connected={broker_label}. Reconnect after the native capture session is connected to its event broker, or explicitly select a stored-evidence endpoint without --require-live. No tool request was sent."
         ),
     })
 }

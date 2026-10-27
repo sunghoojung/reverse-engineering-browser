@@ -7034,5 +7034,5 @@ async fn disconnected_capture_stop_is_not_reported_as_success() {
         .unwrap();
     assert_eq!(context["broker_connected"], false);
     assert_eq!(context["capture_mode"], "live");
-    assert_eq!(context["live_admission"], "debugger_unavailable");
+    assert_eq!(context["live_admission"], "native_capture_unavailable");
 }

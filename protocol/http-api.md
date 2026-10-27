@@ -84,10 +84,10 @@ This closes replacement at the same port between health and action. It is not
 an authentication token, permission grant, or a document-generation selector;
 existing action-specific target/document ownership checks remain required. A
 legacy backend without a health identity cannot use `--require-live`.
-Live mode requires `capture_mode=live` and a running
-or paused debugger before advertising tools and before valid tool dispatch.
-CDP was removed, so `debugger_state` is always `unavailable` and
-`--require-live` currently refuses every backend; connect without it.
+Live mode requires `capture_mode=live` and `broker_connected=true` (the native
+capture broker is connected) before advertising tools and before valid tool
+dispatch. The retired `debugger_state` field is always `unavailable` and is not
+consulted.
 Diagnostics name the loopback endpoint and allowlisted states, never the health
 body's evidence paths. Explicit stored-evidence connections can omit the live
 requirement. See [connection and restart behavior](../docs/development/local-coding-agents.md#select-the-endpoint).
@@ -289,15 +289,15 @@ replace the [advisory effects and common guards](#execution-metadata).
 
 Invalid action bodies return schema-derived `allowed_actions` and, where
 unambiguous, `missing_fields` inside details. Submitted values are not echoed.
-`idle_backend` is an idle process. `debugger_unavailable` means live admission
-needs an attached debugger, which no longer exists since CDP was removed.
+`idle_backend` is an idle process. `native_capture_unavailable` means a live
+backend whose native capture broker is not connected.
 `live_admission` on session context uses the same distinction and adds
 `not_live_capture` for demo and other non-live modes. The retired debugger
 actions and their `x-reb-requires-live-target` annotations were removed with
 them. A disconnected capture
 broker cannot report a newly requested stop as successful
 (`dependency_unavailable`). `--require-live` MCP connections refuse other tools
-with `idle_backend`, `debugger_unavailable`, or `state_conflict` before
+with `idle_backend`, `native_capture_unavailable`, or `state_conflict` before
 dispatch. `get_session_context` remains readable on that connection until the
 endpoint file or instance identity changes, which retires the connection
 instead of retargeting the call.

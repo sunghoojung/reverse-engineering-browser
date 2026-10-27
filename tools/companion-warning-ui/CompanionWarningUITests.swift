@@ -54,8 +54,8 @@ final class CompanionWarningUITests: XCTestCase {
                   "The inert browser must reach the real startup failure alert: " + app.debugDescription)
     let stoppedBrowser = app.staticTexts.matching(NSPredicate(
       format: "label CONTAINS %@ OR value CONTAINS %@",
-      "Brave stopped before its debugger endpoint became ready",
-      "Brave stopped before its debugger endpoint became ready")).firstMatch
+      "Brave stopped during native startup",
+      "Brave stopped during native startup")).firstMatch
     XCTAssertTrue(stoppedBrowser.exists,
                   "Failure must come from the owned browser exiting, not a missing helper: " + app.debugDescription)
     // NSAlert also exposes a Touch Bar Retry button; target only the real dialog.

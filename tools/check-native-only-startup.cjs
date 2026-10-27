@@ -91,6 +91,14 @@ async function main() {
   assert(text.includes('4294967295'));
   assert(text.includes('default arm'));
   assert(text.includes('No host causality is inferred'));
+  context.nativeGuestStartupFixture = {native_guest_sample_count: 1, native_guest_samples: [{
+    instruction_pointer: 7, opcode: 42, instance_id: '18446744073709551615', interpretation: 'explicit-adapter'
+  }]};
+  const guestText = vm.runInContext('renderNativeWasmObservations(nativeGuestStartupFixture).textContent', context);
+  assert(guestText.includes('Native guest state (adapter interpreted)'));
+  assert(guestText.includes('PC 7 bytes'));
+  assert(guestText.includes('18446744073709551615'));
+  assert(guestText.includes('explicit-adapter'));
   await nextTurn();
   await nextTurn();
   assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');

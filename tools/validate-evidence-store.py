@@ -106,6 +106,8 @@ EVENT_TYPES = {
     "vm_finding",
     "vm_dispatch_sample",
     "wasm_dispatch_observation",
+    "wasm_guest_dispatch",
+    "wasm_guest_invocation",
 }
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)
@@ -213,6 +215,32 @@ def validate_event(event: object, line_number: int) -> None:
         or any(payload[24:])
     ):
         raise ValueError(f"line {line_number}: native Wasm dispatch observation is invalid")
+    if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):
+        if (protocol_version != 3 or event["category"] != "vm" or event["flags"] != 0
+                or event["payload_truncated"] or len(payload) != 128
+                or payload[:4] != bytes((1, 0, 128, 0))
+                or any(event[k] == "0" for k in ("session_id", "sequence_number", "monotonic_time_ns", "frame_id", "artifact_id"))
+                or not 1 <= event["process_id"] <= 0xFFFFFFFF
+                or not 1 <= event["thread_id"] <= 0xFFFFFFFF):
+            raise ValueError(f"line {line_number}: native guest envelope invalid")
+
+        def at(offset: int, size: int) -> int:
+            return int.from_bytes(payload[offset:offset + size], "little")
+
+        invalid = at(4, 4) >= 16777216
+        if event["type"] == "wasm_guest_invocation":
+            invalid |= (event["parent_event_id"] != "0" or at(8, 8) == 0 or at(16, 8) == 0
+                        or at(24, 8) == 0 or at(24, 8) == int(event["artifact_id"])
+                        or at(64, 8) == at(16, 8) or not any(payload[32:64]) or any(payload[72:]))
+        else:
+            invalid |= (not 0 < int(event["parent_event_id"]) < int(event["sequence_number"])
+                        or not 8 <= at(8, 4) < 16777216 or at(16, 4) >= 16777216
+                        or at(20, 4) >= 256 or at(24, 8) == 0 or at(32, 8) == 0
+                        or at(56, 8) == 0 or at(56, 8) == int(event["artifact_id"])
+                        or not 0 < at(72, 4) <= 65536 or at(40, 8) >= at(72, 4)
+                        or at(64, 8) + at(72, 4) > 0xFFFFFFFFFFFFFFFF or not any(payload[96:]))
+        if invalid:
+            raise ValueError(f"line {line_number}: native guest payload invalid")
     lowered_payload = payload.lower()
     if any(marker in lowered_payload for marker in SENSITIVE_PAYLOAD_MARKERS):
         raise ValueError(f"line {line_number}: payload contains sensitive HTTP metadata")

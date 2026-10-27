@@ -216,3 +216,34 @@ jobs:
           path: build/Origin-Trace-macos-preview.zip
           if-no-files-found: error
           retention-days: 3
+
+  public-quickjs-binding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install pinned public interpreter without lifecycle scripts
+        run: npm ci --prefix tools/quickjs-native-fixture --ignore-scripts --no-audit --no-fund
+      - name: Verify public artifact and normal interpreter behavior (not native capture)
+        run: |
+          node tools/quickjs-native-fixture/verify.mjs
+          node tools/quickjs-native-fixture/exercise-quickjs.mjs
+      - name: Verify source-backed adapter against actual public Wasm
+        run: |
+          REB_QUICKJS_WASM="$PWD/tools/quickjs-native-fixture/node_modules/@jitl/quickjs-wasmfile-debug-sync/dist/emscripten-module.wasm" \
+            cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml \
+              --lib native_guest_binding::tests::pinned_public_module_and_corruption -- --ignored
+      - name: Verify authored native ABI records against the pinned interpreter binding
+        run: |
+          make native-wasm-guest-golden
+          REB_QUICKJS_WASM="$PWD/tools/quickjs-native-fixture/node_modules/@jitl/quickjs-wasmfile-debug-sync/dist/emscripten-module.wasm" \
+          REB_NATIVE_GUEST_GOLDEN="$PWD/build/reb-native-wasm-guest-golden" \
+          REB_NATIVE_GUEST_WORKSPACE_OUTPUT="$PWD/build/native-quickjs-workspace.json" \
+            cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml \
+              --lib native_guest_quickjs_cpp_golden -- --ignored
+          REB_NATIVE_GUEST_WORKSPACE_INPUT="$PWD/build/native-quickjs-workspace.json" \
+          REB_NATIVE_GUEST_GOLDEN="$PWD/build/reb-native-wasm-guest-golden" \
+            node tools/check-native-guest-wire.mjs

@@ -14,9 +14,13 @@
 
 int main(int argc, char** argv) {
   std::string_view mode = "default", recipe;
-  bool host_fixture = false;
+  bool host_fixture = false, quickjs_fixture = false;
   for (int i = 1; i < argc; ++i) {
     const std::string_view argument = argv[i];
+    if (argument == "--quickjs-fixture") {
+      quickjs_fixture = true;
+      continue;
+    }
     if (argument == "--host-fixture") {
       host_fixture = true;
       continue;
@@ -71,6 +75,16 @@ int main(int argc, char** argv) {
     invocation.function_index = 1;
     sample.function_index = 1;
     sample.module_byte_offset = 58;
+  }
+  if (quickjs_fixture) {
+    invocation.function_index = 414;
+    sample.function_index = 414;
+    sample.module_byte_offset = 0x20677;
+    sample.table_count = 244;
+    sample.selector = sample.opcode;
+    sample.pc_local_index = 320;
+    sample.raw_pc_bits = 4097;
+    sample.memory_base = 4096;
   }
   bool valid_invocation = true, valid_sample = true;
   if (mode == "default") {

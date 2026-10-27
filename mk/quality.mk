@@ -12,7 +12,7 @@ magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decode
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
 
-check: native-wasm-dispatch-golden all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
+check: native-wasm-guest-golden native-wasm-dispatch-golden all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	rm -f "$(abspath $(BUILD_DIR)/native-wasm-workspace.json)"
 	REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
@@ -21,6 +21,13 @@ check: native-wasm-dispatch-golden all heap-snapshot-check native-artifact-captu
 	REB_NATIVE_WASM_WORKSPACE_INPUT="$(abspath $(BUILD_DIR)/native-wasm-workspace.json)" \
 		REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
 		node tools/check-vm-opcode-workspace-ui.mjs --fixture-only
+	rm -f "$(abspath $(BUILD_DIR)/native-guest-workspace.json)" "$(abspath $(BUILD_DIR)/native-guest-workspace.json).host-links.json"
+	REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
+		REB_NATIVE_GUEST_WORKSPACE_OUTPUT="$(abspath $(BUILD_DIR)/native-guest-workspace.json)" \
+		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml native_guest_cpp_golden -- --ignored
+	REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
+		REB_NATIVE_GUEST_WORKSPACE_INPUT="$(abspath $(BUILD_DIR)/native-guest-workspace.json)" \
+		node tools/check-native-guest-wire.mjs
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
 		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml owned_vm_real_helper -- --ignored

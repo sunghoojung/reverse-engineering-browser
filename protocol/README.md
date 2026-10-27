@@ -44,6 +44,10 @@ plans only. Browser/Repeater execution is removed and its CLI fails closed.
 [VM analysis packs v1](vm-analysis-pack-v1.md) defines inert relevance overlays
 and conservative offline comparison of exact workspace v2 documents.
 
+[Native Wasm guest observations v1](native-wasm-guest-v1.md) defines native
+adapter-bound PC/memory observations, exact synchronous host parents, and explicit
+verification limits.
+
 ## Two representations
 
 1. Native hot paths use the fixed 320-byte C++ `EventRecord` in

@@ -351,6 +351,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             "response_body",
             "canvas_data_url",
             "bytecode_buffer",
+            "wasm_guest_adapter",
         ]
         .contains(&artifact["kind"].as_str().unwrap_or(""))
         && artifact["url"].as_str().is_some_and(|s| !s.is_empty())
@@ -390,8 +391,22 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 "canvas_to_data_url",
                 "runtime_typed_array",
                 "runtime_allocating_script",
+                "native_wasm_guest",
             ]
             .contains(&origin)
+            || (artifact["kind"] == "wasm_guest_adapter" && origin != "native_wasm_guest")
+            || (origin == "native_wasm_guest"
+                && (!matches!(
+                    artifact["kind"].as_str(),
+                    Some("bytecode_buffer" | "wasm_guest_adapter")
+                ) || [
+                    "frame_id",
+                    "parent_artifact_id",
+                    "creator_event_id",
+                    "execution_context_id",
+                ]
+                .iter()
+                .any(|k| !canonical(&artifact[*k], 64, true))))
             || (matches!(origin, "dynamic_javascript" | "runtime_allocating_script")
                 && (artifact["kind"] != "javascript" || artifact["execution_context_id"] == "0"))
             || (origin.starts_with("webassembly_")
@@ -409,6 +424,9 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             ));
         }
     } else {
+        if artifact["kind"] == "wasm_guest_adapter" {
+            return Err(Error::new(500, "Native guest adapter origin is missing"));
+        }
         artifact["execution_context_id"] = json!("0");
         artifact["capture_origin"] = json!("unknown");
     }
@@ -986,7 +1004,9 @@ mod frozen_tests {
         let (second, _) = Store::event(&path, false).unwrap();
         assert_eq!(Store::event(&path, true).err().unwrap().status, 409);
         assert_eq!(
-            super::clear_stores(&[path.clone()]).unwrap_err().status,
+            super::clear_stores(std::slice::from_ref(&path))
+                .unwrap_err()
+                .status,
             409
         );
         assert_eq!(fs::read(&path).unwrap(), b"one\ntwo\n");
@@ -995,7 +1015,7 @@ mod frozen_tests {
         let (exclusive, _) = Store::event(&path, true).unwrap();
         assert_eq!(Store::event(&path, false).err().unwrap().status, 409);
         drop(exclusive);
-        super::clear_stores(&[path.clone()]).unwrap();
+        super::clear_stores(std::slice::from_ref(&path)).unwrap();
         assert!(fs::read(path).unwrap().is_empty());
     }
     #[test]

@@ -2018,7 +2018,7 @@ const capturedExportPanel = installCapturedExportDialog({
       function renderNativeWasmObservations(workspace) {
         const panel = document.createElement('section');
         panel.append(textElement('h4', '', 'Native Wasm dispatch observations'),
-          textElement('p', 'vm-workspace-notice', 'Physical module offsets and selectors are not guest-interpreter PCs or recovered guest opcodes. No host causality is inferred.'));
+          textElement('p', 'vm-workspace-notice', 'Physical module offsets and selectors are not guest-interpreter PCs or recovered guest opcodes. No host causality is inferred from physical-only rows.'));
         const rows = workspace.native_wasm_observations ?? [];
         appendVmPagedRows(panel, rows, 'native Wasm observations', row => {
           const item = document.createElement('details'); item.className = 'vm-effect-row';
@@ -2029,6 +2029,16 @@ const capturedExportPanel = installCapturedExportDialog({
         if (!rows.length) panel.append(textElement('p', 'vm-selection-empty', 'No native Wasm dispatch observations retained.'));
         if ((workspace.native_wasm_observation_count ?? 0) > rows.length) panel.append(textElement('p', 'vm-workspace-notice',
           `${workspace.native_wasm_observation_count - rows.length} accepted observations are outside the retained window.`));
+        const guestRows = workspace.native_guest_samples ?? [];
+        panel.append(textElement('h4', '', 'Native guest state (adapter interpreted)'),
+          textElement('p', 'vm-workspace-notice', 'Actual typed local values and memory bytes are retained. Explicit adapters interpret those values; verified-dataflow labels require a reviewed exact module binding. Guest positions on host links require verified guest semantics plus an exact synchronous retained parent.'));
+        appendVmPagedRows(panel, guestRows, 'native guest samples', row => {
+          const item = document.createElement('details'); item.className = 'vm-effect-row';
+          item.append(textElement('summary', '', `PC ${row.instruction_pointer} bytes · opcode ${row.opcode} · instance ${row.instance_id} · ${row.interpretation}`),
+            textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(row,null,2)));
+          return item;
+        });
+        if (!guestRows.length) panel.append(textElement('p','vm-selection-empty','No native guest samples retained.'));
         return panel;
       }
 

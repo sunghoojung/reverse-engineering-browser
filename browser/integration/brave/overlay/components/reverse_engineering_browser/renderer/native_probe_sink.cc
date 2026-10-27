@@ -2377,6 +2377,27 @@ struct GuestThreadState final {
   std::array<GuestDocumentBinding, 16> documents{};
 };
 thread_local GuestThreadState guest_thread;
+thread_local NativeGuestSnapshot guest_snapshot;
+thread_local bool guest_snapshot_busy = false;
+thread_local bool guest_snapshot_cancelled = false;
+struct GuestSnapshotGuard final {
+  GuestSnapshotGuard() noexcept {
+    guest_snapshot_busy = true;
+    guest_snapshot_cancelled = false;
+  }
+  ~GuestSnapshotGuard() { guest_snapshot_busy = false; }
+  GuestSnapshotGuard(const GuestSnapshotGuard&) = delete;
+  GuestSnapshotGuard& operator=(const GuestSnapshotGuard&) = delete;
+};
+void ResetGuestThread(std::uint64_t generation) noexcept {
+  // Reset one small record at a time, not a 42 KiB aggregate stack temporary.
+  for (auto& state : guest_thread.invocations)
+    state = {};
+  for (auto& document : guest_thread.documents)
+    document = {};
+  guest_thread.generation = generation;
+}
+
 }  // namespace
 void NativeProbeSink::NoteNativeGuestOmission(std::uint64_t generation,
                                               std::uint64_t frame,
@@ -2400,8 +2421,7 @@ void NativeProbeSink::NoteNativeGuestOmission(std::uint64_t generation,
 void NativeProbeSink::InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (guest_thread.generation != generation) {
-    guest_thread = {};
-    guest_thread.generation = generation;
+    ResetGuestThread(generation);
   }
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   if (!adapter || view.function_index != adapter->function_index ||
@@ -2466,8 +2486,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                                             std::uint64_t document_token_low) noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (guest_thread.generation != generation) {
-    guest_thread = {};
-    guest_thread.generation = generation;
+    ResetGuestThread(generation);
   }
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   // A helper br_table in an opcode handler is not a guest instruction boundary.
@@ -2544,8 +2563,14 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   if (state->frame != frame_id || state->document_high != document_token_high ||
       state->document_low != document_token_low)
     return;
-  NativeGuestSnapshot snapshot;
-  if (!ResolveNativeGuestSnapshot(*adapter, view, snapshot)) {
+  if (guest_snapshot_busy) {
+    guest_snapshot_cancelled = true;
+    NoteNativeGuestOmission(generation, frame_id, 2, "native_guest_snapshot_reentry");
+    return;
+  }
+  GuestSnapshotGuard snapshot_guard;
+  auto& snapshot = guest_snapshot;
+  if (!ResolveNativeGuestSnapshot(*adapter, view, snapshot) || guest_snapshot_cancelled) {
     NoteNativeGuestOmission(generation, frame_id, 2, "native_guest_state_unavailable");
     return;
   }
@@ -2625,7 +2650,8 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   capture.bytecode_bytes = std::span(snapshot.bytes.data(), snapshot.memory_length);
   const auto emit = native_guest_capture_.load(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != generation || !emit ||
-      !emit(capture, generation)) {
+      !emit(capture, generation) || guest_snapshot_cancelled ||
+      config_generation_.load(std::memory_order_acquire) != generation) {
     NoteNativeGuestOmission(generation, frame_id, 3, "native_guest_transport_unavailable");
     return;
   }

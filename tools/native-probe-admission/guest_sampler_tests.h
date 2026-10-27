@@ -1,8 +1,10 @@
 // Production sink state machine; borrowed native callbacks, not V8 acceptance.
+#include <functional>
 std::array<std::uint8_t, 16> guest_memory{};
 std::uint64_t guest_pc = 0;
 reb::NativeWasmGuestContext guest_context{};
 bool guest_context_valid = true, guest_capture_accept = true;
+std::function<void()> guest_reenter;
 std::vector<NativeProbeEvent> guest_dispatches, guest_hosts, guest_invocations;
 std::vector<std::size_t> guest_module_sizes;
 std::uint64_t GuestFrame() noexcept {
@@ -22,6 +24,11 @@ bool GuestCopy(void*,
                std::uint8_t* out) {
   if (index || offset > guest_memory.size() || length > guest_memory.size() - offset)
     return false;
+  if (guest_reenter) {
+    auto callback = std::move(guest_reenter);
+    guest_reenter = {};
+    callback();
+  }
   std::copy_n(guest_memory.data() + offset, length, out);
   return true;
 }
@@ -139,9 +146,22 @@ void NativeGuestAdmission() {
   record();
   sink.RecordApiCall(kRuntime, "Math.acos");
   assert(guest_hosts.size() == before + 1);
+  view.invocation_id = 11;
+  configure();
+  const auto before_reentry_dispatch = guest_dispatches.size();
+  const auto before_reentry_host = guest_hosts.size();
+  guest_reenter = record;
+  record();
+  assert(guest_dispatches.size() == before_reentry_dispatch);
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == before_reentry_host);
+  record();  // The bounded scratch guard must recover after cancellation.
+  assert(guest_dispatches.size() == before_reentry_dispatch + 1);
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == before_reentry_host + 1);
   sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
   sink.RecordApiCall(kRuntime, "Math.acos");
-  assert(guest_hosts.size() == before + 1);
+  assert(guest_hosts.size() == before_reentry_host + 1);
   sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
   std::cout
       << "PASS guest sink exact invocation/import parents, reentry, cap/read/transport/identity "

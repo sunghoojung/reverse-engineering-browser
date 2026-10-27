@@ -11,6 +11,8 @@ use std::{
     sync::LazyLock,
 };
 
+#[path = "vm_opcode_native_guest.rs"]
+mod native_guest;
 #[path = "vm_opcode_native_wasm.rs"]
 mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
@@ -89,6 +91,9 @@ pub(crate) fn is_snapshot_candidate(value: &Value) -> bool {
 }
 
 pub(crate) fn validate_snapshot_artifact(value: &Value) -> Result<()> {
+    if value["capture_origin"] == "native_wasm_guest" {
+        return evidence::validate_artifact(&mut value.clone());
+    }
     let identifiers = [
         "artifact_id",
         "session_id",
@@ -782,7 +787,8 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
     let linked = artifacts
         .iter()
         .filter(|artifact| {
-            artifact["parent_artifact_id"] != "0"
+            artifact["kind"] != "wasm_guest_adapter"
+                && artifact["parent_artifact_id"] != "0"
                 && artifact["parent_artifact_id"] == interpreter["artifact_id"]
                 && artifact["session_id"] == interpreter["session_id"]
                 && artifact["navigation_id"] == interpreter["navigation_id"]
@@ -800,7 +806,7 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
             |artifact| match evidence::verified_range(root, artifact, 0, SNAPSHOT_PREVIEW_BYTES) {
                 Ok(bytes) => json!({
                     "artifact_id": artifact["artifact_id"],
-                    "origin": "runtime-typed-array",
+                    "origin": if artifact["capture_origin"] == "native_wasm_guest" { "native-wasm-guest" } else { "runtime-typed-array" },
                     "sha256": artifact["sha256"],
                     "byte_count": artifact["byte_size"],
                     "preview_hex": hex::encode(&bytes),
@@ -815,7 +821,7 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
                             .collect::<String>();
                     json!({
                         "artifact_id": artifact["artifact_id"],
-                        "origin": "runtime-typed-array",
+                        "origin": if artifact["capture_origin"] == "native_wasm_guest" { "native-wasm-guest" } else { "runtime-typed-array" },
                         "sha256": artifact["sha256"],
                         "byte_count": artifact["byte_size"],
                         "preview_hex": null,
@@ -1094,6 +1100,7 @@ pub(crate) fn workspace(
         }
     }
     let observations = native_wasm::collect(artifact, bytes, events);
+    let guest_samples = native_guest::collect(root, artifact, bytes, snapshot_artifacts, events);
     let budget_dropped = budget_losses
         .iter()
         .filter(|loss| {
@@ -1107,9 +1114,13 @@ pub(crate) fn workspace(
         omissions.push(json!({"reason":"caller-samples-unverified", "detail":
             "Caller-supplied dispatch reports were retained, not independently observed by a native sampler. They cannot confirm handlers, PC units, invocation identity or host-call causality."}));
     }
-    if native_samples.is_empty() && observations.count == 0 && budget_dropped == 0 {
+    if native_samples.is_empty()
+        && observations.count == 0
+        && guest_samples.count == 0
+        && budget_dropped == 0
+    {
         omissions.push(json!({"reason":"sampler-unavailable", "detail":
-            "No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented. A caller-fed writer still needs a runtime producer. Static dispatch, Canvas calls and snapshots do not prove a guest PC."}));
+            "No native dispatch samples were retained. Rebuild with native guest capture, enable an exact matching adapter, and inspect capture omissions. Static dispatch, Canvas calls and snapshots alone do not prove a guest PC."}));
     }
     if sample_count > retained_samples.len() as u64 {
         omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
@@ -1142,6 +1153,13 @@ pub(crate) fn workspace(
         }
     }
     observations.attach(&mut handlers);
+    guest_samples.attach(&mut handlers);
+    if guest_samples.invalid > 0 {
+        omissions.push(json!({"reason":"native-guest-sample-invalid","detail":format!("Rejected {} malformed or mismatched native guest samples.",guest_samples.invalid)}));
+    }
+    if guest_samples.count > guest_samples.rows.len() as u64 {
+        omissions.push(json!({"reason":"native-guest-sample-limit","detail":"Only the first 4096 native guest samples are retained."}));
+    }
     if observations.invalid > 0 {
         omissions.push(json!({"reason":"native-wasm-observation-invalid","detail":format!("Rejected {} malformed, mismatched or out-of-scope native Wasm observations.", observations.invalid)}));
     }
@@ -1275,7 +1293,7 @@ pub(crate) fn workspace(
         "source_artifact_sha256": artifact["sha256"],
         "runtime": result["runtime"],
         "capture_mode": "unknown",
-        "sample_count": sample_count + observations.count,
+        "sample_count": sample_count + observations.count + guest_samples.count,
         "samples": retained_samples,
         "finding_id": result["finding_id"],
         "model": model,
@@ -1286,6 +1304,8 @@ pub(crate) fn workspace(
         "traversal": traversal,
     });
     if runtime == "webassembly" {
+        workspace["native_guest_samples"] = json!(guest_samples.rows);
+        workspace["native_guest_sample_count"] = json!(guest_samples.count);
         workspace["native_wasm_observations"] = json!(observations.rows);
         workspace["native_wasm_observation_count"] = json!(observations.count);
     }
@@ -2937,7 +2957,7 @@ mod tests {
         let snapshot = &artifacts[1];
         validate_snapshot_artifact(snapshot).unwrap();
         assert_eq!(
-            snapshots(&fixture_root, interpreter, &[snapshot.clone()])
+            snapshots(&fixture_root, interpreter, std::slice::from_ref(snapshot))
                 .0
                 .len(),
             1
@@ -3048,10 +3068,10 @@ mod tests {
             omission["detail"]
                 .as_str()
                 .unwrap()
-                .starts_with("No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented.")
+                .starts_with("No native dispatch samples were retained. Rebuild with native guest capture, enable an exact matching adapter,")
         );
         let detail = omission["detail"].as_str().unwrap();
-        assert!(detail.contains("A caller-fed writer still needs a runtime producer."));
+        assert!(detail.contains("inspect capture omissions"));
         assert!(!detail.contains("no guest dispatch emitter"));
         assert!(detail.len() <= 240);
         assert_schema(&document);

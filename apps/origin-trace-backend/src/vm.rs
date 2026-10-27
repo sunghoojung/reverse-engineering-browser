@@ -1043,12 +1043,20 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 })
                 .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
             failures.push(json!({"artifact_id":id,"artifact_sha256":hash,"runtime":match artifact["kind"].as_str() {Some("javascript")=>"javascript",Some("wasm")=>"webassembly",_=>"unknown"},"status":"failed","error":{"code":"invalid-artifact-manifest","message":format!("Artifact manifest line {line}: {reason}")},"coverage":{"complete":false,"omissions":[omission]}}));
-        } else if snapshot_candidate {
+        } else if snapshot_candidate || artifact["kind"] == "wasm_guest_adapter" {
             snapshot_artifacts.push(artifact);
         } else {
             artifacts.push(artifact);
         }
     }
+    let invalid_ids = failures
+        .iter()
+        .filter_map(|f| f["artifact_id"].as_str())
+        .collect::<BTreeSet<_>>();
+    snapshot_artifacts.retain(|a| {
+        a["capture_origin"] != "native_wasm_guest"
+            || !invalid_ids.contains(a["artifact_id"].as_str().unwrap_or(""))
+    });
     // Resolve before normalization so conflicting identities remain tombstones.
     let exact_request_links = {
         let index =

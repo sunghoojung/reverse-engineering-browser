@@ -1,0 +1,42 @@
+name: Native V8 runtime
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'browser/config/v8.rev'
+      - 'browser/integration/brave/patches/v8/**'
+      - 'tools/check-native-v8-runtime.py'
+      - '.github/workflows/native-v8-runtime.yml'
+permissions:
+  contents: read
+concurrency:
+  group: native-v8-runtime-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  standalone-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install source-build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14 ninja-build
+      - name: Validate standalone adaptation
+        run: python3 tools/check-native-v8-runtime.py --self-test
+      - name: Compile pinned native runtime and execute real C++ tests
+        run: >-
+          python3 tools/check-native-v8-runtime.py
+          --work-dir "$RUNNER_TEMP/reb-native-v8"
+          --receipt build/native-v8-runtime.json
+          --jobs 2
+      - name: Preserve build and test receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-v8-runtime-${{ github.run_id }}
+          path: build/native-v8-runtime.json
+          if-no-files-found: warn
+          retention-days: 7

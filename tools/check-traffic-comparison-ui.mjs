@@ -56,13 +56,16 @@ export async function checkTrafficComparisonController(root) {
     {state,document,TextEncoder,TextDecoder,Uint8Array,URL,integerText:(event,key)=>String(event[key]),renderInspector:redraw});
   const owner={mode:'live'};
   const body=text=>({state:'available',mime:'application/json',text,headers:[['content-type','application/json']]});
-  const request=(id,patch={})=>({id,origin:'live',operation:'cdp_completed',tabId:'target-a',protocolRequestId:id,firstTimestamp:1n,method:'POST',path:'https://fixture.invalid/test',status:200,
+  // Native Traffic rows: the exact identity is the row's unique request_started event.
+  const started=(sequence,requestId)=>({session_id:'5',process_id:3,sequence_number:String(sequence),request_id:String(requestId),type:'request_started'});
+  const request=(id,patch={})=>({id,origin:'live',operation:'request_completed',tabId:'1',events:[started(id==='a'?11:12,id==='a'?101:102)],firstTimestamp:1n,method:'POST',path:'https://fixture.invalid/test',status:200,
     exchange:{request:body('{"request":1}'),response:body('{"response":1}')},...patch});
+  const otherProcess=value=>({...value,events:[{...value.events[0],process_id:4}]});
   const a=request('a'),b=request('b');
   const controller=ui.createTrafficComparisonController(ui.investigationRequestIdentity,ui.investigationSame);
   assert(controller.pin(a,[a,b],owner));
   assert.equal(controller.sync([a,b],owner),a);
-  assert.deepEqual(Object.keys(controller.identity).sort(),['id','protocol','started','target','type']);
+  assert.deepEqual(Object.keys(controller.identity).sort(),['process','request','sequence','session','type']);
   assert.equal(controller.sync([b],owner),null);assert.match(controller.notice,/expired/);
   assert.equal(controller.sync([a,b],owner),null,'An expired baseline must never silently rebind');
   for(const change of [{mode:'demo'},{mode:'idle'}]){
@@ -102,7 +105,7 @@ export async function checkTrafficComparisonController(root) {
   for(const field of ['headersTruncated','headers_truncated']){
     b.exchange.request[field]=true;redraw();assert.match(container.textContent,/Request headers · incomplete/);delete b.exchange.request[field];redraw();assert.match(container.textContent,/Request headers · equal/);
   }
-  assert.equal(controller.pin(a,[a,{...a,tabId:'other-target'}],owner),false,'Same visible request ID with different exact identities cannot be pinned ambiguously');
+  assert.equal(controller.pin(a,[a,otherProcess(a)],owner),false,'Same visible request ID with different exact identities cannot be pinned ambiguously');
 
   b.exchange.response={...body(''),bytes:new TextEncoder().encode('{"response":3}')};delete b.exchange.response.text;redraw();
   b.exchange.response.bytes[12]=52;redraw();assert.match(container.textContent,/Selected: 4/,'In-place byte updates invalidate comparison exactly');
@@ -111,7 +114,7 @@ export async function checkTrafficComparisonController(root) {
   state.sessionMode='live';redraw();assert.equal(ui.identity(),null);
   state.selectedRequestId='a';redraw();container.rebComparison.pin.click();state.selectedRequestId='b';redraw();
   view.result.children.find(value=>value.dataset.label==='Response body').children[0].focus();
-  state.requests=[a,b,{...b,tabId:'other-target'}];redraw();
+  state.requests=[a,b,otherProcess(b)];redraw();
   assert.equal(document.activeElement,container,'Ambiguous selection transfers focused summary to the comparison panel');
   assert.equal(view.pin.disabled,true);assert.equal(view.result.children.length,0);
   state.requests=[a,b];redraw();

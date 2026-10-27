@@ -174,8 +174,6 @@ export async function checkVmRequestLinkageUI(root = repository) {
   assert(BigInt(A.root_event.sequence_number) > BigInt(Number.MAX_SAFE_INTEGER));
 
   const refusedRows = [
-    ['CDP protocol ID', request => {request.protocolRequestId = 'raw';}],
-    ['CDP operation marker', request => {request.operation = 'cdp_complete';}],
     ['demo row', request => {request.origin = 'demo';}],
     ['sample row', request => {request.origin = 'sample';}],
     ['bare ID', request => {delete request.events;}],
@@ -297,56 +295,12 @@ export async function checkVmRequestLinkageUI(root = repository) {
   assert(f.state.vmFindings.some(item => item.findingId === 'session-only'));
   assert.equal(f.calls.at(-1).url, '/api/analysis/vm');
   const beforeCalls = f.calls.length;
-  for (const mutate of [request => {request.protocolRequestId = 'cdp-id';}, request => {request.operation = 'cdp_complete';}, request => {delete request.events;}]) {
+  for (const mutate of [request => {delete request.events;}, request => {request.events = [request.event];}]) {
     setNativeRow(f); mutate(f.state.requests[0]); f.showScreen('traffic', f.nav);
     await f.elements.requestVmCandidates.click();
     assert.equal(f.screen, 'traffic'); assert.equal(f.calls.length, beforeCalls);
     assert.match(f.notices.at(-1)[0], /Unlinked:.*unique retained native request start/);
     assert.match(f.notices.at(-1)[0], /VM navigation separately/);
-  }
-
-  // A DevTools join carries the native events, but the renderer id is not the
-  // browser request_started id. Exact selection uses that start only.
-  {
-    const native = setNativeRow(f);
-    const initiated = nativeEvent(A, {type: 'request_initiated', request_id: '345', sequence_number: '9'});
-    const started = native.events.find(event => event.type === 'request_started');
-    const joined = {
-      id: 'cdp-joined', origin: 'live', protocolRequestId: '12.345', operation: 'cdp_complete',
-      nativeLink: {kind: 'devtools-request-id', nativeRequestId: native.id, requestId: '345'},
-      events: [initiated, started]
-    };
-    f.state.requests = [joined];
-    f.state.selectedRequestId = joined.id;
-    assert.deepEqual(plain(f.vmRequestSelection(f.state.requests, joined.id)), A);
-    assert.notEqual(f.vmRequestSelection(f.state.requests, joined.id).request_id, '345');
-    f.showScreen('traffic', f.nav);
-    const callsBeforeJoin = f.calls.length;
-    await f.elements.requestVmCandidates.click();
-    assert.equal(f.screen, 'vm');
-    const queried = new URL(f.calls.at(-1).url, 'http://localhost');
-    assert.equal(queried.searchParams.get('request_id'), A.request_id);
-    assert.equal(queried.searchParams.get('session_id'), A.root_event.session_id);
-    assert.equal(queried.searchParams.get('root_process_id'), String(A.root_event.process_id));
-    assert.equal(queried.searchParams.get('root_sequence_number'), A.root_event.sequence_number);
-    assert.match(f.notices.at(-1)[0], /DevTools request id/);
-    assert.match(f.notices.at(-1)[0], /joined native start/);
-    assert.equal(f.notices.at(-1)[1], 'ready');
-    for (const [label, events, link] of [
-      ['missing initiated event', [started], joined.nativeLink],
-      ['renderer id only', [initiated], joined.nativeLink],
-      ['duplicate initiated events', [initiated, copy(initiated), started], joined.nativeLink],
-      ['mismatched renderer id', [initiated, started], {...joined.nativeLink, requestId: '346'}],
-      ['correlation without a join', [initiated, started], null]
-    ]) {
-      joined.events = events;
-      joined.nativeLink = link;
-      f.showScreen('traffic', f.nav);
-      await f.elements.requestVmCandidates.click();
-      assert.equal(f.screen, 'traffic', label);
-      assert.equal(f.calls.length, callsBeforeJoin + 1, label);
-      assert.equal(f.notices.at(-1)[1], 'unavailable', label);
-    }
   }
 
   await checkCacheAndRaces(create);

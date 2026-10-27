@@ -4,7 +4,7 @@ import {mkdtemp,writeFile,readFile,rm,stat,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {network} from './traffic-capture-qa.mjs';
+import {network} from './saved-traffic-fixture.mjs';
 import {readCapture} from './captured-request-export.mjs';
 import {harProject} from './har-project.mjs';
 const available=value=>({state:'available',value}),unavailable=()=>({state:'unavailable'});

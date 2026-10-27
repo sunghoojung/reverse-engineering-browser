@@ -2176,7 +2176,6 @@
       .request-window button:hover { color: var(--text); background: var(--panel-3); }
       .request-window button:disabled { opacity: .45; cursor: default; }
       .request-window #request-latest { color: var(--accent); }
-      .request-window #open-api-catalog { color: var(--accent); font-weight: 500; }
       /* Keep the phone footer to a full-width count row and one action row.
          Mixing shrinking counts with buttons steals height from the ledger. */
       @media (max-width: 480px) { .request-window > span { flex-basis: 100%; } }
@@ -2328,7 +2327,6 @@
         .trace-toolbar { flex-wrap: wrap; }
         .trace-toolbar select { min-width: 0; flex: 1 1 200px; }
       }
-
 
       #deobfuscation-report { overflow-wrap: anywhere; }
       .deobfuscation-row { margin-bottom: 5px; }
@@ -2881,35 +2879,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .source-window :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (max-width: 480px) { .source-window input { width: 76px; } #source-window-label { flex-basis: 100%; } }
 
-      #traffic-capture-export .exchange-options-menu { width: min(320px, calc(100vw - 24px)); max-height: min(480px, 60vh); overflow: auto; z-index: 20; }
-      #traffic-capture-export .exchange-options-menu p { margin: 6px; font-size: 11px; line-height: 1.4; color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
-
-/* Cold-path observed API snapshot; raw request workflows stay in Traffic. */
-.api-catalog { width: min(940px, calc(100vw - 24px)); height: min(800px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px); padding: 16px; box-sizing: border-box; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); overflow: hidden; box-shadow: 0 24px 80px #0008; }
-.api-catalog[open] { display: flex; flex-direction: column; }
-.api-catalog::backdrop { background: #171526b8; }
-.api-catalog-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex: 0 0 auto; }
-.api-catalog-header h2 { flex: 1 1 200px; margin: 0; font-size: 18px; }
-.api-catalog p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-#api-catalog-scope { color: var(--muted); margin: 10px 0 6px; }
-#api-catalog-status { margin: 6px 0 10px; }
-.api-catalog [data-kind="warning"], .api-catalog-unknown { color: var(--amber); }
-.api-catalog-content { min-height: 0; overflow: auto; padding: 3px; scrollbar-gutter: stable; }
-.api-catalog-coverage h3 { margin: 4px 0; font-size: 14px; }
-.api-catalog-identity { color: var(--muted); font-size: 12px; }
-.api-catalog summary { cursor: pointer; overflow-wrap: anywhere; line-height: 1.5; padding: 6px 0; }
-.api-catalog-endpoint { border-top: 1px solid var(--line); padding: 8px 0; }
-.api-catalog-endpoint > summary { font: 12px/1.6 var(--mono); }
-.api-catalog-observation { padding: 10px 12px; margin-top: 6px; border-left: 2px solid var(--line); background: var(--bg); }
-.api-catalog-observation h4 { margin: 0 0 8px; font-size: 12px; }
-.api-catalog-side { border-top: 1px solid var(--line-soft); font-size: 12px; }
-.api-catalog-shape { padding-left: 18px; font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
-.api-catalog :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.api-catalog button:disabled { opacity: .5; }
-@media (max-width: 480px) { .api-catalog { padding: 10px; } .api-catalog-header h2 { flex-basis: 100%; font-size: 16px; } .api-catalog-observation { padding: 8px; } }
 /* Compact export dialog: policy and destination are explicit, never a long action menu. */
-#traffic-capture-export > summary { width: auto; height: auto; min-height: 25px; padding: 3px 6px; border-radius: 4px; font: 10px var(--sans); white-space: nowrap; }
-#traffic-capture-export .exchange-options-menu { width: 200px; max-height: none; }
 .captured-export-dialog { width: min(480px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 20px 70px #0006; overflow: hidden; }
 .captured-export-dialog[open] { display: flex; flex-direction: column; }
 .captured-export-dialog::backdrop { background: color-mix(in srgb, var(--bg) 70%, transparent); }
@@ -2934,26 +2904,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .captured-export-primary { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
 .captured-export-dialog :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 420px) { .captured-export-fields { grid-template-columns: 1fr; } .captured-export-header, .captured-export-footer { padding-inline: 14px; } .captured-export-body { padding: 14px; } }
-@media (max-width: 600px) { #traffic-capture-export .exchange-options-menu { position: fixed; inset: auto 12px 28px; width: auto; z-index: 50; } }
-
-.api-catalog-filters, .api-catalog-compare-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
-.api-catalog-filters { flex: 0 0 auto; }
-.api-catalog-filters label, .api-catalog-compare-controls label { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 12px; flex: 1 1 180px; }
-.api-catalog-filters label:first-child { flex: 2 1 220px; }
-.api-catalog-filters input, .api-catalog-filters select, .api-catalog-compare-controls select { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--text); font: inherit; }
-#api-catalog-filter-scope, #api-catalog-filter-status { margin: 6px 0; color: var(--muted); }
-.api-catalog-comparison { border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin: 6px 0; }
-.api-catalog-comparison h4 { margin: 8px 0; font-size: 12px; }
-.api-catalog-differences { padding: 0; list-style: none; font: 11px/1.6 var(--mono); }
-.api-catalog-differences li { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; padding: 8px 0; border-top: 1px solid var(--line-soft); overflow-wrap: anywhere; }
-.api-catalog-differences strong { grid-column: 1 / -1; }
-@media (max-width: 480px) {
-  .api-catalog-filters { gap: 5px; }
-  .api-catalog-filters label:first-child { flex-basis: 100%; }
-  .api-catalog-filters label { flex-basis: 140px; }
-  .api-catalog-comparison { padding: 8px; }
-  .api-catalog-differences li { grid-template-columns: 1fr; }
-}
 
 /* VM-local workspaces keep Findings mounted and give Execution the remaining height. */
 #screen-vm:not([hidden]) { grid-template-rows: auto minmax(0, 1fr); }
@@ -3319,7 +3269,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .owned-vm-debugger-panes { grid-template-columns: minmax(0, 1fr); }
   .owned-vm-debugger-navigation { grid-column: 1; }
 }
-
 
 /* Coexisting live controls and imported analysis use normal document flow on
    narrow screens. Neither an auto grid row nor retained-row intrinsic height

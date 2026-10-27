@@ -4,30 +4,12 @@ const sourceFactsPanel = createSourceFactsPanel({
   openSidebar() { state.sourceSidebarOpen = true; renderSourceSidebar(); }
 });
 const capturedExportPanel = installCapturedExportDialog({
-  getCaptureRequest: () => apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record,
   getRun: () => null, contextKey: () => null, getRunCapture: () => null,
   notice: message => investigationNotice(message)
 });
-      const passiveSecurityPanel = installPassiveSecurityReport({getRequest: () => apiCatalogResolveSource(state.selectedCaptureIdentity,state.requests).record});
-
-      const trafficCaptureExport = installTrafficCaptureExport(
-        document.querySelector('#traffic-capture-export'),
-        () => state.requests.find(request => request.id === state.selectedRequestId)
-      );
-      const apiCatalogPanel = installApiObservationCatalog({
-        getRequests: () => state.requests,
-        openRequest: request => {
-          const identity = investigationRequestIdentity(request);
-          if (!identity || !openInvestigation({kind: 'request', identity, inspectorTab: 'headers',
-            relation: 'Catalog source matched the exact backend instance, capture epoch, request, target and original monotonic start. Shapes describe observations only.'})) return false;
-          return true;
-        }
-      });
-
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
-        requestCorrelated: evidenceDebuggerRequest(state.requests.find(request => request.id === state.selectedRequestId)),
         events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited
       })});
 
@@ -379,17 +361,7 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function requestSignalRoot(request) {
-        // A DevTools request-id join is the renderer request_initiated id.
-        // Host/method/time correlation cannot identify an exact native request.
-        if (request?.nativeLink?.kind === 'devtools-request-id') {
-          const requestId = request.nativeLink.requestId;
-          const matches = event => integerText(event, 'request_id') === requestId;
-          const candidates = request.events ?? [];
-          return candidates.find(event => event.type === 'request_started' && matches(event)) ??
-            candidates.find(event => event.type === 'request_initiated' && matches(event)) ?? null;
-        }
-        if (!request || request.origin === 'sample' || request.protocolRequestId ||
-            String(request.operation).startsWith('cdp_')) return null;
+        if (!request || request.origin === 'sample') return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
@@ -872,39 +844,6 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
-        // Same DevTools-id rule as requestSignalRoot. Kept local so this renderer
-        // can be exercised without pulling in the profile fetch.
-        const devtoolsLink = selectedRequest?.nativeLink?.kind === 'devtools-request-id' &&
-          (selectedRequest.events ?? []).some(event =>
-            (event.type === 'request_started' || event.type === 'request_initiated') &&
-            integerText(event, 'request_id') === selectedRequest.nativeLink.requestId);
-        if ((selectedRequest?.protocolRequestId || String(selectedRequest?.operation).startsWith('cdp_')) &&
-            !devtoolsLink) {
-          const events = fingerprintEventsFromEvents(state.events ?? []);
-          const tabs = new Set(events.map(signalTabKey));
-          const summary = document.createElement('article');
-          summary.className = 'signal-request-card';
-          summary.append(
-            textElement('h3', '', 'No exact native request link'),
-            textElement('p', '', 'This debugger row has no native request id, so Origin Trace will not build a request signal profile from host, method, or timing. Those matches can belong to another request.'),
-            textElement('p', '', `${events.length} fingerprint ${events.length === 1 ? 'event' : 'events'}${tabs.size ? ` on ${tabs.size} tab ${tabs.size === 1 ? 'scope' : 'scopes'}` : ''}.`)
-          );
-          const open = textElement('button', 'secondary-button', 'Open Fingerprinting');
-          open.type = 'button';
-          open.addEventListener('click', () => {
-            state.signalTabId = 'all';
-            showScreen('signals', open);
-          });
-          summary.append(open);
-          if (selectedRequest.nativeCandidateId) {
-            const showNative = textElement('button', 'secondary-button', 'Show correlated native row');
-            showNative.type = 'button';
-            showNative.addEventListener('click', () => selectRequest(selectedRequest.nativeCandidateId));
-            summary.append(showNative);
-          }
-          elements.signalRequestProfile.replaceChildren(summary);
-          return;
-        }
         if (state.signalProfileStatus === 'loading') {
           elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile...'));
           return;
@@ -1279,13 +1218,6 @@ const capturedExportPanel = installCapturedExportDialog({
         state.trafficRenderedView = null;
         state.requests = state.nativeRequests;
         syncTrafficComparison();
-        const selected = apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record;
-        if (state.selectedCaptureIdentity && !selected) {
-          resetRequestSelection();
-          state.trafficSelectionNotice = 'The selected captured request expired or its exact source changed. Choose another request.';
-          investigationNotice(state.trafficSelectionNotice, 'stale');
-        }
-        apiCatalogPanel.sync();
       }
 
       function renderShellStatus() {
@@ -1344,7 +1276,6 @@ const capturedExportPanel = installCapturedExportDialog({
         state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
         state.selectedRequestId = null;
-        state.selectedCaptureIdentity = null;
         state.selectedField = null;
         state.originTrace = null;
         state.selectedTraceRow = null;
@@ -1360,7 +1291,6 @@ const capturedExportPanel = installCapturedExportDialog({
         state.signalProfileEtag = null;
         state.signalProfileGeneration += 1;
         evidencePackagePanel.sync();
-        passiveSecurityPanel.sync();
       }
 
       function renderRequestCount(visibleCount, loadedCount) {
@@ -2678,7 +2608,6 @@ const capturedExportPanel = installCapturedExportDialog({
         if (!request) return;
         if (state.selectedRequestId !== id) state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.selectedRequestId = id;
-        state.selectedCaptureIdentity = request.captureRecord ? apiCatalogRequestIdentity(request) : null;
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
         state.originTrace = null;
@@ -2736,14 +2665,7 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function requestTraceRoot(request) {
-        if (request?.nativeLink?.kind === 'devtools-request-id') {
-          const requestId = request.nativeLink.requestId;
-          const matches = event => integerText(event, 'request_id') === requestId;
-          const candidates = request.events ?? [];
-          return candidates.find(event => event.type === 'request_started' && matches(event)) ??
-            candidates.find(event => event.type === 'request_initiated' && matches(event)) ?? null;
-        }
-        if (request?.origin !== 'live' || request.protocolRequestId || String(request.operation).startsWith('cdp_')) return null;
+        if (request?.origin !== 'live') return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
@@ -2863,26 +2785,13 @@ const capturedExportPanel = installCapturedExportDialog({
         if (!request?.traceable) {
           const empty = document.createElement('div');
           empty.className = 'field-empty';
-          const linkedRoot = requestTraceRoot(request);
           empty.textContent = request?.origin === 'live'
-            ? request.protocolRequestId
-              ? linkedRoot
-                ? 'Structured fields were not captured. This debugger row joins one native request by its DevTools request id. Related VM candidates uses that request only when its events contain one exact native start.'
-                : 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only. Related VM candidates requires an exact native start; use VM navigation separately for session-wide findings. Fingerprinting lists the session surfaces.'
-              : 'Structured fields were not captured. Request-level origin evidence is still available.'
+            ? 'Structured fields were not captured. Request-level origin evidence is still available.'
             : request?.origin === 'demo'
               ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
               : request
                 ? 'This sample request has no trace target in the proof of concept.'
                 : 'Select a request to inspect its fields.';
-          if (request?.nativeCandidateId) {
-            const showNative = document.createElement('button');
-            showNative.type = 'button';
-            showNative.className = 'secondary-button';
-            showNative.textContent = 'Show correlated native row';
-            showNative.addEventListener('click', () => selectRequest(request.nativeCandidateId));
-            empty.append(document.createElement('br'), showNative);
-          }
           elements.fieldTree.replaceChildren(empty);
           const root = requestTraceRoot(request);
           elements.traceTarget.textContent = root
@@ -2945,8 +2854,6 @@ const capturedExportPanel = installCapturedExportDialog({
         const showingExchange = ['headers', 'payload', 'preview', 'response'].includes(state.inspectorTab) || state.selectedRequestId === null;
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         updateSelectionSummary(request);
-        trafficCaptureExport.sync();
-        passiveSecurityPanel.sync();
 
         document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
@@ -2996,34 +2903,6 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.prompt.textContent = 'Fingerprint activity before this request';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
-          if ((request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) && !requestTraceRoot(request)) {
-            const events = fingerprintEventsFromEvents(state.events ?? []);
-            const tabs = new Set(events.map(signalTabKey));
-            elements.prompt.textContent = 'Session fingerprint activity, not a request profile';
-            renderInspectorDetails([
-              {key: 'link', value: 'This debugger row has no native request id. Host, method, and timing matches are not a request profile.', type: 'unavailable'},
-              {key: 'session fingerprint events', value: String(events.length), type: 'count'},
-              {key: 'tab scopes', value: String(tabs.size), type: 'count'}
-            ]);
-            const open = document.createElement('button');
-            open.type = 'button';
-            open.className = 'secondary-button';
-            open.textContent = 'Open Fingerprinting';
-            open.addEventListener('click', () => {
-              state.signalTabId = 'all';
-              showScreen('signals', open);
-            });
-            elements.fieldTree.append(open);
-            if (request?.nativeCandidateId) {
-              const showNative = document.createElement('button');
-              showNative.type = 'button';
-              showNative.className = 'secondary-button';
-              showNative.textContent = 'Show correlated native row';
-              showNative.addEventListener('click', () => selectRequest(request.nativeCandidateId));
-              elements.fieldTree.append(showNative);
-            }
-            return;
-          }
           if (state.signalProfileStatus === 'loading') {
             renderInspectorMessage('Building a bounded profile from retained browser-signal evidence.');
             return;
@@ -3074,9 +2953,6 @@ const capturedExportPanel = installCapturedExportDialog({
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
             const details = [{ key: 'correlation', value: request.id, type: 'id' }];
-            if (request.protocolRequestId || String(request.operation).startsWith('cdp_')) {
-              details.unshift({key: 'link confidence', value: 'Unverified host, method and timing match. These native identifiers may belong to another request or tab.', type: 'Correlated'});
-            }
             if (contextEvent) {
               details.push({ key: 'browser context', value: browserContextToken(contextEvent), type: 'token' });
             }
@@ -3112,7 +2988,7 @@ const capturedExportPanel = installCapturedExportDialog({
               { key: 'last event', value: request.lastTimestamp, type: 'ns' },
               { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
               { key: 'lifecycle', value: request.operation, type: 'state' },
-              { key: request.protocolRequestId || String(request.operation).startsWith('cdp_') ? 'unverified native candidate events' : 'events', value: request.events.length, type: 'count' },
+              { key: 'events', value: request.events.length, type: 'count' },
               { key: 'phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
             ]);
           } else if (request) {
@@ -3329,7 +3205,7 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.traceLoad.disabled = !selection || state.originTraceStatus === 'loading';
         elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
         elements.backtraceSubtitle.textContent = selection
-          ? `${request.method} ${request.path}${request.nativeLink?.kind === 'devtools-request-id' ? ' · DevTools request id join' : ''}`
+          ? `${request.method} ${request.path}`
           : 'Request events and their recorded predecessors';
         const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
         const hasSteps = Boolean(trace?.steps.length);
@@ -7669,17 +7545,11 @@ const capturedExportPanel = installCapturedExportDialog({
       elements.requestDecoderPivot.addEventListener('click', useSelectedFieldInDecoder);
 
       elements.requestVmCandidates.addEventListener('click', async () => {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const selection = vmRequestSelection(state.requests, state.selectedRequestId);
         if (!selection) {
-          investigationNotice(request?.nativeLink?.kind === 'devtools-request-id'
-            ? 'This debugger row joins a native request by its DevTools request id, but that join is not a unique retained native request start. Related VM candidates needs the exact captured-response-body chain. Choose the native row, or use VM navigation separately for session-wide findings.'
-            : 'Unlinked: this Traffic row has no unique retained native request start with exact session, process and sequence identifiers. Debugger correlations and legacy rows cannot establish a captured-response-body link. Choose a native row, or use VM navigation separately for session-wide findings.',
+          investigationNotice('Unlinked: this Traffic row has no unique retained native request start with exact session, process and sequence identifiers. Legacy rows cannot establish a captured-response-body link. Choose another native row, or use VM navigation separately for session-wide findings.',
             'unavailable');
           return;
-        }
-        if (request?.nativeLink?.kind === 'devtools-request-id') {
-          investigationNotice('This debugger row joins a native request by its DevTools request id. Related VM candidates uses that joined native start.', 'ready');
         }
         const refresh = refreshVmAnalysis(selection);
         showScreen('vm', elements.requestVmCandidates);

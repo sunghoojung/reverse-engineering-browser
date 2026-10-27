@@ -86,7 +86,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   const state = {requests, selectedRequestId: null, requestTabId: 'all', requestDomain: 'all', requestType: 'all',
     trafficSort: 'name', trafficSortDirection: 1, trafficWindowStart: 0, trafficWindowAnchor: null,
     trafficNewIds: new Set(), trafficKnownIds: null, originTraceGeneration: 0, signalProfileGeneration: 0,
-    sessionMode: 'demo', selectedCaptureIdentity: null};
+    sessionMode: 'demo'};
   elements.requestFilter.value = 'retained-needle'; elements.requestSearchScope.value = 'content';
   const context = {state, elements, document, URL, TextDecoder, TextEncoder, Uint8Array, stats,
     matchMedia: () => ({matches: true}), fieldSets: {body: []},
@@ -97,8 +97,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
     refreshRequestSignalProfile: () => { stats.profiles++; },
     investigationSame: (left, right) => left === right,
     investigationRequestIdentity: request => request.id,
-    investigationNotice: text => { state.notice = text; },
-    apiCatalogRequestIdentity: request => request.id};
+    investigationNotice: text => { state.notice = text; }};
   const instrument = `
     const search = trafficSearchRequests;
     trafficSearchRequests = (...args) => { stats.searches++; return search(...args); };

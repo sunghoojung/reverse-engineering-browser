@@ -5,7 +5,7 @@ import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createRequire} from 'node:module';
-import {network} from './traffic-capture-qa.mjs';
+import {network} from './saved-traffic-fixture.mjs';
 import {introspectionSDL,constantLiteral} from './graphql-sdl.mjs';
 const ref=(kind,name)=>({kind,name,ofType:null});
 const string=()=>ref('SCALAR','String'),integer=()=>ref('SCALAR','Int');

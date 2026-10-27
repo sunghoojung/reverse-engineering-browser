@@ -7,12 +7,12 @@ import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join, resolve, dirname} from 'node:path';
 import {runInNewContext} from 'node:vm';
-import {network} from './traffic-capture-qa.mjs';
+import {network,savedRequests} from './saved-traffic-fixture.mjs';
 
 const root = resolve(new URL('..',import.meta.url).pathname);
-const code = await Promise.all(['evidence_models.js','traffic_view.js','api_catalog.js','captured_client.js'].map(name=>readFile(join(root,'apps/research-ui',name),'utf8')));
+const code = await Promise.all(['traffic_view.js','captured_client.js'].map(name=>readFile(join(root,'apps/research-ui',name),'utf8')));
 const globals = {TextEncoder,TextDecoder,Uint8Array,URL,atob,btoa,AbortController,setTimeout,clearTimeout};
-const api = runInNewContext(code.join('\n')+'\n;({requestsFromDebuggerNetwork,capturedClientCapture,capturedClientRun,capturedClientProject,capturedClientZip,capturedClientIssues,capturedClientSend})',globals);
+const api = runInNewContext(code.join('\n')+'\n;({capturedRequestIdentity,capturedClientCapture,capturedClientRun,capturedClientProject,capturedClientZip,capturedClientIssues,capturedClientSend})',globals);
 const copy = value => JSON.parse(JSON.stringify(value));
 const inputBody = '\ufeff雪\r\n{"duplicate":1,"duplicate":2,"inert":"${process.exit()} ` </script>"}';
 function fixture(url = 'https://example.test/a%2Fb?x=1&%78=2&empty=&q=a+b&q=a%20b') {
@@ -22,8 +22,23 @@ function fixture(url = 'https://example.test/a%2Fb?x=1&%78=2&empty=&q=a+b&q=a%20
   record.request.body.text=inputBody;record.response.body.base64='';record.response.body.text='response-secret';
   return value;
 }
-const requests = value => api.requestsFromDebuggerNetwork(value);
+const requests = value => savedRequests(value);
 const capture = value => api.capturedClientCapture(requests(value)[0]);
+// Saved-capture identity is five exact values; rounded timestamps and visible IDs never substitute.
+{
+  const value = fixture(); value.requests[0].started_monotonic_ms = 100.0000001;
+  const [request] = requests(value), before = JSON.stringify(value);
+  assert.deepEqual(copy(api.capturedRequestIdentity(request)),{instance:value.instance_id,epoch:value.capture_epoch,
+    request:value.requests[0].id,target:value.requests[0].target_id,started:100.0000001});
+  assert.equal(Math.round(100.0000001*1e6), Math.round(100.0000002*1e6), 'Fixture proves rounded timestamp collision');
+  assert.notDeepEqual(copy(api.capturedRequestIdentity({...request,captureRecord:{...request.captureRecord,started_monotonic_ms:100.0000002}})),
+    copy(api.capturedRequestIdentity(request)));
+  for (const owner of [[null,1],['same',Number.MAX_SAFE_INTEGER+1],['same',-1],['same'],'same']) assert.equal(api.capturedRequestIdentity({...request,captureOwner:owner}),null);
+  for (const changed of [{tabId:'wrong'},{id:'wrong'},{captureRecord:undefined}]) assert.equal(api.capturedRequestIdentity({...request,...changed}),null);
+  assert.equal(api.capturedRequestIdentity({id:'native',origin:'live',events:[]}),null,'Native Traffic rows carry no saved-capture identity');
+  assert.equal(api.capturedRequestIdentity(null),null);
+  assert.equal(JSON.stringify(value),before,'Identity resolution must not alter retained raw fields');
+}
 const base = fixture(), original = JSON.stringify(base), source = capture(base);
 assert.deepEqual(copy(source.input),{method:'POST',url:base.requests[0].url,headers:base.requests[0].request.headers,body:inputBody,timeout_ms:15000});
 assert.equal(source.problems.length,0);assert.equal(source.templateProblems.length,0);

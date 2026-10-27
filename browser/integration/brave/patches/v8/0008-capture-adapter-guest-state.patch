@@ -588,7 +588,7 @@ index c3b231c..a67bc27 100644
  }
  
 diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
-index 2197c8c..ef7c3ab 100644
+index 2197c8c..ad58ba5 100644
 --- a/src/wasm/baseline/liftoff-compiler.cc
 +++ b/src/wasm/baseline/liftoff-compiler.cc
 @@ -1312,6 +1312,8 @@ class LiftoffCompiler {
@@ -623,17 +623,17 @@ index 2197c8c..ef7c3ab 100644
      LiftoffRegister info = pinned.set(__ GetUnusedRegister(kGpReg, pinned));
      __ AllocateStackSlot(info.gp(), sizeof(RebBrTableTracingInfo));
      __ Store(info.gp(), no_reg, offsetof(RebBrTableTracingInfo, selector),
-@@ -3885,6 +3895,39 @@ class LiftoffCompiler {
+@@ -3885,6 +3895,44 @@ class LiftoffCompiler {
      __ LoadConstant(data, WasmValue(table_count));
      __ Store(info.gp(), no_reg, offsetof(RebBrTableTracingInfo, table_count),
               data, StoreType::kI32Store, pinned);
 +    uint32_t descriptor_index = UINT32_MAX;
-+    if (!is_entry && reb_guest_descriptor_bytes_ < 8 * 1024 * 1024 &&
-+        __ num_locals() <= (8 * 1024 * 1024 - reb_guest_descriptor_bytes_) /
-+                               sizeof(RebGuestLocalDescriptor)) {
-+      auto budget = RebGuestDescriptorCharge::Acquire(
-+          sizeof(RebGuestSiteDescriptor) +
-+          __ num_locals() * sizeof(RebGuestLocalDescriptor));
++    const size_t site_bytes =
++        RebGuestSiteDescriptor::StorageBudget(__ num_locals());
++    if (!is_entry && site_bytes != 0 &&
++        site_bytes <= RebGuestSiteDescriptor::kFunctionLimit -
++                          reb_guest_descriptor_bytes_) {
++      auto budget = RebGuestDescriptorCharge::Acquire(site_bytes);
 +      if (budget) {
 +        RebGuestSiteDescriptor site{
 +            static_cast<uint32_t>(decoder->position()), {}, std::move(budget)};
@@ -647,8 +647,13 @@ index 2197c8c..ef7c3ab 100644
 +              {slot.is_const() ? slot.i32_const() : slot.offset(), bits,
 +               slot.is_const()});
 +        }
-+        reb_guest_descriptor_bytes_ +=
-+            site.locals.size() * sizeof(RebGuestLocalDescriptor);
++        reb_guest_descriptor_bytes_ += site_bytes;
++        // Make growth explicit so the per-site budget covers spare slots and
++        // transient old/new array overlap, including zero-local functions.
++        if (reb_guest_sites_.size() == reb_guest_sites_.capacity()) {
++          const size_t capacity = reb_guest_sites_.capacity();
++          reb_guest_sites_.reserve(capacity == 0 ? 1 : capacity * 2);
++        }
 +        descriptor_index = static_cast<uint32_t>(reb_guest_sites_.size());
 +        reb_guest_sites_.push_back(std::move(site));
 +      }
@@ -663,7 +668,7 @@ index 2197c8c..ef7c3ab 100644
      WasmTraceMemoryDescriptor descriptor;
      Register param_reg = descriptor.GetRegisterParameter(0);
      if (info.gp() != param_reg) __ Move(param_reg, info.gp(), kIntPtrKind);
-@@ -11155,6 +11198,8 @@ class LiftoffCompiler {
+@@ -11155,6 +11203,8 @@ class LiftoffCompiler {
        // Extern ref:
        kRef, kRefNull, kI8, kI16};
  
@@ -672,7 +677,7 @@ index 2197c8c..ef7c3ab 100644
    LiftoffAssembler asm_;
    Label return_label_;
    LiftoffAssembler::CacheState return_label_state_;
-@@ -11350,6 +11395,7 @@ WasmCompilationResult ExecuteLiftoffCompilation(
+@@ -11350,6 +11400,7 @@ WasmCompilationResult ExecuteLiftoffCompilation(
    WasmCompilationResult result;
    compiler->GetCode(&result.code_desc);
    result.instr_buffer = compiler->ReleaseBuffer();
@@ -722,10 +727,10 @@ index 61d23d6..12d172e 100644
    DCHECK_EQ(0, code_space.size());
  
 diff --git a/src/wasm/wasm-code-manager.h b/src/wasm/wasm-code-manager.h
-index 7227a1b..a1c8224 100644
+index 7227a1b..9e74de9 100644
 --- a/src/wasm/wasm-code-manager.h
 +++ b/src/wasm/wasm-code-manager.h
-@@ -54,6 +54,36 @@ class DebugInfo;
+@@ -54,6 +54,49 @@ class DebugInfo;
  class NamesProvider;
  class NativeModule;
  struct WasmCompilationResult;
@@ -736,13 +741,15 @@ index 7227a1b..a1c8224 100644
 +  bool is_constant;
 +};
 +struct RebGuestDescriptorCharge {
++  static constexpr size_t kLimit = 64 * 1024 * 1024;
 +  inline static std::atomic<size_t> total_bytes{0};
 +  size_t bytes = 0;
 +  ~RebGuestDescriptorCharge() {
 +    total_bytes.fetch_sub(bytes, std::memory_order_relaxed);
 +  }
 +  static std::unique_ptr<RebGuestDescriptorCharge> Acquire(size_t bytes) {
-+    constexpr size_t kLimit = 64 * 1024 * 1024;
++    if (bytes == 0)
++      return nullptr;
 +    size_t current = total_bytes.load(std::memory_order_relaxed);
 +    do {
 +      if (bytes > kLimit || current > kLimit - bytes)
@@ -758,11 +765,22 @@ index 7227a1b..a1c8224 100644
 +  uint32_t function_byte_offset;
 +  std::vector<RebGuestLocalDescriptor> locals;
 +  std::unique_ptr<RebGuestDescriptorCharge> budget;
++  static constexpr size_t kFunctionLimit = 8 * 1024 * 1024;
++  static size_t StorageBudget(size_t locals) {
++    // Logical allocation payload, not allocator bookkeeping/RSS. Explicit
++    // doubling below needs at most three site slots per retained site during
++    // reallocation (old + new arrays), plus its separately allocated charge.
++    constexpr size_t overhead =
++        3 * sizeof(RebGuestSiteDescriptor) + sizeof(RebGuestDescriptorCharge);
++    if (locals > (kFunctionLimit - overhead) / sizeof(RebGuestLocalDescriptor))
++      return 0;
++    return overhead + locals * sizeof(RebGuestLocalDescriptor);
++  }
 +};
  class WasmEngine;
  template <typename CacheKey>
  class WasmWrapperCache;
-@@ -220,6 +250,9 @@ class V8_EXPORT_PRIVATE WasmCode final {
+@@ -220,6 +263,9 @@ class V8_EXPORT_PRIVATE WasmCode final {
      return {inlining_positions().end(), deopt_data_size_};
    }
  
@@ -772,7 +790,7 @@ index 7227a1b..a1c8224 100644
    int index() const { return index_; }
    // Anonymous functions are functions that don't carry an index.
    bool IsAnonymous() const { return index_ == kAnonymousFuncIndex; }
-@@ -502,6 +535,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
+@@ -502,6 +548,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
    //  - source positions of size {source_positions_size_}
    //  - deopt data of size {deopt_data_size_}
    // Note that the trapping instructions come first to ensure alignment.
@@ -805,7 +823,7 @@ index 5e62f08..e762bcd 100644
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c541..24f68bb 100644
+index 7f4c541..08f16f6 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,6 +6,7 @@
@@ -824,7 +842,7 @@ index 7f4c541..24f68bb 100644
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1357,260 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1357,300 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1077,7 +1095,47 @@ index 7f4c541..24f68bb 100644
 +  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
 +}
 +
++TEST(RebNativeGuestZeroLocalDescriptorBudget) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  WasmCodeRefScope code_scope;
++  WasmRunner<int32_t> admitted(TestExecutionTier::kLiftoff);
++  admitted.Build(
++      {B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       WASM_I32V_1(7)});
++  const auto &sites = admitted.builder().GetFunctionCode(0)->reb_guest_sites();
++  CHECK_EQ(size_t{3}, sites.size());
++  const size_t charge = RebGuestSiteDescriptor::StorageBudget(0);
++  CHECK_GT(charge, sizeof(RebGuestSiteDescriptor));
++  CHECK_EQ(size_t{0}, RebGuestSiteDescriptor::StorageBudget(SIZE_MAX));
++  size_t retained = sites.capacity() * sizeof(RebGuestSiteDescriptor);
++  for (const auto &site : sites) {
++    CHECK(site.locals.empty());
++    CHECK_NOT_NULL(site.budget);
++    CHECK_EQ(charge, site.budget->bytes);
++    retained += sizeof(RebGuestDescriptorCharge);
++  }
++  CHECK_LE(retained, sites.size() * charge);
++  CHECK_EQ(7, admitted.Call());
++
++  const size_t used =
++      RebGuestDescriptorCharge::total_bytes.load(std::memory_order_relaxed);
++  CHECK_LE(used + charge, RebGuestDescriptorCharge::kLimit);
++  auto reserved = RebGuestDescriptorCharge::Acquire(
++      RebGuestDescriptorCharge::kLimit - used - charge + 1);
++  CHECK_NOT_NULL(reserved);
++  WasmRunner<int32_t> denied(TestExecutionTier::kLiftoff);
++  denied.Build(
++      {B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       WASM_I32V_1(9)});
++  CHECK(denied.builder().GetFunctionCode(0)->reb_guest_sites().empty());
++  // Budget denial is observational: actual Wasm execution remains intact.
++  CHECK_EQ(9, denied.Call());
++}
++
 +TEST(RebNativeGuestDescriptorBudgetRejectsOverflow) {
++  CHECK(!RebGuestDescriptorCharge::Acquire(0));
 +  CHECK(!RebGuestDescriptorCharge::Acquire(std::numeric_limits<size_t>::max()));
 +  CHECK(!RebGuestDescriptorCharge::Acquire(64 * 1024 * 1024 + 1));
 +}

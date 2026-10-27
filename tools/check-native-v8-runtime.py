@@ -32,6 +32,7 @@ TEST_NAMES = [
     "RebNativeGuestDistinctInstances",
     "RebNativeGuestWeakIdentityLifetime",
     "RebNativeGuestDescriptorBudgetRejectsOverflow",
+    "RebNativeGuestZeroLocalDescriptorBudget",
 ]
 
 
@@ -154,7 +155,10 @@ def main():
                     raise RuntimeError("Stopped owned build before exhausting disk")
                 if time.monotonic() > deadline:
                     raise TimeoutError("Owned build stage exceeded 45 minutes")
-                time.sleep(5)
+                try:
+                    process.wait(timeout=0.25)
+                except subprocess.TimeoutExpired:
+                    pass
             if process.returncode:
                 raise subprocess.CalledProcessError(process.returncode, command)
             receipt["last_successful_stage"] = receipt["stage"]
@@ -242,11 +246,14 @@ def main():
                     run(["git", "apply", "--check", str(temporary)], v8)
                     run(["git", "apply", str(temporary)], v8)
             receipt["patches"].append(entry)
+        # Temporal alone pulls Rust into this standalone build; guest capture
+        # and the public QuickJS fixture do not use the Temporal API.
         gn_args = " ".join((
             'is_debug=false', 'is_component_build=false', 'symbol_level=0',
             'is_clang=false', 'use_lld=false', 'use_custom_libcxx=true', 'use_sysroot=false',
             'use_custom_libcxx_for_host=true', 'enable_safe_libcxx=true', 'v8_enable_sandbox=true',
-            'enable_rust=false', 'use_remoteexec=false', 'treat_warnings_as_errors=true',
+            'enable_rust=false', 'v8_enable_temporal_support=false',
+            'use_remoteexec=false', 'treat_warnings_as_errors=true',
             'target_cpu="x64"', 'v8_target_cpu="x64"', 'v8_enable_i18n_support=false',
             'v8_use_external_startup_data=false', 'v8_dcheck_always_on=true',
         ))

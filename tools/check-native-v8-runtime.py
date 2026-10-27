@@ -164,7 +164,7 @@ def main():
 
     def checkout(url, revision, path, full=False):
         run(["git", "clone", *([] if full else ["--depth=1"]), "--no-checkout", url, str(path)])
-        run(["git", "fetch", "--depth=1", "origin", revision], path)
+        run(["git", "fetch", *([] if full else ["--depth=1"]), "origin", revision], path)
         run(["git", "checkout", "--detach", "FETCH_HEAD"], path)
         assert run(["git", "rev-parse", "HEAD"], path, True).strip() == revision
 

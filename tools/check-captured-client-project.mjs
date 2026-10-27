@@ -334,7 +334,9 @@ async function checkConfiguredProject() {
     seen.push({url:request.url,headers:request.headers});
     if(request.url==='/slow'){setTimeout(()=>response.end('late'),250);return;}
     if(request.url==='/short'){response.writeHead(200,{'Content-Type':'application/json','Content-Length':'100'});response.end('{"part":');return;}
-    if(request.url==='/partial-timeout'){response.writeHead(200,{'Content-Type':'application/json'});response.write('{"part":');setTimeout(()=>response.end('1}'),250);return;}
+    // Hold the partial body open until the client aborts, so its timeout wins
+    // regardless of scheduler load.
+    if(request.url==='/partial-timeout'){response.writeHead(200,{'Content-Type':'application/json'});response.write('{"part":');response.on('close',()=>response.destroy());return;}
     if(request.url==='/invalid-utf8'){response.writeHead(200,{'Content-Type':'application/json'});response.end(Buffer.from([123,34,120,34,58,34,255,34,125]));return;}
     const [status,type,body]=responses[request.url]??responses['/stock'];
     response.writeHead(status,{'Content-Type':type,...(status===302?{Location:'/unexpected','Set-Cookie':'authored=1'}:{})});response.end(body);
@@ -368,7 +370,8 @@ async function checkConfiguredProject() {
       [field('/__proto__','object'),'/stock','response_field_missing'],[{...valid,timeoutMs:100},'/slow','timeout'],
     ])await refuses(config,path,code);
     for(const path of ['/short','/partial-timeout']){
-      await assert.rejects(()=>send({...valid,timeoutMs:100},path),error=>{
+      // A premature close is independent of the deadline; give it a long one.
+      await assert.rejects(()=>send({...valid,timeoutMs:path==='/short'?10000:100},path),error=>{
         assert.equal(error.code,path==='/short'?'response_read':'timeout');assert.equal(error.result.network_requests,1);
         assert.equal(error.result.url,origin+path);assert.equal(error.result.status,200);assert.equal(error.result.body,'{"part":');assert.equal(error.result.body_truncated,true);return true;
       });

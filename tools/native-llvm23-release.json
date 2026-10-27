@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "compiler_major": 23,
+  "release": "llvmorg-23.1.4",
+  "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/LLVM-23.1.4-Linux-X64.tar.zst",
+  "sha256": "efdd1dbd089b99bfcfcde7b8eb1236163f2e88df5a981cca4f783ec9cb5e0378",
+  "size": 1190060068,
+  "root": "LLVM-23.1.4-Linux-X64",
+  "members": [
+    "bin/clang-23",
+    "bin/clang",
+    "bin/clang++",
+    "bin/lld",
+    "bin/ld.lld",
+    "bin/llvm-ar",
+    "bin/llvm-nm",
+    "bin/llvm-readobj",
+    "bin/llvm-readelf",
+    "lib/clang/23"
+  ]
+}

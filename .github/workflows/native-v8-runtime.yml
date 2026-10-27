@@ -1,13 +1,24 @@
 name: Native V8 runtime
 on:
   workflow_dispatch:
+  # Runs on main seed the compiler-object cache that pull requests restore.
+  push:
+    branches: [main]
+    paths:
+      - 'browser/config/v8.rev'
+      - 'browser/integration/brave/patches/v8/**'
+      - 'tools/check-native-v8-runtime.py'
+      - 'tools/install-native-llvm.py'
+      - 'tools/native-llvm23-release.json'
+      - '.github/workflows/native-v8-runtime.yml'
+      - 'tools/quickjs-native-fixture/**'
   pull_request:
     paths:
       - 'browser/config/v8.rev'
       - 'browser/integration/brave/patches/v8/**'
       - 'tools/check-native-v8-runtime.py'
       - 'tools/install-native-llvm.py'
-      - 'tools/native-llvm23-packages.json'
+      - 'tools/native-llvm23-release.json'
       - '.github/workflows/native-v8-runtime.yml'
       - 'tools/quickjs-native-fixture/**'
 permissions:
@@ -23,27 +34,26 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - name: Install source-build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-15 ninja-build pkg-config libglib2.0-dev ccache libedit2 libffi8 libxml2-16 libz3-4 libzstd1 zlib1g libpfm4 libcurl4t64
-      - name: Extract verified LLVM23 privately and check required compiler flags
+          sudo apt-get install -y g++-15 ninja-build pkg-config libglib2.0-dev ccache zstd python3-httplib2
+      - name: Extract the digest-pinned official LLVM23 release privately and check required compiler flags
         run: |
           python3 tools/install-native-llvm.py --self-test
           python3 tools/install-native-llvm.py \
             --prefix "$RUNNER_TEMP/reb-llvm23" --receipt build/native-llvm23.json
-          echo "$RUNNER_TEMP/reb-llvm23/usr/bin" >> "$GITHUB_PATH"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/reb-llvm23/usr/lib/x86_64-linux-gnu:$RUNNER_TEMP/reb-llvm23/usr/lib/llvm-23/lib" >> "$GITHUB_ENV"
+          python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bin"])' build/native-llvm23.json >> "$GITHUB_PATH"
       - name: Restore bounded compiler objects (never source or credentials)
         id: compiler-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/reb-native-ccache
-          key: native-v8-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-packages.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: native-v8-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-packages.json') }}-
+          key: native-v8-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-release.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: native-v8-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-release.json') }}-
       - name: Validate standalone adaptation
         run: python3 tools/check-native-v8-runtime.py --self-test
       - name: Compile pinned native runtime and execute real C++ tests

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
@@ -50,6 +51,18 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint32_t sample_index,
                            const std::string& source_url,
                            mojo_base::BigBuffer content) override;
+  void CaptureNativeGuest(std::uint64_t capture_epoch,
+                          const std::vector<std::uint8_t>& invocation_record,
+                          const std::vector<std::uint8_t>& dispatch_record,
+                          std::uint64_t execution_context_id,
+                          std::uint64_t document_token_high,
+                          std::uint64_t document_token_low,
+                          const std::string& source_url,
+                          const std::string& adapter_json,
+                          mojo_base::BigBuffer module,
+                          mojo_base::BigBuffer bytecode) override;
+  void CaptureNativeGuestHost(std::uint64_t capture_epoch,
+                              const std::vector<std::uint8_t>& event_record) override;
   void CaptureGeneratedArtifact(std::uint16_t kind,
                                 std::uint16_t capture_origin,
                                 std::uint64_t creator_event_id,
@@ -80,6 +93,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   std::uint64_t reported_dropped_events_ = 0;
   std::uint64_t wasm_capture_epoch_ = 0;
   std::uint32_t wasm_capture_count_ = 0;
+  std::uint32_t guest_capture_count_ = 0, guest_host_count_ = 0;
   bool wasm_document_gap_emitted_ = false;
   std::shared_ptr<const std::uint64_t> wasm_epoch_lifetime_;
 };

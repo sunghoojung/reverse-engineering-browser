@@ -33,6 +33,7 @@ enum class NativeArtifactKind : std::uint16_t {
   kResponseBody = 4,
   kCanvasDataUrl = 5,
   kBytecodeBuffer = 6,
+  kWasmGuestAdapter = 7,
 };
 
 enum class NativeArtifactCaptureOrigin : std::uint16_t {
@@ -45,6 +46,7 @@ enum class NativeArtifactCaptureOrigin : std::uint16_t {
   kCanvasToDataUrl = 6,
   kRuntimeTypedArray = 7,
   kRuntimeAllocatingScript = 8,
+  kNativeWasmGuest = 9,
 };
 
 // Transient views: emitters must copy before returning. The script identity is

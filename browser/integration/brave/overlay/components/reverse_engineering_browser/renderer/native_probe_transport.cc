@@ -6,8 +6,10 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
 #include <bit>
+#include <cstring>
 #include <memory>
 #include <utility>
+#include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 
 #include "base/functional/bind.h"
 #include "base/task/sequenced_task_runner.h"
@@ -58,7 +60,8 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      const std::uint64_t expires_at_monotonic_ns,
                                      const bool capture_canvas_images,
                                      base::UnsafeSharedMemoryRegion queue_region,
-                                     const std::uint64_t wasm_capture_epoch) {
+                                     const std::uint64_t wasm_capture_epoch,
+                                     const std::string& guest_adapter_json) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -85,6 +88,9 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   NativeProbeSink::Get().SetEmitters(
       &NativeProbeTransport::EmitStatus, &NativeProbeTransport::EmitArtifact, session_id,
       category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId);
+  if (!guest_adapter_json.empty())
+    NativeProbeSink::Get().ConfigureNativeWasmGuest(ParseNativeWasmGuestAdapter(guest_adapter_json),
+                                                    &EmitNativeGuest, &EmitNativeGuestHost);
 }
 
 void NativeProbeTransport::Disable() {
@@ -118,6 +124,47 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
       observation.document_token_low, observation.function_index, observation.module_byte_offset,
       observation.selector, observation.table_count, observation.sample_index,
       std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
+  return true;
+}
+
+bool NativeProbeTransport::EmitNativeGuest(const NativeGuestCapture& capture,
+                                           std::uint64_t generation) noexcept {
+  auto& transport = Get();
+  const auto epoch = transport.wasm_capture_epoch_.load(std::memory_order_acquire);
+  if (!epoch || !NativeProbeSink::Get().CanAdmitEvent(capture.dispatch, generation) ||
+      capture.module_bytes.size() > kNativeArtifactMaxContentBytes ||
+      capture.bytecode_bytes.size() > kNativeGuestSnapshotLimit ||
+      capture.adapter_json.size() > kNativeGuestAdapterLimit)
+    return false;
+  auto* host = transport.HostForCurrentSequence();
+  if (!*host || epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire) ||
+      !NativeProbeSink::Get().CanAdmitEvent(capture.dispatch, generation))
+    return false;
+  std::vector<std::uint8_t> invocation(sizeof(NativeProbeEvent)),
+      dispatch(sizeof(NativeProbeEvent));
+  std::memcpy(invocation.data(), &capture.invocation, sizeof(NativeProbeEvent));
+  std::memcpy(dispatch.data(), &capture.dispatch, sizeof(NativeProbeEvent));
+  (*host)->CaptureNativeGuest(epoch, invocation, dispatch, capture.execution_context_id,
+                              capture.document_token_high, capture.document_token_low,
+                              std::string(capture.source_url), std::string(capture.adapter_json),
+                              mojo_base::BigBuffer(capture.module_bytes),
+                              mojo_base::BigBuffer(capture.bytecode_bytes));
+  return true;
+}
+bool NativeProbeTransport::EmitNativeGuestHost(const NativeProbeEvent& event,
+                                               std::uint64_t generation) noexcept {
+  auto& transport = Get();
+  const auto epoch = transport.wasm_capture_epoch_.load(std::memory_order_acquire);
+  if (!epoch || !event.header.parent_event_id ||
+      !NativeProbeSink::Get().CanAdmitEvent(event, generation))
+    return false;
+  auto* host = transport.HostForCurrentSequence();
+  if (!*host || epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire) ||
+      !NativeProbeSink::Get().CanAdmitEvent(event, generation))
+    return false;
+  std::vector<std::uint8_t> record(sizeof(NativeProbeEvent));
+  std::memcpy(record.data(), &event, sizeof(NativeProbeEvent));
+  (*host)->CaptureNativeGuestHost(epoch, record);
   return true;
 }
 

@@ -14,7 +14,8 @@ interface NativeProbeClient {
             uint64 expires_at_monotonic_ns,
             bool capture_canvas_images,
             mojo_base.mojom.UnsafeSharedMemoryRegion queue_region,
-            uint64 wasm_capture_epoch);
+            uint64 wasm_capture_epoch,
+            string guest_adapter_json);
   Disable();
 };
 
@@ -40,6 +41,17 @@ interface NativeProbeHost {
                       uint32 sample_index,
                       string source_url,
                       mojo_base.mojom.BigBuffer content);
+  CaptureNativeGuest(uint64 capture_epoch,
+                     array<uint8> invocation_record,
+                     array<uint8> dispatch_record,
+                     uint64 execution_context_id,
+                     uint64 document_token_high,
+                     uint64 document_token_low,
+                     string source_url,
+                     string adapter_json,
+                     mojo_base.mojom.BigBuffer module,
+                     mojo_base.mojom.BigBuffer bytecode);
+  CaptureNativeGuestHost(uint64 capture_epoch, array<uint8> event_record);
   CaptureGeneratedArtifact(uint16 kind,
                            uint16 capture_origin,
                            uint64 creator_event_id,

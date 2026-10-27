@@ -26,8 +26,9 @@ EVENT_BROKER_TEST_BINARY := $(BUILD_DIR)/tests/event-broker-test
 VM_DISPATCH_TEST_BINARY := $(BUILD_DIR)/tests/vm-dispatch-test
 OWNED_REGISTER_SAMPLER_TEST := $(BUILD_DIR)/tests/owned-register-sampler-test
 PAGE_GUEST_SAMPLER_TEST := $(BUILD_DIR)/tests/page-guest-sampler-test
+NATIVE_GUEST_TEST := $(BUILD_DIR)/tests/native-wasm-guest-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -149,3 +150,6 @@ $(BUILD_DIR)/tools/native-wasm-guest-golden.o: mk/config.mk mk/native.mk
 $(NATIVE_WASM_GUEST_GOLDEN): $(BUILD_DIR)/tools/native-wasm-guest-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 -include $(BUILD_DIR)/tools/native-wasm-guest-golden.d
+
+$(BUILD_DIR)/tests/native_wasm_guest_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(NATIVE_GUEST_TEST): $(BUILD_DIR)/tests/native_wasm_guest_test.o

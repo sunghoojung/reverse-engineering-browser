@@ -9,11 +9,14 @@
 #include <memory>
 #include <utility>
 
+#include "base/command_line.h"
+#include "base/files/file_util.h"
 #include "base/no_destructor.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 #include "content/public/browser/render_process_host.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 
@@ -50,6 +53,29 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
     return false;
   }
 
+  guest_adapter_json_.clear();
+  const auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch("reb-wasm-guest-adapter")) {
+    const auto path = command_line->GetSwitchValuePath("reb-wasm-guest-adapter");
+    if (path.empty() ||
+        !base::ReadFileToStringWithMaxSize(path, &guest_adapter_json_, kNativeGuestAdapterLimit) ||
+        !ParseNativeWasmGuestAdapter(guest_adapter_json_)) {
+      guest_adapter_json_.clear();
+      return false;
+    }
+    if (!guest_startup_adapter_json_.empty() &&
+        guest_startup_adapter_json_ != guest_adapter_json_) {
+      guest_adapter_json_.clear();
+      return false;
+    }
+    guest_startup_adapter_json_ = guest_adapter_json_;
+    constexpr auto required = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
+                              NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+    if ((category_mask & required) != required) {
+      guest_adapter_json_.clear();
+      return false;
+    }
+  }
   category_mask_.store(category_mask, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(expires_at_monotonic_ns, std::memory_order_relaxed);
   capture_canvas_images_.store(capture_canvas_images, std::memory_order_relaxed);
@@ -67,6 +93,7 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
 }
 
 void NativeProbeSession::StopSession() noexcept {
+  guest_adapter_json_.clear();
   NativeArtifactCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   NativeNetworkCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   session_id_.store(0, std::memory_order_release);

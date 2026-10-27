@@ -17,6 +17,7 @@
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
 #include "reb/wasm_dispatch.hpp"
+#include "reb/wasm_guest.hpp"
 
 namespace {
 using reb::NativeArtifactBodyTee;
@@ -466,6 +467,8 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
   std::cout << "PASS native Wasm artifact ACK, physical typed payload, document/generation "
                "retirement and bounds\n";
 }
+
+#include "guest_dependencies_test.h"
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -490,6 +493,7 @@ int main(int argc, char** argv) {
     Lifecycle(receiver);
     Admission(output);
     NativeWasmDispatch(receiver);
+    NativeGuestDependencies(receiver);
     event_wire.flush();
     artifact_wire.flush();
     ack_wire.flush();

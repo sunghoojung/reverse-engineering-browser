@@ -1348,9 +1348,12 @@ void NativeWasmRuntimeAdmission() {
                "transport retry and full-ring cap retry\n";
 }
 
+#include "guest_sampler_tests.h"
+
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
+  NativeGuestAdmission();
   NativeWasmRuntimeAdmission();
   DispatchSampleAdmission();
   DispatchEmitFailureReleasesBudget();

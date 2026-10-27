@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 
 #include <bit>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -16,6 +17,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
@@ -166,6 +168,124 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
       });
 }
 
+void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
+                                         const std::vector<std::uint8_t>& invocation_record,
+                                         const std::vector<std::uint8_t>& dispatch_record,
+                                         const std::uint64_t execution_context_id,
+                                         const std::uint64_t document_token_high,
+                                         const std::uint64_t document_token_low,
+                                         const std::string& source_url,
+                                         const std::string& adapter_json,
+                                         mojo_base::BigBuffer module,
+                                         mojo_base::BigBuffer bytecode) {
+  const auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
+                    NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  if (!queue_ || !capture_epoch || capture_epoch != wasm_capture_epoch_ || !session_->IsActive() ||
+      (session_->category_mask() & mask) != mask ||
+      guest_capture_count_ >= kNativeGuestSampleLimit ||
+      invocation_record.size() != sizeof(NativeProbeEvent) ||
+      dispatch_record.size() != sizeof(NativeProbeEvent) ||
+      (module.size() != 0 && module.size() < 8) || module.size() > kNativeArtifactMaxContentBytes ||
+      bytecode.size() == 0 || bytecode.size() > kNativeGuestSnapshotLimit || adapter_json.empty() ||
+      adapter_json != session_->guest_adapter_json())
+    return;
+  ++guest_capture_count_;
+  NativeGuestCapture capture;
+  std::memcpy(&capture.invocation, invocation_record.data(), sizeof(capture.invocation));
+  std::memcpy(&capture.dispatch, dispatch_record.data(), sizeof(capture.dispatch));
+  const auto now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  const auto& h = capture.dispatch.header;
+  auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
+  if (!process || h.session_id != session_->session_id() ||
+      h.process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()) ||
+      !h.monotonic_time_ns || h.monotonic_time_ns > now ||
+      capture.invocation.header.monotonic_time_ns > h.monotonic_time_ns)
+    return;
+  content::RenderFrameHost* owner = nullptr;
+  process->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
+    if (!frame->IsActive())
+      return;
+    const auto& token = frame->GetFrameToken().value();
+    const auto& document = frame->GetDocumentToken().value();
+    if ((std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization()) ==
+            h.frame_id &&
+        document.GetHighForSerialization() == document_token_high &&
+        document.GetLowForSerialization() == document_token_low)
+      owner = frame;
+  });
+  if (!owner)
+    return;
+  auto* contents = content::WebContents::FromRenderFrameHost(owner);
+  auto* main_frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
+  const auto tab =
+      main_frame ? static_cast<std::uint32_t>(main_frame->GetFrameTreeNodeId().value()) : 0;
+  capture.invocation.header.tab_id = tab;
+  capture.dispatch.header.tab_id = tab;
+  // Private copies defeat shared BigBuffer mutation between hashing and transfer.
+  const std::vector<std::uint8_t> module_copy(module.begin(), module.end());
+  const std::vector<std::uint8_t> bytecode_copy(bytecode.begin(), bytecode.end());
+  const auto adapter = ParseNativeWasmGuestAdapter(adapter_json);
+  if (!adapter ||
+      (!module_copy.empty() && NativeGuestDigest(module_copy) != adapter->module_sha256))
+    return;
+  const auto field = [&](std::size_t offset, std::size_t width) {
+    std::uint64_t value = 0;
+    for (std::size_t n = 0; n < width; ++n)
+      value |= std::to_integer<std::uint64_t>(capture.dispatch.inline_payload[offset + n])
+               << (n * 8U);
+    return value;
+  };
+  if (guest_capture_count_ > adapter->sample_limit || field(20, 4) >= adapter->sample_limit ||
+      field(4, 4) != adapter->function_index || field(8, 4) != adapter->dispatch_module_offset ||
+      field(76, 4) != adapter->pc_local_index || field(88, 4) != adapter->memory_index ||
+      field(80, 8) != static_cast<std::uint64_t>(adapter->pc_adjustment) ||
+      bytecode_copy.size() < adapter->opcode_width ||
+      field(40, 8) > bytecode_copy.size() - adapter->opcode_width)
+    return;
+  std::uint32_t opcode = 0;
+  for (std::uint32_t n = 0; n < adapter->opcode_width; ++n) {
+    const auto shift = adapter->opcode_big_endian ? 8U * (adapter->opcode_width - n - 1U) : 8U * n;
+    opcode |= static_cast<std::uint32_t>(bytecode_copy[static_cast<std::size_t>(field(40, 8)) + n])
+              << shift;
+  }
+  if (field(92, 4) != opcode)
+    return;
+  capture.execution_context_id = execution_context_id;
+  capture.document_token_high = document_token_high;
+  capture.document_token_low = document_token_low;
+  capture.source_url = source_url;
+  capture.adapter_json = adapter_json;
+  capture.module_bytes = module_copy;
+  capture.bytecode_bytes = bytecode_copy;
+  const auto document = owner->GetWeakDocumentPtr();
+  const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
+  NativeArtifactCaptureSink::Get().CaptureNativeGuest(
+      capture, capture_epoch, [document, lifetime]() {
+        auto* current = document.AsRenderFrameHostIfValid();
+        return !lifetime.expired() && current && current->IsActive();
+      });
+}
+
+void NativeProbeHost::CaptureNativeGuestHost(const std::uint64_t capture_epoch,
+                                             const std::vector<std::uint8_t>& event_record) {
+  // The 65th attempt reaches the sink so its 64-host cap emits a bounded loss marker.
+  if (!queue_ || !capture_epoch || capture_epoch != wasm_capture_epoch_ || !session_->IsActive() ||
+      guest_host_count_ >= 65 || event_record.size() != sizeof(NativeProbeEvent))
+    return;
+  ++guest_host_count_;
+  NativeProbeEvent event;
+  std::memcpy(&event, event_record.data(), sizeof(event));
+  auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
+  const auto now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if (!process || event.header.session_id != session_->session_id() ||
+      event.header.process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()) ||
+      !event.header.monotonic_time_ns || event.header.monotonic_time_ns > now)
+    return;
+  NativeArtifactCaptureSink::Get().CaptureNativeGuestHost(event, capture_epoch);
+}
+
 void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
                                                const std::uint16_t capture_origin,
                                                const std::uint64_t creator_event_id,
@@ -221,7 +341,8 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   }
   wasm_epoch_lifetime_ = std::make_shared<const std::uint64_t>(wasm_capture_epoch_);
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
-                     std::move(renderer_region), wasm_capture_epoch_);
+                     std::move(renderer_region), wasm_capture_epoch_,
+                     session_->guest_adapter_json());
 }
 
 void NativeProbeHost::Disable() {
@@ -229,6 +350,8 @@ void NativeProbeHost::Disable() {
   if (wasm_capture_epoch_ != std::numeric_limits<std::uint64_t>::max())
     ++wasm_capture_epoch_;
   wasm_capture_count_ = 0;
+  guest_capture_count_ = 0;
+  guest_host_count_ = 0;
   wasm_document_gap_emitted_ = false;
   if (client_.is_bound()) {
     client_->Disable();

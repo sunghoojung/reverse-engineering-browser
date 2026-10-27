@@ -44,7 +44,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  std::uint64_t expires_at_monotonic_ns,
                  bool capture_canvas_images,
                  base::UnsafeSharedMemoryRegion queue_region,
-                 std::uint64_t wasm_capture_epoch = 0) override;
+                 std::uint64_t wasm_capture_epoch = 0,
+                 const std::string& guest_adapter_json = {}) override;
   void Disable() override;
 
   [[nodiscard]] static NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
@@ -58,6 +59,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
 
   [[nodiscard]] NativeProbeEmitStatus EmitEvent(const NativeProbeEvent& event,
                                                 std::uint64_t config_generation) noexcept;
+  static bool EmitNativeGuest(const NativeGuestCapture& capture, std::uint64_t generation) noexcept;
+  static bool EmitNativeGuestHost(const NativeProbeEvent& event, std::uint64_t generation) noexcept;
   static bool EmitWasmDispatch(const NativeWasmDispatchObservation& observation,
                                std::uint64_t generation) noexcept;
   static void EmitArtifact(NativeArtifactKind kind,

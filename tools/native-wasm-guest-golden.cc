@@ -14,8 +14,13 @@
 
 int main(int argc, char** argv) {
   std::string_view mode = "default", recipe;
+  bool host_fixture = false;
   for (int i = 1; i < argc; ++i) {
     const std::string_view argument = argv[i];
+    if (argument == "--host-fixture") {
+      host_fixture = true;
+      continue;
+    }
     if ((argument == "--case" || argument == "--recipe-sha") && i + 1 < argc) {
       if (argument == "--case")
         mode = argv[++i];
@@ -62,6 +67,11 @@ int main(int argc, char** argv) {
   sample.memory_length = 4;
   sample.opcode = 0x42;
   sample.recipe_sha256 = invocation.recipe_sha256;
+  if (host_fixture) {
+    invocation.function_index = 1;
+    sample.function_index = 1;
+    sample.module_byte_offset = 58;
+  }
   bool valid_invocation = true, valid_sample = true;
   if (mode == "default") {
   } else if (mode == "version") {

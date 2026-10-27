@@ -4,6 +4,7 @@
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_guest_wire.h"
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/page_guest_dispatch.h"
@@ -1200,6 +1201,11 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   // If a reader sees any replacement policy field, its acquire fence also
   // observes the preceding odd generation and rejects the mixed snapshot.
   std::atomic_thread_fence(std::memory_order_release);
+  native_guest_adapter_.store(nullptr, std::memory_order_release);
+  native_guest_capture_.store(nullptr, std::memory_order_release);
+  native_guest_host_.store(nullptr, std::memory_order_release);
+  if (const auto reset = native_guest_reset_.load(std::memory_order_acquire))
+    reset();
   const bool active = emitter && artifact_emitter;
   session_id_.store(active ? session_id : 0, std::memory_order_relaxed);
   category_mask_.store(active ? category_mask : 0, std::memory_order_relaxed);
@@ -1713,6 +1719,8 @@ std::uint64_t NativeProbeSink::RecordSurfaceOperation(
       frame_id_provider_.load(std::memory_order_relaxed);
   event.header.frame_id = frame_id_provider ? frame_id_provider() : 0;
   SetPayload(event, operation);
+  if (TryRecordNativeGuestHost(event, config_generation))
+    return event.header.sequence_number;
   if (emitter(event, config_generation) != NativeProbeEmitStatus::kAdmitted) {
     if (observed_generation) {
       std::uint64_t claimed = config_generation;
@@ -2353,4 +2361,306 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   }
 }
 
+namespace {
+struct GuestInvocationState final {
+  std::uint64_t instance = 0, invocation = 0, frame = 0, document_high = 0, document_low = 0,
+                dispatch_sequence = 0;
+  NativeProbeEvent invocation_event{};
+};
+struct GuestDocumentBinding final {
+  std::uint64_t frame = 0, high = 0, low = 0, context = 0;
+  bool module_sent = false;
+};
+struct GuestThreadState final {
+  std::uint64_t generation = 0;
+  std::array<GuestInvocationState, 128> invocations{};
+  std::array<GuestDocumentBinding, 16> documents{};
+};
+thread_local GuestThreadState guest_thread;
+}  // namespace
+void NativeProbeSink::NoteNativeGuestOmission(std::uint64_t generation,
+                                              std::uint64_t frame,
+                                              std::size_t kind,
+                                              std::string_view reason) noexcept {
+  if (!generation || (generation & 1U) || kind >= native_guest_gap_generations_.size())
+    return;
+  auto& slot = native_guest_gap_generations_[kind];
+  auto previous = slot.load(std::memory_order_acquire);
+  while (previous < generation - 1) {
+    if (slot.compare_exchange_weak(previous, generation - 1, std::memory_order_acq_rel)) {
+      const bool retained =
+          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame, reason, generation) != 0;
+      auto claimed = generation - 1;
+      slot.compare_exchange_strong(claimed, retained ? generation : previous,
+                                   std::memory_order_acq_rel);
+      return;
+    }
+  }
+}
+void NativeProbeSink::InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept {
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (guest_thread.generation != generation) {
+    guest_thread = {};
+    guest_thread.generation = generation;
+  }
+  const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
+  if (!adapter || view.function_index != adapter->function_index ||
+      view.module_byte_offset != adapter->dispatch_module_offset)
+    return;
+  if (!view.instance_id || !view.invocation_id) {
+    for (auto& state : guest_thread.invocations)
+      state.dispatch_sequence = 0;
+    NoteNativeGuestOmission(generation, 0, 7, "native_guest_runtime_identity_unavailable");
+    return;
+  }
+  for (auto& state : guest_thread.invocations)
+    if (state.instance == view.instance_id && state.invocation == view.invocation_id)
+      state.dispatch_sequence = 0;
+}
+void NativeProbeSink::ConfigureNativeWasmGuest(
+    std::shared_ptr<const NativeWasmGuestAdapter> adapter,
+    NativeGuestCaptureEmitter capture,
+    NativeGuestHostEmitter host) noexcept {
+  native_guest_capture_.store(capture, std::memory_order_release);
+  native_guest_host_.store(host, std::memory_order_release);
+  if (!adapter || !IsValidNativeGuestAdapterShape(*adapter)) {
+    native_guest_adapter_.store(nullptr, std::memory_order_release);
+    return;
+  }
+  // One immutable startup recipe intentionally retained for process lifetime:
+  // hot callback loads cannot block on an atomic shared_ptr implementation.
+  if (!native_guest_retained_adapter_)
+    native_guest_retained_adapter_ = new NativeWasmGuestAdapter(*adapter);
+  if (native_guest_retained_adapter_->json != adapter->json) {
+    native_guest_adapter_.store(nullptr, std::memory_order_release);
+    NoteNativeGuestOmission(config_generation_.load(std::memory_order_acquire), 0, 6,
+                            "native_guest_adapter_restart_required");
+    return;
+  }
+  native_guest_adapter_.store(native_guest_retained_adapter_, std::memory_order_release);
+}
+void NativeProbeSink::SetNativeWasmGuestRuntime(NativeWasmGuestContextProvider context,
+                                                NativeWasmGuestReset reset) noexcept {
+  native_guest_context_.store(context, std::memory_order_release);
+  native_guest_reset_.store(reset, std::memory_order_release);
+}
+bool NativeProbeSink::IsNativeWasmGuestEnabled() const noexcept {
+  // Keep invalidating parents at matching dispatches after the sample cap.
+  return native_guest_adapter_.load(std::memory_order_acquire) &&
+         native_guest_capture_.load(std::memory_order_acquire) && IsVmCaptureEnabled() &&
+         IsArtifactCaptureEnabled();
+}
+bool NativeProbeSink::AdmitNativeWasmGuestModule(std::span<const std::uint8_t> module,
+                                                 std::uint32_t function_index) const noexcept {
+  const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
+  return adapter && function_index == adapter->function_index && IsNativeWasmGuestEnabled() &&
+         !module.empty() && module.size() <= kNativeArtifactMaxContentBytes &&
+         NativeGuestDigest(module) == adapter->module_sha256;
+}
+void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
+                                            std::uint64_t frame_id,
+                                            std::string_view source_url,
+                                            std::span<const std::uint8_t> module_bytes,
+                                            const NativeWasmGuestStateView& view,
+                                            std::uint64_t document_token_high,
+                                            std::uint64_t document_token_low) noexcept {
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (guest_thread.generation != generation) {
+    guest_thread = {};
+    guest_thread.generation = generation;
+  }
+  const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
+  // A helper br_table in an opcode handler is not a guest instruction boundary.
+  if (!adapter || view.function_index != adapter->function_index ||
+      view.module_byte_offset != adapter->dispatch_module_offset)
+    return;
+  if (!view.instance_id || !view.invocation_id) {
+    for (auto& state : guest_thread.invocations)
+      state.dispatch_sequence = 0;
+    NoteNativeGuestOmission(generation, frame_id, 7, "native_guest_runtime_identity_unavailable");
+    return;
+  }
+  GuestInvocationState* state = nullptr;
+  for (auto& slot : guest_thread.invocations)
+    if (slot.instance == view.instance_id && slot.invocation == view.invocation_id) {
+      state = &slot;
+      break;
+    }
+  if (state)
+    state->dispatch_sequence = 0;
+  if (!IsNativeWasmGuestEnabled() || module_bytes.empty() ||
+      module_bytes.size() > kNativeArtifactMaxContentBytes || source_url.empty() ||
+      source_url.size() > kNativeArtifactMaxUrlBytes || !execution_context_id || !frame_id ||
+      !(document_token_high || document_token_low))
+    return;
+  VmAdmission admission;
+  if (!SnapshotVmAdmission(admission) || admission.generation != generation)
+    return;
+  admission.frame_id = frame_id;
+  if (native_guest_capped_generation_.load(std::memory_order_acquire) >= generation) {
+    NoteNativeGuestOmission(generation, frame_id, 0, "native_guest_sample_limit");
+    return;
+  }
+  GuestDocumentBinding* document = nullptr;
+  for (auto& entry : guest_thread.documents)
+    if (entry.frame == frame_id && entry.context == execution_context_id &&
+        entry.high == document_token_high && entry.low == document_token_low) {
+      document = &entry;
+      break;
+    }
+  if (!document) {
+    for (auto& entry : guest_thread.documents)
+      if (!entry.frame) {
+        document = &entry;
+        break;
+      }
+    if (!document) {
+      NoteNativeGuestOmission(generation, frame_id, 5, "native_guest_document_limit");
+      return;
+    }
+    document->frame = frame_id;
+    document->context = execution_context_id;
+    document->high = document_token_high;
+    document->low = document_token_low;
+  }
+  if (!state) {
+    for (auto& slot : guest_thread.invocations)
+      if (!slot.invocation) {
+        state = &slot;
+        break;
+      }
+    if (!state) {
+      NoteNativeGuestOmission(generation, frame_id, 1, "native_guest_invocation_limit");
+      return;
+    }
+    if (NativeGuestDigest(module_bytes) != adapter->module_sha256)
+      return;
+    state->instance = view.instance_id;
+    state->invocation = view.invocation_id;
+    state->frame = frame_id;
+    state->document_high = document_token_high;
+    state->document_low = document_token_low;
+  }
+  if (state->frame != frame_id || state->document_high != document_token_high ||
+      state->document_low != document_token_low)
+    return;
+  NativeGuestSnapshot snapshot;
+  if (!ResolveNativeGuestSnapshot(*adapter, view, snapshot)) {
+    NoteNativeGuestOmission(generation, frame_id, 2, "native_guest_state_unavailable");
+    return;
+  }
+  // Generation tags prevent stale in-flight work consuming a replacement budget.
+  std::uint32_t sample_index = UINT32_MAX;
+  for (std::size_t index = 0; index < adapter->sample_limit; ++index) {
+    auto& slot = native_guest_slots_[index];
+    auto previous = slot.load(std::memory_order_acquire);
+    while (previous < generation) {
+      if (slot.compare_exchange_weak(previous, generation, std::memory_order_acq_rel)) {
+        sample_index = static_cast<std::uint32_t>(index);
+        break;
+      }
+    }
+    if (sample_index != UINT32_MAX)
+      break;
+  }
+  if (sample_index == UINT32_MAX) {
+    auto previous = native_guest_capped_generation_.load(std::memory_order_acquire);
+    while (previous < generation && !native_guest_capped_generation_.compare_exchange_weak(
+                                        previous, generation, std::memory_order_acq_rel)) {
+    }
+    NoteNativeGuestOmission(generation, frame_id, 0, "native_guest_sample_limit");
+    return;
+  }
+  NativeGuestCapture capture;
+  auto& event = capture.dispatch;
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kWasmGuestDispatch;
+  event.header.payload_size = 128;
+  event.header.session_id = admission.session_id;
+  event.header.process_id = admission.process_id;
+  event.header.thread_id = admission.thread_id;
+  event.header.frame_id = frame_id;
+  event.header.monotonic_time_ns = admission.monotonic_time_ns;
+  if (!state->invocation_event.header.sequence_number) {
+    auto& invocation = state->invocation_event;
+    invocation.header = event.header;
+    invocation.header.type = NativeProbeType::kWasmGuestInvocation;
+    invocation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+    NativeWasmGuestInvocationPayload payload;
+    payload.function_index = view.function_index;
+    payload.instance_id = view.instance_id;
+    payload.invocation_id = view.invocation_id;
+    for (std::size_t i = 0; i < 32; ++i)
+      payload.recipe_sha256[i] = static_cast<std::byte>(adapter->recipe_sha256[i]);
+    invocation.inline_payload = EncodeNativeWasmGuestInvocationPayload(payload);
+  }
+  capture.invocation = state->invocation_event;
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.parent_event_id = capture.invocation.header.sequence_number;
+  NativeWasmGuestDispatchPayload payload;
+  payload.function_index = view.function_index;
+  payload.module_byte_offset = view.module_byte_offset;
+  payload.selector = view.selector;
+  payload.table_count = view.table_count;
+  payload.sample_index = sample_index;
+  payload.instance_id = view.instance_id;
+  payload.invocation_id = view.invocation_id;
+  payload.guest_pc = snapshot.pc;
+  payload.raw_pc_bits = snapshot.raw_pc;
+  payload.memory_base = snapshot.memory_base;
+  payload.memory_length = snapshot.memory_length;
+  payload.pc_local_index = adapter->pc_local_index;
+  payload.pc_adjustment = adapter->pc_adjustment;
+  payload.memory_index = adapter->memory_index;
+  payload.opcode = snapshot.opcode;
+  for (std::size_t i = 0; i < 32; ++i)
+    payload.recipe_sha256[i] = static_cast<std::byte>(adapter->recipe_sha256[i]);
+  event.inline_payload = EncodeNativeWasmGuestDispatchPayload(payload);
+  capture.execution_context_id = execution_context_id;
+  capture.document_token_high = document_token_high;
+  capture.document_token_low = document_token_low;
+  capture.source_url = source_url;
+  capture.adapter_json = adapter->json;
+  capture.module_bytes = document->module_sent ? std::span<const std::uint8_t>{} : module_bytes;
+  capture.bytecode_bytes = std::span(snapshot.bytes.data(), snapshot.memory_length);
+  const auto emit = native_guest_capture_.load(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != generation || !emit ||
+      !emit(capture, generation)) {
+    NoteNativeGuestOmission(generation, frame_id, 3, "native_guest_transport_unavailable");
+    return;
+  }
+  document->module_sent = true;
+  state->dispatch_sequence = event.header.sequence_number;
+}
+bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
+                                               std::uint64_t generation) noexcept {
+  const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
+  const auto context_provider = native_guest_context_.load(std::memory_order_acquire);
+  const auto emit = native_guest_host_.load(std::memory_order_acquire);
+  if (!adapter || !context_provider || !emit || guest_thread.generation != generation)
+    return false;
+  NativeWasmGuestContext context;
+  if (!context_provider(adapter->function_index, &context) ||
+      context.function_index != adapter->function_index)
+    return false;
+  const auto end = adapter->import_call_offsets.begin() +
+                   static_cast<std::ptrdiff_t>(adapter->import_call_count);
+  if (std::find(adapter->import_call_offsets.begin(), end, context.import_module_byte_offset) ==
+      end)
+    return false;
+  for (auto& state : guest_thread.invocations) {
+    if (state.instance != context.instance_id || state.invocation != context.invocation_id ||
+        state.frame != event.header.frame_id || !state.dispatch_sequence)
+      continue;
+    event.header.parent_event_id = state.dispatch_sequence;
+    if (emit(event, generation))
+      return true;
+    event.header.parent_event_id = 0;
+    state.dispatch_sequence = 0;
+    NoteNativeGuestOmission(generation, event.header.frame_id, 4,
+                            "native_guest_host_transport_unavailable");
+    return false;
+  }
+  return false;
+}
 }  // namespace reb

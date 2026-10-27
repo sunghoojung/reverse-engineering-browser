@@ -117,6 +117,9 @@ static_library("renderer") {
     "common/native_console_messages.h",
     "common/native_vm_dispatch.h",
     "common/native_wasm_dispatch.h",
+    "common/native_wasm_guest.h",
+    "common/native_wasm_guest_adapter.h",
+    "common/native_wasm_guest_wire.h",
     "common/native_vm_finding.h",
     "renderer/native_console_agent.cc",
     "renderer/native_console_agent.h",
@@ -165,6 +168,7 @@ source_set("browser") {
     "browser/native_worker_transfer_gate.cc",
     "browser/native_worker_transfer_gate.h",
     "common/native_artifact_header.h",
+    "common/native_artifact_queue_limits.h",
     "common/native_console_io.cc",
     "common/native_console_io.h",
     "common/native_network_lifecycle.h",
@@ -173,6 +177,9 @@ source_set("browser") {
     "common/native_runtime_snapshot_queue.h",
     "common/native_vm_dispatch.h",
     "common/native_wasm_dispatch.h",
+    "common/native_wasm_guest.h",
+    "common/native_wasm_guest_adapter.h",
+    "common/native_wasm_guest_wire.h",
     "common/native_vm_finding.h",
   ]
 
@@ -189,5 +196,16 @@ source_set("browser") {
     "//services/network/public/cpp",
     "//services/network/public/mojom",
     "//url",
+  ]
+}
+
+# Requires the pinned Chromium JSON implementation; never covered by the portable stub.
+test("native_wasm_guest_adapter_unittests") {
+  sources = [ "common/native_wasm_guest_adapter_unittest.cc" ]
+  deps = [
+    "//base",
+    "//base/test:test_support",
+    "//content/test:run_all_unittests",
+    "//testing/gtest",
   ]
 }

@@ -18,6 +18,7 @@
 #include <tuple>
 #include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
@@ -61,6 +62,10 @@ class NativeArtifactCaptureSink final {
   void CaptureWasmDispatch(const NativeWasmDispatchObservation& observation,
                            mojo_base::BigBuffer content,
                            std::function<bool()> is_current_document);
+  void CaptureNativeGuest(const NativeGuestCapture& capture,
+                          std::uint64_t epoch,
+                          std::function<bool()> is_current_document);
+  void CaptureNativeGuestHost(const NativeProbeEvent& event, std::uint64_t epoch);
   void CaptureRuntimeTypedArray(int renderer_process_id,
                                 std::uint64_t capture_session_id,
                                 std::uint64_t script_id,
@@ -107,6 +112,39 @@ class NativeArtifactCaptureSink final {
     std::optional<NativeProbeEvent> wasm_observation = std::nullopt;
     std::function<bool()> is_current_document = {};
   };
+
+  using GuestEventKey = std::pair<std::uint32_t, std::uint64_t>;
+  struct GuestGroup final {
+    std::uint64_t epoch = 0, document_high = 0, document_low = 0, module_id = 0, adapter_id = 0;
+    std::uint64_t context_id = 0, frame_id = 0;
+    std::uint32_t process_id = 0;
+    std::array<std::uint8_t, 32> module_digest{}, recipe_digest{};
+    // IPC admission is not artifact admission. Failure poisons this binding
+    // until reconfiguration; empty-module messages never silently retry it.
+    bool failed = false;
+  };
+  struct GuestInvocation final {
+    NativeProbeEvent event{};
+    std::uint64_t module_id = 0, adapter_id = 0;
+    std::function<bool()> current_document;
+    bool published = false;
+  };
+  struct GuestDispatch final {
+    NativeProbeEvent event{};
+    GuestEventKey invocation{};
+    std::uint64_t epoch = 0, module_id = 0, adapter_id = 0, bytecode_id = 0;
+    std::function<bool()> current_document;
+    std::vector<NativeProbeEvent> hosts;
+    bool published = false, failed = false;
+  };
+  void DrainGuestDependencies();
+  std::vector<GuestGroup> guest_groups_;
+  std::map<GuestEventKey, GuestInvocation> guest_invocations_;
+  std::map<GuestEventKey, GuestDispatch> guest_dispatches_;
+  // 0 pending, 1 accepted, 2 rejected; bounded by three artifacts per sample.
+  std::map<std::uint64_t, std::uint8_t> guest_receipts_;
+  std::size_t guest_host_count_ = 0, guest_capture_count_ = 0;
+  bool guest_host_gap_emitted_ = false, guest_budget_gap_emitted_ = false;
 
   NativeArtifactCaptureSink();
   ~NativeArtifactCaptureSink();

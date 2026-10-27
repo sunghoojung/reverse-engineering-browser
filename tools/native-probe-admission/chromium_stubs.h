@@ -107,7 +107,8 @@ struct NativeProbeClient {
                          std::uint64_t,
                          bool,
                          base::UnsafeSharedMemoryRegion,
-                         std::uint64_t) = 0;
+                         std::uint64_t,
+                         const std::string&) = 0;
   virtual void Disable() = 0;
 };
 struct NativeProbeHost {
@@ -117,6 +118,14 @@ struct NativeProbeHost {
   void EventsAvailable() { ++notifications; }
   template <class... Args>
   void CaptureWasmDispatch(Args&&...) {
+    ++artifacts;
+  }
+  template <class... Args>
+  void CaptureNativeGuest(Args&&...) {
+    ++artifacts;
+  }
+  template <class... Args>
+  void CaptureNativeGuestHost(Args&&...) {
     ++artifacts;
   }
   template <class... Args>

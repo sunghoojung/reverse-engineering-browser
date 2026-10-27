@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+const wasm=await readFile(new URL('node_modules/@jitl/quickjs-wasmfile-debug-sync/dist/emscripten-module.wasm',import.meta.url));
+assert.equal(digest(wasm),'4d2f9f8adf28c48ed273515b815e05ae9a698b54955f7348e951faf43b1febc3');
+const license=await readFile(new URL('node_modules/@jitl/quickjs-wasmfile-debug-sync/LICENSE',import.meta.url));
+assert.equal(digest(license),'446a69ae534aa8612d8b16d3bfc670c5a5050597dca3ce9820441a60d5d04fbb');
+const recipe=JSON.parse(await readFile(new URL('adapter.json',import.meta.url),'utf8'));
+assert.equal(recipe.module_sha256,digest(wasm));assert.equal(recipe.pc.local_index,320);
+assert.equal(recipe.pc.adjustment,'0');assert.equal(recipe.pc.subtract_memory_base,true);
+assert.deepEqual(recipe.import_call_offsets,[0x6816]);
+console.log('PASS exact public module/license and adapter identity; not native capture acceptance');

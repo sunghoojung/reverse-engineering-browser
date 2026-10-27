@@ -10,8 +10,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string_view>
+#include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 
 #include "base/component_export.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
@@ -158,6 +160,22 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
     CaptureGeneratedArtifact(kind, capture_origin, 0, execution_context_id, frame_id, source_url,
                              content);
   }
+  void ConfigureNativeWasmGuest(std::shared_ptr<const NativeWasmGuestAdapter> adapter,
+                                NativeGuestCaptureEmitter capture,
+                                NativeGuestHostEmitter host) noexcept;
+  void SetNativeWasmGuestRuntime(NativeWasmGuestContextProvider context,
+                                 NativeWasmGuestReset reset) noexcept;
+  [[nodiscard]] bool IsNativeWasmGuestEnabled() const noexcept;
+  void InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept;
+  [[nodiscard]] bool AdmitNativeWasmGuestModule(std::span<const std::uint8_t> module,
+                                                std::uint32_t function_index) const noexcept;
+  void RecordNativeWasmGuest(std::uint64_t execution_context_id,
+                             std::uint64_t frame_id,
+                             std::string_view source_url,
+                             std::span<const std::uint8_t> module_bytes,
+                             const NativeWasmGuestStateView& view,
+                             std::uint64_t document_token_high,
+                             std::uint64_t document_token_low) noexcept;
   // Native-only runtime callback; no page JS registration and no inferred guest PC.
   void SetNativeWasmDispatchEmitter(NativeWasmDispatchEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmDispatchEnabled() const noexcept;
@@ -321,6 +339,20 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> wasm_br_table_interpreter_id_{0};
   std::atomic<std::uint64_t> wasm_br_table_bytecode_id_{0};
   std::atomic<std::uint64_t> page_guest_invocation_{1};
+  const NativeWasmGuestAdapter* native_guest_retained_adapter_ = nullptr;
+  std::atomic<const NativeWasmGuestAdapter*> native_guest_adapter_{nullptr};
+  std::atomic<NativeGuestCaptureEmitter> native_guest_capture_{nullptr};
+  std::atomic<NativeGuestHostEmitter> native_guest_host_{nullptr};
+  std::atomic<NativeWasmGuestContextProvider> native_guest_context_{nullptr};
+  std::atomic<NativeWasmGuestReset> native_guest_reset_{nullptr};
+  std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_slots_{};
+  std::atomic<std::uint64_t> native_guest_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, 8> native_guest_gap_generations_{};
+  void NoteNativeGuestOmission(std::uint64_t generation,
+                               std::uint64_t frame,
+                               std::size_t kind,
+                               std::string_view reason) noexcept;
+  bool TryRecordNativeGuestHost(NativeProbeEvent& event, std::uint64_t generation) noexcept;
 
   struct PageGuestIds final {
     std::uint64_t finding_id = 0;

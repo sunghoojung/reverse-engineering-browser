@@ -363,6 +363,12 @@ pub(super) mod tests {
                 {
                     std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
                 }
+                if case == "wide-identities" {
+                    super::super::export_golden_evidence(
+                        root.path(),
+                        "REB_NATIVE_WASM_EVIDENCE_OUTPUT",
+                    );
+                }
             }
         }
     }

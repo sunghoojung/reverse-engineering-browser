@@ -83,7 +83,7 @@ jobs:
         run: node tools/check-companion-warning.mjs
       - name: Exercise rendered packaged UI with hosted XCTest
         run: |
-          make e2e native-wasm-guest-golden native-wasm-dispatch-golden
+          make e2e native-wasm-golden-check
           node tools/check-origin-trace-rendered-ui.mjs
       - name: Preserve package and lifecycle diagnostics
         if: always()

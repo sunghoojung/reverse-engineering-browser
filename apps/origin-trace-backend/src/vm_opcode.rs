@@ -1412,6 +1412,26 @@ pub(crate) fn store(root: &Path, analysis: &Value, mut workspaces: Vec<Value>) -
     Ok(document)
 }
 
+// The C++ golden tests build a real evidence store from native encoder output.
+// When the named variable is set, copy that exact store (manifest, events and
+// content-addressed blobs) for consumers such as the rendered UI acceptance, so
+// they never mirror the fixture by hand.
+#[cfg(test)]
+fn export_golden_evidence(root: &std::path::Path, variable: &str) {
+    let Ok(out) = std::env::var(variable) else {
+        return;
+    };
+    let out = std::path::Path::new(&out);
+    std::fs::create_dir_all(out.join("blobs")).unwrap();
+    for name in ["manifest.jsonl", "events.jsonl"] {
+        std::fs::copy(root.join(name), out.join(name)).unwrap();
+    }
+    for entry in std::fs::read_dir(root.join("blobs")).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(&path, out.join("blobs").join(path.file_name().unwrap())).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

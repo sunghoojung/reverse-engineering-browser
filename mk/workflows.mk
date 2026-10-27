@@ -86,9 +86,10 @@ app-build: heap-snapshot decoder broker artifact-receiver native-console-build $
 	./scripts/build-research-app.sh
 
 # Rendered acceptance of the packaged app: a hosted XCTest drives its real
-# WKWebView with native AppKit input against the packaged backend. macOS and
+# WKWebView with native AppKit input against the packaged backend. Its native
+# Wasm evidence is the store exported by native-wasm-golden-check. macOS and
 # full Xcode only; screenshots land in build/rendered-ui-qa/screenshots.
-rendered-ui-check: app-build e2e $(NATIVE_WASM_GUEST_GOLDEN) $(NATIVE_WASM_DISPATCH_GOLDEN)
+rendered-ui-check: app-build e2e native-wasm-golden-check
 	node tools/check-origin-trace-rendered-ui.mjs
 
 app: app-build

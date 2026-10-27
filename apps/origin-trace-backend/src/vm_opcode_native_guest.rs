@@ -1059,6 +1059,12 @@ mod tests {
                 )
                 .unwrap();
             }
+            if mode == "wide-identities" && !quickjs {
+                super::super::export_golden_evidence(
+                    root.path(),
+                    "REB_NATIVE_GUEST_EVIDENCE_OUTPUT",
+                );
+            }
         }
     }
     #[test]

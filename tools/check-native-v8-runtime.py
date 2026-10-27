@@ -30,6 +30,7 @@ TEST_NAMES = [
     "RebNativeGuestLargeLocalIndexAndMemory",
     "RebNativeGuestHelperImportAndExceptionScope",
     "RebNativeGuestAdmissionPolicyReplacement",
+    "RebNativeGuestSelectedAncestorAndDropBarrier",
     "RebNativeGuestDepthAndCounterExhaustionFailClosed",
     "RebNativeGuestDistinctInstances",
     "RebNativeGuestWeakIdentityLifetime",

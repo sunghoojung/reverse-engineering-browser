@@ -1,8 +1,8 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index fedf1ce..10d4a62 100644
+index fedf1ce..90a5bdd 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -330,6 +330,27 @@ using WasmBrTableDispatchCallback = void (*)(
+@@ -330,6 +330,30 @@ using WasmBrTableDispatchCallback = void (*)(
  // into V8. Null means enabled; embedders should reject inactive/capped captures.
  using WasmBrTableDispatchEnabledCallback = bool (*)();
  
@@ -21,6 +21,9 @@ index fedf1ce..10d4a62 100644
 +  uint32_t import_function_index, import_module_byte_offset;
 +};
 +using WasmGuestCaptureEpochCallback = uint64_t (*)();
++// Pure configured-site identity, independent of capture budgets/admission.
++// Null conservatively treats every br_table as a selected boundary.
++using WasmGuestDispatchSiteCallback = bool (*)(uint32_t, uint32_t);
 +using WasmGuestModuleAdmissionCallback = bool (*)(Local<Context>,
 +                                                  const uint8_t *, size_t,
 +                                                  uint32_t);
@@ -31,10 +34,10 @@ index fedf1ce..10d4a62 100644
    kCompile,
    kModule,
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index 09606fb..677685d 100644
+index 09606fb..7a09eea 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1764,6 +1764,17 @@ class V8_EXPORT Isolate {
+@@ -1764,6 +1764,20 @@ class V8_EXPORT Isolate {
        WasmBrTableDispatchCallback callback,
        WasmBrTableDispatchEnabledCallback enabled_callback = nullptr);
  
@@ -42,9 +45,12 @@ index 09606fb..677685d 100644
 +      WasmGuestDispatchCallback callback,
 +      WasmBrTableDispatchEnabledCallback enabled,
 +      WasmGuestCaptureEpochCallback epoch = nullptr,
-+      WasmGuestModuleAdmissionCallback admit_module = nullptr);
++      WasmGuestModuleAdmissionCallback admit_module = nullptr,
++      WasmGuestDispatchSiteCallback selected_site = nullptr);
 +  // Actual current stack only, including exact import caller and nearest
-+  // matching dispatcher ancestor. Cross-instance chains and async work fail.
++  // matching dispatcher ancestor that encountered a selected boundary.
++  // Never-selected activations are skipped; selected-but-dropped ones are not.
++  // Cross-instance chains, untracked frames and async work fail.
 +  bool GetCurrentWasmGuestContext(uint32_t dispatcher_function_index,
 +                                  WasmGuestContext *result);
 +  void ResetWasmGuestCapture();
@@ -53,7 +59,7 @@ index 09606fb..677685d 100644
  
    void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
 diff --git a/src/api/api.cc b/src/api/api.cc
-index c128c92..67a212b 100644
+index c128c92..a72d974 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -164,6 +164,7 @@
@@ -64,7 +70,7 @@ index c128c92..67a212b 100644
  #endif  // V8_ENABLE_WEBASSEMBLY
  
  #ifdef V8_INTL_SUPPORT
-@@ -11012,6 +11013,39 @@ void Isolate::SetWasmBrTableDispatchCallback(
+@@ -11012,6 +11013,41 @@ void Isolate::SetWasmBrTableDispatchCallback(
    i_isolate->set_wasm_br_table_dispatch_callback(callback);
  }
  
@@ -72,7 +78,8 @@ index c128c92..67a212b 100644
 +    WasmGuestDispatchCallback callback,
 +    WasmBrTableDispatchEnabledCallback enabled,
 +    WasmGuestCaptureEpochCallback epoch,
-+    WasmGuestModuleAdmissionCallback admit_module) {
++    WasmGuestModuleAdmissionCallback admit_module,
++    WasmGuestDispatchSiteCallback selected_site) {
 +  i::Isolate *isolate = reinterpret_cast<i::Isolate *>(this);
 +#if V8_ENABLE_WEBASSEMBLY
 +  // Previously admitted instances must never bypass a replacement policy,
@@ -81,6 +88,7 @@ index c128c92..67a212b 100644
 +#endif
 +  isolate->set_wasm_guest_epoch_callback(epoch);
 +  isolate->set_wasm_guest_module_admission(admit_module);
++  isolate->set_wasm_guest_selected_site(selected_site);
 +  isolate->set_wasm_guest_enabled_callback(enabled);
 +  isolate->set_wasm_guest_dispatch_callback(callback);
 +}
@@ -105,10 +113,10 @@ index c128c92..67a212b 100644
                  wasm_module_bytes_callback)
  
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index a695fec..c97cabe 100644
+index a695fec..e6b0060 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -492,61 +492,65 @@ V8_EXPORT_PRIVATE void FreeCurrentEmbeddedBlob();
+@@ -492,61 +492,66 @@ V8_EXPORT_PRIVATE void FreeCurrentEmbeddedBlob();
  
  using DebugObjectCache = std::vector<Handle<HeapObject>>;
  
@@ -183,6 +191,7 @@ index a695fec..c97cabe 100644
 +  V(WasmBrTableDispatchCallback, wasm_br_table_dispatch_callback, nullptr)     \
 +  V(WasmGuestCaptureEpochCallback, wasm_guest_epoch_callback, nullptr)         \
 +  V(WasmGuestModuleAdmissionCallback, wasm_guest_module_admission, nullptr)    \
++  V(WasmGuestDispatchSiteCallback, wasm_guest_selected_site, nullptr)          \
 +  V(WasmGuestDispatchCallback, wasm_guest_dispatch_callback, nullptr)          \
 +  V(WasmBrTableDispatchEnabledCallback, wasm_guest_enabled_callback, nullptr)  \
 +  V(WasmModuleBytesCallback, wasm_module_bytes_callback, nullptr)              \
@@ -229,7 +238,7 @@ index a695fec..c97cabe 100644
    V(uint32_t, wasm_switch_to_the_central_stack_counter, 0)
  
  #define THREAD_LOCAL_TOP_ACCESSOR(type, name)                         \
-@@ -1446,6 +1450,22 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1446,6 +1451,24 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    wasm::StackPool& stack_pool() { return stack_pool_; }
  #endif  // V8_ENABLE_WEBASSEMBLY
  
@@ -240,11 +249,13 @@ index a695fec..c97cabe 100644
 +  struct RebGuestFrame {
 +    Address fp = 0;
 +    uint64_t instance_id = 0, invocation_id = 0;
++    bool selected_dispatch_seen = false;
 +  };
 +  struct RebGuestCaptureState {
 +    RebGuestInstance instances[16]{};
 +    RebGuestFrame frames[128]{};
 +    uint64_t next_id = 1, epoch = 0;
++    bool enabled = false;
 +  };
 +  RebGuestCaptureState &reb_guest_capture_state() {
 +    return reb_guest_capture_state_;
@@ -252,7 +263,7 @@ index a695fec..c97cabe 100644
    GlobalHandles* global_handles() const { return global_handles_; }
  
    TracedHandles* traced_handles() { return &traced_handles_; }
-@@ -2679,6 +2699,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2679,6 +2702,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    UnicodeCache* unicode_cache_ = nullptr;
    AccountingAllocator* allocator_ = nullptr;
    InnerPointerToCodeCache* inner_pointer_to_code_cache_ = nullptr;
@@ -261,7 +272,7 @@ index a695fec..c97cabe 100644
    TracedHandles traced_handles_;
    EternalHandles* eternal_handles_ = nullptr;
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index c3b231c..a67bc27 100644
+index c3b231c..73310ec 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -2,6 +2,8 @@
@@ -291,24 +302,28 @@ index c3b231c..a67bc27 100644
  
  #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
  #include "src/wasm/interpreter/wasm-interpreter.h"
-@@ -149,47 +152,288 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+@@ -149,47 +152,308 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
    return ret;
  }
  
 +namespace wasm {
 +namespace {
 +bool GuestCaptureEnabled(Isolate *isolate) {
-+  if (auto epoch = isolate->wasm_guest_epoch_callback()) {
-+    auto &state = isolate->reb_guest_capture_state();
-+    const uint64_t generation = epoch();
-+    if (state.epoch != generation) {
-+      ResetRebGuestCapture(isolate);
-+      state.epoch = generation;
-+    }
-+  }
++  auto &state = isolate->reb_guest_capture_state();
++  auto epoch = isolate->wasm_guest_epoch_callback();
++  const uint64_t generation = epoch ? epoch() : state.epoch;
 +  auto callback = isolate->wasm_guest_dispatch_callback();
 +  auto enabled = isolate->wasm_guest_enabled_callback();
-+  return callback && enabled && enabled();
++  const bool active = callback && enabled && enabled();
++  // Observed disable/re-enable intervals revoke all old frame identities.
++  // A selected boundary while disabled can therefore never expose a stale
++  // outer parent later, without walking/allocating in the disabled hot path.
++  if (state.epoch != generation || state.enabled != active) {
++    ResetRebGuestCapture(isolate);
++    state.epoch = generation;
++    state.enabled = active;
++  }
++  return active;
 +}
 +Isolate::RebGuestFrame *FindGuestFrame(Isolate *isolate, WasmFrame *frame) {
 +  if (!frame->trusted_instance_data()->has_instance_object())
@@ -497,6 +512,11 @@ index c3b231c..a67bc27 100644
 +      return false;
 +    if (static_cast<uint32_t>(function) != dispatcher_function_index)
 +      continue;
++    // The same interpreter function may implement native calls without ever
++    // entering the guest loop. Skip only these actual, tracked activations.
++    // A selected-but-dropped inner boundary is still a mandatory barrier.
++    if (!identity->selected_dispatch_seen)
++      continue;
 +    *result = {identity->instance_id,
 +               identity->invocation_id,
 +               static_cast<uint32_t>(function),
@@ -546,8 +566,9 @@ index c3b231c..a67bc27 100644
    const int function_index = frame->GetInnermostFunctionIndex();
    const auto instance = frame->trusted_instance_data();
    const auto* module = instance->module();
-   if (!instance->has_native_context() || function_index < 0 ||
+-  if (!instance->has_native_context() || function_index < 0 ||
 -      static_cast<size_t>(function_index) >= module->functions.size()) {
++  if (function_index < 0 ||
 +      static_cast<size_t>(function_index) >= module->functions.size())
      return ReadOnlyRoots(isolate).undefined_value();
 -  }
@@ -561,7 +582,17 @@ index c3b231c..a67bc27 100644
 -  if (offset >= bytes.size() || bytes[offset] != wasm::kExprBrTable) {
 +  if (offset >= bytes.size() || bytes[offset] != wasm::kExprBrTable)
      return ReadOnlyRoots(isolate).undefined_value();
--  }
++  if (guest_enabled) {
++    auto *identity = wasm::FindGuestFrame(isolate, frame);
++    auto selected = isolate->wasm_guest_selected_site();
++    if (identity && (!selected ||
++                     selected(static_cast<uint32_t>(function_index), offset))) {
++      identity->selected_dispatch_seen = true;
++    }
+   }
++  // Record the encounter before context/descriptor/consumer capture admission.
++  if (!instance->has_native_context())
++    return ReadOnlyRoots(isolate).undefined_value();
    HandleScope scope(isolate);
 -  callback(Utils::ToLocal(direct_handle(instance->native_context(), isolate)),
 -           bytes.data(), bytes.size(), static_cast<uint32_t>(function_index),
@@ -856,7 +887,7 @@ index 5e62f08..2d49d36 100644
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c541..c8d7eec 100644
+index 7f4c541..dfd3cb3 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,13 +6,17 @@
@@ -877,7 +908,7 @@ index 7f4c541..c8d7eec 100644
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1359,364 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1359,458 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1075,6 +1106,100 @@ index 7f4c541..c8d7eec 100644
 +  CHECK_EQ(9, r.Call());
 +  CHECK_EQ(2, guest_calls);
 +  CHECK_NE(old_instance, guest_instance);
++  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++}
++
++namespace {
++uint32_t selected_ancestor_site = 0;
++uint64_t selected_outer_invocation = 0;
++bool selected_ancestor_enabled = true;
++bool selected_expect_inner = false;
++bool selected_disable_at_outer = false;
++bool selected_reenable_at_host = false;
++bool EnableSelectedAncestor() { return selected_ancestor_enabled; }
++bool SelectAncestorSite(uint32_t function, uint32_t offset) {
++  return function == 1 && offset == selected_ancestor_site;
++}
++void ObserveSelectedAncestor(v8::Local<v8::Context>, const uint8_t *, size_t,
++                             const v8::WasmGuestStateView &view) {
++  if (!SelectAncestorSite(view.function_index, view.module_byte_offset))
++    return;
++  uint64_t mode = 0;
++  uint8_t width = 0;
++  CHECK(view.read_numeric_local(view.accessor_context, 0, &mode, &width));
++  CHECK_EQ(32, width);
++  // Deliberately drop the selected inner sample. Engine ancestry must still
++  // return this inner activation, never borrow the retained outer observation.
++  if (mode == 3)
++    return;
++  selected_outer_invocation = view.invocation_id;
++  CHECK_NE(uint64_t{0}, selected_outer_invocation);
++  if (selected_disable_at_outer)
++    selected_ancestor_enabled = false;
++}
++void CheckSelectedAncestorHost(
++    const v8::FunctionCallbackInfo<v8::Value> &args) {
++  v8::WasmGuestContext context{};
++  if (selected_reenable_at_host) {
++    selected_ancestor_enabled = true;
++    CHECK(!args.GetIsolate()->GetCurrentWasmGuestContext(1, &context));
++    CHECK_EQ(uint64_t{0}, context.invocation_id);
++    return;
++  }
++  CHECK(args.GetIsolate()->GetCurrentWasmGuestContext(1, &context));
++  if (selected_expect_inner) {
++    CHECK_NE(selected_outer_invocation, context.invocation_id);
++  } else {
++    CHECK_EQ(selected_outer_invocation, context.invocation_id);
++  }
++}
++} // namespace
++
++TEST(RebNativeGuestSelectedAncestorAndDropBarrier) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  HandleScope handles(CcTest::InitIsolateOnce());
++  WasmCodeRefScope code_scope;
++  auto *isolate = CcTest::isolate();
++  auto host =
++      v8::Function::New(isolate->GetCurrentContext(), CheckSelectedAncestorHost)
++          .ToLocalChecked();
++  TestSignatures sigs;
++  ManuallyImportedJSFunction import{
++      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*host))};
++  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff, kWasmOrigin,
++                                 &import);
++  r.Build(
++      {WASM_IF(WASM_I32_EQ(WASM_LOCAL_GET(0), WASM_I32V_1(1)),
++               WASM_SEQ(B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0),
++                                         BR_TARGET(0))),
++                        WASM_CALL_FUNCTION0(0), WASM_RETURN(WASM_I32V_1(9)))),
++       B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       WASM_IF(WASM_I32_EQ(WASM_LOCAL_GET(0), WASM_I32V_1(0)),
++               WASM_RETURN(WASM_CALL_FUNCTION(1, WASM_I32V_1(1)))),
++       WASM_IF(WASM_I32_EQ(WASM_LOCAL_GET(0), WASM_I32V_1(2)),
++               WASM_RETURN(WASM_CALL_FUNCTION(1, WASM_I32V_1(3)))),
++       WASM_CALL_FUNCTION0(0), WASM_I32V_1(9)});
++  const auto &sites = r.builder().GetFunctionCode(1)->reb_guest_sites();
++  CHECK_EQ(size_t{2}, sites.size());
++  selected_ancestor_site = r.builder().GetFunctionAt(1)->code.offset() +
++                           sites[1].function_byte_offset;
++  selected_ancestor_enabled = true;
++  selected_expect_inner = selected_disable_at_outer =
++      selected_reenable_at_host = false;
++  isolate->SetWasmGuestDispatchCallback(ObserveSelectedAncestor,
++                                        EnableSelectedAncestor, nullptr,
++                                        nullptr, SelectAncestorSite);
++  // Recursive native-only activation executes an unrelated br_table, not the
++  // configured guest boundary: resolve the exact active outer invocation.
++  CHECK_EQ(9, r.Call(0));
++  selected_expect_inner = true;
++  CHECK_EQ(9, r.Call(2));
++  selected_disable_at_outer = selected_reenable_at_host = true;
++  CHECK_EQ(9, r.Call(2));
++  // A fresh activation after re-enable gets a new valid identity.
++  selected_expect_inner = selected_disable_at_outer =
++      selected_reenable_at_host = false;
++  CHECK_EQ(9, r.Call(0));
 +  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
 +}
 +

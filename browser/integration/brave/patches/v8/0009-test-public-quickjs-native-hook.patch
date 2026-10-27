@@ -9,7 +9,15 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
  #include <stdint.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -4529,6 +4530,219 @@
+@@ -13,6 +14,7 @@
+ #include "src/utils/utils.h"
+ #include "src/wasm/code-space-access.h"
+ #include "src/wasm/compilation-environment-inl.h"
++#include "src/wasm/decoder.h"
+ #include "src/wasm/wasm-opcodes-inl.h"
+ #include "src/wasm/wasm-tracing.h"
+ #include "test/cctest/cctest.h"
+@@ -4529,6 +4531,266 @@
        });
  }
  
@@ -45,6 +53,9 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +}
 +
 +bool EnablePublicQuickJS() { return true; }
++bool SelectPublicQuickJSSite(uint32_t function, uint32_t offset) {
++  return function == 414 && offset == 0x20677;
++}
 +bool AdmitPublicQuickJS(v8::Local<v8::Context>, const uint8_t *bytes,
 +                        size_t size, uint32_t function) {
 +  return function == 414 && size == public_quickjs_bytes.size() &&
@@ -70,7 +81,7 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +}
 +void ObservePublicQuickJS(v8::Local<v8::Context>, const uint8_t *bytes,
 +                          size_t size, const v8::WasmGuestStateView &view) {
-+  if (view.function_index != 414 || view.module_byte_offset != 0x20677)
++  if (!SelectPublicQuickJSSite(view.function_index, view.module_byte_offset))
 +    return;
 +  CHECK_EQ(public_quickjs_bytes.size(), size);
 +  CHECK_EQ(0, memcmp(bytes, public_quickjs_bytes.data(), size));
@@ -110,6 +121,43 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +  ++public_quickjs_dispatches;
 +}
 +
++// Wasm permits padded unsigned LEB encodings. Use the engine's checked decoder.
++bool DecodePublicQuickJSU32(const uint8_t *bytes, size_t size, size_t offset,
++                            uint32_t *result) {
++  if (offset >= size)
++    return false;
++  const size_t remaining = size - offset;
++  const size_t length = remaining < 5 ? remaining : 5;
++  Decoder decoder(bytes + offset, bytes + offset + length);
++  const uint32_t value = decoder.consume_u32v("public QuickJS import index");
++  if (!decoder.ok())
++    return false;
++  *result = value;
++  return true;
++}
++
++void CheckPublicQuickJSCallIndexDecoder() {
++  constexpr uint8_t zero[] = {0};
++  constexpr uint8_t padded_zero[] = {0x80, 0x80, 0x80, 0x80, 0};
++  constexpr uint8_t maximum[] = {0xff, 0xff, 0xff, 0xff, 0x0f};
++  constexpr uint8_t truncated[] = {0x80};
++  constexpr uint8_t overflow[] = {0x80, 0x80, 0x80, 0x80, 0x10};
++  constexpr uint8_t too_long[] = {0x80, 0x80, 0x80, 0x80, 0x80, 0};
++  uint32_t index = 17;
++  CHECK(DecodePublicQuickJSU32(zero, sizeof(zero), 0, &index));
++  CHECK_EQ(0u, index);
++  CHECK(DecodePublicQuickJSU32(padded_zero, sizeof(padded_zero), 0, &index));
++  CHECK_EQ(0u, index);
++  CHECK(DecodePublicQuickJSU32(maximum, sizeof(maximum), 0, &index));
++  CHECK_EQ(UINT32_MAX, index);
++  index = 17;
++  CHECK(!DecodePublicQuickJSU32(truncated, sizeof(truncated), 0, &index));
++  CHECK(!DecodePublicQuickJSU32(overflow, sizeof(overflow), 0, &index));
++  CHECK(!DecodePublicQuickJSU32(too_long, sizeof(too_long), 0, &index));
++  CHECK(!DecodePublicQuickJSU32(zero, sizeof(zero), sizeof(zero), &index));
++  CHECK(!DecodePublicQuickJSU32(zero, sizeof(zero), SIZE_MAX, &index));
++  CHECK_EQ(17u, index); // Malformed input must not publish a partial value.
++}
 +void PublicQuickJSHost(const v8::FunctionCallbackInfo<v8::Value> &args) {
 +  static constexpr int expected[] = {100, 201, 102, 203, 100, 201, 102, 203};
 +  CHECK_EQ(1, args.Length());
@@ -130,7 +178,12 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +  CHECK_LT(size_t{context.import_module_byte_offset} + 1,
 +           public_quickjs_bytes.size());
 +  CHECK_EQ(0x10, public_quickjs_bytes[context.import_module_byte_offset]);
-+  CHECK_EQ(0, public_quickjs_bytes[context.import_module_byte_offset + 1]);
++  uint32_t callee_index = UINT32_MAX;
++  CHECK(DecodePublicQuickJSU32(public_quickjs_bytes.data(),
++                              public_quickjs_bytes.size(),
++                              size_t{context.import_module_byte_offset} + 1,
++                              &callee_index));
++  CHECK_EQ(0u, callee_index);
 +  const PublicQuickJSObservation *match = nullptr;
 +  for (const auto &observation : public_quickjs_latest) {
 +    if (observation.instance == context.instance_id &&
@@ -145,6 +198,7 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +} // namespace
 +
 +TEST(RebNativePublicQuickJSGuestState) {
++  CheckPublicQuickJSCallIndexDecoder();
 +  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
 +  FlagScope<bool> liftoff_only(&v8_flags.liftoff_only, true);
 +  FlagScope<bool> cache(&v8_flags.wasm_native_module_cache, false);
@@ -181,7 +235,8 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +            ->Set(context, v8_str("rebNativeHostProbe"), host)
 +            .FromJust());
 +  isolate->SetWasmGuestDispatchCallback(
-+      ObservePublicQuickJS, EnablePublicQuickJS, nullptr, AdmitPublicQuickJS);
++      ObservePublicQuickJS, EnablePublicQuickJS, nullptr, AdmitPublicQuickJS,
++      SelectPublicQuickJSSite);
 +  auto source = v8::String::NewFromUtf8(
 +                    isolate, reinterpret_cast<const char *>(bundle.data()),
 +                    v8::NewStringType::kNormal, static_cast<int>(bundle.size()))

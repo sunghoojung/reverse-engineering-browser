@@ -2470,6 +2470,15 @@ bool NativeProbeSink::IsNativeWasmGuestEnabled() const noexcept {
          native_guest_capture_.load(std::memory_order_acquire) && IsVmCaptureEnabled() &&
          IsArtifactCaptureEnabled();
 }
+bool NativeProbeSink::IsNativeWasmGuestDispatchSite(
+    std::uint32_t function_index,
+    std::uint32_t module_byte_offset) const noexcept {
+  // Engine ancestry markers must survive sample caps and metadata rejection.
+  // This predicate describes the immutable recipe, not capture admission.
+  const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
+  return adapter && function_index == adapter->function_index &&
+         module_byte_offset == adapter->dispatch_module_offset;
+}
 bool NativeProbeSink::AdmitNativeWasmGuestModule(std::span<const std::uint8_t> module,
                                                  std::uint32_t function_index) const noexcept {
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);

@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index aaa9dde..d9380ed 100644
+index aaa9dde..e97c52b 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -32,6 +32,7 @@
@@ -10,7 +10,7 @@ index aaa9dde..d9380ed 100644
  #include <bit>
  #include <cstdint>
  #include <limits>
-@@ -297,6 +298,97 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
+@@ -297,6 +298,101 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
        document_token.GetLowForSerialization());
  }
  
@@ -18,6 +18,10 @@ index aaa9dde..d9380ed 100644
 +std::atomic<std::uint64_t> native_guest_reset_generation{1};
 +std::uint64_t NativeWasmGuestEpoch() {
 +  return native_guest_reset_generation.load(std::memory_order_acquire);
++}
++bool NativeWasmGuestSelectedSite(std::uint32_t function, std::uint32_t offset) {
++  return reb::NativeProbeSink::Get().IsNativeWasmGuestDispatchSite(function,
++                                                                   offset);
 +}
 +bool NativeWasmGuestEnabled() {
 +  return reb::NativeProbeSink::Get().IsNativeWasmGuestEnabled();
@@ -108,13 +112,13 @@ index aaa9dde..d9380ed 100644
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1330,6 +1422,11 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1330,6 +1426,11 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
    isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
    isolate->SetWasmBrTableDispatchCallback(CaptureWasmBrTableDispatch,
                                          NativeWasmBrTableDispatchEnabled);
 +  isolate->SetWasmGuestDispatchCallback(
 +      CaptureWasmGuestDispatch, NativeWasmGuestEnabled, NativeWasmGuestEpoch,
-+      AdmitNativeWasmGuestModule);
++      AdmitNativeWasmGuestModule, NativeWasmGuestSelectedSite);
 +  reb::NativeProbeSink::Get().SetNativeWasmGuestRuntime(CurrentNativeWasmGuest,
 +                                                        ResetNativeWasmGuest);
    isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);

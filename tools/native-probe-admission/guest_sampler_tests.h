@@ -71,6 +71,9 @@ void NativeGuestAdmission() {
     sink.SetNativeWasmGuestRuntime(&GuestContext, nullptr);
   };
   configure();
+  assert(sink.IsNativeWasmGuestDispatchSite(414, 8));
+  assert(!sink.IsNativeWasmGuestDispatchSite(413, 8));
+  assert(!sink.IsNativeWasmGuestDispatchSite(414, 9));
   assert(sink.AdmitNativeWasmGuestModule(module, 414));
   assert(!sink.AdmitNativeWasmGuestModule(module, 413));
   auto changed = module;
@@ -114,6 +117,7 @@ void NativeGuestAdmission() {
   record();
   sink.RecordApiCall(kRuntime, "Math.acos");
   assert(guest_hosts.size() == before);
+  assert(sink.IsNativeWasmGuestDispatchSite(414, 8));  // Cap is not site identity.
   configure();
   record();
   assert(guest_dispatches.size() == 4 && guest_module_sizes.back() == module.size());
@@ -126,6 +130,7 @@ void NativeGuestAdmission() {
   record();
   sink.RecordApiCall(kRuntime, "Math.acos");
   assert(guest_hosts.size() == before);
+  assert(sink.IsNativeWasmGuestDispatchSite(414, 8));  // Failed transport is not a new site.
   guest_capture_accept = true;
   configure();
   record();
@@ -175,6 +180,15 @@ void NativeGuestAdmission() {
   sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
   sink.RecordApiCall(kRuntime, "Math.acos");
   assert(guest_hosts.size() == before_reentry_host + 2);
+  assert(!sink.IsNativeWasmGuestDispatchSite(414, 8));  // Configuration reset clears recipe.
+  sink.ConfigureNativeWasmGuest(adapter, nullptr, nullptr);
+  assert(!sink.IsNativeWasmGuestEnabled());
+  assert(sink.IsNativeWasmGuestDispatchSite(414, 8));  // Recipe identity is not admission.
+  sink.ConfigureNativeWasmGuest(nullptr, nullptr, nullptr);
+  assert(!sink.IsNativeWasmGuestDispatchSite(414, 8));
+  configure();
+  assert(sink.IsNativeWasmGuestDispatchSite(414, 8));
+  sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
   sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
   std::cout
       << "PASS guest sink exact invocation/import parents, reentry, cap/read/transport/identity "

@@ -166,6 +166,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void SetNativeWasmGuestRuntime(NativeWasmGuestContextProvider context,
                                  NativeWasmGuestReset reset) noexcept;
   [[nodiscard]] bool IsNativeWasmGuestEnabled() const noexcept;
+  [[nodiscard]] bool IsNativeWasmGuestDispatchSite(std::uint32_t function_index,
+                                                   std::uint32_t module_byte_offset) const noexcept;
   void InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept;
   [[nodiscard]] bool AdmitNativeWasmGuestModule(std::span<const std::uint8_t> module,
                                                 std::uint32_t function_index) const noexcept;

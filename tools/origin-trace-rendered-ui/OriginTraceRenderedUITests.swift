@@ -119,12 +119,16 @@ final class Harness {
     throw HarnessError("Timed out: \(message)")
   }
 
+  // The outgoing document satisfies the same readiness condition as the new
+  // one, so a fixed sleep can return before navigation and deliver the next
+  // click to a page being torn down. Mark the old document and wait for a
+  // document without the mark.
   func reload() async throws {
     try await activate()
+    _ = try await webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
     webView.reload()
-    try await Task.sleep(nanoseconds: 300_000_000)
     try await waitUntil(
-      "document.readyState === 'complete' && typeof state === 'object' && state.requests.length > 0 && !document.querySelector('#screen-traffic').hidden",
+      "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object' && state.requests.length > 0 && !document.querySelector('#screen-traffic').hidden",
       timeout: 30, "the packaged UI did not load retained evidence")
     try await settle()
   }

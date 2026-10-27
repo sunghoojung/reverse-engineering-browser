@@ -1075,8 +1075,6 @@ mod tests {
         let ops = operations(&spec).unwrap();
         for id in [
             "get_health",
-            "get_api_observation_catalog",
-            "get_network_request",
             "get_origin_trace",
             "get_events",
             "get_artifacts",

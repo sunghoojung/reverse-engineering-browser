@@ -210,8 +210,20 @@ def main():
         gn_source = work / "gn-source"
         # GN's version generator needs its initial-commit tag/history.
         checkout("https://gn.googlesource.com/gn", gn_pin, gn_source, full=True)
-        run(["python3", "build/gen.py", "--out-path=out"], gn_source)
-        run(["ninja", "-C", "out", "-j", str(args.jobs), "gn"], gn_source)
+        # GCC diagnoses the pinned GN source's ASCII-diagram backslash as a
+        # multiline comment. Keep the diagnostic, but scope nonfatal handling
+        # to the build tool only. Production V8 still uses full -Werror.
+        original_cxxflags = env.get("CXXFLAGS")
+        env["CXXFLAGS"] = " ".join(filter(None, (original_cxxflags, "-Wno-error=comment")))
+        receipt["gn_bootstrap_extra_cxxflags"] = ["-Wno-error=comment"]
+        try:
+            run(["python3", "build/gen.py", "--out-path=out"], gn_source)
+            run(["ninja", "-C", "out", "-j", str(args.jobs), "gn"], gn_source)
+        finally:
+            if original_cxxflags is None:
+                env.pop("CXXFLAGS", None)
+            else:
+                env["CXXFLAGS"] = original_cxxflags
         receipt["gn_revision"] = gn_pin
         for patch in sorted((ROOT / "browser/integration/brave/patches/v8").glob("*.patch")):
             source, build, omitted = split_patch(patch.read_text())

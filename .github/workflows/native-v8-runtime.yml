@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   standalone-runtime:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -27,7 +27,7 @@ jobs:
       - name: Install source-build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-14 ninja-build pkg-config libglib2.0-dev
+          sudo apt-get install -y g++-15 ninja-build pkg-config libglib2.0-dev
       - name: Validate standalone adaptation
         run: python3 tools/check-native-v8-runtime.py --self-test
       - name: Compile pinned native runtime and execute real C++ tests

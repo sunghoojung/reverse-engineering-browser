@@ -136,7 +136,7 @@ def main():
         path = work / directory
         path.mkdir()
         env[variable] = str(path)
-    env.update(DEPOT_TOOLS_UPDATE="0", DEPOT_TOOLS_METRICS="0", CC="gcc-14", CXX="g++-14")
+    env.update(DEPOT_TOOLS_UPDATE="0", DEPOT_TOOLS_METRICS="0", CC="gcc-15", CXX="g++-15")
 
     def run(command, cwd=work, capture=False):
         receipt["stage"] = " ".join(map(str, command))
@@ -184,7 +184,7 @@ def main():
         compiler_bin = work / "compiler-bin"
         compiler_bin.mkdir()
         base_path = env["PATH"]
-        for name, versioned in (("gcc", "gcc-14"), ("g++", "g++-14")):
+        for name, versioned in (("gcc", "gcc-15"), ("g++", "g++-15")):
             resolved = shutil.which(versioned, path=base_path)
             if resolved is None:
                 raise RuntimeError("Missing required compiler: " + versioned)
@@ -255,7 +255,7 @@ def main():
         gn_args = " ".join((
             'is_debug=false', 'is_component_build=false', 'symbol_level=0',
             'is_clang=false', 'use_lld=false', 'use_custom_libcxx=true', 'use_sysroot=false',
-            'use_custom_libcxx_for_host=true', 'enable_safe_libcxx=true', 'v8_enable_sandbox=true',
+            'use_custom_libcxx_for_host=true', 'v8_enable_sandbox=true',
             'enable_rust=false', 'v8_enable_temporal_support=false',
             'use_remoteexec=false', 'treat_warnings_as_errors=true',
             'target_cpu="x64"', 'v8_target_cpu="x64"', 'v8_enable_i18n_support=false',

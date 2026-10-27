@@ -116,7 +116,8 @@ jobs:
           node tools/check-vm-full-shell-ui.mjs --fixture-only
 
   test:
-    timeout-minutes: 15
+    # macOS also packages, signs, and runs the real WebKit/XCTest lifecycle gate.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 25 || 15 }}
     strategy:
       fail-fast: false
       matrix:

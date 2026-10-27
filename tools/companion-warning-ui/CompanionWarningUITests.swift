@@ -153,10 +153,11 @@ final class CompanionWarningUITests: XCTestCase {
       "companion-only release", "companion-only release")).firstMatch
     XCTAssertTrue(explanation.exists, "The companion release limitation must be visible")
     let detail = explanation.label + " " + (explanation.value as? String ?? "")
-    for phrase in ["0.3.0", "0.3.1", "runtime-buffer", "VM capture", "CDP Traffic",
-                   "native capture completeness is not established"] {
+    for phrase in ["0.3.0", "0.3.1", "runtime-buffer", "VM capture",
+                   "Native capture completeness is not established"] {
       XCTAssertTrue(detail.contains(phrase), "Missing warning detail: " + phrase)
     }
+    XCTAssertFalse(detail.contains("CDP Traffic"), "Retired CDP support must not be advertised")
     let dialog = app.dialogs.containing(.staticText, identifier: warningTitle).element
     XCTAssertTrue(dialog.exists)
     XCTAssertEqual(dialog.buttons.matching(identifier: "Continue Offline").count, 1)

@@ -9,11 +9,10 @@ node tools/export-graphql-sdl.mjs --input introspection.json --output schema.gra
 ```
 
 Use Node.js 22+. Input is a complete JSON response with `data.__schema`, or an
-object with `__schema`. A saved REB `reb-network-request-v1` exact-request
-response is also accepted directly: select the captured introspection HTTP
-request in Traffic, obtain its five exact selectors with the existing
-`get_network_request` API/`reb-api` workflow, save that response as JSON, and pass
-it as --input. The exporter reuses REB's exact-response validator, requires a
+object with `__schema`. A previously saved REB `reb-network-request-v1`
+exact-request response is also accepted directly as --input. The
+`get_network_request` operation that produced those files was removed with CDP,
+so only earlier saves exist. The exporter reuses REB's exact-response validator, requires a
 complete retained HTTP 200 JSON body, and records the exact source identity in
 an SDL comment. No second file read can substitute a different captured body.
 A truncated/missing body must be recaptured in an authorized session; it is not

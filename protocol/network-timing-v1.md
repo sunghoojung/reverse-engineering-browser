@@ -1,5 +1,12 @@
 # Retained network timing evidence v1
 
+> **Retired.** `timing_evidence` was a projection of CDP Traffic rows. CDP, the
+> Traffic ledger in `GET /api/debugger` and the exact-request API
+> (`GET /api/network/request`) were removed, and the `NetworkTimingEvidence`
+> schema left [openapi.json](openapi.json) with them. Offline exporters still
+> read the format from previously saved records. This page is a historical
+> record of that format.
+
 Traffic rows optionally carry `timing_evidence` with format
 `reb-network-timing-v1`. New content-capture rows include it; older rows remain
 readable. This is a bounded source projection, not a synthesized HAR waterfall.

@@ -7,8 +7,12 @@ have been removed; there is no fallback or replacement claimed for those feature
 
 `/api/debugger` and its subroutes return HTTP410 and are absent from OpenAPI/MCP
 discovery. The old `--debugger-transport` and `--devtools-active-port` options are
-rejected. Historical schemas and inert read-only evidence interpretation may
-remain for saved captures; they cannot connect to a browser or execute code.
+rejected. The CDP-backed `/api/network/catalog` and `/api/network/request` reads
+were also removed and return 404; native network records keep no bodies to
+rebuild them. Session context and deobfuscation keep their version 1 debugger
+fields as fixed retirement values. The OpenAPI document carries no schema for a
+removed route: a backend test fails if any component schema is unreachable or
+any `x-source` path is missing.
 Native Console and the explicitly owned VM fixture debugger remain separate,
 native-backed features. `/api/vm-debugger` is not the removed CDP debugger.
 
@@ -37,6 +41,8 @@ remain opt-in, not authorization to inspect an unowned target.
 See [native-wasm-dispatch-v1](../../protocol/native-wasm-dispatch-v1.md). Runtime
 sampling stays C++; Rust validates exact artifacts and physical dispatch sites,
 and the viewer displays native observations without calling them guest PCs.
+Physical observations and adapter guest samples can describe the same br_table
+execution, so workspaces count them separately and never add them.
 A rebuilt browser is required. Portable tests are not a full native browser build.
 
 ## Limits

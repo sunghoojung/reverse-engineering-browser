@@ -276,8 +276,7 @@ Build the CLI from this checkout when needed:
 make origin-trace-backend
 REB_API=apps/origin-trace-backend/target/debug/reb-api
 "$REB_API" list --json
-"$REB_API" describe get_api_observation_catalog
-"$REB_API" describe get_network_request
+"$REB_API" describe get_session_context
 "$REB_API" describe get_origin_trace
 ```
 
@@ -352,68 +351,13 @@ are rejected. Do not silently drop the guard or substitute `curl` when it
 rejects an operation. Inspect its description and obtain the required scope
 and approval before proposing a distinct action.
 
-## Catalog → exact evidence → offline client
+## Exact evidence → offline client
 
-### 1. Read the bounded observation catalog
+The observed API catalog (`get_api_observation_catalog`) and exact CDP Traffic
+reads (`get_network_request`) were removed with CDP. Native network records
+carry no bodies to rebuild them. Start from native request evidence instead.
 
-After reviewing the sharing scope:
-
-```sh
-"$REB_API" call get_api_observation_catalog --endpoint-file "$ENDPOINT" \
-  --read-only --output observed-api.json
-```
-
-The explicit output file is private and no-clobber; it is not automatically safe
-to share or commit. This call considers the newest 64 retained Traffic requests
-and does not enable capture or issue a target request. Capture-off or an empty
-window stays empty. Preserve all coverage, truncation and unavailable-body
-reasons. Observed exact method/origin/path groups and independent JSON shapes
-do not establish unused endpoints, schema requiredness, credentials, or a
-complete service API. See the [catalog contract](../../protocol/api-observation-catalog-v1.md).
-
-Compare two approved observations within the same exact group using their typed
-shape paths. Distinguish observed changes from unknown bodies; do not infer
-optional fields, pagination semantics, GraphQL operations or service behavior
-from names alone. Keep the researcher-selected scope even if another endpoint
-looks interesting.
-
-### 2. Correlate without substituting identities
-
-A catalog observation links to current Traffic only when all five identity
-fields match: coverage `instance_id` and `capture_epoch`, plus source
-`request_id`, `target_id` and `started_monotonic_ms`. Retain
-`debugger_generation` as snapshot context. Refresh, reconnect or eviction can
-make the exact source unavailable; never substitute a similar path or time.
-
-After authorizing the raw row to enter this provider's context, use
-`get_network_request` to retrieve that exact retained source. Copy the original
-five values from the approved catalog, preserving the unrounded timestamp:
-
-```sh
-# Synthetic examples only; replace all five from the approved observation.
-"$REB_API" call get_network_request --endpoint-file "$ENDPOINT" --read-only \
-  --json-errors --param instance_id=synthetic-owner --param capture_epoch=0 \
-  --param request_id=cdp:synthetic-target:1 --param target_id=synthetic-target \
-  --param started_monotonic_ms=100.0000001 --output selected-traffic.json
-```
-
-The closed response contains `format: reb-network-request-v1`, the five-field
-`source`, `debugger_generation`, and one unchanged raw `request`. Headers,
-URLs, text/base64 bodies and all existing truncation and unavailable-body flags
-are preserved. It never fetches a missing body, reconnects or reads the full
-debugger snapshot. The complete JSON is bounded to 8 MiB, including escaping;
-an oversized record fails entirely with 413 `resource_limit`.
-
-Stop this investigation branch on 409 `state_conflict` with
-`details.selection_reason=stale_capture` (instance/epoch changed), 409 with
-`selection_reason=ambiguous_request` (duplicate retained public ID, even if
-only one row matches the other fields), or 404 `target_unavailable` with
-`selection_reason=request_not_retained` (no exact record). Do not fall back to
-`get_debugger`, retry with rounded time, choose a similar row, or automatically
-refresh selection. `--json-errors` exposes these allowlisted reasons without
-raw capture diagnostics. A later explicit researcher selection can establish a
-new identity. See the [wire contract](../../protocol/http-api.md#exact-retained-traffic-request)
-for exact parameter limits and strict encoding rules.
+### 1. Select native evidence without substituting identities
 
 Native request traces use a different identity domain. Only when the researcher
 has selected a native request with its exact recorded identifiers, call:
@@ -433,7 +377,7 @@ another session. Do not broaden a read to arbitrary source or artifact bodies
 without matching identity and sharing authorization. Some analyses launch local
 helpers and intentionally fail the read-only guard.
 
-### 3. Generate and test locally, without replay
+### 2. Generate and test locally, without replay
 
 Use reviewed observations to author a narrow client in the user's chosen
 language. There is no `reb-api generate` command. A useful deliverable includes:
@@ -454,14 +398,13 @@ authentication success or browser/TLS fingerprint equivalence. State unsupported
 binary/multipart/streaming/WebSocket cases rather than silently changing them.
 
 The native UI already has a separate **Export project** workflow with Go and
-JavaScript clients. It can export an exact Traffic capture or a selected
-Repeater run, uses a macOS Save dialog (browser development downloads a ZIP),
-and defaults to no network until deliberate configuration and `--send`.
+JavaScript clients. It uses a macOS Save dialog (browser development downloads a
+ZIP) and defaults to no network until deliberate configuration and `--send`.
 [Client project v1](../product/client-project-v1.md) describes its fidelity and
 privacy limits. CLI-assisted code authoring is not an invocation of that UI
-export and does not imply a Repeater run occurred.
+export.
 
-### 4. Obtain approval before effects
+### 3. Obtain approval before effects
 
 Before changing a request, creating/replacing an isolated draft, replaying,
 enabling capture, running hooks/scripts, or sharing captured material, identify
@@ -488,9 +431,9 @@ from shared deliverables.
 
 ## Export one reviewed saved request offline
 
-After an authorized `get_network_request` call has saved its complete response
-locally with `--output request.json`, review the file within the approved data
-scope. From the repository, use Node.js 22+:
+This works only on a previously saved `reb-network-request-v1` response from
+the retired `get_network_request` operation; nothing produces new ones. Review
+the file within the approved data scope. From the repository, use Node.js 22+:
 
 ```sh
 node tools/export-captured-client.mjs --input request.json --output project.zip
@@ -526,27 +469,24 @@ available through
 Fresh wrapper configs from `scripts/reb-api-mcp.sh --print-config` use the
 canonical live file and `--require-live` for all five clients. It reports
 `live_admission` (`ready`, `idle`, `debugger_unavailable`, or
-`not_live_capture`), capture/debugger state, the same `instance_id` as
-`/api/health` and `X-REB-Expected-Instance`, selected target ID, debugger
-generation/document epoch, and separate bounded Wasm script and retained-artifact
-inventories. It does not scrape or return the full debugger document, fetch
-source/bytecode, reconnect a browser, or infer which artifact belongs to which
-script.
+`not_live_capture`), capture mode, the same `instance_id` as `/api/health` and
+`X-REB-Expected-Instance`, and a bounded retained-artifact inventory. It does
+not fetch bytecode or reconnect a browser. Its version 1 debugger fields are
+fixed retirement values since CDP was removed: `debugger_state` is
+`unavailable`, `target` is null and `wasm_scripts` is empty.
 
 `allow_effects` is the actual MCP invocation's admission flag, not permission to
 mutate a target or share captures. Direct HTTP/CLI reads return `null` because
 those clients have no MCP admission state. Existing confirmations, ownership,
 and effects gates remain required. `live_admission` is availability only.
-`ready` means capture is live and the debugger is running or paused. `idle`
-means an idle backend with no DevTools port. `debugger_unavailable` means live
-capture or a configured DevTools port is not attached, including a crashed
-renderer. `not_live_capture` covers demo and any other non-live mode. An idle
-endpoint remains useful for stored evidence and local cleanup. Live debugger
-commands return `idle_backend` when the backend is idle and no DevTools port is
-configured, or `debugger_unavailable` when a live target is required but not
-attached. `--require-live` uses `idle_backend` for idle capture,
-`debugger_unavailable` for a live capture whose debugger is not running or
-paused, and `state_conflict` for demo or unknown health. A capture stop whose
+`ready` means capture is live and the debugger is running or paused, which no
+longer happens since CDP was removed. `idle` means an idle backend.
+`debugger_unavailable` means live capture without an attached debugger, which is
+every live backend now. `not_live_capture` covers demo and any other non-live
+mode. An idle endpoint remains useful for stored evidence and local cleanup.
+`--require-live` uses `idle_backend` for idle capture, `debugger_unavailable`
+for a live capture, and `state_conflict` for demo or unknown health, so it
+currently refuses every backend. A capture stop whose
 broker is disconnected returns `dependency_unavailable` and does not report
 success. Correct the endpoint or attachment explicitly rather than automatically
 retrying mutations.
@@ -558,16 +498,13 @@ different identities: an oversized ID is `null`. These labels/IDs can still be
 sensitive metadata, so establish provider-sharing scope first. Each inventory
 has at most 16 entries. Artifact coverage is only a 256 KiB manifest tail;
 `window_truncated` and `items_omitted` are not evidence that an absent module was
-never captured. Scripts and artifacts are not joined by URL, time, or hash.
-`artifact_id`/`script_id` and script `sha256` remain `null` where no exact link or
-verified content digest exists. Script `byte_length` is CDP's script length,
-not proof of a retained complete module.
+never captured. Artifact `script_id` is always `null`; no script is joined by
+URL, time, or hash.
 
-Cache `/api/session/context` with its own response ETag and `If-None-Match`.
-`debugger_etag` belongs only to `/api/debugger`; generation alone does not cover
-manifest or broker changes, and context is not an atomic evidence snapshot.
-Invalid `debugger_action` or `capture_action` bodies include bounded
-`details.allowed_actions` and `details.missing_fields`, drawn only from the
-embedded schema. MCP validation reports those details before sending an invalid
-request. Inspect the exact action with `reb-api describe debugger_action
---action ACTION` before enabling effects or supplying confirmation fields.
+Cache `/api/session/context` with its own response ETag and `If-None-Match`;
+context is not an atomic evidence snapshot. Invalid action bodies such as
+`capture_action` include bounded `details.allowed_actions` and
+`details.missing_fields`, drawn only from the embedded schema. MCP validation
+reports those details before sending an invalid request. Inspect the exact
+action with `reb-api describe OPERATION --action ACTION` before enabling effects
+or supplying confirmation fields.

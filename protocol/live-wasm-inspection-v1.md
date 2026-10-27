@@ -1,6 +1,8 @@
 # Live Wasm inspection v1
 
-The existing `POST /api/debugger/actions` surface adds
+> **Retired.** Live Wasm inspection ran helper JavaScript through `POST /api/debugger/actions`. Native capture replaces it with captured-page Wasm evidence; see [native Wasm guest v1](native-wasm-guest-v1.md). CDP and the `/api/debugger` routes were removed; every `/api/debugger` route now returns 410 `debugger_unavailable`, and no operation or schema in [openapi.json](openapi.json) implements this contract. This page is kept as a historical record for reading earlier captures and notes.
+
+The removed `POST /api/debugger/actions` surface added
 `list_live_wasm_objects` and `read_live_wasm_memory`. These are explicit,
 effectful operations. Two owners are accepted, and every other page is refused:
 
@@ -12,10 +14,9 @@ effectful operations. Two owners are accepted, and every other page is refused:
 
 A disposable Experiment context refuses `captured_owner`. Workers, a different
 target id, a stale epoch, and an unconfirmed captured request are refused.
-Missing captured fields are named in the error. `describe debugger_action
---action list_live_wasm_objects` (and the read action) advertises effects,
-including code-execution and browser-control, and the confirmation. The shared
-debugger action stays off the default MCP tool list until `--allow-effects`.
+Missing captured fields were named in the error. Both actions advertised
+code-execution and browser-control effects and the confirmation, and stayed off
+the default MCP tool list.
 That flag is not authorization.
 
 ## Listing and ownership

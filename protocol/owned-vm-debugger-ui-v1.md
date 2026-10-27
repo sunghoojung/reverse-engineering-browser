@@ -145,28 +145,6 @@ ancestor containing relocated controls. This flow is authored for the rendered
 real-helper gate, not a fake-response replacement for it. Native packaging and
 macOS interaction remain separate required acceptance checks.
 
-A durable real-backend command is:
-
-```sh
-node tools/check-owned-vm-native-browser.mjs \
-  --backend apps/origin-trace-backend/target/debug/origin-trace-backend \
-  --helper build/reb-native-vm-fixture \
-  --browser /path/to/chromium \
-  --output /path/to/validation
-```
-
-All four paths are required. This runner creates fresh temporary evidence stores,
-starts the actual Rust backend on an ephemeral loopback port with the specified
-native helper, loads the integrated UI in a normal sandboxed Chromium, and opens
-VM tab → Live owned fixture through rendered controls. It then
-runs the real-helper keyboard/state/provider-switch flow. It never starts a
-mock-response server or substitutes a JavaScript VM.
-
-Each invocation creates a unique `run-*` subdirectory under the requested output
-directory with a private validation receipt and any screenshots. Missing
-binaries, browser startup restrictions, runtime exceptions, failed assertions,
-or cleanup failures produce failed receipts. Teardown sends an explicit
-exact-scoped Close if a session remains, then requests graceful backend SIGTERM
-and verifies process exit. Forced backend termination is a failure and cannot
-claim confirmed helper disposal. Browser cleanup is restricted to its owned
-process group. Temporary profiles/stores are retained if cleanup is unverified.
+The durable real-backend runner `tools/check-owned-vm-native-browser.mjs`
+drove Chromium through CDP and was removed with CDP browser automation. The
+exported interaction flow above has no current rendered driver.

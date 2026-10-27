@@ -249,7 +249,7 @@ index a695fec..c97cabe 100644
    TracedHandles traced_handles_;
    EternalHandles* eternal_handles_ = nullptr;
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index c3b231c..48710af 100644
+index c3b231c..a67bc27 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -2,6 +2,8 @@
@@ -279,7 +279,7 @@ index c3b231c..48710af 100644
  
  #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
  #include "src/wasm/interpreter/wasm-interpreter.h"
-@@ -149,47 +152,285 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+@@ -149,47 +152,288 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
    return ret;
  }
  
@@ -356,7 +356,7 @@ index c3b231c..48710af 100644
 +  if (!instance_id) {
 +    if (!empty || state.next_id == UINT64_MAX)
 +      return;
-+    // Unrelated modules must not consume the bounded persistent-root budget.
++    // Unrelated modules must not consume the bounded weak-identity budget.
 +    // The embedder checks the configured dispatcher index before hashing.
 +    if (auto admit = isolate->wasm_guest_module_admission()) {
 +      const auto instance = frame->trusted_instance_data();
@@ -370,10 +370,13 @@ index c3b231c..48710af 100644
 +                 bytes.data(), bytes.size(), static_cast<uint32_t>(function)))
 +        return;
 +    }
-+    // Native global-handle nodes are GC-updated roots, not raw address keys.
++    // Weak global handles are GC-updated identity keys, not lifetime roots.
++    // The fixed isolate slot outlives the handle; GC nulls this slot and
++    // releases its node without a callback when the instance becomes dead.
 +    auto handle =
 +        isolate->global_handles()->Create(frame->wasm_instance().ptr());
 +    empty->root = handle.location();
++    GlobalHandles::MakeWeak(&empty->root);
 +    empty->id = instance_id = state.next_id++;
 +  }
 +  if (state.next_id == UINT64_MAX)
@@ -802,7 +805,7 @@ index 5e62f08..e762bcd 100644
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c541..8b556d7 100644
+index 7f4c541..24f68bb 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,6 +6,7 @@
@@ -813,7 +816,15 @@ index 7f4c541..8b556d7 100644
  #include "src/base/functional/function-ref.h"
  #include "src/base/overflowing-math.h"
  #include "src/utils/utils.h"
-@@ -1355,6 +1356,197 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -13,6 +14,7 @@
+ #include "src/wasm/compilation-environment-inl.h"
+ #include "src/wasm/wasm-opcodes-inl.h"
+ #include "test/cctest/cctest.h"
++#include "test/cctest/heap/heap-utils.h"
+ #include "test/cctest/wasm/wasm-runner.h"
+ #include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+@@ -1355,6 +1357,260 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1003,6 +1014,69 @@ index 7f4c541..8b556d7 100644
 +  CHECK_NE(instance, guest_instance);
 +  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
 +}
++TEST(RebNativeGuestWeakIdentityLifetime) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  FlagScope<bool> baseline(&v8_flags.liftoff_only, true);
++  FlagScope<bool> cache(&v8_flags.wasm_native_module_cache, false);
++  auto *internal = CcTest::InitIsolateOnce();
++  auto *isolate = CcTest::isolate();
++  DisableConservativeStackScanningScopeForTesting no_stack_roots(
++      internal->heap());
++  v8::Global<v8::Function> retained_export;
++  isolate->SetWasmGuestDispatchCallback(ObserveNativeGuest, EnableGuestCapture);
++  guest_high_local = false;
++  guest_calls = guest_failures = 0;
++  uint64_t previous_instance = 0;
++  // Reuse a collected identity slot without recycling its monotonic ID.
++  for (int iteration = 0; iteration < 2; ++iteration) {
++    {
++      v8::HandleScope handles(isolate);
++      // A real instantiated module, with memory, one dispatcher and export f.
++      // No JS reference to the WebAssembly.Instance wrapper escapes this IIFE.
++      auto value = CompileRun("(() => { const b = new Uint8Array(["
++                              "0,97,115,109,1,0,0,0,"
++                              "1,5,1,96,0,1,127,3,2,1,0,"
++                              "5,3,1,0,1,7,5,1,1,102,0,0,"
++                              "10,15,1,13,0,2,64,65,0,14,1,0,0,11,65,7,11]);"
++                              "return new WebAssembly.Instance(new "
++                              "WebAssembly.Module(b)).exports.f;"
++                              "})()");
++      CHECK(value->IsFunction());
++      auto function = value.As<v8::Function>();
++      retained_export.Reset(isolate, function);
++      CHECK_EQ(7, function
++                      ->Call(isolate->GetCurrentContext(),
++                             v8::Undefined(isolate), 0, nullptr)
++                      .ToLocalChecked()
++                      ->Int32Value(isolate->GetCurrentContext())
++                      .FromJust());
++    }
++    const uint64_t instance = guest_instance;
++    CHECK_NE(previous_instance, instance);
++    previous_instance = instance;
++    heap::InvokeMajorGC(internal->heap());
++    {
++      v8::HandleScope handles(isolate);
++      CHECK_EQ(7, retained_export.Get(isolate)
++                      ->Call(isolate->GetCurrentContext(),
++                             v8::Undefined(isolate), 0, nullptr)
++                      .ToLocalChecked()
++                      ->Int32Value(isolate->GetCurrentContext())
++                      .FromJust());
++      CHECK_EQ(instance, guest_instance);
++    }
++    retained_export.Reset();
++    // No reset/disable/next Wasm call is needed to release dead target state.
++    heap::InvokeMemoryReducingMajorGCs(internal->heap());
++    for (const auto &identity : internal->reb_guest_capture_state().instances) {
++      CHECK_NULL(identity.root);
++    }
++  }
++  CHECK_EQ(4, guest_calls);
++  CHECK_EQ(0, guest_failures);
++  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++}
++
 +TEST(RebNativeGuestDescriptorBudgetRejectsOverflow) {
 +  CHECK(!RebGuestDescriptorCharge::Acquire(std::numeric_limits<size_t>::max()));
 +  CHECK(!RebGuestDescriptorCharge::Acquire(64 * 1024 * 1024 + 1));

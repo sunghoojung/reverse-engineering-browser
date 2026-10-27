@@ -29,6 +29,7 @@ TEST_NAMES = [
     "RebNativeGuestHelperImportAndExceptionScope",
     "RebNativeGuestDepthAndCounterExhaustionFailClosed",
     "RebNativeGuestDistinctInstances",
+    "RebNativeGuestWeakIdentityLifetime",
     "RebNativeGuestDescriptorBudgetRejectsOverflow",
 ]
 

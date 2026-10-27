@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,22 @@ def binary_dependencies(deps):
     raise ValueError("Missing DEPS dictionary")
 
 
+def create_clang_toolchain_view(destination, system_base, resource_dir, builtins):
+    """Expose the real distro archive at Chromium's expected x64 runtime path."""
+    if not builtins.is_file() or not (resource_dir / "include").is_dir():
+        raise ValueError("Missing real Clang runtime archive or resource headers")
+    if builtins.read_bytes()[:8] != b"!<arch>\n":
+        raise ValueError("Compiler-reported builtins must be a real archive")
+    destination.mkdir()
+    (destination / "bin").symlink_to(system_base / "bin", target_is_directory=True)
+    resource_view = destination / "lib/clang/22"
+    runtime_view = resource_view / "lib/x86_64-unknown-linux-gnu"
+    runtime_view.mkdir(parents=True)
+    (resource_view / "include").symlink_to(resource_dir / "include", target_is_directory=True)
+    (runtime_view / "libclang_rt.builtins.a").symlink_to(builtins)
+    return destination
+
+
 def self_test():
     patches = sorted((ROOT / "browser/integration/brave/patches/v8").glob("*.patch"))
     assert patches
@@ -99,6 +116,25 @@ def self_test():
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        system = root / "system"
+        (system / "bin").mkdir(parents=True)
+        resource = root / "resource"
+        (resource / "include").mkdir(parents=True)
+        builtins = root / "libclang_rt.builtins-x86_64.a"
+        builtins.write_bytes(b"!<arch>\n")
+        view = create_clang_toolchain_view(root / "view", system, resource, builtins)
+        linked = view / "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a"
+        assert linked.resolve() == builtins and linked.read_bytes() == builtins.read_bytes()
+        assert (view / "bin").resolve() == system / "bin"
+        builtins.write_text("not an archive")
+        try:
+            create_clang_toolchain_view(root / "invalid", system, resource, builtins)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid builtins must fail closed")
     print("PASS standalone adapter preserves every production C++ hunk and excludes only embedder GN wiring")
 
 
@@ -210,6 +246,17 @@ def main():
         receipt["compiler"] = run([compiler_paths["clang++-22"], "--version"], capture=True).splitlines()[0]
         receipt["c_compiler"] = run([compiler_paths["clang-22"], "--version"], capture=True).splitlines()[0]
         receipt["compiler_paths"] = compiler_paths
+        resource_dir = Path(run([compiler_paths["clang-22"], "-print-resource-dir"], capture=True).strip()).resolve()
+        builtins = Path(run([compiler_paths["clang-22"], "--rtlib=compiler-rt",
+                             "-print-libgcc-file-name"], capture=True).strip()).resolve()
+        system_clang_base = clang_base
+        clang_base = create_clang_toolchain_view(work / "clang-toolchain-view",
+                                                system_clang_base, resource_dir, builtins)
+        receipt["system_clang_runtime"] = {
+            "system_base": str(system_clang_base), "resource_dir": str(resource_dir),
+            "builtins": str(builtins), "builtins_sha256": hashlib.sha256(builtins.read_bytes()).hexdigest(),
+            "view": str(clang_base),
+        }
         v8_pin = (ROOT / "browser/config/v8.rev").read_text().strip()
         assert re.fullmatch(r"[0-9a-f]{40}", v8_pin)
         receipt["v8_revision"] = v8_pin

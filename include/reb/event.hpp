@@ -53,6 +53,8 @@ enum class EventType : std::uint16_t {
   kArtifactCaptureFailed = 15,
   kVmDispatchSample = 16,
   kWasmDispatchObservation = 17,
+  kWasmGuestDispatch = 18,
+  kWasmGuestInvocation = 19,
 };
 
 enum class EventFlag : std::uint16_t {

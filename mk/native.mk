@@ -140,3 +140,12 @@ $(BUILD_DIR)/tools/native-wasm-dispatch-golden.o: mk/config.mk mk/native.mk
 $(NATIVE_WASM_DISPATCH_GOLDEN): $(BUILD_DIR)/tools/native-wasm-dispatch-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 -include $(BUILD_DIR)/tools/native-wasm-dispatch-golden.d
+
+# Native guest ABI producer; shares the actual renderer encoder.
+NATIVE_WASM_GUEST_GOLDEN := $(BUILD_DIR)/reb-native-wasm-guest-golden
+.PHONY: native-wasm-guest-golden
+native-wasm-guest-golden: $(NATIVE_WASM_GUEST_GOLDEN)
+$(BUILD_DIR)/tools/native-wasm-guest-golden.o: mk/config.mk mk/native.mk
+$(NATIVE_WASM_GUEST_GOLDEN): $(BUILD_DIR)/tools/native-wasm-guest-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
+	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
+-include $(BUILD_DIR)/tools/native-wasm-guest-golden.d

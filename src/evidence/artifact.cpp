@@ -301,6 +301,7 @@ bool ParseManifestRecord(const std::string_view line,
                          std::uint64_t& session_id) {
   std::size_t position = 0;
   std::uint64_t ignored = 0;
+  std::uint64_t frame_id = 0, parent_artifact_id = 0, creator_event_id = 0;
   std::uint64_t execution_context_id = 0;
   std::string_view capture_origin;
   if (!ConsumePrefix(line, position, "{\"protocol_version\":1,\"artifact_id\":\"") ||
@@ -308,9 +309,9 @@ bool ParseManifestRecord(const std::string_view line,
       artifact_id == 0 ||
       !ParseUnsignedField(line, position, "\",\"navigation_id\":\"", session_id) ||
       session_id == 0 || !ParseUnsignedField(line, position, "\",\"frame_id\":\"", ignored) ||
-      !ParseUnsignedField(line, position, "\",\"parent_artifact_id\":\"", ignored) ||
-      !ParseUnsignedField(line, position, "\",\"creator_event_id\":\"", ignored) ||
-      !ParseUnsignedField(line, position, "\"", ignored)) {
+      !ParseUnsignedField(line, position, "\",\"parent_artifact_id\":\"", frame_id) ||
+      !ParseUnsignedField(line, position, "\",\"creator_event_id\":\"", parent_artifact_id) ||
+      !ParseUnsignedField(line, position, "\"", creator_event_id)) {
     return false;
   }
 
@@ -327,7 +328,7 @@ bool ParseManifestRecord(const std::string_view line,
         capture_origin != "dynamic_javascript" && capture_origin != "webassembly_compile" &&
         capture_origin != "webassembly_module" && capture_origin != "webassembly_instantiate" &&
         capture_origin != "canvas_to_data_url" && capture_origin != "runtime_typed_array" &&
-        capture_origin != "runtime_allocating_script") {
+        capture_origin != "runtime_allocating_script" && capture_origin != "native_wasm_guest") {
       return false;
     }
     position = origin_end + std::string_view("\",\"kind\":\"").size();
@@ -341,7 +342,7 @@ bool ParseManifestRecord(const std::string_view line,
   }
   const std::string_view kind = line.substr(position, kind_end - position);
   if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body" &&
-      kind != "canvas_data_url" && kind != "bytecode_buffer") {
+      kind != "canvas_data_url" && kind != "bytecode_buffer" && kind != "wasm_guest_adapter") {
     return false;
   }
   if ((!capture_origin.empty() && capture_origin != "unknown" &&
@@ -350,9 +351,15 @@ bool ParseManifestRecord(const std::string_view line,
        kind != "javascript") ||
       (capture_origin.starts_with("webassembly_") && kind != "wasm") ||
       (capture_origin == "canvas_to_data_url" && kind != "canvas_data_url") ||
-      (capture_origin == "runtime_typed_array" && kind != "bytecode_buffer")) {
+      (capture_origin == "runtime_typed_array" && kind != "bytecode_buffer") ||
+      (capture_origin == "native_wasm_guest" && kind != "bytecode_buffer" &&
+       kind != "wasm_guest_adapter")) {
     return false;
   }
+  if ((kind == "wasm_guest_adapter" && capture_origin != "native_wasm_guest") ||
+      (capture_origin == "native_wasm_guest" &&
+       (!frame_id || !parent_artifact_id || !creator_event_id)))
+    return false;
   position = kind_end + std::string_view("\",\"url\":\"").size();
   if (!SkipJsonString(line, position) || !ConsumePrefix(line, position, ",\"mime_type\":\"") ||
       !SkipJsonString(line, position) || !ConsumePrefix(line, position, ",\"byte_size\":")) {
@@ -408,6 +415,11 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.reserved1 != 0 || header.reserved2 != 0) {
     return false;
   }
+  if ((header.kind == ArtifactKind::kWasmGuestAdapter &&
+       header.capture_origin != ArtifactCaptureOrigin::kNativeWasmGuest) ||
+      (header.capture_origin == ArtifactCaptureOrigin::kNativeWasmGuest &&
+       (!header.frame_id || !header.parent_artifact_id || !header.creator_event_id)))
+    return false;
   const bool sensitive = (header.flags & kArtifactFlagSensitive) != 0;
   if ((header.kind == ArtifactKind::kResponseBody || header.kind == ArtifactKind::kCanvasDataUrl) !=
       sensitive) {
@@ -416,7 +428,8 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
   const bool valid_kind =
       header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
       header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody ||
-      header.kind == ArtifactKind::kCanvasDataUrl || header.kind == ArtifactKind::kBytecodeBuffer;
+      header.kind == ArtifactKind::kCanvasDataUrl || header.kind == ArtifactKind::kBytecodeBuffer ||
+      header.kind == ArtifactKind::kWasmGuestAdapter;
   const bool valid_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -426,7 +439,8 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyInstantiate ||
       header.capture_origin == ArtifactCaptureOrigin::kCanvasToDataUrl ||
       header.capture_origin == ArtifactCaptureOrigin::kRuntimeTypedArray ||
-      header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript;
+      header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript ||
+      header.capture_origin == ArtifactCaptureOrigin::kNativeWasmGuest;
   const bool compatible_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -440,7 +454,10 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       (header.kind == ArtifactKind::kCanvasDataUrl &&
        header.capture_origin == ArtifactCaptureOrigin::kCanvasToDataUrl) ||
       (header.kind == ArtifactKind::kBytecodeBuffer &&
-       header.capture_origin == ArtifactCaptureOrigin::kRuntimeTypedArray);
+       header.capture_origin == ArtifactCaptureOrigin::kRuntimeTypedArray) ||
+      ((header.kind == ArtifactKind::kBytecodeBuffer ||
+        header.kind == ArtifactKind::kWasmGuestAdapter) &&
+       header.capture_origin == ArtifactCaptureOrigin::kNativeWasmGuest);
   const bool runtime_has_context =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -463,6 +480,8 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
       return "canvas_data_url";
     case ArtifactKind::kBytecodeBuffer:
       return "bytecode_buffer";
+    case ArtifactKind::kWasmGuestAdapter:
+      return "wasm_guest_adapter";
     case ArtifactKind::kUnknown:
       return "unknown";
   }
@@ -487,6 +506,8 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
       return "runtime_typed_array";
     case ArtifactCaptureOrigin::kRuntimeAllocatingScript:
       return "runtime_allocating_script";
+    case ArtifactCaptureOrigin::kNativeWasmGuest:
+      return "native_wasm_guest";
     case ArtifactCaptureOrigin::kUnknown:
       return "unknown";
   }

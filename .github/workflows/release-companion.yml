@@ -23,7 +23,8 @@ permissions:
 
 concurrency:
   group: release-companion-${{ github.ref }}
-  cancel-in-progress: false
+  # Superseded PR checks may stop; manual releases remain serialized.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:

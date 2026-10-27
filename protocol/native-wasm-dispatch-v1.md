@@ -29,9 +29,12 @@ Blink supplies exact document identity and native capture context. Renderer and
 browser validate the session, generation, category, expiry and document token.
 The browser captures the module through the artifact receiver and emits the
 observation only after accepted ACK. Stale navigation/configuration callbacks
-are rejected. This version captures one module artifact per observation, capped
-at 16 observations per capture configuration and 16 MiB per module. Queue,
-transport and budget losses are explicit incompleteness, never invented samples.
+are rejected. Observations of the same module in the same document share one
+module artifact; each is emitted once that artifact is accepted (or at once if
+it already was). Capture is capped at 16 observations per configuration and
+16 MiB per module. A lost observation becomes a `gap` in its own renderer
+sequence slot. Queue, transport and budget losses are explicit incompleteness,
+never invented samples.
 
 ## Wire contract
 

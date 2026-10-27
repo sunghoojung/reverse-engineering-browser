@@ -58,6 +58,49 @@ Rejection, navigation, expiry and bounded-queue loss clear the binding; they do
 not retarget it to the last successful sample. Delayed IDs retract provisional
 sequence holes in broker/Rust/JS/Swift summaries. Explicit drops remain drops.
 
+### Module binding and loss accounting
+
+The renderer sends module bytes with the first sample of a document binding and
+then only empty-module samples, until the browser reports a verdict through
+`NativeProbeClient.NativeGuestModuleStatus(epoch, module_token, accepted)`. The
+token is the sequence number of the dispatch that carried the bytes; a verdict
+for a retired configuration or another token has no effect. Acceptance means the
+module and adapter artifacts were both accepted by the receiver. A rejection
+makes the next sample resend the bytes, at most 3 transfers per binding; after
+that the renderer records `native_guest_module_unavailable` and stops sampling
+that binding. Samples sent while a transfer is pending bind to it, and become
+explicit gaps if it is rejected.
+
+Every browser refusal of a guest capture (invalid record, adapter or module
+mismatch, missing owning document, unbound or lost module binding, snapshot
+transfer failure, sample budget) emits a `gap` that reuses the refused
+dispatch's own renderer process and sequence number, so it closes that
+provisional hole instead of leaving it. Invocation sequence numbers are reused
+by later samples and are not filled this way.
+
+Host API-call and property-read records travel the parent-binding path for at
+most 256 records per capture configuration; later ones stay on the ordinary
+queue without a parent after one `native_guest_host_parent_budget` marker. The
+browser publishes each routed host exactly once: with its parent and module
+artifact when that dispatch is published, or immediately without a parent when
+the parent was lost (`native_guest_host_parent_lost`) or more than 64 hosts are
+already held (`native_guest_host_parent_omitted`). Host records are never
+dropped because their parent was. About 250 ms before session expiry the
+browser turns unresolved guest dispatches into `native_guest_pending_at_expiry`
+gaps and publishes their held hosts unparented, because the session refuses
+every record after expiry.
+
+### Engine cost and module admission
+
+`--reb-wasm-guest-capture` (added by the launcher when an adapter is set) is
+what compiles a runtime call on every Wasm function entry and the numeric-local
+descriptors at each `br_table`; physical dispatch observation alone does not.
+Module admission is a three-way decision: another function of an unknown module
+defers, an admitted digest tracks the instance, and a definite rejection is
+remembered weakly per module until the capture interval or policy changes, so a
+hot function in an unrelated module is never hashed again. Returned frames are
+reclaimed by a stack walk only when the 128-entry frame table is full.
+
 ## Host causality and limits
 
 Configured direct import call offsets must be strictly increasing, and each one

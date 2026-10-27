@@ -116,7 +116,16 @@ def main():
         probe.write_text("int main() { return 0; }\n")
         subprocess.run([str(compiler), "-Werror", "-fsyntax-only", *FLAGS, str(probe)],
                        env=env, check=True, timeout=60)
-        receipt.update(status="passed", compiler=version.splitlines()[0], accepted_flags=FLAGS)
+        linker = prefix / "usr/lib/llvm-23/bin/ld.lld"
+        linker_version = subprocess.check_output([str(linker), "--version"], env=env, text=True, timeout=30)
+        if not re.search(r"LLD 23\.", linker_version):
+            raise RuntimeError("Extracted linker is not LLVM23")
+        executable = prefix / "link-probe"
+        subprocess.run([str(compiler), "-Werror", *FLAGS, "-fuse-ld=" + str(linker),
+                        str(probe), "-o", str(executable)], env=env, check=True, timeout=60)
+        subprocess.run([str(executable)], env=env, check=True, timeout=30)
+        receipt.update(status="passed", compiler=version.splitlines()[0], accepted_flags=FLAGS,
+                       linker=linker_version.strip(), compile_link_execute_probe=True)
         print(json.dumps({"bin": str(prefix / "usr/bin"), "ld_library_path": env["LD_LIBRARY_PATH"]}))
     except Exception as error:
         receipt.update(status="failed", error=str(error))

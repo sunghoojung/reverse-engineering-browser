@@ -273,7 +273,7 @@ def main():
                 raise RuntimeError("Missing required compiler: " + name)
             compiler_paths[name] = str(Path(resolved).resolve())
         clang_base = Path(compiler_paths["clang-23"]).parent.parent
-        for name in ("clang", "clang++", "llvm-ar", "llvm-nm", "llvm-readelf"):
+        for name in ("clang", "clang++", "llvm-ar", "llvm-nm", "llvm-readelf", "ld.lld"):
             if not (clang_base / "bin" / name).is_file():
                 raise RuntimeError("Incomplete system LLVM toolchain: " + name)
         receipt["compiler"] = run([compiler_paths["clang++-23"], "--version"], capture=True).splitlines()[0]
@@ -350,7 +350,7 @@ def main():
         # and the public QuickJS fixture do not use the Temporal API.
         gn_args = " ".join((
             'is_debug=false', 'is_component_build=false', 'symbol_level=0',
-            'is_clang=true', 'use_lld=false',
+            'is_clang=true', 'use_lld=true',
             'clang_use_chrome_plugins=false', 'clang_version="23"', 'clang_base_path=' + json.dumps(str(clang_base)), 'use_custom_libcxx=true', 'use_sysroot=false',
             'use_custom_libcxx_for_host=true', 'v8_enable_sandbox=true',
             'enable_rust=false', 'v8_enable_temporal_support=false',

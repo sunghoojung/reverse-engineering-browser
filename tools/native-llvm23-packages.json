@@ -72,6 +72,13 @@
       "filename": "pool/main/l/llvm-toolchain-23/libclang-rt-23-dev_23.1.5~++20261023092600+395ba2c4d274-1~exp1~20261023092610.88_amd64.deb",
       "sha256": "40f4de13d24813a692dd8ba02a4cc918d0131011a46a26b749c551e55d6473af",
       "size": 4345678
+    },
+    {
+      "name": "lld-23",
+      "version": "1:23.1.5~++20261023092600+395ba2c4d274-1~exp1~20261023092610.88",
+      "filename": "pool/main/l/llvm-toolchain-23/lld-23_23.1.5~++20261023092600+395ba2c4d274-1~exp1~20261023092610.88_amd64.deb",
+      "sha256": "bc95e6027cc856049fa1b507cf3d1ec2fe6f5b2cbc809df24d13f52f37b07c76",
+      "size": 1581004
     }
   ]
 }

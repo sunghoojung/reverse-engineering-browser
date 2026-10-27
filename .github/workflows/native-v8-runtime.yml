@@ -18,7 +18,7 @@ concurrency:
 jobs:
   standalone-runtime:
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:

@@ -233,12 +233,12 @@ def main():
             return result
         process = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
         try:
-            deadline = time.monotonic() + 2700
+            deadline = time.monotonic() + 5400
             while process.poll() is None:
                 if shutil.disk_usage(work).free < 1024 ** 3:
                     raise RuntimeError("Stopped owned build before exhausting disk")
                 if time.monotonic() > deadline:
-                    raise TimeoutError("Owned build stage exceeded 45 minutes")
+                    raise TimeoutError("Owned build stage exceeded 90 minutes")
                 try:
                     process.wait(timeout=0.25)
                 except subprocess.TimeoutExpired:

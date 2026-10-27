@@ -3302,15 +3302,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         [...document.querySelectorAll('.request-row')]
           .find(row => row.textContent.includes('live'))?.click();
         document.querySelector('#trace-origin')?.click();
-        showScreen('experiments');
-        setExperimentMode('repeater');
-        window.__rebSmokeRepeater = {
-          visible: !document.querySelector('#screen-experiments')?.hidden,
-          title: document.querySelector('#experiment-title')?.textContent,
-          requestTabs: document.querySelectorAll('[data-repeater-editor-tab]').length,
-          splitColumns: getComputedStyle(document.querySelector('.repeater-split')).gridTemplateColumns,
-          workspaceHeight: document.querySelector('#repeater-workspace')?.getBoundingClientRect().height,
-          splitHeight: document.querySelector('.repeater-split')?.getBoundingClientRect().height
+        showScreen('vm');
+        window.__rebSmokeNativeWorkspace = {
+          visible: document.querySelector('#screen-vm')?.hidden === false,
+          nativeConsolePresent: Boolean(document.querySelector('#native-console-panel')),
+          exportPresent: Boolean(document.querySelector('#captured-export-dialog')),
+          retiredDebuggerAbsent: !document.querySelector('#screen-experiments') &&
+            typeof setExperimentMode === 'undefined' && typeof runDebuggerAction === 'undefined'
         };
         return true;
         })().catch(error => { window.__rebSmokeExerciseError = String(error); return false; });
@@ -3338,18 +3336,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               artifacts: document.querySelectorAll('.source-tree-row[data-artifact-id]').length,
               sourceLines: document.querySelectorAll('.source-line').length,
               broker: document.querySelector('#broker-status')?.textContent,
-              debuggerState: document.querySelector('#debug-state strong')?.textContent,
-              debuggerContractValid: isDebuggerResponse(state.debuggerSession),
-              objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1,
-              runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1,
-              automationRecipesAvailable: state.debuggerSession?.automation_recipes?.protocol_version === 1,
-              repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1,
-              repeaterVisible: window.__rebSmokeRepeater?.visible === true,
-              repeaterTitle: window.__rebSmokeRepeater?.title ?? null,
-              repeaterRequestTabs: window.__rebSmokeRepeater?.requestTabs ?? 0,
-              repeaterSplitColumns: window.__rebSmokeRepeater?.splitColumns ?? null,
-              repeaterWorkspaceHeight: window.__rebSmokeRepeater?.workspaceHeight ?? 0,
-              repeaterSplitHeight: window.__rebSmokeRepeater?.splitHeight ?? 0,
+              liveDebuggerUnavailable: state.debuggerSession === null,
+              nativeWorkspace: window.__rebSmokeNativeWorkspace,
               apiCollectionContractValid: isApiCollection(state.apiCollection),
               apiCollectionGeneration: state.apiCollection?.generation,
               apiCollectionStoreVisible: document.querySelector('#collection-generation')?.textContent,

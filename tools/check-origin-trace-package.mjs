@@ -107,7 +107,8 @@ export async function runPackagedSmoke(app, directory, name, flags = [], environ
   assert.deepEqual(result.nativeClientProject,{available:true,invalidPayloadRefused:true,subframeRefused:true});
   assert.equal(result.stylesLoaded, true);
   assert.equal(result.smokeExerciseError, null, output);
-  assert.equal(result.debuggerContractValid, true);
+  assert.equal(result.liveDebuggerUnavailable, true);
+  assert.deepEqual(result.nativeWorkspace, {visible:true,nativeConsolePresent:true,exportPresent:true,retiredDebuggerAbsent:true});
   assert.equal(result.apiCollectionContractValid, true);
   assert.equal(result.localAnalystContractValid, true);
   assert.equal(result.localAnalystRunnerAvailable, true);

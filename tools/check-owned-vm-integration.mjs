@@ -20,7 +20,10 @@ assert(assets); assert.equal(Number(assets[1]), [...assets[2].matchAll(/"[^"]+"/
 for (const source of [assets[2], swift, packaging]) assert(source.includes('vm_debugger.js'));
 for (const source of [backend, packaging]) assert(source.includes('OriginTraceOwnedVmFixture'));
 assert(swift.includes('"/api/vm-debugger/actions", "/api/vm-debugger/trace"'));
-assert(make.includes('owned_vm_real_helper -- --ignored'));
+// Both real-helper tests run by exact name with an executed-count assertion.
+assert(make.includes('owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens'));
+assert(make.includes('--test owned_vm_http,owned_vm_real_helper_http_cli_lifecycle'));
+assert(make.includes("grep -q '^test result: ok\\. 1 passed; 0 failed;'"));
 assert(make.includes('owned-vm-helper-check'));
 const spec = JSON.parse(specText), paths = spec.paths;
 assert.equal(paths['/api/vm-debugger/actions'].post['x-max-body-bytes'], 2048);

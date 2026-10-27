@@ -51,3 +51,38 @@ dispatcher ancestor, not merely the nearest Wasm frame.
 The Rust verifier checks exact digest AND compiled instruction/type dataflow.
 Unknown builds cannot gain semantic verification from a caller label.
 This is not hCaptcha support or universal guest-PC discovery.
+
+## Real engine-hook cctest (separate from ordinary execution)
+
+`0009-test-public-quickjs-native-hook.patch` adds
+`test-run-wasm/RebNativePublicQuickJSGuestState`. It loads this same unmodified
+public binary through bundled official browser glue. JavaScript only loads the
+module, runs the guest program and forwards ordinary host-call arguments. The
+C++ observer installs `SetWasmGuestDispatchCallback`, reads local320/local10 and
+the checked memory pointer chains through the actual native borrowed accessors,
+and checks the fetched opcode against the runtime selector at dispatch0x20677.
+The C++ host function calls `GetCurrentWasmGuestContext(414)` while the actual
+import stack is live; it joins instance/invocation to the latest native dispatch,
+checks helper import0 at0x6816 and all eight ordinary callback values. The live
+dispatcher frame's CALL offset is intentionally distinct from its earlier
+dispatch offset. Outside the import stack, context lookup must fail.
+
+```sh
+npm ci --prefix tools/quickjs-native-fixture --ignore-scripts --no-audit --no-fund
+node tools/quickjs-native-fixture/verify.mjs
+node tools/quickjs-native-fixture/build-native-hook.mjs "$PWD/build/quickjs-native-hook"
+node tools/quickjs-native-fixture/check-native-hook-loader.mjs "$PWD/build/quickjs-native-hook"
+REB_PUBLIC_QUICKJS_WASM="$PWD/build/quickjs-native-hook/quickjs.wasm" \
+REB_PUBLIC_QUICKJS_BUNDLE="$PWD/build/quickjs-native-hook/quickjs-native-hook.js" \
+  /path/to/patched/v8/out/native-runtime/cctest \
+  test-run-wasm/RebNativePublicQuickJSGuestState
+```
+
+The build script verifies the exact SHA256 before copying the binary and keeps
+both upstream MIT licenses with the generated bundle. esbuild0.25.0 is pinned as
+a **development-only** bundler; generated bundles/node_modules are not committed.
+The loader prerequisite emits `native_capture_validated:false`. Only a compiled,
+successfully executed cctest emits `native_hook_validated:true`; missing fixture
+paths fail instead of skipping. Neither result proves Brave/Blink capture,
+transport persistence, UI acceptance or arbitrary interpreter support. Keep the
+cctest log and exact V8/patch/input identities with its CI receipt.

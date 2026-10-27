@@ -1,1 +1,1 @@
-{"name":"reb-quickjs-native-fixture","private":true,"version":"1.0.0","description":"Development-only real interpreter target; not an application dependency","dependencies":{"@jitl/quickjs-wasmfile-debug-sync":"0.32.0","quickjs-emscripten-core":"0.32.0"}}
+{"name":"reb-quickjs-native-fixture","private":true,"version":"1.0.0","description":"Development-only real interpreter target; not an application dependency","dependencies":{"@jitl/quickjs-wasmfile-debug-sync":"0.32.0","quickjs-emscripten-core":"0.32.0"},"devDependencies":{"esbuild":"0.25.0"}}

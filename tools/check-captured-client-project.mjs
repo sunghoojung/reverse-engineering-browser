@@ -176,32 +176,72 @@ async function checkGeneratedProject() {
       await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+path,timeout_ms:path==='/slow'?100:5000}}));
       result=await execute('--send');
       if(expected==='large'||expected==='exact'){assert.equal(result.code,0,result.stderr);const response=JSON.parse(result.stdout);assert.equal(response.body.length,65536);assert.equal(response.body_truncated,expected==='large');}
-      else assert.notEqual(result.code,0,'Timeout is surfaced with no retry');
+      else {
+        assert.notEqual(result.code,0,'Timeout is surfaced with no retry');
+        assert.match(result.stderr,/^timeout:/m,'A transport failure must not masquerade as the deadline case');
+      }
     }
-    assert.equal(seen.length,5);
+    // The overall deadline can expire before connect or after server receipt.
+    // Count every successful send/refusal exactly; a timed-out send may arrive
+    // zero or one time, but never retries. Recheck after closing/draining below.
+    const receivedWithoutTimeout=()=>seen.filter(request=>request.url!=='/slow').length;
+    assert(seen.filter(request=>request.url==='/slow').length<=1,'Timed-out send never retries');
+    assert.equal(receivedWithoutTimeout(),4);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:'https://wrong.test',request:override}));
-    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5);
+    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,headers:[['Authorization','synthetic-only']]}}));
-    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5,'Credential/transport refusal happens before fetch');
+    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4,'Credential/transport refusal happens before fetch');
     for(const type of invalidContentTypes) {
       await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...copy(local.input),headers:[['Content-Type',type]]}}));
-      result=await execute('--send');assert.notEqual(result.code,0,type);assert.match(result.stderr,/invalid_input/);assert.equal(seen.length,5,'Malformed/ambiguous charset is refused before send');
+      result=await execute('--send');assert.notEqual(result.code,0,type);assert.match(result.stderr,/invalid_input/);assert.equal(receivedWithoutTimeout(),4,'Malformed/ambiguous charset is refused before send');
     }
     for(const type of validContentTypes) {
       await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...copy(local.input),headers:[['Content-Type',type]]}}));
-      result=await execute();assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).ready,true,type);assert.equal(seen.length,5);
+      result=await execute();assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).ready,true,type);assert.equal(receivedWithoutTimeout(),4);
     }
     const redactedProject=api.capturedClientProject(local,'redacted_copy');
     for(const item of redactedProject.files)await writeFile(join(directory,item.path),item.text);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin}));
     result=await execute();assert.equal(result.code,0);assert.equal(JSON.parse(result.stdout).ready,false);
-    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5,'Redacted inputs require a complete reviewed replacement');
+    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4,'Redacted inputs require a complete reviewed replacement');
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+'/configured'}}));
-    result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(seen.length,6);
+    result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(receivedWithoutTimeout(),5);
+    // Exercise the pre-connect deadline deterministically. This authored preload
+    // defers only this fixture request until its real AbortSignal fires, then
+    // calls Node's real transport with the already-aborted signal. Product
+    // timeout code and its deadline are unchanged; no connection may escape.
+    await writeFile(join(folder,'deferred-connect.mjs'), `
+import http from 'node:http';
+import {EventEmitter} from 'node:events';
+import {syncBuiltinESMExports} from 'node:module';
+const original=http.request;
+http.request=function(url,options,callback){
+  if(new URL(url).pathname!=='/deadline-before-connect') return original.call(this,url,options,callback);
+  const pending=new EventEmitter();
+  pending.end=body=>{
+    options.signal.addEventListener('abort',()=>{
+      const request=original.call(http,url,options,callback);
+      request.on('error',error=>pending.emit('error',error));request.end(body);
+    },{once:true});
+  };
+  return pending;
+};
+syncBuiltinESMExports();
+`);
+    await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+'/deadline-before-connect',timeout_ms:100}}));
+    result=await command(process.execPath,['--import','./deferred-connect.mjs','examples/request-001.mjs','--send'],folder);
+    assert.notEqual(result.code,0);assert.match(result.stderr,/^timeout:/m);
+    assert.equal(receivedWithoutTimeout(),5,'Already-aborted transport must not send');
     const output=join(root,'build/client-project-qa');await mkdir(output,{recursive:true});
     await writeFile(join(output,'authored-example.zip'),raw.bytes);
     await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',fixture:'authored loopback only',requests:seen.length,checks:['ZIP CRC and extraction','generated syntax','default dry run','exact method/query/header/text body','origin gate','manual redirect','timeout without retry','bounded response','credential refusal','redacted explicit configuration']},null,2)+'\n');
-  } finally {server.closeAllConnections();await new Promise(done=>server.close(done));await rm(directory,{recursive:true,force:true});}
+  } finally {
+    server.closeAllConnections();await new Promise(done=>server.close(done));
+    await rm(directory,{recursive:true,force:true});
+    assert(seen.filter(request=>request.url==='/slow').length<=1,'Drained timeout traffic never retries');
+    assert.equal(seen.filter(request=>request.url==='/deadline-before-connect').length,0,'Pre-connect timeout remains unsent after drain');
+  }
+  assert.equal(seen.filter(request=>request.url!=='/slow').length,5,'Drained successful/refused requests retain the exact total');
   console.log('PASS generated project extracted by Python, Node syntax, no network until explicit Send, exact supported request values, redirect/origin/credential guards, timeout and response bound');
 }
 

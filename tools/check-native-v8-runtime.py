@@ -20,6 +20,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPOT_REV = "94e89b10b92cc9d6e58fc8d1b6474b7d29e8a114"
+PUBLIC_TEST = "test-run-wasm/RebNativePublicQuickJSGuestState"
 TEST_NAMES = [
     "RebNativeBrTableRuntimeDispatch",
     "RebNativeBrTableAdmissionPredicate",
@@ -116,7 +117,11 @@ def main():
     if work.exists():
         raise ValueError("Use a fresh work directory; existing checkouts are never reset")
     work.mkdir(parents=True)
-    receipt = {"status": "running", "profile": "standalone-gcc-not-Brave", "tests": {}, "patches": []}
+    receipt = {
+        "status": "running", "profile": "standalone-gcc-hardened-libcxx-not-Brave",
+        "tests": {}, "patches": [], "brave_validated": False,
+        "public_native_hook_validated": False,
+    }
     def save_receipt():
         args.receipt.parent.mkdir(parents=True, exist_ok=True)
         args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
@@ -239,12 +244,21 @@ def main():
             receipt["patches"].append(entry)
         gn_args = " ".join((
             'is_debug=false', 'is_component_build=false', 'symbol_level=0',
-            'is_clang=false', 'use_lld=false', 'use_custom_libcxx=false', 'use_sysroot=false',
+            'is_clang=false', 'use_lld=false', 'use_custom_libcxx=true', 'use_sysroot=false',
+            'use_custom_libcxx_for_host=true', 'enable_safe_libcxx=true', 'v8_enable_sandbox=true',
             'enable_rust=false', 'use_remoteexec=false', 'treat_warnings_as_errors=true',
             'target_cpu="x64"', 'v8_target_cpu="x64"', 'v8_enable_i18n_support=false',
             'v8_use_external_startup_data=false', 'v8_dcheck_always_on=true',
         ))
         receipt["gn_args"] = gn_args
+        fixture = ROOT / "tools/quickjs-native-fixture"
+        public_inputs = work / "public-quickjs"
+        run(["npm", "ci", "--ignore-scripts", "--prefix", str(fixture)], ROOT)
+        run(["node", str(fixture / "verify.mjs")], ROOT)
+        run(["node", str(fixture / "build-native-hook.mjs"), str(public_inputs)], ROOT)
+        run(["node", str(fixture / "check-native-hook-loader.mjs"), str(public_inputs)], ROOT)
+        receipt["public_fixture_inputs"] = json.loads((public_inputs / "input-receipt.json").read_text())
+        save_receipt()
         run([str(gn_source / "out/gn"), "gen", "out/native-runtime", "--fail-on-unused-args", "--args=" + gn_args], v8)
         run(["ninja", "-C", "out/native-runtime", "-j", str(args.jobs), "d8", "cctest"], v8)
         binary = v8 / "out/native-runtime/cctest"
@@ -256,8 +270,30 @@ def main():
             run([str(binary), test], v8)
             receipt["tests"][test] = "passed"
             save_receipt()
+        if PUBLIC_TEST not in listed.split():
+            raise RuntimeError("Expected public native test missing: " + PUBLIC_TEST)
+        env["REB_PUBLIC_QUICKJS_WASM"] = str(public_inputs / "quickjs.wasm")
+        env["REB_PUBLIC_QUICKJS_BUNDLE"] = str(public_inputs / "quickjs-native-hook.js")
+        output = run([str(binary), PUBLIC_TEST], v8, True)
+        print(output, end="", flush=True)
+        witnesses = []
+        for line in output.splitlines():
+            if line.startswith('{"target":"public-quickjs-0.32.0"'):
+                witnesses.append(json.loads(line))
+        if len(witnesses) != 1:
+            raise RuntimeError("Expected exactly one completed public native-hook witness")
+        witness = witnesses[0]
+        if not (witness.get("native_hook_validated") is True
+                and witness.get("brave_validated") is False
+                and witness.get("host_calls") == 8
+                and isinstance(witness.get("dispatches"), int)
+                and witness["dispatches"] >= 8):
+            raise RuntimeError("Incomplete public native-hook witness")
+        receipt["public_native_hook"] = witness
+        receipt["public_native_hook_validated"] = True
+        receipt["tests"][PUBLIC_TEST] = "passed"
         receipt["status"] = "passed"
-        receipt["limits"] = ["No Brave/Blink build or browser execution", "No real QuickJS native-hook run"]
+        receipt["limits"] = ["No Brave/Blink build or browser execution"]
     except Exception as error:
         receipt["status"] = "failed"
         receipt["error"] = str(error)

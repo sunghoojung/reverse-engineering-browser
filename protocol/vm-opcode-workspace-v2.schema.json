@@ -1760,6 +1760,14 @@
         "event": {
           "$ref": "#/$defs/eventIdentity"
         },
+        "monotonic_time_ns": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/nativeUint64"
+            }
+          ],
+          "description": "Monotonic time of the accepted observation event, copied from the native event. Optional: documents written before this field remain valid."
+        },
         "is_default": {
           "type": "boolean"
         }
@@ -1852,6 +1860,14 @@
       "properties": {
         "event": {
           "$ref": "#/$defs/nativeEventIdentity"
+        },
+        "monotonic_time_ns": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/nativeUint64"
+            }
+          ],
+          "description": "Monotonic time of the accepted guest sample event, copied from the native event. Optional: documents written before this field remain valid."
         },
         "invocation_event": {
           "$ref": "#/$defs/nativeEventIdentity"

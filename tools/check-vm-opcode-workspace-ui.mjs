@@ -484,6 +484,14 @@ if (process.env.REB_NATIVE_WASM_WORKSPACE_INPUT) {
   const actual=JSON.parse(await readFile(process.env.REB_NATIVE_WASM_WORKSPACE_INPUT,'utf8'));
   assert(validateModule(actual),'actual C++ → Rust workspace accepted by shipped viewer');
   assert(actual.workspaces.some(row=>row.native_wasm_observation_count>0));
+  const physical=actual.workspaces.flatMap(row=>row.native_wasm_observations??[]);
+  assert(physical.length>0 && physical.every(row=>/^(0|[1-9][0-9]{0,19})$/.test(row.monotonic_time_ns)),'physical rows carry canonical decimal event times');
+  const identity=runInNewContext(`${model}\nvmNativeRowIdentityText(row, [])`,{row:physical[0],TextEncoder});
+  assert.match(identity,new RegExp(`^time ${physical[0].monotonic_time_ns} ns · `),'row time renders without a retained event');
+  const legacy=structuredClone(actual);for(const row of legacy.workspaces.flatMap(row=>row.native_wasm_observations??[]))delete row.monotonic_time_ns;
+  assert(validateModule(legacy),'documents without the optional time stay valid');
+  const badTime=structuredClone(actual);badTime.workspaces.find(row=>row.native_wasm_observations?.length).native_wasm_observations[0].monotonic_time_ns=1;
+  assert(!validateModule(badTime),'a numeric time is not a canonical decimal string');
   console.log('PASS actual C++ → Rust → viewer workspace with wide identities');
 }
 if (process.env.REB_NATIVE_WASM_GOLDEN) {

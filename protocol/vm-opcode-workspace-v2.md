@@ -51,6 +51,13 @@ needs a lower bound on distinct executions at one handler uses the largest of
 the three counts. Producers before 2.7.0 summed all three into `sample_count`;
 consumers read those documents with that older arithmetic.
 
+Each `native_wasm_observations` and `native_guest_samples` row carries
+`monotonic_time_ns`, the accepted native event's monotonic time as a canonical
+unsigned decimal string, like the other 64-bit identifiers. A consumer can show
+when a retained row happened after its event has left the bounded event window.
+The field is optional: producers before 2.8.0 omit it, and their documents stay
+valid.
+
 A `vm` `gap` whose artifact id is the interpreter and whose payload is a
 decimal count is a dispatch-budget loss. The workspace adds
 `dispatch-sample-budget` with that summed count and keeps coverage incomplete.

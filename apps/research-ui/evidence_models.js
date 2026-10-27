@@ -1479,9 +1479,17 @@
           inventory.candidates.some(site => site.byte_offset === inventory.selected_byte_offset && site.loop_depth > 0);
       }
 
+      // Producers since 2.8.0 copy the accepted event's monotonic time onto each
+      // native row; older documents omit it.
+      function vmNativeRowKeys(row, keys) {
+        return row?.monotonic_time_ns === undefined ? keys : [...keys, 'monotonic_time_ns'];
+      }
+      function vmNativeRowTimeValid(row) {
+        return row.monotonic_time_ns === undefined || isCanonicalInteger(row.monotonic_time_ns, 0n, uint64Max);
+      }
       function isNativeWasmObservation(row, workspace) {
-        if (!vmWorkspaceExact(row, ['event','function_index','module_byte_offset','selector','table_count','sample_index','selected_arm','is_default']) ||
-          !vmSampleEvent(row.event) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
+        if (!vmWorkspaceExact(row, vmNativeRowKeys(row, ['event','function_index','module_byte_offset','selector','table_count','sample_index','selected_arm','is_default'])) ||
+          !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
           !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
           !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,15) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
@@ -1495,7 +1503,7 @@
           'instruction_pointer_units','raw_pc_bits','pc_local_index','pc_adjustment','pc_value_type','pc_subtract_memory_base',
           'memory_index','memory_base','memory_length','opcode','opcode_width','opcode_endian','adapter_artifact_id',
           'adapter_sha256','bytecode_artifact_id','bytecode_sha256','interpretation','host_import_call_offsets'];
-        if (!vmWorkspaceExact(row,keys) || !vmSampleEvent(row.event) || !vmSampleEvent(row.invocation_event) ||
+        if (!vmWorkspaceExact(row,vmNativeRowKeys(row,keys)) || !vmNativeRowTimeValid(row) || !vmSampleEvent(row.event) || !vmSampleEvent(row.invocation_event) ||
           row.event.session_id !== row.invocation_event.session_id || row.event.process_id !== row.invocation_event.process_id ||
           BigInt(row.invocation_event.sequence_number) >= BigInt(row.event.sequence_number) ||
           !['instance_id','invocation_id','adapter_artifact_id','bytecode_artifact_id'].every(k => isCanonicalInteger(row[k],1n,uint64Max)) ||
@@ -1688,7 +1696,9 @@
         const key = [event.session_id, event.process_id, event.sequence_number].map(String);
         const retained = Array.isArray(events) ? events.find(candidate => candidate &&
           [candidate.session_id, candidate.process_id, candidate.sequence_number].map(String).every((value, index) => value === key[index])) : null;
-        const time = retained?.monotonic_time_ns;
+        // Prefer the producer-recorded time; older documents only have it while
+        // the event is still in the retained window.
+        const time = typeof row.monotonic_time_ns === 'string' ? row.monotonic_time_ns : retained?.monotonic_time_ns;
         return `${time === undefined ? 'time outside retained event window' : `time ${time} ns`} · session ${key[0]} · process ${key[1]} · seq ${key[2]} · native probe · vm/${operation}`;
       }
       // Older documents may omit a per-kind count; never subtract a malformed one.

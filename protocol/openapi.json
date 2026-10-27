@@ -7186,6 +7186,14 @@
               "event": {
                 "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/eventIdentity"
               },
+              "monotonic_time_ns": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeUint64"
+                  }
+                ],
+                "description": "Monotonic time of the accepted observation event, copied from the native event. Optional: documents written before this field remain valid."
+              },
               "is_default": {
                 "type": "boolean"
               }
@@ -7278,6 +7286,14 @@
             "properties": {
               "event": {
                 "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+              },
+              "monotonic_time_ns": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeUint64"
+                  }
+                ],
+                "description": "Monotonic time of the accepted guest sample event, copied from the native event. Optional: documents written before this field remain valid."
               },
               "invocation_event": {
                 "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"

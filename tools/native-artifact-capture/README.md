@@ -42,6 +42,11 @@ and executed; omitted stages are explicitly reported as skipped.
   session-wide; the selected workspace resolver must match the exact artifact,
   content hash, and finding, and resolve no workspace for an unlinked request.
 
+- The production `native_probe_host.cc` guest boundary is compiled against
+  narrow content/Mojo/shared-memory adapters and driven into the production sink:
+  refusals become gaps in the refused record's own sequence slot, module
+  verdicts reach the renderer client, and host records keep exact parents.
+
 ## Cases
 
 The native corpus contains unique exact matches, two independent out-of-order

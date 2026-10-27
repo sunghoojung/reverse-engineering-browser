@@ -377,4 +377,10 @@ Rebuilt browsers can record physical `br_table` operands with
 `--js-flags=--reb-wasm-br-table-dispatch`. This is Liftoff-only instrumentation,
 not arbitrary interpreter guest-PC recovery. See
 [wire contract and verification limits](../../../protocol/native-wasm-dispatch-v1.md).
+
+Guest-state capture additionally needs `REB_NATIVE_WASM_GUEST_ADAPTER`, which
+makes the launcher add `--reb-wasm-guest-capture`. That flag compiles a call on
+every Wasm function entry (frame identity) and numeric-local descriptors for
+each `br_table`; without it, physical dispatch observation alone pays neither
+cost. See [native guest observations](../../../protocol/native-wasm-guest-v1.md).
 All CDP capture/transport functionality has been removed from the companion.

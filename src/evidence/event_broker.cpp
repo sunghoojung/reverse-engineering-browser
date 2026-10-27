@@ -75,7 +75,55 @@ EventBroker::EventBroker(const std::size_t capacity, const SessionPolicy policy)
     throw std::invalid_argument("EventBroker session policy is invalid");
   }
   events_.reserve(capacity);
-  stream_high_water_marks_.reserve(capacity);
+  sequence_trackers_.reserve(capacity);
+}
+
+void EventBroker::EvictSequenceTracker() {
+  const auto found = sequence_trackers_.find(stream_insertion_order_.front());
+  missing_interval_count_ -= found->second.missing.size();
+  sequence_trackers_.erase(found);
+  stream_insertion_order_.pop_front();
+  ++stats_.sequence_tracking_evictions;
+}
+void EventBroker::TrackSequence(const StreamKey& stream, const std::uint64_t sequence) {
+  auto found = sequence_trackers_.find(stream);
+  if (found == sequence_trackers_.end()) {
+    if (sequence_trackers_.size() == capacity_)
+      EvictSequenceTracker();
+    sequence_trackers_.emplace(stream, SequenceTracker{sequence, sequence, {}});
+    stream_insertion_order_.push_back(stream);
+    return;
+  }
+  auto& tracker = found->second;
+  const auto previous_size = tracker.missing.size();
+  if (sequence > tracker.high) {
+    if (sequence - tracker.high > 1)
+      tracker.missing.emplace(tracker.high + 1, sequence - 1);
+    tracker.high = sequence;
+  } else if (sequence < tracker.low) {
+    if (tracker.low - sequence > 1)
+      tracker.missing.emplace(sequence + 1, tracker.low - 1);
+    tracker.low = sequence;
+  } else {
+    auto hole = tracker.missing.upper_bound(sequence);
+    if (hole != tracker.missing.begin()) {
+      --hole;
+      const auto [first, last] = *hole;
+      if (sequence <= last) {
+        tracker.missing.erase(hole);
+        if (first < sequence)
+          tracker.missing.emplace(first, sequence - 1);
+        if (sequence < last)
+          tracker.missing.emplace(sequence + 1, last);
+      }
+    }
+  }
+  missing_interval_count_ -= previous_size;
+  missing_interval_count_ += tracker.missing.size();
+  // Bound all interval storage, not just process streams. Evicted uncertainty
+  // is explicit, never frozen as a fabricated permanent loss.
+  while (missing_interval_count_ > capacity_)
+    EvictSequenceTracker();
 }
 
 IngestStatus EventBroker::Ingest(const EventRecord& event) {
@@ -97,26 +145,7 @@ IngestStatus EventBroker::IngestAt(const EventRecord& event, const std::uint64_t
     return IngestStatus::kCategoryRejected;
   }
 
-  const StreamKey stream{event.header.session_id, event.header.process_id};
-  auto high_water = stream_high_water_marks_.find(stream);
-  if (high_water == stream_high_water_marks_.end() &&
-      stream_high_water_marks_.size() == capacity_) {
-    stream_high_water_marks_.erase(stream_insertion_order_.front());
-    stream_insertion_order_.pop_front();
-    ++stats_.sequence_tracking_evictions;
-  }
-
-  if (high_water != stream_high_water_marks_.end()) {
-    if (event.header.sequence_number > high_water->second &&
-        event.header.sequence_number - high_water->second > 1) {
-      const std::uint64_t missing = event.header.sequence_number - high_water->second - 1;
-      SaturateAdd(stats_.sequence_gaps, stats_.sequence_gaps_saturated, missing);
-    }
-    high_water->second = std::max(high_water->second, event.header.sequence_number);
-  } else {
-    stream_high_water_marks_.emplace(stream, event.header.sequence_number);
-    stream_insertion_order_.push_back(stream);
-  }
+  TrackSequence({event.header.session_id, event.header.process_id}, event.header.sequence_number);
 
   if (event.header.type == EventType::kGap) {
     SaturateAdd(stats_.queue_drops, stats_.queue_drops_saturated, ReportedQueueDrops(event));
@@ -158,7 +187,16 @@ std::vector<EventRecord> EventBroker::Snapshot(const std::size_t limit) const {
 
 BrokerStats EventBroker::Stats() const {
   std::scoped_lock lock(mutex_);
-  return stats_;
+  auto result = stats_;
+  result.sequence_gaps = 0;
+  result.sequence_gaps_saturated = false;
+  for (const auto& [stream, tracker] : sequence_trackers_) {
+    static_cast<void>(stream);
+    for (const auto& [first, last] : tracker.missing) {
+      SaturateAdd(result.sequence_gaps, result.sequence_gaps_saturated, last - first + 1);
+    }
+  }
+  return result;
 }
 
 std::size_t EventBroker::Size() const {

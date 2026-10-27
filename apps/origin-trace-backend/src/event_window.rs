@@ -10,7 +10,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::Metadata,
     io::{Read, Seek, SeekFrom},
     path::Path,
@@ -326,26 +326,18 @@ fn summarize(
         queue_drops_saturated: false,
         coverage: Value::Null,
     };
-    let mut marks: HashMap<(u64, u64), u64> = HashMap::new();
+    let mut marks: HashMap<(u64, u64), (u64, u64, HashSet<u64>)> = HashMap::new();
     let mut retained = vec![false; records.len()];
     let general_start = records.len().saturating_sub(limit);
     let network_count = records.iter().filter(|record| record.network).count();
     let mut network_skip = network_count.saturating_sub(limit);
     for (index, record) in records.iter_mut().enumerate() {
-        // These are observed high-water jumps, not unique absent IDs: late
-        // out-of-order records do not erase a previously observed jump.
-        if let Some(previous) = marks.get_mut(&record.stream) {
-            if record.sequence > *previous {
-                add(
-                    &mut window.sequence_gaps,
-                    &mut window.sequence_gaps_saturated,
-                    record.sequence - *previous - 1,
-                );
-                *previous = record.sequence;
-            }
-        } else {
-            marks.insert(record.stream, record.sequence);
-        }
+        let stream = marks
+            .entry(record.stream)
+            .or_insert_with(|| (record.sequence, record.sequence, HashSet::new()));
+        stream.0 = stream.0.min(record.sequence);
+        stream.1 = stream.1.max(record.sequence);
+        stream.2.insert(record.sequence);
         add(
             &mut window.queue_drops,
             &mut window.queue_drops_saturated,
@@ -375,6 +367,14 @@ fn summarize(
             }
             retained[index] = true;
         }
+    }
+    // Count absent IDs inside observed bounds, independent of arrival order.
+    for (low, high, seen) in marks.values() {
+        add(
+            &mut window.sequence_gaps,
+            &mut window.sequence_gaps_saturated,
+            high - low - (seen.len() as u64 - 1),
+        );
     }
     window.coverage = json!({
         "scope": if start == 0 { "store" } else { "bounded_tail" },
@@ -576,6 +576,23 @@ mod tests {
     }
 
     #[test]
+    fn delayed_ack_ids_close_holes_without_resequencing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        for sequences in [vec![3, 1, 2], vec![1, 4, 2, 3], vec![3, 1, 2, 2]] {
+            let events: Vec<_> = sequences
+                .iter()
+                .map(|&n| event(n, "canvas", "api_call", ""))
+                .collect();
+            write(&path, &events);
+            let mut cache = EventWindowCache::default();
+            let window = poll(&mut cache, &path, 10);
+            assert_eq!(window.sequence_gaps, 0);
+            assert_eq!(ids(&window.events), sequences);
+        }
+    }
+
+    #[test]
     fn summary_stream_order_drop_parsing_and_saturation() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("events");
@@ -591,7 +608,7 @@ mod tests {
         write(&path, &events);
         let mut cache = EventWindowCache::default();
         let window = poll(&mut cache, &path, 1);
-        assert_eq!(window.sequence_gaps, 2);
+        assert_eq!(window.sequence_gaps, 1);
         assert_eq!(window.queue_drops, u64::MAX);
         assert!(window.queue_drops_saturated);
         for payload in [

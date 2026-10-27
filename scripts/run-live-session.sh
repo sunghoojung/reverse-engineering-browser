@@ -43,6 +43,7 @@ readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
+readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
@@ -62,6 +63,18 @@ fi
 if [[ "${native_wasm_dispatch}" == 1 ]] &&
    (( (category_mask & 512) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_NATIVE_WASM_DISPATCH requires VM and Artifact capture categories."
+fi
+if [[ -n "${native_guest_adapter}" ]]; then
+  if [[ "${native_wasm_dispatch}" != 1 ]]; then
+    fail_live_session 2 "REB_NATIVE_WASM_GUEST_ADAPTER requires REB_NATIVE_WASM_DISPATCH=1."
+  fi
+  if [[ "${native_guest_adapter}" != /* || ! -f "${native_guest_adapter}" || ! -r "${native_guest_adapter}" ]]; then
+    fail_live_session 2 "REB_NATIVE_WASM_GUEST_ADAPTER must name a readable absolute regular file."
+  fi
+  adapter_bytes="$(wc -c < "${native_guest_adapter}")"
+  if (( adapter_bytes == 0 || adapter_bytes > 8192 )); then
+    fail_live_session 2 "REB_NATIVE_WASM_GUEST_ADAPTER must contain between 1 and 8192 bytes."
+  fi
 fi
 if [[ "${REB_CDP_NETWORK_CAPTURE:-0}" != 0 || -n "${REB_DEBUGGER_TRANSPORT_BINARY:-}" ]]; then
   fail_live_session 2 "CDP capture and debugger transport were removed; use native Brave capture."
@@ -387,6 +400,9 @@ if [[ "${native_wasm_dispatch}" == 1 ]]; then
 fi
 if [[ ${#native_js_flags[@]} -gt 0 ]]; then
   brave_arguments+=("--js-flags=${native_js_flags[*]}")
+fi
+if [[ -n "${native_guest_adapter}" ]]; then
+  brave_arguments+=("--reb-wasm-guest-adapter=${native_guest_adapter}")
 fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)

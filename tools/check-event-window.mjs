@@ -225,3 +225,10 @@ for (const invalid of ['2\n', '2\r', '2 ', ' 2', '+2', '02', '-2', '184467440737
 assert.equal(api.countSequenceGaps([request(1, 'request_started'), {...gap, sequence_number: '4', session_id: '9'}, request(5, 'request_completed')]), 2n,
   'visible fallback and backend both count a present gap marker in sequence high-water accounting');
 console.log('PASS strict unsigned summaries/drop payloads and gap-marker high-water parity');
+
+for (const sequences of [[3, 1, 2], [1, 4, 2, 3], [3, 1, 2, 2]]) {
+  assert.equal(api.countSequenceGaps(sequences.map(n => request(n, 'request_started'))), 0n,
+    'late ACK identities close holes and duplicates do not create loss');
+}
+assert.equal(api.countSequenceGaps([1, 5, 3].map(n => request(n, 'request_started'))), 2n);
+console.log('PASS delayed-ACK and duplicate-aware sequence gaps');

@@ -6,6 +6,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -45,6 +46,8 @@ struct BrokerStats final {
   std::uint64_t invalid = 0;
   std::uint64_t category_rejected = 0;
   std::uint64_t expired = 0;
+  // Currently absent IDs within observed bounds; late arrivals retract holes.
+  // Explicit tracking eviction makes this an incomplete lower bound.
   std::uint64_t sequence_gaps = 0;
   bool sequence_gaps_saturated = false;
   // Sum of accepted gap-record payloads. This survives ring eviction, so a
@@ -83,6 +86,13 @@ class EventBroker final {
     }
   };
 
+  struct SequenceTracker final {
+    std::uint64_t low = 0, high = 0;
+    std::map<std::uint64_t, std::uint64_t> missing;
+  };
+  void EvictSequenceTracker();
+  void TrackSequence(const StreamKey& stream, std::uint64_t sequence);
+
   const std::size_t capacity_;
   const SessionPolicy policy_;
   mutable std::mutex mutex_;
@@ -90,7 +100,8 @@ class EventBroker final {
   std::vector<EventRecord> events_;
   std::size_t next_event_ = 0;
   BrokerStats stats_;
-  std::unordered_map<StreamKey, std::uint64_t, StreamKeyHash> stream_high_water_marks_;
+  std::unordered_map<StreamKey, SequenceTracker, StreamKeyHash> sequence_trackers_;
+  std::size_t missing_interval_count_ = 0;
   std::deque<StreamKey> stream_insertion_order_;
 };
 

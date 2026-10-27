@@ -850,8 +850,12 @@ parsed as a new record. `scope: "store"` means the scan starts at byte zero;
 
 `sequence_gaps` and `queue_drops` are canonical unsigned decimal strings over
 validated records in this declared scope. They are not session totals.
-Sequence gaps count forward jumps of per-session/process high-water marks;
-late arrivals can overlap those observed jumps and do not reduce the total.
+Sequence gaps count absent IDs between the minimum and maximum observed sequence
+within each session/process in the stated scope. Late ACK-delayed arrivals close
+holes; duplicates do not create gaps. Unknown prefixes and tails are not counted.
+The native broker retains bounded missing intervals independently of its event
+ring; `sequence_tracking_evictions` reports lost tracking coverage when that
+budget is exhausted, rather than freezing speculative losses.
 A canonical positive unsigned decimal gap-marker payload contributes its value
 to queue drops, otherwise the marker weighs one. Drop totals may overlap gaps.
 The respective `_saturated` flags distinguish clamping at u64 maximum.

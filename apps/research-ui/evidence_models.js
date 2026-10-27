@@ -142,16 +142,22 @@
 
       function countSequenceGaps(events) {
         let gaps = 0n;
-        const highWaterMarks = new Map();
+        const streams = new Map();
         for (const event of events) {
           const streamId = `${integerText(event, 'session_id')}:${event.process_id}`;
           const sequence = integerValue(event, 'sequence_number');
-          const previous = highWaterMarks.get(streamId);
-          const missing = previous !== undefined && sequence > previous + 1n
-            ? sequence - previous - 1n
-            : 0n;
-          gaps += missing;
-          highWaterMarks.set(streamId, previous === undefined || sequence > previous ? sequence : previous);
+          let stream = streams.get(streamId);
+          if (!stream) {
+            stream = {low: sequence, high: sequence, seen: new Set()};
+            streams.set(streamId, stream);
+          }
+          if (sequence < stream.low) stream.low = sequence;
+          if (sequence > stream.high) stream.high = sequence;
+          stream.seen.add(sequence);
+        }
+        // ACK-delayed original IDs close holes; duplicate arrivals are neutral.
+        for (const stream of streams.values()) {
+          gaps += stream.high - stream.low - BigInt(stream.seen.size - 1);
         }
         return gaps;
       }

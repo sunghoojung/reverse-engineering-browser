@@ -8819,7 +8819,7 @@
           },
           "sequence_gaps": {
             "$ref": "#/components/schemas/Uint64String",
-            "description": "Sum of observed high-water sequence jumps within event_window scope, including gap markers. Late arrivals do not subtract previously observed jumps; this is not the cardinality of currently missing IDs."
+            "description": "Count of absent sequence IDs between observed minimum and maximum per session/process within event_window scope, including gap markers. Late arrivals close holes; duplicate IDs do not create gaps. Unknown prefixes and tails are not counted."
           },
           "sequence_gaps_saturated": {
             "type": "boolean"

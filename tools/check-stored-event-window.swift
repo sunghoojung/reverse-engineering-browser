@@ -82,8 +82,19 @@ enum StoredEventWindowChecks {
     flood += event(sequence: 7, category: "webgl", type: "gap", payload: "1")
     try flood.write(to: path)
     window = try saturated.read(path: path.path, limit: 1)
-    precondition(window.sequenceGaps == 2, "late arrivals do not erase an observed jump")
+    precondition(window.sequenceGaps == 1, "late arrivals close observed holes")
     precondition(window.queueDrops == UInt64.max && window.queueDropsSaturated)
+
+    for sequences in [[3, 1, 2], [1, 4, 2, 3], [3, 1, 2, 2]] {
+      var delayed = Data()
+      for sequence in sequences {
+        delayed += event(sequence: sequence, category: "canvas", type: "api_call")
+      }
+      try delayed.write(to: path)
+      let ordered = try StoredEventWindowCache().read(path: path.path, limit: 10)
+      precondition(ordered.sequenceGaps == 0, "late ACKs close holes; duplicates are neutral")
+      precondition(ordered.events.compactMap { Int($0["sequence_number"] as? String ?? "") } == sequences)
+    }
 
     let openRecord = Data(#"{"session_id":"1","process_id":7,"sequence_number":"1","category":"webgl","type":"gap","payload":"323830"}"#.utf8)
     try openRecord.write(to: path)

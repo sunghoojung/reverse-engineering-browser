@@ -71,6 +71,6 @@ try {
   const result = spawnSync('bash',['-c',`set -eu; brave_arguments=(); native_quiet_mode=1; native_wasm_dispatch=1; native_guest_adapter="$TEST_ADAPTER"; ${flagsCode}
     printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_ADAPTER:adapterPath},encoding:'utf8'});
   assert.equal(result.status,0,result.stderr);
-  assert.deepEqual(result.stdout.trimEnd().split('\n'), ['--js-flags=--reb-ignore-debugger-statements --reb-wasm-br-table-dispatch','--reb-wasm-guest-adapter='+adapterPath]);
+  assert.deepEqual(result.stdout.trimEnd().split('\n'), ['--js-flags=--reb-ignore-debugger-statements --reb-wasm-br-table-dispatch --reb-wasm-guest-capture','--reb-wasm-guest-adapter='+adapterPath]);
 } finally {await rm(adapterDirectory,{recursive:true,force:true});}
 console.log('PASS native guest adapter opt-in, bounded file preflight and quoted path propagation');

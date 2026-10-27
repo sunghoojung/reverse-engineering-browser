@@ -74,11 +74,15 @@ void NativeGuestAdmission() {
   assert(sink.IsNativeWasmGuestDispatchSite(414, 8));
   assert(!sink.IsNativeWasmGuestDispatchSite(413, 8));
   assert(!sink.IsNativeWasmGuestDispatchSite(414, 9));
-  assert(sink.AdmitNativeWasmGuestModule(module, 414));
-  assert(!sink.AdmitNativeWasmGuestModule(module, 413));
+  using Decision = reb::NativeWasmGuestModuleDecision;
+  assert(sink.AdmitNativeWasmGuestModule(module, 414) == Decision::kAdmit);
+  // Another function of an unknown module defers; it must not be remembered
+  // as a module rejection before the dispatcher itself is entered.
+  assert(sink.AdmitNativeWasmGuestModule(module, 413) == Decision::kNotDispatcher);
   auto changed = module;
   changed[10] = 1;
-  assert(!sink.AdmitNativeWasmGuestModule(changed, 414));
+  assert(sink.AdmitNativeWasmGuestModule(changed, 414) == Decision::kRejectModule);
+  assert(sink.AdmitNativeWasmGuestModule({}, 414) == Decision::kRejectModule);
   reb::NativeWasmGuestStateView view{7, 11, 414, 8, 0, 0, nullptr, &GuestRead, &GuestCopy};
   guest_context = {7, 11, 414, 8, 9, 9};
   const auto record = [&] {
@@ -193,4 +197,103 @@ void NativeGuestAdmission() {
   std::cout
       << "PASS guest sink exact invocation/import parents, reentry, cap/read/transport/identity "
          "failure invalidation, no async fallback and module-once binding\n";
+}
+
+std::vector<NativeProbeEvent> guest_queue_events;
+reb::NativeProbeEmitStatus RecordGuestQueue(const NativeProbeEvent& event, std::uint64_t) noexcept {
+  guest_queue_events.push_back(event);
+  return reb::NativeProbeEmitStatus::kAdmitted;
+}
+bool GuestQueueHasGap(std::string_view reason) {
+  return std::any_of(guest_queue_events.begin(), guest_queue_events.end(), [&](const auto& event) {
+    return event.header.type == reb::NativeProbeType::kGap &&
+           std::string_view(reinterpret_cast<const char*>(event.inline_payload.data()),
+                            event.header.payload_size) == reason;
+  });
+}
+
+// Module bytes are resent until the browser accepts them, within a bounded
+// number of attempts; host parent routing is bounded without losing hosts.
+void NativeGuestModuleVerdictsAndHostBudget() {
+  const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
+  auto adapter = std::make_shared<reb::NativeWasmGuestAdapter>();
+  adapter->module_sha256 = reb::NativeGuestDigest(module);
+  adapter->function_index = 414;
+  adapter->dispatch_module_offset = 8;
+  adapter->pc_local_index = 320;
+  adapter->memory_length.constant = 16;
+  adapter->import_call_offsets[0] = 9;
+  adapter->import_call_count = 1;
+  // The adapter is immutable for the process: reuse the earlier recipe.
+  adapter->sample_limit = 3;
+  adapter->json = "owned boundary recipe";
+  adapter->recipe_sha256 = reb::NativeGuestDigest(
+      std::span(reinterpret_cast<const std::uint8_t*>(adapter->json.data()), adapter->json.size()));
+  const auto configure = [&] {
+    sink.SetEmitters(&RecordGuestQueue, &CaptureRuntimeMetadata, 43,
+                     reb::kAllNativeProbeCategoryMask, kForever, false, &GuestFrame);
+    sink.ConfigureNativeWasmGuest(adapter, &GuestCapture, &GuestHost);
+    sink.SetNativeWasmGuestRuntime(&GuestContext, nullptr);
+  };
+  guest_dispatches.clear();
+  guest_module_sizes.clear();
+  guest_hosts.clear();
+  guest_queue_events.clear();
+  guest_capture_accept = true;
+  guest_context_valid = true;
+  guest_pc = 0;
+  guest_memory[0] = 0x41;
+  configure();
+  reb::NativeWasmGuestStateView view{7, 21, 414, 8, 0, 0, nullptr, &GuestRead, &GuestCopy};
+  const auto record = [&] {
+    sink.RecordNativeWasmGuest(1, 8, "https://owned.test/module.wasm", module, view, 5, 6);
+  };
+  record();
+  assert(guest_dispatches.size() == 1 && guest_module_sizes.back() == module.size());
+  const auto first_token = guest_dispatches.back().header.sequence_number;
+  sink.NoteNativeGuestModuleStatus(first_token, false);
+  record();
+  assert(guest_module_sizes.back() == module.size());  // Rejected: resend.
+  sink.NoteNativeGuestModuleStatus(guest_dispatches.back().header.sequence_number, false);
+  record();
+  assert(guest_module_sizes.back() == module.size());
+  sink.NoteNativeGuestModuleStatus(guest_dispatches.back().header.sequence_number, false);
+  const auto attempts = guest_dispatches.size();
+  record();
+  assert(guest_dispatches.size() == attempts);  // Attempt limit stops this binding.
+  assert(GuestQueueHasGap("native_guest_module_unavailable"));
+
+  configure();
+  guest_queue_events.clear();
+  record();
+  assert(guest_module_sizes.back() == module.size());
+  const auto accepted_token = guest_dispatches.back().header.sequence_number;
+  sink.NoteNativeGuestModuleStatus(first_token, true);  // Stale token: no effect.
+  record();
+  assert(guest_module_sizes.back() == 0);  // Pending: bind to the in-flight module.
+  sink.NoteNativeGuestModuleStatus(accepted_token, true);
+  record();
+  assert(guest_dispatches.size() == attempts + 3 && guest_module_sizes.back() == 0);
+
+  guest_context = {7, 21, 414, 8, 9, 9};
+  const auto routed_before = guest_hosts.size();
+  for (std::size_t n = 0; n < reb::kNativeGuestHostParentLimit; ++n)
+    sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == routed_before + reb::kNativeGuestHostParentLimit);
+  const auto queued_before = guest_queue_events.size();
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == routed_before + reb::kNativeGuestHostParentLimit);
+  bool unparented_host = false;
+  for (std::size_t n = queued_before; n < guest_queue_events.size(); ++n)
+    unparented_host |= guest_queue_events[n].header.type == reb::NativeProbeType::kApiCall &&
+                       guest_queue_events[n].header.parent_event_id == 0;
+  assert(unparented_host);  // Over budget: kept on the ordinary queue, not lost.
+  assert(GuestQueueHasGap("native_guest_host_parent_budget"));
+  configure();
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == routed_before + reb::kNativeGuestHostParentLimit);
+  sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
+  sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
+  std::cout << "PASS guest module verdict resend, bounded attempts, stale verdicts and bounded "
+               "host parent routing without host loss\n";
 }

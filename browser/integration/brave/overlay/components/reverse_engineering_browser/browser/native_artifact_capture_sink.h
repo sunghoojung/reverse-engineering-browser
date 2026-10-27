@@ -6,13 +6,14 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_ARTIFACT_CAPTURE_SINK_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_ARTIFACT_CAPTURE_SINK_H_
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
-#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -62,9 +63,12 @@ class NativeArtifactCaptureSink final {
   void CaptureWasmDispatch(const NativeWasmDispatchObservation& observation,
                            mojo_base::BigBuffer content,
                            std::function<bool()> is_current_document);
+  // module_status receives the browser verdict for module bytes this capture
+  // carried (accepted once module and adapter artifacts are both accepted).
   void CaptureNativeGuest(const NativeGuestCapture& capture,
                           std::uint64_t epoch,
-                          std::function<bool()> is_current_document);
+                          std::function<bool()> is_current_document,
+                          std::function<void(bool)> module_status = {});
   void CaptureNativeGuestHost(const NativeProbeEvent& event, std::uint64_t epoch);
   void CaptureRuntimeTypedArray(int renderer_process_id,
                                 std::uint64_t capture_session_id,
@@ -109,8 +113,8 @@ class NativeArtifactCaptureSink final {
     // Only network creators share the browser event's sequence namespace.
     std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
-    std::optional<NativeProbeEvent> wasm_observation = std::nullopt;
-    std::function<bool()> is_current_document = {};
+    // Physical dispatch observations that share this module artifact.
+    std::vector<std::pair<NativeProbeEvent, std::function<bool()>>> wasm_observations;
   };
 
   using GuestEventKey = std::pair<std::uint32_t, std::uint64_t>;
@@ -119,9 +123,12 @@ class NativeArtifactCaptureSink final {
     std::uint64_t context_id = 0, frame_id = 0;
     std::uint32_t process_id = 0;
     std::array<std::uint8_t, 32> module_digest{}, recipe_digest{};
-    // IPC admission is not artifact admission. Failure poisons this binding
-    // until reconfiguration; empty-module messages never silently retry it.
-    bool failed = false;
+    // IPC admission is not artifact admission. A failed binding refuses
+    // empty-module samples explicitly and is retried only when the renderer
+    // resends the module, at most kNativeGuestModuleAttemptLimit times.
+    bool failed = false, status_reported = false;
+    std::uint8_t attempts = 0;
+    std::vector<std::function<void(bool)>> status_waiters;
   };
   struct GuestInvocation final {
     NativeProbeEvent event{};
@@ -138,13 +145,22 @@ class NativeArtifactCaptureSink final {
     bool published = false, failed = false;
   };
   void DrainGuestDependencies();
+  // Fills the renderer sequence slot of an unpublished record with a gap.
+  void EmitRendererGap(const NativeProbeEvent& source, std::string_view reason) noexcept;
+  // Publishes a host record without its guest parent; one marker per reason.
+  void PublishUnparentedHost(NativeProbeEvent host, bool& gap_emitted, std::string_view reason);
+  // Runs shortly before session expiry, after which the session drops every
+  // record: unresolved guest work becomes explicit gaps, held hosts survive.
+  void FlushBeforeExpiry(std::uint64_t generation);
   std::vector<GuestGroup> guest_groups_;
   std::map<GuestEventKey, GuestInvocation> guest_invocations_;
   std::map<GuestEventKey, GuestDispatch> guest_dispatches_;
   // 0 pending, 1 accepted, 2 rejected; bounded by three artifacts per sample.
   std::map<std::uint64_t, std::uint8_t> guest_receipts_;
-  std::size_t guest_host_count_ = 0, guest_capture_count_ = 0;
-  bool guest_host_gap_emitted_ = false, guest_budget_gap_emitted_ = false;
+  std::size_t guest_routed_host_count_ = 0, guest_held_host_count_ = 0, guest_capture_count_ = 0;
+  std::set<GuestEventKey> guest_host_identities_;
+  bool guest_host_malformed_gap_emitted_ = false, guest_host_parent_lost_gap_emitted_ = false,
+       guest_host_parent_omitted_gap_emitted_ = false, guest_budget_gap_emitted_ = false;
 
   NativeArtifactCaptureSink();
   ~NativeArtifactCaptureSink();
@@ -188,6 +204,15 @@ class NativeArtifactCaptureSink final {
   std::atomic<std::size_t> runtime_typed_array_count_{0};
   std::map<std::uint64_t, PendingContext> pending_;
   std::size_t wasm_dispatch_count_ = 0;
+  // One artifact per exact module and document for physical observations.
+  // Value is the artifact ID and whether its transfer was already accepted.
+  using WasmModuleKey = std::tuple<std::uint32_t,
+                                   std::uint64_t,
+                                   std::uint64_t,
+                                   std::uint64_t,
+                                   std::uint64_t,
+                                   std::array<std::uint8_t, 32>>;
+  std::map<WasmModuleKey, std::pair<std::uint64_t, bool>> wasm_dispatch_modules_;
   bool wasm_dispatch_budget_gap_emitted_ = false;
   // Only the browser assigns artifact IDs. Never key this relation by URL.
   using ScriptKey = std::tuple<int, std::uint64_t, std::uint64_t, std::uint64_t>;

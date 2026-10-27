@@ -71,6 +71,12 @@ struct OwnedRegisterSamplePolicy final {
   std::uint64_t bytecode_artifact_id = 0;
 };
 
+enum class NativeWasmGuestModuleDecision : std::uint8_t {
+  kNotDispatcher,
+  kAdmit,
+  kRejectModule,
+};
+
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
  public:
   static NativeProbeSink& Get();
@@ -165,12 +171,20 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                 NativeGuestHostEmitter host) noexcept;
   void SetNativeWasmGuestRuntime(NativeWasmGuestContextProvider context,
                                  NativeWasmGuestReset reset) noexcept;
+  // Records the browser's verdict for the module bytes sent with the guest
+  // dispatch whose sequence number is module_token. Lock-free; may be called
+  // from the transport sequence while Wasm runs on another thread.
+  void NoteNativeGuestModuleStatus(std::uint64_t module_token, bool accepted) noexcept;
   [[nodiscard]] bool IsNativeWasmGuestEnabled() const noexcept;
   [[nodiscard]] bool IsNativeWasmGuestDispatchSite(std::uint32_t function_index,
                                                    std::uint32_t module_byte_offset) const noexcept;
   void InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept;
-  [[nodiscard]] bool AdmitNativeWasmGuestModule(std::span<const std::uint8_t> module,
-                                                std::uint32_t function_index) const noexcept;
+  // kNotDispatcher defers to a later function entry (or a later enabled
+  // interval). kRejectModule is final for these exact module bytes under the
+  // immutable adapter, so the engine may stop asking (and hashing) for them.
+  [[nodiscard]] NativeWasmGuestModuleDecision AdmitNativeWasmGuestModule(
+      std::span<const std::uint8_t> module,
+      std::uint32_t function_index) const noexcept;
   void RecordNativeWasmGuest(std::uint64_t execution_context_id,
                              std::uint64_t frame_id,
                              std::string_view source_url,
@@ -349,7 +363,18 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeWasmGuestReset> native_guest_reset_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_slots_{};
   std::atomic<std::uint64_t> native_guest_capped_generation_{0};
-  std::array<std::atomic<std::uint64_t>, 8> native_guest_gap_generations_{};
+  std::array<std::atomic<std::uint64_t>, 10> native_guest_gap_generations_{};
+  // Parent-binding host routes claimed per configuration (see
+  // kNativeGuestHostParentLimit). Same generation-tag scheme as samples.
+  std::array<std::atomic<std::uint64_t>, kNativeGuestHostParentLimit> native_guest_host_slots_{};
+  std::atomic<std::uint64_t> native_guest_host_capped_generation_{0};
+  // Recent module verdicts, (token << 1) | accepted. Tokens are process-unique
+  // renderer sequence numbers, so a stale verdict can never match a new send.
+  std::array<std::atomic<std::uint64_t>, 64> native_guest_module_status_{};
+  std::atomic<std::uint32_t> native_guest_module_status_next_{0};
+  enum class GuestModuleVerdict : std::uint8_t { kPending, kAccepted, kRejected };
+  [[nodiscard]] GuestModuleVerdict NativeGuestModuleVerdict(std::uint64_t token) const noexcept;
+  [[nodiscard]] bool ClaimNativeGuestHostRoute(std::uint64_t generation) noexcept;
   void NoteNativeGuestOmission(std::uint64_t generation,
                                std::uint64_t frame,
                                std::size_t kind,

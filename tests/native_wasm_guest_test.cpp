@@ -2,6 +2,72 @@
 #include <cassert>
 #include <cstdio>
 #include "components/reverse_engineering_browser/common/native_artifact_queue_limits.h"
+#include "components/reverse_engineering_browser/common/native_wasm_guest_wire.h"
+#include "reb/wasm_guest.hpp"
+
+// The renderer encoder (overlay) and the core decoder each own a copy of the
+// version-1 layout. Set one field at a time to a distinct value and require
+// identical bytes and identical cross-decoding, so the copies cannot drift.
+template <class Overlay, class Core, class Field>
+void CheckGuestWireField(Field Overlay::*overlay_field, Field Core::*core_field, Field value) {
+  Overlay overlay;
+  Core core;
+  overlay.*overlay_field = value;
+  core.*core_field = value;
+  std::array<std::byte, 128> overlay_bytes{}, core_bytes{};
+  if constexpr (std::is_same_v<Overlay, reb::NativeWasmGuestDispatchPayload>) {
+    overlay_bytes = reb::EncodeNativeWasmGuestDispatchPayload(overlay);
+    core_bytes = reb::EncodeWasmGuestDispatchPayload(core);
+    reb::WasmGuestDispatchPayload decoded_core;
+    reb::NativeWasmGuestDispatchPayload decoded_overlay;
+    assert(reb::DecodeWasmGuestDispatchPayload(overlay_bytes, decoded_core));
+    assert(reb::DecodeNativeWasmGuestDispatchPayload(core_bytes, decoded_overlay));
+    assert(decoded_core.*core_field == value && decoded_overlay.*overlay_field == value);
+  } else {
+    overlay_bytes = reb::EncodeNativeWasmGuestInvocationPayload(overlay);
+    core_bytes = reb::EncodeWasmGuestInvocationPayload(core);
+    reb::WasmGuestInvocationPayload decoded_core;
+    reb::NativeWasmGuestInvocationPayload decoded_overlay;
+    assert(reb::DecodeWasmGuestInvocationPayload(overlay_bytes, decoded_core));
+    assert(reb::DecodeNativeWasmGuestInvocationPayload(core_bytes, decoded_overlay));
+    assert(decoded_core.*core_field == value && decoded_overlay.*overlay_field == value);
+  }
+  assert(overlay_bytes == core_bytes);
+}
+void CheckGuestWireParity() {
+  using O = reb::NativeWasmGuestDispatchPayload;
+  using C = reb::WasmGuestDispatchPayload;
+  CheckGuestWireField(&O::function_index, &C::function_index, std::uint32_t{0x01020304});
+  CheckGuestWireField(&O::module_byte_offset, &C::module_byte_offset, std::uint32_t{0x05060708});
+  CheckGuestWireField(&O::selector, &C::selector, std::uint32_t{0xfffffffe});
+  CheckGuestWireField(&O::table_count, &C::table_count, std::uint32_t{0x0a0b0c0d});
+  CheckGuestWireField(&O::sample_index, &C::sample_index, std::uint32_t{0x0e});
+  CheckGuestWireField(&O::instance_id, &C::instance_id, std::uint64_t{0x1112131415161718});
+  CheckGuestWireField(&O::invocation_id, &C::invocation_id, std::uint64_t{0x2122232425262728});
+  CheckGuestWireField(&O::guest_pc, &C::guest_pc, std::uint64_t{0x31});
+  CheckGuestWireField(&O::raw_pc_bits, &C::raw_pc_bits, std::uint64_t{0x4142434445464748});
+  CheckGuestWireField(&O::bytecode_artifact_id, &C::bytecode_artifact_id,
+                      std::uint64_t{0x5152535455565758});
+  CheckGuestWireField(&O::memory_base, &C::memory_base, std::uint64_t{0x6162636465666768});
+  CheckGuestWireField(&O::memory_length, &C::memory_length, std::uint32_t{0x10000});
+  CheckGuestWireField(&O::pc_local_index, &C::pc_local_index, std::uint32_t{320});
+  CheckGuestWireField(&O::pc_adjustment, &C::pc_adjustment, std::int64_t{-0x7172737475767778});
+  CheckGuestWireField(&O::memory_index, &C::memory_index, std::uint32_t{0x81});
+  CheckGuestWireField(&O::opcode, &C::opcode, std::uint32_t{0x91929394});
+  std::array<std::byte, 32> digest{};
+  for (std::size_t i = 0; i < digest.size(); ++i)
+    digest[i] = static_cast<std::byte>(0xa0 + i);
+  CheckGuestWireField(&O::recipe_sha256, &C::recipe_sha256, digest);
+  using OI = reb::NativeWasmGuestInvocationPayload;
+  using CI = reb::WasmGuestInvocationPayload;
+  CheckGuestWireField(&OI::function_index, &CI::function_index, std::uint32_t{0x01020304});
+  CheckGuestWireField(&OI::instance_id, &CI::instance_id, std::uint64_t{0x1112131415161718});
+  CheckGuestWireField(&OI::invocation_id, &CI::invocation_id, std::uint64_t{0x2122232425262728});
+  CheckGuestWireField(&OI::adapter_artifact_id, &CI::adapter_artifact_id,
+                      std::uint64_t{0x3132333435363738});
+  CheckGuestWireField(&OI::recipe_sha256, &CI::recipe_sha256, digest);
+  std::puts("PASS overlay renderer encoder and core decoder agree byte-for-byte on every field");
+}
 struct Runtime {
   std::array<std::uint8_t, 256> memory{};
   std::array<std::uint64_t, 321> locals{};
@@ -99,6 +165,7 @@ int main() {
                                               0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
                                               0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad};
   assert(reb::NativeGuestDigest(abc) == expected);
+  CheckGuestWireParity();
   std::puts(
       "PASS actual borrowed local320/memory resolution, pointer chains, checked "
       "limits/type/shared/endian and digest");

@@ -68,7 +68,25 @@ class UnsafeSharedMemoryRegion {
 };
 template <class T>
 class ThreadLocalOwnedPointer {};
+struct Location {};
+struct TimeDelta {
+  std::int64_t ns = 0;
+};
+inline TimeDelta Nanoseconds(std::int64_t value) {
+  return {value};
+}
+// This pipeline never reaches session expiry; no task is ever posted.
+struct SequencedTaskRunner {
+  static bool HasCurrentDefault() { return false; }
+  static SequencedTaskRunner* GetCurrentDefault() {
+    static SequencedTaskRunner runner;
+    return &runner;
+  }
+  template <class Task>
+  void PostDelayedTask(const Location&, Task&&, TimeDelta) {}
+};
 }  // namespace base
+#define FROM_HERE ::base::Location()
 
 namespace mojo_base {
 class BigBuffer {

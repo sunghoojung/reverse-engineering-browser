@@ -1,6 +1,8 @@
 // Native response artifact linkage component integration test.
 // No event, artifact metadata, creator sequence or ACK status is repaired in this driver.
+#include <algorithm>
 #include <bit>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -13,6 +15,7 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
+#include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 #include "chromium_stubs.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
@@ -436,24 +439,42 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
         "Payload decodes");
   Check(payload.selector == 42 && payload.module_byte_offset == 8 && payload.table_count == 1,
         "Explicit little endian physical dispatch fields retained");
+  observation.header.sequence_number = 1000;
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [&] { return current; });
+  Check(transfers.empty() && count() == before + 2 && events.back().header.artifact_id == id,
+        "Accepted module is reused, not transferred again, for the same document");
+  observation.document_token_low = 74;
+  observation.header.sequence_number = 1001;
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [&] { return current; });
+  Check(transfers.size() == 1, "Another document gets its own module artifact");
   current = false;
   Receive(receiver, transfers.begin()->first);
-  Check(count() == before + 1, "Navigated document cannot emit delayed observation");
+  Check(count() == before + 2, "Navigated document cannot emit delayed observation");
+  Check(std::any_of(events.begin(), events.end(),
+                    [](const auto& e) {
+                      return e.header.type == NativeProbeType::kGap &&
+                             e.header.sequence_number == 1001 && e.header.process_id == 123;
+                    }),
+        "Lost observation fills its own sequence slot with a gap");
   current = true;
+  observation.document_token_low = 75;
+  observation.header.sequence_number = 1002;
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [&] { return current; });
   const auto retired = transfers.begin()->first;
   Configure();
   Receive(receiver, retired);
-  Check(count() == before + 1, "Same session reconfiguration retires old acknowledgement");
+  Check(count() == before + 2, "Same session reconfiguration retires old acknowledgement");
   observation.table_count = 2;
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
   Check(transfers.empty(), "Mismatched br_table immediate rejected");
   observation.table_count = 1;
   Configure();
-  for (unsigned i = 0; i < 17; ++i)
+  const auto before_budget = count();
+  for (unsigned i = 0; i < 17; ++i) {
+    observation.header.sequence_number = 2000 + i;
     sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
-  Check(transfers.size() == 16, "Browser admission bounded independently to sixteen modules");
+  }
+  Check(transfers.size() == 1, "Sixteen observations of one module share one artifact");
   Check(Payload(events.back()) == "native_wasm_dispatch_browser_budget_incomplete",
         "Cross-renderer browser budget reports incompleteness");
   const auto after_budget_gap = events.size();
@@ -461,6 +482,7 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
   Check(events.size() == after_budget_gap, "Browser budget marker is bounded per configuration");
   while (!transfers.empty())
     Receive(receiver, transfers.begin()->first);
+  Check(count() == before_budget + 16, "Every admitted observation is published after one ACK");
   Configure(kSession, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact));
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
   Check(transfers.empty(), "Artifact permission alone cannot admit runtime observation");
@@ -469,6 +491,7 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
 }
 
 #include "guest_dependencies_test.h"
+#include "probe_host_test.h"
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -494,6 +517,7 @@ int main(int argc, char** argv) {
     Admission(output);
     NativeWasmDispatch(receiver);
     NativeGuestDependencies(receiver);
+    NativeProbeHostGuestBoundary(receiver);
     event_wire.flush();
     artifact_wire.flush();
     ack_wire.flush();

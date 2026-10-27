@@ -110,6 +110,7 @@ struct NativeProbeClient {
                          std::uint64_t,
                          const std::string&) = 0;
   virtual void Disable() = 0;
+  virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
 };
 struct NativeProbeHost {
   inline static std::atomic<unsigned> notifications{0};

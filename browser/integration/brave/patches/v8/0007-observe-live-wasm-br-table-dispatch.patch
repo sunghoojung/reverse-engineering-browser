@@ -101,10 +101,10 @@ index cedbe4e..a695fec 100644
    V(SharedArrayBufferConstructorEnabledCallback,                            \
      sharedarraybuffer_constructor_enabled_callback, nullptr)                \
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index a10eedd..8e5efc7 100644
+index 7f1aebf..3b73178 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -2046,6 +2046,10 @@ DEFINE_BOOL(liftoff, true,
+@@ -2047,6 +2047,10 @@ DEFINE_BOOL(liftoff, true,
              "enable Liftoff, the baseline compiler for WebAssembly")
  DEFINE_BOOL(liftoff_only, false,
              "disallow TurboFan compilation for WebAssembly (for testing)")
@@ -270,19 +270,24 @@ index ac9c1a6..c198ac5 100644
    if (!HeaderMatches(data, enabled_features, compile_imports)) return {};
  
 diff --git a/src/wasm/wasm-tracing.h b/src/wasm/wasm-tracing.h
-index 220507b..5e62f08 100644
+index 220507b..7106d5a 100644
 --- a/src/wasm/wasm-tracing.h
 +++ b/src/wasm/wasm-tracing.h
-@@ -29,6 +29,13 @@ struct MemoryTracingInfo {
+@@ -29,6 +29,18 @@ struct MemoryTracingInfo {
                  "MachineRepresentation uses uint8_t");
  };
  
 +// Created on the native stack by Liftoff, following MemoryTracingInfo's ABI.
-+struct RebBrTableTracingInfo {
++// Liftoff reserves exactly sizeof() bytes before calling the runtime, so the
++// size must keep the native stack pointer word-aligned on every target.
++// This is not a serialized wire record.
++struct alignas(uintptr_t) RebBrTableTracingInfo {
 +  uint32_t function_byte_offset;
 +  uint32_t selector;
 +  uint32_t table_count;
 +};
++static_assert(alignof(RebBrTableTracingInfo) >= alignof(uintptr_t));
++static_assert(sizeof(RebBrTableTracingInfo) % sizeof(uintptr_t) == 0);
 +
  struct GlobalTracingInfo {
    uint32_t global_index;

@@ -1,126 +1,135 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index aaa9dde..e97c52b 100644
+index d912549..997fadf 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -32,6 +32,7 @@
- #include "third_party/blink/renderer/platform/wtf/functional.h"
+@@ -25,12 +25,6 @@
  
+ #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
+ 
+-#include "base/location.h"
+-#include "base/task/single_thread_task_runner.h"
+-#include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
+-#include "third_party/blink/renderer/platform/heap/persistent.h"
+-#include "third_party/blink/renderer/platform/wtf/functional.h"
+-
  #include <algorithm>
-+#include <atomic>
+ #include <atomic>
  #include <bit>
- #include <cstdint>
- #include <limits>
-@@ -297,6 +298,101 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
-       document_token.GetLowForSerialization());
+@@ -44,10 +38,13 @@
+ 
+ #include "base/containers/span.h"
+ #include "base/debug/crash_logging.h"
++#include "base/location.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/system/sys_info.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "build/build_config.h"
+ #include "components/crash/core/common/crash_key.h"
+@@ -78,10 +75,10 @@
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_string_trustedscript.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_wasm_response_extensions.h"
+ #include "third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.h"
++#include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+ #include "third_party/blink/renderer/core/dom/events/event_dispatch_forbidden_scope.h"
+ #include "third_party/blink/renderer/core/events/error_event.h"
+-#include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/execution_context/agent.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
+@@ -104,6 +101,7 @@
+ #include "third_party/blink/renderer/platform/bindings/v8_per_context_data.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
++#include "third_party/blink/renderer/platform/heap/persistent.h"
+ #include "third_party/blink/renderer/platform/heap/thread_state.h"
+ #include "third_party/blink/renderer/platform/heap/thread_state_storage.h"
+ #include "third_party/blink/renderer/platform/instrumentation/histogram.h"
+@@ -114,6 +112,7 @@
+ #include "third_party/blink/renderer/platform/scheduler/public/thread_scheduler.h"
+ #include "third_party/blink/renderer/platform/weborigin/kurl.h"
+ #include "third_party/blink/renderer/platform/weborigin/reporting_disposition.h"
++#include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "third_party/blink/renderer/platform/wtf/sanitizers.h"
+ #include "third_party/blink/renderer/platform/wtf/stack_util.h"
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+@@ -312,8 +311,9 @@ bool NativeWasmGuestEnabled() {
+ }
+ void ResetNativeWasmGuest() noexcept {
+   native_guest_reset_generation.fetch_add(1, std::memory_order_acq_rel);
+-  if (auto *isolate = v8::Isolate::TryGetCurrent())
++  if (auto* isolate = v8::Isolate::TryGetCurrent()) {
+     isolate->ResetWasmGuestCapture();
++  }
+ }
+ v8::WasmGuestModuleAdmission AdmitNativeWasmGuestModule(
+     v8::Local<v8::Context> context,
+@@ -347,12 +347,13 @@ v8::WasmGuestModuleAdmission AdmitNativeWasmGuestModule(
+   return v8::WasmGuestModuleAdmission::kNotDispatcher;
+ }
+ bool CurrentNativeWasmGuest(std::uint32_t dispatcher,
+-                            reb::NativeWasmGuestContext *output) noexcept {
+-  auto *isolate = v8::Isolate::TryGetCurrent();
++                            reb::NativeWasmGuestContext* output) noexcept {
++  auto* isolate = v8::Isolate::TryGetCurrent();
+   v8::WasmGuestContext state{};
+   if (!output || !isolate ||
+-      !isolate->GetCurrentWasmGuestContext(dispatcher, &state))
++      !isolate->GetCurrentWasmGuestContext(dispatcher, &state)) {
+     return false;
++  }
+   *output = {state.instance_id,           state.invocation_id,
+              state.function_index,        state.module_byte_offset,
+              state.import_function_index, state.import_module_byte_offset};
+@@ -360,10 +361,10 @@ bool CurrentNativeWasmGuest(std::uint32_t dispatcher,
  }
  
-+// Epoch invalidation reaches isolates not entered during configuration.
-+std::atomic<std::uint64_t> native_guest_reset_generation{1};
-+std::uint64_t NativeWasmGuestEpoch() {
-+  return native_guest_reset_generation.load(std::memory_order_acquire);
-+}
-+bool NativeWasmGuestSelectedSite(std::uint32_t function, std::uint32_t offset) {
-+  return reb::NativeProbeSink::Get().IsNativeWasmGuestDispatchSite(function,
-+                                                                   offset);
-+}
-+bool NativeWasmGuestEnabled() {
-+  return reb::NativeProbeSink::Get().IsNativeWasmGuestEnabled();
-+}
-+void ResetNativeWasmGuest() noexcept {
-+  native_guest_reset_generation.fetch_add(1, std::memory_order_acq_rel);
-+  if (auto *isolate = v8::Isolate::TryGetCurrent())
-+    isolate->ResetWasmGuestCapture();
-+}
-+bool AdmitNativeWasmGuestModule(v8::Local<v8::Context> context,
-+                                const std::uint8_t *bytes, std::size_t size,
-+                                std::uint32_t function_index) {
-+  if (context.IsEmpty() || !bytes || size < 8 ||
-+      size > reb::kNativeArtifactMaxContentBytes)
-+    return false;
-+  auto *execution = ToExecutionContext(context);
-+  auto *window = execution ? DynamicTo<LocalDOMWindow>(execution) : nullptr;
-+  if (!execution || execution->IsContextDestroyed() || !window ||
-+      !window->GetFrame() || !window->document())
-+    return false;
-+  return reb::NativeProbeSink::Get().AdmitNativeWasmGuestModule(
-+      UNSAFE_BUFFERS(base::span(bytes, size)), function_index);
-+}
-+bool CurrentNativeWasmGuest(std::uint32_t dispatcher,
-+                            reb::NativeWasmGuestContext *output) noexcept {
-+  auto *isolate = v8::Isolate::TryGetCurrent();
-+  v8::WasmGuestContext state{};
-+  if (!output || !isolate ||
-+      !isolate->GetCurrentWasmGuestContext(dispatcher, &state))
-+    return false;
-+  *output = {state.instance_id,           state.invocation_id,
-+             state.function_index,        state.module_byte_offset,
-+             state.import_function_index, state.import_module_byte_offset};
-+  return true;
-+}
-+
-+void CaptureWasmGuestDispatch(v8::Local<v8::Context> context,
-+                              const std::uint8_t *module_bytes,
-+                              const std::size_t module_size,
-+                              const v8::WasmGuestStateView &view) {
-+  reb::NativeProbeSink &sink = reb::NativeProbeSink::Get();
-+  const reb::NativeWasmGuestStateView state{
-+      view.instance_id,        view.invocation_id,      view.function_index,
-+      view.module_byte_offset, view.selector,           view.table_count,
-+      view.accessor_context,   view.read_numeric_local, view.copy_memory};
-+  // Revoke the preceding configured-site parent before any metadata rejection.
-+  sink.InvalidateNativeWasmGuest(state);
-+  if (!sink.IsNativeWasmGuestEnabled() || context.IsEmpty() ||
-+      module_bytes == nullptr || module_size < 8 ||
-+      module_size > reb::kNativeArtifactMaxContentBytes) {
-+    return;
-+  }
-+  ExecutionContext *execution_context = ToExecutionContext(context);
-+  if (!execution_context || execution_context->IsContextDestroyed()) {
-+    return;
-+  }
-+  // Only a live local document has the browser-side ownership needed here.
-+  // Workers and other realms remain unsupported instead of being retargeted.
-+  auto *window = DynamicTo<LocalDOMWindow>(execution_context);
-+  if (!window || !window->GetFrame() || !window->document()) {
-+    return;
-+  }
-+  const auto execution_context_id =
-+      StableExecutionContextId(*execution_context);
-+  const auto frame_id = StableFrameId(*execution_context);
-+  if (execution_context_id == 0 || frame_id == 0) {
-+    return;
-+  }
-+  // Bound conversion work before allocating the UTF-8 copy, then bound bytes.
-+  const String &url = execution_context->Url().GetString();
-+  if (url.empty() || url.length() > reb::kNativeArtifactMaxUrlBytes) {
-+    return;
-+  }
-+  const std::string source_url = url.Utf8();
-+  if (source_url.empty() ||
-+      source_url.size() > reb::kNativeArtifactMaxUrlBytes) {
-+    return;
-+  }
-+  const base::UnguessableToken &document_token =
-+      window->document()->Token().value();
-+  sink.RecordNativeWasmGuest(
-+      execution_context_id, frame_id, source_url,
-+      UNSAFE_BUFFERS(base::span(module_bytes, module_size)), state,
-+      document_token.GetHighForSerialization(),
-+      document_token.GetLowForSerialization());
-+}
-+
- void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
-                             const v8::WasmModuleBytesOrigin origin,
-                             const std::uint8_t* bytes,
-@@ -1330,6 +1426,11 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
-   isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
-   isolate->SetWasmBrTableDispatchCallback(CaptureWasmBrTableDispatch,
-                                         NativeWasmBrTableDispatchEnabled);
-+  isolate->SetWasmGuestDispatchCallback(
-+      CaptureWasmGuestDispatch, NativeWasmGuestEnabled, NativeWasmGuestEpoch,
-+      AdmitNativeWasmGuestModule, NativeWasmGuestSelectedSite);
-+  reb::NativeProbeSink::Get().SetNativeWasmGuestRuntime(CurrentNativeWasmGuest,
-+                                                        ResetNativeWasmGuest);
-   isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);
-   isolate->SetWasmCustomDescriptorsEnabledCallback(
-       WasmCustomDescriptorsEnabledCallback);
+ void CaptureWasmGuestDispatch(v8::Local<v8::Context> context,
+-                              const std::uint8_t *module_bytes,
++                              const std::uint8_t* module_bytes,
+                               const std::size_t module_size,
+-                              const v8::WasmGuestStateView &view) {
+-  reb::NativeProbeSink &sink = reb::NativeProbeSink::Get();
++                              const v8::WasmGuestStateView& view) {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
+   const reb::NativeWasmGuestStateView state{
+       view.instance_id,        view.invocation_id,      view.function_index,
+       view.module_byte_offset, view.selector,           view.table_count,
+@@ -375,13 +376,13 @@ void CaptureWasmGuestDispatch(v8::Local<v8::Context> context,
+       module_size > reb::kNativeArtifactMaxContentBytes) {
+     return;
+   }
+-  ExecutionContext *execution_context = ToExecutionContext(context);
++  ExecutionContext* execution_context = ToExecutionContext(context);
+   if (!execution_context || execution_context->IsContextDestroyed()) {
+     return;
+   }
+   // Only a live local document has the browser-side ownership needed here.
+   // Workers and other realms remain unsupported instead of being retargeted.
+-  auto *window = DynamicTo<LocalDOMWindow>(execution_context);
++  auto* window = DynamicTo<LocalDOMWindow>(execution_context);
+   if (!window || !window->GetFrame() || !window->document()) {
+     return;
+   }
+@@ -392,7 +393,7 @@ void CaptureWasmGuestDispatch(v8::Local<v8::Context> context,
+     return;
+   }
+   // Bound conversion work before allocating the UTF-8 copy, then bound bytes.
+-  const String &url = execution_context->Url().GetString();
++  const String& url = execution_context->Url().GetString();
+   if (url.empty() || url.length() > reb::kNativeArtifactMaxUrlBytes) {
+     return;
+   }
+@@ -401,7 +402,7 @@ void CaptureWasmGuestDispatch(v8::Local<v8::Context> context,
+       source_url.size() > reb::kNativeArtifactMaxUrlBytes) {
+     return;
+   }
+-  const base::UnguessableToken &document_token =
++  const base::UnguessableToken& document_token =
+       window->document()->Token().value();
+   sink.RecordNativeWasmGuest(
+       execution_context_id, frame_id, source_url,

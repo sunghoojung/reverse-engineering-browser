@@ -1354,6 +1354,7 @@ int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
   NativeGuestAdmission();
+  NativeGuestModuleVerdictsAndHostBudget();
   NativeWasmRuntimeAdmission();
   DispatchSampleAdmission();
   DispatchEmitFailureReleasesBudget();

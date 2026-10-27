@@ -47,6 +47,9 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  std::uint64_t wasm_capture_epoch = 0,
                  const std::string& guest_adapter_json = {}) override;
   void Disable() override;
+  void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,
+                               std::uint64_t module_token,
+                               bool accepted) override;
 
   [[nodiscard]] static NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
                                                         std::uint64_t config_generation) noexcept;

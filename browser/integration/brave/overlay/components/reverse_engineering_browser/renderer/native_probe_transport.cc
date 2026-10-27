@@ -99,6 +99,16 @@ void NativeProbeTransport::Disable() {
   queue_.store(nullptr, std::memory_order_release);
 }
 
+void NativeProbeTransport::NativeGuestModuleStatus(const std::uint64_t wasm_capture_epoch,
+                                                   const std::uint64_t module_token,
+                                                   const bool accepted) {
+  // A verdict for a retired configuration must not release a newer binding.
+  const auto epoch = wasm_capture_epoch_.load(std::memory_order_acquire);
+  if (!epoch || epoch != wasm_capture_epoch || !module_token)
+    return;
+  NativeProbeSink::Get().NoteNativeGuestModuleStatus(module_token, accepted);
+}
+
 NativeProbeEmitStatus NativeProbeTransport::EmitStatus(
     const NativeProbeEvent& event,
     const std::uint64_t config_generation) noexcept {

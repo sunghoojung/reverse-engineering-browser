@@ -27,9 +27,11 @@ TEST_NAMES = [
     "RebNativeBrTableAdmissionPredicate",
     "RebNativeBrTablePreservesLiveValues",
     "RebNativeBrTableDisabledCompilation",
+    "RebNativeBrTablePhysicalOnlyHasNoGuestMetadata",
     "RebNativeGuestLargeLocalIndexAndMemory",
     "RebNativeGuestHelperImportAndExceptionScope",
     "RebNativeGuestAdmissionPolicyReplacement",
+    "RebNativeGuestRejectedModuleIsNotReadmitted",
     "RebNativeGuestPhysicalObserverClearsCallback",
     "RebNativeGuestPhysicalObserverDisablesReplacement",
     "RebNativeGuestPhysicalObserverReplacesPolicy",
@@ -154,7 +156,8 @@ def self_test():
     else:
         raise AssertionError("Changed Abseil annotations must fail closed")
     with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
+        # Resolve once: macOS temp directories live behind a /var symlink.
+        root = Path(directory).resolve()
         system = root / "system"
         (system / "bin").mkdir(parents=True)
         resource = root / "resource"

@@ -2369,7 +2369,11 @@ struct GuestInvocationState final {
 };
 struct GuestDocumentBinding final {
   std::uint64_t frame = 0, high = 0, low = 0, context = 0;
-  bool module_sent = false;
+  // Sequence number of the dispatch that last carried the module bytes; zero
+  // means the next sample must carry them. Cleared again on a rejection.
+  std::uint64_t module_token = 0;
+  std::uint8_t module_attempts = 0;
+  bool module_accepted = false;
 };
 struct GuestThreadState final {
   std::uint64_t generation = 0;
@@ -2459,6 +2463,40 @@ void NativeProbeSink::ConfigureNativeWasmGuest(
   }
   native_guest_adapter_.store(native_guest_retained_adapter_, std::memory_order_release);
 }
+void NativeProbeSink::NoteNativeGuestModuleStatus(std::uint64_t module_token,
+                                                  bool accepted) noexcept {
+  if (!module_token || module_token > (UINT64_MAX >> 1U))
+    return;
+  const auto slot = native_guest_module_status_next_.fetch_add(1, std::memory_order_relaxed) %
+                    native_guest_module_status_.size();
+  native_guest_module_status_[slot].store((module_token << 1U) | (accepted ? 1U : 0U),
+                                          std::memory_order_release);
+}
+NativeProbeSink::GuestModuleVerdict NativeProbeSink::NativeGuestModuleVerdict(
+    std::uint64_t token) const noexcept {
+  for (const auto& entry : native_guest_module_status_) {
+    const auto value = entry.load(std::memory_order_acquire);
+    if (value >> 1U == token)
+      return value & 1U ? GuestModuleVerdict::kAccepted : GuestModuleVerdict::kRejected;
+  }
+  return GuestModuleVerdict::kPending;
+}
+bool NativeProbeSink::ClaimNativeGuestHostRoute(std::uint64_t generation) noexcept {
+  if (native_guest_host_capped_generation_.load(std::memory_order_acquire) >= generation)
+    return false;
+  for (auto& slot : native_guest_host_slots_) {
+    auto previous = slot.load(std::memory_order_acquire);
+    while (previous < generation) {
+      if (slot.compare_exchange_weak(previous, generation, std::memory_order_acq_rel))
+        return true;
+    }
+  }
+  auto previous = native_guest_host_capped_generation_.load(std::memory_order_acquire);
+  while (previous < generation && !native_guest_host_capped_generation_.compare_exchange_weak(
+                                      previous, generation, std::memory_order_acq_rel)) {
+  }
+  return false;
+}
 void NativeProbeSink::SetNativeWasmGuestRuntime(NativeWasmGuestContextProvider context,
                                                 NativeWasmGuestReset reset) noexcept {
   native_guest_context_.store(context, std::memory_order_release);
@@ -2479,12 +2517,18 @@ bool NativeProbeSink::IsNativeWasmGuestDispatchSite(
   return adapter && function_index == adapter->function_index &&
          module_byte_offset == adapter->dispatch_module_offset;
 }
-bool NativeProbeSink::AdmitNativeWasmGuestModule(std::span<const std::uint8_t> module,
-                                                 std::uint32_t function_index) const noexcept {
+NativeWasmGuestModuleDecision NativeProbeSink::AdmitNativeWasmGuestModule(
+    std::span<const std::uint8_t> module,
+    std::uint32_t function_index) const noexcept {
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
-  return adapter && function_index == adapter->function_index && IsNativeWasmGuestEnabled() &&
-         !module.empty() && module.size() <= kNativeArtifactMaxContentBytes &&
-         NativeGuestDigest(module) == adapter->module_sha256;
+  // Capture state is transient; the engine resets remembered rejections when
+  // the enabled interval or capture epoch changes.
+  if (!adapter || function_index != adapter->function_index || !IsNativeWasmGuestEnabled())
+    return NativeWasmGuestModuleDecision::kNotDispatcher;
+  return !module.empty() && module.size() <= kNativeArtifactMaxContentBytes &&
+                 NativeGuestDigest(module) == adapter->module_sha256
+             ? NativeWasmGuestModuleDecision::kAdmit
+             : NativeWasmGuestModuleDecision::kRejectModule;
 }
 void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                                             std::uint64_t frame_id,
@@ -2550,6 +2594,25 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     document->context = execution_context_id;
     document->high = document_token_high;
     document->low = document_token_low;
+  }
+  if (!document->module_accepted && document->module_token) {
+    switch (NativeGuestModuleVerdict(document->module_token)) {
+      case GuestModuleVerdict::kAccepted:
+        document->module_accepted = true;
+        break;
+      case GuestModuleVerdict::kRejected:
+        document->module_token = 0;
+        break;
+      case GuestModuleVerdict::kPending:
+        break;
+    }
+  }
+  // While a transfer is pending, later samples bind to the browser's in-flight
+  // module; if it is rejected the browser marks those dispatches lost.
+  const bool send_module = !document->module_accepted && !document->module_token;
+  if (send_module && document->module_attempts >= kNativeGuestModuleAttemptLimit) {
+    NoteNativeGuestOmission(generation, frame_id, 8, "native_guest_module_unavailable");
+    return;
   }
   if (!state) {
     for (auto& slot : guest_thread.invocations)
@@ -2655,7 +2718,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   capture.document_token_low = document_token_low;
   capture.source_url = source_url;
   capture.adapter_json = adapter->json;
-  capture.module_bytes = document->module_sent ? std::span<const std::uint8_t>{} : module_bytes;
+  capture.module_bytes = send_module ? module_bytes : std::span<const std::uint8_t>{};
   capture.bytecode_bytes = std::span(snapshot.bytes.data(), snapshot.memory_length);
   const auto emit = native_guest_capture_.load(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != generation || !emit ||
@@ -2664,7 +2727,10 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     NoteNativeGuestOmission(generation, frame_id, 3, "native_guest_transport_unavailable");
     return;
   }
-  document->module_sent = true;
+  if (send_module) {
+    document->module_token = event.header.sequence_number;
+    ++document->module_attempts;
+  }
   state->dispatch_sequence = event.header.sequence_number;
 }
 bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
@@ -2687,6 +2753,13 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
     if (state.instance != context.instance_id || state.invocation != context.invocation_id ||
         state.frame != event.header.frame_id || !state.dispatch_sequence)
       continue;
+    // Beyond the routing budget the host stays on the ordinary queue without
+    // its parent link; the event itself is still retained.
+    if (!ClaimNativeGuestHostRoute(generation)) {
+      NoteNativeGuestOmission(generation, event.header.frame_id, 9,
+                              "native_guest_host_parent_budget");
+      return false;
+    }
     event.header.parent_event_id = state.dispatch_sequence;
     if (emit(event, generation))
       return true;

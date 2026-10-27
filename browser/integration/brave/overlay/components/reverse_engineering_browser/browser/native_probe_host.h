@@ -15,6 +15,7 @@
 #include "base/memory/raw_ref.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/unsafe_shared_memory_region.h"
+#include "base/memory/weak_ptr.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -83,6 +84,11 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
 
  private:
   void Drain();
+  // Reports the browser verdict for module bytes sent with the guest dispatch
+  // whose sequence number is module_token, if that configuration is current.
+  void SendNativeGuestModuleStatus(std::uint64_t capture_epoch,
+                                   std::uint64_t module_token,
+                                   bool accepted);
 
   const raw_ref<NativeProbeSession> session_;
   const int renderer_process_id_;
@@ -93,9 +99,11 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   std::uint64_t reported_dropped_events_ = 0;
   std::uint64_t wasm_capture_epoch_ = 0;
   std::uint32_t wasm_capture_count_ = 0;
-  std::uint32_t guest_capture_count_ = 0, guest_host_count_ = 0;
-  bool wasm_document_gap_emitted_ = false;
+  std::uint32_t guest_capture_count_ = 0;
+  bool wasm_document_gap_emitted_ = false, guest_budget_gap_emitted_ = false,
+       guest_host_malformed_gap_emitted_ = false;
   std::shared_ptr<const std::uint64_t> wasm_epoch_lifetime_;
+  base::WeakPtrFactory<NativeProbeHost> weak_factory_{this};
 };
 
 }  // namespace reb

@@ -151,5 +151,5 @@ $(NATIVE_WASM_GUEST_GOLDEN): $(BUILD_DIR)/tools/native-wasm-guest-golden.o $(BUI
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 -include $(BUILD_DIR)/tools/native-wasm-guest-golden.d
 
-$(BUILD_DIR)/tests/native_wasm_guest_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(BUILD_DIR)/tests/native_wasm_guest_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay -Itools/native-test-support
 $(NATIVE_GUEST_TEST): $(BUILD_DIR)/tests/native_wasm_guest_test.o

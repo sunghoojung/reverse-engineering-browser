@@ -398,6 +398,11 @@ fi
 if [[ "${native_wasm_dispatch}" == 1 ]]; then
   native_js_flags+=(--reb-wasm-br-table-dispatch)
 fi
+# Per-function-entry frame hooks cost a runtime call on every Wasm call, so
+# they are compiled in only when a guest adapter actually needs them.
+if [[ -n "${native_guest_adapter}" ]]; then
+  native_js_flags+=(--reb-wasm-guest-capture)
+fi
 if [[ ${#native_js_flags[@]} -gt 0 ]]; then
   brave_arguments+=("--js-flags=${native_js_flags[*]}")
 fi

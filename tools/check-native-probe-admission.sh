@@ -36,7 +36,8 @@ if [[ -n "${REB_PROBE_TEST_SANITIZERS:-}" ]]; then
 fi
 sources="$root/browser/integration/brave/overlay/components/reverse_engineering_browser"
 readonly sources
-"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$build/include" -I"$root/include" \
+"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$root/tools/native-test-support" \
+  -I"$build/include" -I"$root/include" \
   "$fixture/main.cc" "$sources/renderer/native_probe_sink.cc" \
   "$sources/renderer/native_probe_transport.cc" "$sources/common/native_probe_queue.cc" \
   "$root/src/analysis/owned_vm_guest_sampler.cpp" \

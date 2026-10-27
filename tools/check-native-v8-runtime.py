@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build the pinned native V8 runtime tests, not a Brave/browser acceptance run.
 
-This independent GCC profile does not fetch Chromium's binary Clang/Rust
-toolchains. Authored C++ patches are unchanged. Brave-specific GN wiring is
-omitted; one upstream unused-name annotation is recorded in the receipt.
+This independent system-Clang profile does not fetch Chromium's binary
+toolchains. Production C++ patches are unchanged; only Brave-specific GN wiring
+is omitted because this checkout has no Brave embedder.
 """
 
 import argparse
@@ -83,14 +83,6 @@ def binary_dependencies(deps):
     raise ValueError("Missing DEPS dictionary")
 
 
-def annotate_standalone_pointer_table_name(source):
-    """Annotate one upstream header variable; keep all compiler warnings enabled."""
-    declaration = 'static const char* kPointerTableAddressSpaceName = "v8-pointer-table";'
-    if source.count(declaration) != 1 or "[[maybe_unused]] " + declaration in source:
-        raise ValueError("Pinned pointer-table declaration changed; review required")
-    return source.replace(declaration, "[[maybe_unused]] " + declaration)
-
-
 def self_test():
     patches = sorted((ROOT / "browser/integration/brave/patches/v8").glob("*.patch"))
     assert patches
@@ -107,16 +99,6 @@ def self_test():
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }
-    declaration = 'static const char* kPointerTableAddressSpaceName = "v8-pointer-table";'
-    annotated = annotate_standalone_pointer_table_name(declaration)
-    assert annotated == "[[maybe_unused]] " + declaration
-    for invalid in ("", declaration + declaration, annotated):
-        try:
-            annotate_standalone_pointer_table_name(invalid)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("Standalone annotation must reject changed source")
     print("PASS standalone adapter preserves every production C++ hunk and excludes only embedder GN wiring")
 
 
@@ -126,6 +108,7 @@ def main():
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--jobs", type=int, default=2, choices=(1, 2))
+    parser.add_argument("--ccache-dir", type=Path, help="Optional isolated compiler-object cache")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -137,7 +120,7 @@ def main():
         raise ValueError("Use a fresh work directory; existing checkouts are never reset")
     work.mkdir(parents=True)
     receipt = {
-        "status": "running", "profile": "standalone-gcc-hardened-libcxx-not-Brave",
+        "status": "running", "profile": "standalone-system-clang22-hardened-libcxx-not-Brave",
         "tests": {}, "patches": [], "brave_validated": False,
         "public_native_hook_validated": False,
     }
@@ -154,7 +137,21 @@ def main():
         path = work / directory
         path.mkdir()
         env[variable] = str(path)
-    env.update(DEPOT_TOOLS_UPDATE="0", DEPOT_TOOLS_METRICS="0", CC="gcc-15", CXX="g++-15")
+    if args.ccache_dir is not None:
+        cache_dir = args.ccache_dir.resolve()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if shutil.which("ccache", path=env["PATH"]) is None:
+            raise RuntimeError("--ccache-dir requires ccache")
+        # Never inherit a remote cache, permissive sloppiness or cached config.
+        env = {key: value for key, value in env.items() if not key.startswith("CCACHE_")}
+        cache_config = work / "ccache.conf"
+        cache_config.write_text("")
+        env.update(CCACHE_DIR=str(cache_dir), CCACHE_CONFIGPATH=str(cache_config),
+                   CCACHE_COMPILERCHECK="content", CCACHE_MAXSIZE="2G",
+                   CCACHE_BASEDIR=str(work), CCACHE_COMPRESS="true")
+        receipt["compiler_cache"] = {"path": str(cache_dir), "max_size": "2G",
+                                     "compiler_check": "content", "sloppiness": "none"}
+    env.update(DEPOT_TOOLS_UPDATE="0", DEPOT_TOOLS_METRICS="0", CC="clang-22", CXX="clang++-22")
 
     def run(command, cwd=work, capture=False):
         receipt["stage"] = " ".join(map(str, command))
@@ -199,27 +196,27 @@ def main():
     try:
         if shutil.disk_usage(work).free < 8 * 1024 ** 3:
             raise RuntimeError("Need at least 8 GiB free before standalone source setup")
-        compiler_bin = work / "compiler-bin"
-        compiler_bin.mkdir()
         base_path = env["PATH"]
-        for name, versioned in (("gcc", "gcc-15"), ("g++", "g++-15")):
-            resolved = shutil.which(versioned, path=base_path)
+        compiler_paths = {}
+        for name in ("clang-22", "clang++-22"):
+            resolved = shutil.which(name, path=base_path)
             if resolved is None:
-                raise RuntimeError("Missing required compiler: " + versioned)
-            (compiler_bin / name).symlink_to(Path(resolved).resolve())
-        # Chromium's Linux GN toolchain invokes gcc/g++ literally, independent
-        # of CC/CXX. Own this PATH entry without changing the machine defaults.
-        env["PATH"] = str(compiler_bin) + os.pathsep + base_path
-        receipt["compiler"] = run(["g++", "--version"], capture=True).splitlines()[0]
-        receipt["c_compiler"] = run(["gcc", "--version"], capture=True).splitlines()[0]
-        receipt["compiler_paths"] = {name: str((compiler_bin / name).resolve()) for name in ("gcc", "g++")}
+                raise RuntimeError("Missing required compiler: " + name)
+            compiler_paths[name] = str(Path(resolved).resolve())
+        clang_base = Path(compiler_paths["clang-22"]).parent.parent
+        for name in ("clang", "clang++", "llvm-ar", "llvm-nm", "llvm-readelf"):
+            if not (clang_base / "bin" / name).is_file():
+                raise RuntimeError("Incomplete system LLVM toolchain: " + name)
+        receipt["compiler"] = run([compiler_paths["clang++-22"], "--version"], capture=True).splitlines()[0]
+        receipt["c_compiler"] = run([compiler_paths["clang-22"], "--version"], capture=True).splitlines()[0]
+        receipt["compiler_paths"] = compiler_paths
         v8_pin = (ROOT / "browser/config/v8.rev").read_text().strip()
         assert re.fullmatch(r"[0-9a-f]{40}", v8_pin)
         receipt["v8_revision"] = v8_pin
         depot, v8 = work / "depot_tools", work / "v8"
         checkout("https://chromium.googlesource.com/chromium/tools/depot_tools.git", DEPOT_REV, depot)
         checkout("https://github.com/v8/v8.git", v8_pin, v8)
-        env["PATH"] = os.pathsep.join((str(compiler_bin), str(depot), base_path))
+        env["PATH"] = os.pathsep.join((str(depot), base_path))
         deps = (v8 / "DEPS").read_text()
         gn_pin = re.search(r"'gn_version': 'git_revision:([0-9a-f]{40})'", deps).group(1)
         excluded = binary_dependencies(deps)
@@ -242,20 +239,8 @@ def main():
         gn_source = work / "gn-source"
         # GN's version generator needs its initial-commit tag/history.
         checkout("https://gn.googlesource.com/gn", gn_pin, gn_source, full=True)
-        # GCC diagnoses the pinned GN source's ASCII-diagram backslash as a
-        # multiline comment. Keep the diagnostic, but scope nonfatal handling
-        # to the build tool only. Production V8 still uses full -Werror.
-        original_cxxflags = env.get("CXXFLAGS")
-        env["CXXFLAGS"] = " ".join(filter(None, (original_cxxflags, "-Wno-error=comment")))
-        receipt["gn_bootstrap_extra_cxxflags"] = ["-Wno-error=comment"]
-        try:
-            run(["python3", "build/gen.py", "--out-path=out"], gn_source)
-            run(["ninja", "-C", "out", "-j", str(args.jobs), "gn"], gn_source)
-        finally:
-            if original_cxxflags is None:
-                env.pop("CXXFLAGS", None)
-            else:
-                env["CXXFLAGS"] = original_cxxflags
+        run(["python3", "build/gen.py", "--out-path=out"], gn_source)
+        run(["ninja", "-C", "out", "-j", str(args.jobs), "gn"], gn_source)
         receipt["gn_revision"] = gn_pin
         for patch in sorted((ROOT / "browser/integration/brave/patches/v8").glob("*.patch")):
             source, build, omitted = split_patch(patch.read_text())
@@ -268,31 +253,21 @@ def main():
                     run(["git", "apply", "--check", str(temporary)], v8)
                     run(["git", "apply", str(temporary)], v8)
             receipt["patches"].append(entry)
-        # GCC diagnoses this header-local upstream name in translation units
-        # that do not use it. Annotate only this declaration, without suppressing
-        # warnings or changing any authored native-capture patch.
-        globals_path = v8 / "src/common/globals.h"
-        original_globals = globals_path.read_text()
-        annotated_globals = annotate_standalone_pointer_table_name(original_globals)
-        globals_path.write_text(annotated_globals)
-        receipt["standalone_upstream_annotations"] = [{
-            "path": "src/common/globals.h",
-            "change": "[[maybe_unused]] kPointerTableAddressSpaceName",
-            "before_sha256": hashlib.sha256(original_globals.encode()).hexdigest(),
-            "after_sha256": hashlib.sha256(annotated_globals.encode()).hexdigest(),
-        }]
-        save_receipt()
         # Temporal alone pulls Rust into this standalone build; guest capture
         # and the public QuickJS fixture do not use the Temporal API.
         gn_args = " ".join((
             'is_debug=false', 'is_component_build=false', 'symbol_level=0',
-            'is_clang=false', 'use_lld=false', 'use_custom_libcxx=true', 'use_sysroot=false',
+            'is_clang=true', 'use_lld=false',
+            'clang_use_chrome_plugins=false', 'clang_version="22"', 'clang_base_path=' + json.dumps(str(clang_base)), 'use_custom_libcxx=true', 'use_sysroot=false',
             'use_custom_libcxx_for_host=true', 'v8_enable_sandbox=true',
             'enable_rust=false', 'v8_enable_temporal_support=false',
             'use_remoteexec=false', 'treat_warnings_as_errors=true',
             'target_cpu="x64"', 'v8_target_cpu="x64"', 'v8_enable_i18n_support=false',
             'v8_use_external_startup_data=false', 'v8_dcheck_always_on=true',
         ))
+        if args.ccache_dir is not None:
+            gn_args += ' cc_wrapper="ccache"'
+            receipt["compiler_cache"]["version"] = run(["ccache", "--version"], capture=True).splitlines()[0]
         receipt["gn_args"] = gn_args
         fixture = ROOT / "tools/quickjs-native-fixture"
         public_inputs = work / "public-quickjs"
@@ -342,6 +317,13 @@ def main():
         receipt["error"] = str(error)
         raise
     finally:
+        if args.ccache_dir is not None:
+            try:
+                stats = subprocess.run(["ccache", "--show-stats"], env=env, text=True,
+                                       capture_output=True, timeout=30, check=False)
+                receipt["compiler_cache"]["statistics"] = stats.stdout
+            except (OSError, subprocess.TimeoutExpired) as error:
+                receipt["compiler_cache"]["statistics_error"] = str(error)
         save_receipt()
 
 

@@ -18,7 +18,7 @@ mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.6.0";
+const PRODUCER_VERSION: &str = "2.7.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1293,7 +1293,9 @@ pub(crate) fn workspace(
         "source_artifact_sha256": artifact["sha256"],
         "runtime": result["runtime"],
         "capture_mode": "unknown",
-        "sample_count": sample_count + observations.count + guest_samples.count,
+        // Physical and guest callbacks fire for the same br_table execution at
+        // an adapter site, so each native stream keeps its own count below.
+        "sample_count": sample_count,
         "samples": retained_samples,
         "finding_id": result["finding_id"],
         "model": model,
@@ -1435,7 +1437,7 @@ mod tests {
             let (_, _, document) = analyze_artifact(&bytes, "wasm", &[event.clone(), event]);
             assert_schema(&document);
             let workspace = &document["workspaces"][0];
-            assert_eq!(workspace["sample_count"], 1);
+            assert_eq!(workspace["sample_count"], 0);
             assert_eq!(workspace["native_wasm_observation_count"], 1);
             assert_eq!(workspace["samples"], json!([]));
             let observed = workspace["handlers"]

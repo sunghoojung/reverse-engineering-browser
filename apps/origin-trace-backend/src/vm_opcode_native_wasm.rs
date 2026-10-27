@@ -143,8 +143,6 @@ impl Observations {
             }
             if let Some(count) = self.counts.get(&(offset, selector)) {
                 handler["native_wasm_sample_count"] = json!(count);
-                handler["sample_count"] =
-                    json!(handler["sample_count"].as_u64().unwrap_or(0) + count);
                 handler["state"] = json!("observed");
             }
         }
@@ -217,8 +215,9 @@ pub(super) mod tests {
             json!({"source":{"byte_offset":70},"opcode":null,"label":"br_table default","sample_count":0}),
         ];
         output.attach(&mut handlers);
-        assert_eq!(handlers[0]["sample_count"], 1);
-        assert_eq!(handlers[1]["sample_count"], 0);
+        assert_eq!(handlers[0]["native_wasm_sample_count"], 1);
+        assert_eq!(handlers[0]["sample_count"], 0);
+        assert!(handlers[1].get("native_wasm_sample_count").is_none());
     }
     #[test]
     fn native_wasm_imported_function_index_and_retention() {

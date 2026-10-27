@@ -428,6 +428,26 @@ const defaultDocument=structuredClone(nativeDocument), dw=defaultDocument.worksp
 Object.assign(dw.native_wasm_observations[0],{selector:0xffffffff,selected_arm:200,is_default:true});
 Object.assign(dw.handlers[0],{opcode:null,label:'br_table default'});
 assert(validateModule(defaultDocument),'unsigned max selects default without inventing an opcode');
+// Producer 2.7.0 keeps physical and guest counts out of sample_count. One
+// br_table execution at an adapter site emits both records.
+const separateDocument=structuredClone(nativeDocument), sw=separateDocument.workspaces[0];
+separateDocument.producer.version='2.7.0';
+sw.sample_count=separateDocument.summary.sample_count=0;sw.handlers[0].sample_count=0;
+assert(validateModule(separateDocument),'separate native counts accepted from producer 2.7.0');
+const summedNew=structuredClone(nativeDocument);summedNew.producer.version='2.7.0';
+assert(!validateModule(summedNew),'producer 2.7.0 cannot sum native observations into sample_count');
+const bothDocument=structuredClone(defaultDocument), bw=bothDocument.workspaces[0];
+bothDocument.producer.version='2.7.0';
+bw.sample_count=bothDocument.summary.sample_count=0;
+bw.native_guest_samples=[];bw.native_guest_sample_count=0;
+Object.assign(bw.handlers[0],{sample_count:0,native_wasm_sample_count:1});
+assert(validateModule(bothDocument),'native-only default arm is observed with zero dispatch reports');
+bw.handlers[0].sample_count=1;
+assert(!validateModule(bothDocument),'native-only default arm cannot report dispatch samples');
+bw.handlers[0].sample_count=0;
+const executions=runInNewContext(`${model}\nvmOpcodeHandlerRow(workspace, workspace.handlers[0]).samples`,
+  {workspace:{...bw,handlers:[{...bw.handlers[0],native_guest_sample_count:1}]},TextEncoder});
+assert.equal(executions,1,'one execution with physical and guest records displays once');
 const nativePanel=renderApi.renderNativeWasmObservations({...nativeWorkspace,
   native_wasm_observation_count:66,native_wasm_observations:Array.from({length:65},(_,i)=>({...nativeRow,selector:i,selected_arm:i}))});
 assert(nativePanel.textContent.includes('not guest-interpreter PCs'));

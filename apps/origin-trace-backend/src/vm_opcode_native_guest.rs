@@ -552,8 +552,6 @@ impl Samples {
                 .count();
             if count > 0 {
                 handler["native_guest_sample_count"] = json!(count);
-                handler["sample_count"] =
-                    json!(handler["sample_count"].as_u64().unwrap_or(0) + count as u64);
                 handler["state"] = json!("observed");
             }
         }
@@ -784,6 +782,70 @@ mod tests {
             crate::vm_host_links::store(f.root.path(), &workspace, &[f.module], &[host]).unwrap();
         assert!(links["workspaces"][0]["links"][0]["guest_position"].is_null());
     }
+    // V8 fires the physical and the guest callback for one br_table execution
+    // at an adapter site. The workspace must not count that execution twice.
+    #[test]
+    fn physical_and_guest_events_for_one_execution_are_not_summed() {
+        let f = Fixture::new();
+        let mut physical = vec![0u8; 128];
+        physical[..4].copy_from_slice(&[1, 0, 128, 0]);
+        put32(&mut physical, 8, 47);
+        put32(&mut physical, 12, u32::MAX);
+        put32(&mut physical, 16, 2);
+        let observation = event("wasm_dispatch_observation", 10, 0, &physical);
+        let mut events = f.events.clone();
+        events.insert(1, observation);
+        fs::write(
+            f.root.path().join("manifest.jsonl"),
+            [&f.module, &f.aux[0], &f.aux[1]]
+                .iter()
+                .map(|a| format!("{}\n", serde_json::to_string(a).unwrap()))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let path = f.root.path().join("events.jsonl");
+        fs::write(
+            &path,
+            events
+                .iter()
+                .map(|e| format!("{}\n", serde_json::to_string(e).unwrap()))
+                .collect::<String>(),
+        )
+        .unwrap();
+        crate::vm::store(f.root.path(), &path).unwrap();
+        let doc: Value = serde_json::from_slice(
+            &fs::read(f.root.path().join("analysis/vm-opcode-workspace-v2.json")).unwrap(),
+        )
+        .unwrap();
+        let workspace = &doc["workspaces"][0];
+        assert_eq!(workspace["native_wasm_observation_count"], 1);
+        assert_eq!(workspace["native_guest_sample_count"], 1);
+        assert_eq!(workspace["sample_count"], 0, "dispatch reports only");
+        assert_eq!(doc["summary"]["sample_count"], 0);
+        let handler = workspace["handlers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["source"]["byte_offset"] == 47 && h["opcode"].is_null())
+            .unwrap();
+        assert_eq!(handler["state"], "observed");
+        assert_eq!(handler["native_wasm_sample_count"], 1);
+        assert_eq!(handler["native_guest_sample_count"], 1);
+        assert_eq!(handler["sample_count"], 0);
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-opcode-workspace-v2.schema.json"
+        ))
+        .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(
+            validator.is_valid(&doc),
+            "{:?}",
+            validator
+                .iter_errors(&doc)
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
     #[test]
     #[ignore = "requires actual native C++ golden encoder"]
     fn native_guest_cpp_golden() {
@@ -938,7 +1000,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(doc["workspaces"][0]["native_guest_sample_count"], 1);
-            assert_eq!(doc["workspaces"][0]["sample_count"], 1);
+            assert_eq!(doc["workspaces"][0]["sample_count"], 0);
             let schema: Value = serde_json::from_str(include_str!(
                 "../../../protocol/vm-opcode-workspace-v2.schema.json"
             ))

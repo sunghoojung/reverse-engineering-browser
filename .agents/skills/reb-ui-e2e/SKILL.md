@@ -44,6 +44,15 @@ For native shell, bundle, icon, or packaging work, verify that the packaged app
 loads bundled assets at runtime rather than source-tree paths. Run the app build
 and strict code-signature checks from `AGENTS.md`.
 
+`make rendered-ui-check` is the repeatable packaged-app path: a hosted XCTest
+drives the real window and WKWebView with native keyboard and pointer events at
+normal and narrow sizes against bounded synthetic evidence, then writes
+screenshots to `build/rendered-ui-qa/screenshots/`. It needs full Xcode; set
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` for that command
+only and never change the global Xcode selection. Open the screenshots and
+judge them; a passing run is not visual review. Add an assertion to
+`tools/origin-trace-rendered-ui/` for any rendered regression you fix.
+
 ## Compare and verify
 
 After the change, repeat the original reproduction steps in the same state and

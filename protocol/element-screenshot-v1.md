@@ -111,6 +111,4 @@ The overlay is not a segmentation mask or visual verification result.
 
 ## Verification
 
-The checks that covered this workflow (`tools/check-element-screenshot.mjs`,
-the Rust `debugger::element_screenshot` tests and the `make backend-e2e`
-capture run) were removed with the implementation.
+The checks that covered this workflow were removed with the implementation.

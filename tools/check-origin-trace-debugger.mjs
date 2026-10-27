@@ -634,7 +634,7 @@ for (const patch of [{sha256: "b".repeat(64)}, {artifact_id: "2"}, {byte_size: 3
 }
 console.log("PASS WASM inspection identity, coordinate and resource bounds");
 // A minimal DOM verifies the real reconciliation code and bounded state, not
-// pixels. --traffic-ui-browser below is the separate rendered interaction path.
+// pixels. `make rendered-ui-check` is the separate rendered interaction path.
 class TrafficFixtureNode {
   constructor(tag = "div") {
     this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = new Map();

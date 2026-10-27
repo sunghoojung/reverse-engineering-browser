@@ -68,15 +68,9 @@ snapshot, while scope changes retire selection and the prior message view.
 
 ## Validation
 
-Rust authored-event tests cover text/binary/control payloads, close/reuse
-ownership, capture disabled, retention/omission counters and payload bounds.
-`node tools/check-websocket-inspection.mjs` covers model and controller states,
-inert rendering, direction/selection, focus and expansion retention, epoch reset
-and 100-row display bounds. `node tools/check-origin-trace-debugger.mjs
---traffic-ui-browser` also exercises the actual Traffic panel with keyboard and
-hit-tested pointer actions at 1440, 600 and 360 pixel widths, producing rendered
-screenshots in the existing Requests UI artifact. These are authored fixtures,
-not live third-party WebSocket probes or complete wire-capture attestation.
+The Rust, model, controller and rendered-browser checks that covered this
+projection were removed with the CDP implementation. No current check exercises
+it.
 
 Primary source: [CDP Network WebSocketFrame](https://chromedevtools.github.io/devtools-protocol/tot/Network/#type-WebSocketFrame).
 

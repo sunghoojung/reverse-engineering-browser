@@ -20,7 +20,7 @@ boundaries.
 | Goal | Current route | Limit |
 | --- | --- | --- |
 | Use the complete packaged product | [macOS release and setup](../../README.md#how-to-use-it) | Apple silicon app pair |
-| Develop native helpers, backend, or shared web UI on Linux | [Linux instructions below](#linux-and-wsl-2-development-workflow) | CI covers Linux tools/backend and selected rendered UI journeys |
+| Develop native helpers, backend, or shared web UI on Linux | [Linux instructions below](#linux-and-wsl-2-development-workflow) | CI covers Linux tools/backend; rendered UI acceptance runs only in the macOS app |
 | Explore the same development UI from Windows 11 | WSL 2, then the Linux instructions | Linux processes inside WSL; this specific setup is unverified |
 | Run native Windows Origin Trace or capture from a Windows custom Brave | [Porting work below](#what-a-native-windows-port-needs) | No supported build, installer, or Windows CI job yet |
 | Build the complete instrumented browser on Linux | [Browser porting notes](#building-the-instrumented-brave-browser) | Upstream Brave supports Linux; this project's full integrated path is not verified there |
@@ -172,12 +172,9 @@ environment and put its `bin` directory on `PATH`. The existing
 `make bootstrap-dev-tools` helper falls back to **Homebrew** when ShellCheck or
 actionlint is missing; it is not a complete Ubuntu installer.
 
-Rendered UI and live-debugger tests additionally need a Linux
-Chromium-compatible browser. See the [backend test guide](../../apps/origin-trace-backend/README.md)
-for `ORIGIN_TRACE_TEST_BROWSER`, and CI for `REB_UI_CHROMIUM`. A browser used for
-synthetic CDP tests does not validate the project's native Brave probes. WSL
-browser/sandbox/display behavior has not been verified here; do not disable
-browser security to make a failing test pass.
+Rendered UI acceptance runs in the packaged macOS app (`make rendered-ui-check`);
+Linux has no rendered UI gate. WSL browser/sandbox/display behavior has not been
+verified here; do not disable browser security to make a failing test pass.
 
 A missing tool, skipped test, or sanitizer restriction is not a passing check.
 The [validation contract](../../AGENTS.md#validation) describes what to report.
@@ -191,9 +188,8 @@ These are source-inspected blockers, not results from a Windows compilation:
   [apps/research-ui/macos](../../apps/research-ui/macos/), `xcrun`, `.app`
   resources and `codesign`. It cannot be rebuilt unchanged as a Windows app.
 - **Standalone transport and helpers:**
-  [local_ipc.cpp](../../src/transport/local_ipc.cpp),
-  [debugger_transport.cpp](../../src/transport/debugger_transport.cpp), the
-  broker and artifact receiver use POSIX headers/APIs, Unix-domain sockets,
+  [local_ipc.cpp](../../src/transport/local_ipc.cpp), the broker and artifact
+  receiver use POSIX headers/APIs, Unix-domain sockets,
   file descriptors, Unix ownership/modes and `/dev/urandom`. The Makefiles use
   Unix commands and GCC/Clang flags; there is no equivalent MSVC build route.
 - **Backend and safe saves:**

@@ -63,7 +63,7 @@ jobs:
     needs: route
     if: needs.route.outputs.release_type == 'paired'
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     outputs:
       release_tag: ${{ steps.source.outputs.release_tag }}
       source_sha: ${{ steps.source.outputs.source_sha }}
@@ -110,6 +110,11 @@ jobs:
           printf 'RELEASE_TAG=%s\nRELEASE_SOURCE_SHA=%s\n' "$tag" "$source_sha" >> "$GITHUB_ENV"
           printf 'release_tag=%s\nsource_sha=%s\n' "$tag" "$source_sha" >> "$GITHUB_OUTPUT"
 
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
       - name: Check release metadata tooling
         run: |
           python3 tools/write-release-pair-test.py
@@ -136,6 +141,11 @@ jobs:
       - name: Exercise native Analyst close and Quit lifecycle
         run: node tools/check-origin-trace-native-close.mjs
 
+      - name: Exercise rendered packaged UI with hosted XCTest
+        run: |
+          make e2e native-wasm-guest-golden native-wasm-dispatch-golden
+          node tools/check-origin-trace-rendered-ui.mjs
+
       - name: Preserve paired and lifecycle diagnostics
         if: always()
         uses: actions/upload-artifact@v7
@@ -144,6 +154,9 @@ jobs:
           path: |
             build/package-qa
             build/native-close-qa
+            build/rendered-ui-qa/screenshots
+            build/rendered-ui-qa/result.json
+            build/rendered-ui-qa/xcodebuild.log
           if-no-files-found: ignore
           retention-days: 14
 

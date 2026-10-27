@@ -18,6 +18,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
 
 namespace reb {
 
@@ -157,6 +158,19 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
     CaptureGeneratedArtifact(kind, capture_origin, 0, execution_context_id, frame_id, source_url,
                              content);
   }
+  // Native-only runtime callback; no page JS registration and no inferred guest PC.
+  void SetNativeWasmDispatchEmitter(NativeWasmDispatchEmitter emitter) noexcept;
+  [[nodiscard]] bool IsNativeWasmDispatchEnabled() const noexcept;
+  void RecordNativeWasmDispatch(std::uint64_t execution_context_id,
+                                std::uint64_t frame_id,
+                                std::string_view source_url,
+                                std::span<const std::uint8_t> module_bytes,
+                                std::uint32_t function_index,
+                                std::uint32_t module_byte_offset,
+                                std::uint32_t selector,
+                                std::uint32_t table_count,
+                                std::uint64_t document_token_high,
+                                std::uint64_t document_token_low) noexcept;
   void RecordApiCall(NativeProbeCategory category, std::string_view operation) noexcept;
   void RecordPropertyRead(NativeProbeCategory category, std::string_view operation) noexcept;
   // Call-site state is an opaque, monotonically ordered configuration claim,
@@ -250,6 +264,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                           std::uint32_t thread_id,
                           std::uint64_t interpreter_artifact_id) noexcept;
 
+  enum class NativeWasmOmission : std::size_t { kInput, kTransport, kBudget };
+  bool NoteNativeWasmDispatchOmission(const VmAdmission& admission,
+                                      NativeWasmOmission reason) noexcept;
+  std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
+  std::array<std::atomic<std::uint64_t>, 3> native_wasm_gap_generations_{};
+  std::atomic<std::uint64_t> native_wasm_capped_generation_{0};
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};

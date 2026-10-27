@@ -16,6 +16,7 @@
 #include "chromium_stubs.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
+#include "reb/wasm_dispatch.hpp"
 
 namespace {
 using reb::NativeArtifactBodyTee;
@@ -385,6 +386,86 @@ void Admission(const std::filesystem::path& output) {
   std::cout << "PASS disabled/category/disconnected admission, metadata/size/memory bounds, "
                "incomplete body, tee/queue failures, real receiver rejection and duplicate ACK\n";
 }
+void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
+  record_corpus = false;
+  Configure();
+  auto& sink = NativeArtifactCaptureSink::Get();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  const std::vector<std::uint8_t> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 1, 0, 0};
+  reb::NativeWasmDispatchObservation observation;
+  observation.header.session_id = kSession;
+  observation.header.frame_id = kFrame;
+  observation.header.sequence_number = 999;
+  observation.header.monotonic_time_ns = 99;
+  observation.header.process_id = 123;
+  observation.header.thread_id = 7;
+  observation.execution_context_id = 81;
+  observation.document_token_high = 72;
+  observation.document_token_low = 73;
+  observation.module_byte_offset = 8;
+  observation.selector = 42;
+  observation.table_count = 1;
+  observation.source_url = "fixture://native-wasm";
+  bool current = true;
+  const auto count = [] {
+    return std::count_if(events.begin(), events.end(), [](const auto& e) {
+      return e.header.type == NativeProbeType::kWasmDispatchObservation;
+    });
+  };
+  Check(sink.CaptureGeneratedArtifact(reb::NativeArtifactKind::kWasm,
+                                      reb::NativeArtifactCaptureOrigin::kUnknown, 0, 81, kFrame,
+                                      observation.source_url, mojo_base::BigBuffer(module)) == 0,
+        "Generic unknown origin cannot bypass dedicated validation");
+  const auto before = count();
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [&] { return current; });
+  Check(transfers.size() == 1 && count() == before,
+        "No dispatch record before module acknowledgement");
+  const auto id = transfers.begin()->first;
+  Receive(receiver, id);
+  Check(count() == before + 1, "Accepted exact module emits typed dispatch");
+  const auto found = std::find_if(events.rbegin(), events.rend(), [](const auto& e) {
+    return e.header.type == NativeProbeType::kWasmDispatchObservation;
+  });
+  Check(found->header.artifact_id == id && found->header.sequence_number == 999 &&
+            found->header.process_id == 123 && found->header.thread_id == 7 &&
+            !found->header.navigation_id && !found->header.parent_event_id,
+        "Runtime provenance preserved without guest or causal claims");
+  reb::WasmDispatchObservationPayload payload;
+  Check(reb::DecodeWasmDispatchObservationPayload(found->inline_payload, payload),
+        "Payload decodes");
+  Check(payload.selector == 42 && payload.module_byte_offset == 8 && payload.table_count == 1,
+        "Explicit little endian physical dispatch fields retained");
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [&] { return current; });
+  current = false;
+  Receive(receiver, transfers.begin()->first);
+  Check(count() == before + 1, "Navigated document cannot emit delayed observation");
+  current = true;
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [&] { return current; });
+  const auto retired = transfers.begin()->first;
+  Configure();
+  Receive(receiver, retired);
+  Check(count() == before + 1, "Same session reconfiguration retires old acknowledgement");
+  observation.table_count = 2;
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.empty(), "Mismatched br_table immediate rejected");
+  observation.table_count = 1;
+  Configure();
+  for (unsigned i = 0; i < 17; ++i)
+    sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.size() == 16, "Browser admission bounded independently to sixteen modules");
+  Check(Payload(events.back()) == "native_wasm_dispatch_browser_budget_incomplete",
+        "Cross-renderer browser budget reports incompleteness");
+  const auto after_budget_gap = events.size();
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(events.size() == after_budget_gap, "Browser budget marker is bounded per configuration");
+  while (!transfers.empty())
+    Receive(receiver, transfers.begin()->first);
+  Configure(kSession, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact));
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.empty(), "Artifact permission alone cannot admit runtime observation");
+  std::cout << "PASS native Wasm artifact ACK, physical typed payload, document/generation "
+               "retirement and bounds\n";
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -408,6 +489,7 @@ int main(int argc, char** argv) {
     Corpus(receiver, output);
     Lifecycle(receiver);
     Admission(output);
+    NativeWasmDispatch(receiver);
     event_wire.flush();
     artifact_wire.flush();
     ack_wire.flush();

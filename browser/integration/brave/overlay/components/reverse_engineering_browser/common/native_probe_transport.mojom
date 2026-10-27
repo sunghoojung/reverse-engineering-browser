@@ -13,7 +13,8 @@ interface NativeProbeClient {
             uint64 category_mask,
             uint64 expires_at_monotonic_ns,
             bool capture_canvas_images,
-            mojo_base.mojom.UnsafeSharedMemoryRegion queue_region);
+            mojo_base.mojom.UnsafeSharedMemoryRegion queue_region,
+            uint64 wasm_capture_epoch);
   Disable();
 };
 
@@ -22,6 +23,23 @@ interface NativeProbeClient {
 interface NativeProbeHost {
   BindClient(pending_remote<NativeProbeClient> client);
   EventsAvailable();
+  CaptureWasmDispatch(uint64 capture_epoch,
+                      uint64 session_id,
+                      uint64 sequence_number,
+                      uint64 monotonic_time_ns,
+                      uint32 process_id,
+                      uint32 thread_id,
+                      uint64 frame_id,
+                      uint64 execution_context_id,
+                      uint64 document_token_high,
+                      uint64 document_token_low,
+                      uint32 function_index,
+                      uint32 module_byte_offset,
+                      uint32 selector,
+                      uint32 table_count,
+                      uint32 sample_index,
+                      string source_url,
+                      mojo_base.mojom.BigBuffer content);
   CaptureGeneratedArtifact(uint16 kind,
                            uint16 capture_origin,
                            uint64 creator_event_id,

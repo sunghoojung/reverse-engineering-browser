@@ -7,6 +7,7 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_PROBE_HOST_H_
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "base/memory/raw_ptr.h"
@@ -32,6 +33,23 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   // mojom::NativeProbeHost:
   void BindClient(mojo::PendingRemote<mojom::NativeProbeClient> client) override;
   void EventsAvailable() override;
+  void CaptureWasmDispatch(std::uint64_t capture_epoch,
+                           std::uint64_t session_id,
+                           std::uint64_t sequence_number,
+                           std::uint64_t monotonic_time_ns,
+                           std::uint32_t process_id,
+                           std::uint32_t thread_id,
+                           std::uint64_t frame_id,
+                           std::uint64_t execution_context_id,
+                           std::uint64_t document_token_high,
+                           std::uint64_t document_token_low,
+                           std::uint32_t function_index,
+                           std::uint32_t module_byte_offset,
+                           std::uint32_t selector,
+                           std::uint32_t table_count,
+                           std::uint32_t sample_index,
+                           const std::string& source_url,
+                           mojo_base::BigBuffer content) override;
   void CaptureGeneratedArtifact(std::uint16_t kind,
                                 std::uint16_t capture_origin,
                                 std::uint64_t creator_event_id,
@@ -60,6 +78,10 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   base::WritableSharedMemoryMapping queue_mapping_;
   raw_ptr<NativeProbeQueue> queue_ = nullptr;
   std::uint64_t reported_dropped_events_ = 0;
+  std::uint64_t wasm_capture_epoch_ = 0;
+  std::uint32_t wasm_capture_count_ = 0;
+  bool wasm_document_gap_emitted_ = false;
+  std::shared_ptr<const std::uint64_t> wasm_epoch_lifetime_;
 };
 
 }  // namespace reb

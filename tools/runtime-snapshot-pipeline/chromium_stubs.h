@@ -137,7 +137,8 @@ class NativeProbeClient {
                          std::uint64_t,
                          std::uint64_t,
                          bool,
-                         base::UnsafeSharedMemoryRegion) = 0;
+                         base::UnsafeSharedMemoryRegion,
+                         std::uint64_t) = 0;
   virtual void Disable() = 0;
 };
 }  // namespace mojom

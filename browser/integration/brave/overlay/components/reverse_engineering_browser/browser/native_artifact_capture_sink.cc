@@ -114,6 +114,8 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   category_mask_.store(emitter ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(emitter ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   pending_.clear();
+  wasm_dispatch_count_ = 0;
+  wasm_dispatch_budget_gap_emitted_ = false;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
   emitter_.store(emitter, std::memory_order_release);
@@ -238,7 +240,84 @@ void NativeArtifactCaptureSink::CaptureRuntimeTypedArray(const int renderer_proc
                            parent->second);
 }
 
+void NativeArtifactCaptureSink::CaptureWasmDispatch(
+    const NativeWasmDispatchObservation& observation,
+    mojo_base::BigBuffer content,
+    std::function<bool()> is_current_document) {
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled() ||
+      observation.header.session_id != session_id_.load(std::memory_order_relaxed) ||
+      !is_current_document || !is_current_document())
+    return;
+  const auto gap = [&](const char* reason) {
+    EmitResult(NativeProbeType::kGap, 0, 0, observation.header.frame_id, reason,
+               NativeProbeCategory::kVm);
+  };
+  if (wasm_dispatch_count_ >= 16) {
+    if (!wasm_dispatch_budget_gap_emitted_) {
+      wasm_dispatch_budget_gap_emitted_ = true;
+      gap("native_wasm_dispatch_browser_budget_incomplete");
+    }
+    return;
+  }
+  ++wasm_dispatch_count_;
+  if (content.size() < 8 || content.size() > 16U * 1024U * 1024U ||
+      !observation.header.sequence_number || !observation.header.monotonic_time_ns ||
+      !observation.header.process_id || !observation.header.thread_id ||
+      observation.function_index >= 16U * 1024U * 1024U ||
+      observation.table_count >= 16U * 1024U * 1024U) {
+    gap("native_wasm_dispatch_limit_or_invalid");
+    return;
+  }
+  // Renderer shared memory remains writable: validate a private immutable copy.
+  std::vector<std::uint8_t> bytes(content.begin(), content.end());
+  auto checked = observation;
+  checked.module_bytes = bytes;
+  if (!IsValidNativeWasmDispatchInput(checked)) {
+    gap("native_wasm_dispatch_module_invalid");
+    return;
+  }
+  const auto artifact_id = CaptureGeneratedArtifactInternal(
+      NativeArtifactKind::kWasm, NativeArtifactCaptureOrigin::kUnknown, 0,
+      observation.execution_context_id, observation.header.frame_id, observation.source_url,
+      mojo_base::BigBuffer(bytes), 0, true);
+  const auto found = pending_.find(artifact_id);
+  if (!artifact_id || found == pending_.end()) {
+    gap("native_wasm_dispatch_artifact_unavailable");
+    return;
+  }
+  NativeProbeEvent event;
+  event.header = observation.header;
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kWasmDispatchObservation;
+  event.header.artifact_id = artifact_id;
+  event.header.parent_event_id = 0;
+  event.header.payload_size = 128;
+  const NativeWasmDispatchObservationPayload sample{
+      .function_index = observation.function_index,
+      .module_byte_offset = observation.module_byte_offset,
+      .selector = observation.selector,
+      .table_count = observation.table_count,
+      .sample_index = observation.sample_index};
+  event.inline_payload = EncodeNativeWasmDispatchObservationPayload(sample);
+  found->second.wasm_observation = event;
+  found->second.is_current_document = std::move(is_current_document);
+}
+
 std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
+    NativeArtifactKind kind,
+    NativeArtifactCaptureOrigin capture_origin,
+    std::uint64_t creator_event_id,
+    std::uint64_t execution_context_id,
+    std::uint64_t frame_id,
+    std::string_view source_url,
+    mojo_base::BigBuffer content,
+    std::uint64_t parent_artifact_id) {
+  return CaptureGeneratedArtifactInternal(kind, capture_origin, creator_event_id,
+                                          execution_context_id, frame_id, source_url,
+                                          std::move(content), parent_artifact_id, false);
+}
+
+std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
     const NativeArtifactKind kind,
     const NativeArtifactCaptureOrigin capture_origin,
     const std::uint64_t creator_event_id,
@@ -246,7 +325,8 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
     const std::uint64_t frame_id,
     const std::string_view source_url,
     mojo_base::BigBuffer content,
-    const std::uint64_t parent_artifact_id) {
+    const std::uint64_t parent_artifact_id,
+    const bool native_wasm_runtime) {
   const bool is_runtime_typed_array =
       kind == NativeArtifactKind::kBytecodeBuffer &&
       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray;
@@ -263,6 +343,8 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   const std::uint64_t capture_generation = generation_.load(std::memory_order_acquire);
   const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
   const bool valid_kind_and_origin =
+      (native_wasm_runtime && kind == NativeArtifactKind::kWasm &&
+       capture_origin == NativeArtifactCaptureOrigin::kUnknown) ||
       (kind == NativeArtifactKind::kJavaScript &&
        capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript) ||
       (kind == NativeArtifactKind::kWasm &&
@@ -387,6 +469,18 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   pending_.erase(found);
   if (!IsCurrentCapture(context.session_id, context.generation)) {
     return;
+  }
+  if (context.wasm_observation) {
+    if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled())
+      return;
+    if (status == NativeArtifactReceiveStatus::kAccepted && context.is_current_document &&
+        context.is_current_document()) {
+      if (const auto emitter = emitter_.load(std::memory_order_acquire))
+        emitter(*context.wasm_observation);
+    } else {
+      EmitResult(NativeProbeType::kGap, artifact_id, 0, context.frame_id,
+                 "native_wasm_dispatch_artifact_or_document_lost", NativeProbeCategory::kVm);
+    }
   }
   EmitResult(status == NativeArtifactReceiveStatus::kAccepted
                  ? NativeProbeType::kArtifactCaptured

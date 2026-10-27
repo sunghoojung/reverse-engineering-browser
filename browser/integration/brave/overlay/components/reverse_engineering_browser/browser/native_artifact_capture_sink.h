@@ -9,12 +9,15 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <vector>
+#include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
 
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
@@ -55,6 +58,9 @@ class NativeArtifactCaptureSink final {
       const network::mojom::URLResponseHead& response_head,
       mojo::ScopedDataPipeConsumerHandle body);
 
+  void CaptureWasmDispatch(const NativeWasmDispatchObservation& observation,
+                           mojo_base::BigBuffer content,
+                           std::function<bool()> is_current_document);
   void CaptureRuntimeTypedArray(int renderer_process_id,
                                 std::uint64_t capture_session_id,
                                 std::uint64_t script_id,
@@ -98,10 +104,22 @@ class NativeArtifactCaptureSink final {
     // Only network creators share the browser event's sequence namespace.
     std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
+    std::optional<NativeProbeEvent> wasm_observation = std::nullopt;
+    std::function<bool()> is_current_document = {};
   };
 
   NativeArtifactCaptureSink();
   ~NativeArtifactCaptureSink();
+
+  std::uint64_t CaptureGeneratedArtifactInternal(NativeArtifactKind kind,
+                                                 NativeArtifactCaptureOrigin capture_origin,
+                                                 std::uint64_t creator_event_id,
+                                                 std::uint64_t execution_context_id,
+                                                 std::uint64_t frame_id,
+                                                 std::string_view source_url,
+                                                 mojo_base::BigBuffer content,
+                                                 std::uint64_t parent_artifact_id,
+                                                 bool native_wasm_runtime);
 
   void OnBodyComplete(std::unique_ptr<CaptureContext> context,
                       bool complete,
@@ -131,6 +149,8 @@ class NativeArtifactCaptureSink final {
   std::atomic<std::size_t> active_bytes_{0};
   std::atomic<std::size_t> runtime_typed_array_count_{0};
   std::map<std::uint64_t, PendingContext> pending_;
+  std::size_t wasm_dispatch_count_ = 0;
+  bool wasm_dispatch_budget_gap_emitted_ = false;
   // Only the browser assigns artifact IDs. Never key this relation by URL.
   using ScriptKey = std::tuple<int, std::uint64_t, std::uint64_t, std::uint64_t>;
   std::map<ScriptKey, std::uint64_t> allocating_scripts_;

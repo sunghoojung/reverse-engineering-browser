@@ -10,9 +10,11 @@
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_vm_dispatch.h"
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
+#include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
 #include "reb/vm_dispatch.hpp"
+#include "reb/wasm_dispatch.hpp"
 
 namespace {
 
@@ -26,6 +28,35 @@ bool Check(const bool condition, const char* const message) {
 }  // namespace
 
 int main() {
+  {
+    static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmDispatchObservation) ==
+                  static_cast<std::uint16_t>(reb::NativeProbeType::kWasmDispatchObservation));
+    reb::NativeWasmDispatchObservationPayload wasm;
+    wasm.function_index = 0x00010203;
+    wasm.module_byte_offset = 0x04050607;
+    wasm.selector = UINT32_MAX;
+    wasm.table_count = 0x08090a0b;
+    const auto encoded = reb::EncodeNativeWasmDispatchObservationPayload(wasm);
+    reb::WasmDispatchObservationPayload decoded;
+    if (!Check(encoded[4] == std::byte{3} && encoded[7] == std::byte{0} &&
+                   encoded[8] == std::byte{7} && encoded[16] == std::byte{11},
+               "native payload is not LE") ||
+        !Check(reb::DecodeWasmDispatchObservationPayload(encoded, decoded),
+               "native bytes decode") ||
+        !Check(decoded.function_index == wasm.function_index &&
+                   decoded.module_byte_offset == wasm.module_byte_offset &&
+                   decoded.selector == UINT32_MAX && decoded.table_count == wasm.table_count,
+               "payload field parity") ||
+        !Check(reb::EncodeWasmDispatchObservationPayload(decoded) == encoded,
+               "core/native encoder parity"))
+      return 1;
+    for (std::size_t size : {std::size_t{0}, std::size_t{24}, std::size_t{127}}) {
+      if (!Check(
+              !reb::DecodeWasmDispatchObservationPayload(std::span(encoded).first(size), decoded),
+              "truncation accepted"))
+        return 1;
+    }
+  }
   // Model a reader paused after policy validation, then a replacement config.
   // This is the same reservation state used by NativeProbeSink, not a copy of
   // its algorithm. No timing sleeps or native browser are required.

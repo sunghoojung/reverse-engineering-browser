@@ -158,13 +158,13 @@ export async function checkAdvancedNavigation(root) {
   assert(html.indexOf('id="nav-vm-workspace"')<html.indexOf('id="advanced-navigation"'),'VM must precede and be outside Advanced');
   assert.match(vmEntry,/class="[^"]*\bnav-button\b[^"]*"/,'VM entry must use shared navigation focus semantics');
   const advanced=['backtrace','analyst','tools'];
-  const names=['traffic','api-collection','sources','vm','signals',...advanced,'evidence','field-provenance'];
+  const names=['traffic','api-collection','sources','vm','signals',...advanced,'evidence'];
   for(const narrow of [false,true]) {
     const focused=[],frames=[];let current='traffic';
     const document={activeElement:null};
     const summary={focus(){document.activeElement=this;focused.push('summary');}};
     const group={open:false,contains:node=>node===summary||buttons.some(button=>advanced.includes(button.dataset.screen)&&node===button),querySelector:()=>summary};
-    const buttons=names.filter(name=>!['evidence','field-provenance'].includes(name)).map(name=>({
+    const buttons=names.filter(name=>name!=='evidence').map(name=>({
       dataset:{screen:name},classList:{contains:value=>value==='nav-button'},
       closest:()=>advanced.includes(name)?group:null,
       setAttribute(key,value){this[key]=value;},removeAttribute(key){delete this[key];},
@@ -184,13 +184,13 @@ export async function checkAdvancedNavigation(root) {
     for(const name of ['renderRequests','updateSelectionSummary','renderInspector','renderFingerprintActivity','renderBacktrace','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderSources','renderVmLab'])context[name]=noop;
     const showScreen=runInNewContext(source+';showScreen',context);
     const flush=()=>{for(const callback of frames.splice(0))callback();};
-    for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence','vm','field-provenance']) {
+    for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence','vm']) {
       showScreen(name);flush();
       assert.equal(group.open,false,`${name}: linked navigation must not open or retain Advanced at ${narrow?'narrow':'wide'} widths`);
       assert.equal(screens.filter(screen=>!screen.hidden).length,1);
       const currentButtons=buttons.filter(button=>button['aria-current']==='page');
       assert.equal(currentButtons.length,1,'Exactly one workspace tab is current');
-      assert.equal(currentButtons[0].dataset.screen,name==='backtraces'||name==='evidence'?'backtrace':name==='field-provenance'?'traffic':name);
+      assert.equal(currentButtons[0].dataset.screen,name==='backtraces'||name==='evidence'?'backtrace':name);
     }
     for(const name of advanced) {
       const button=buttons.find(button=>button.dataset.screen===name);

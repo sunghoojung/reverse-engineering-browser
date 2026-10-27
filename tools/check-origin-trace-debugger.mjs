@@ -1,8 +1,6 @@
 import {checkVmRequestLinkageUI} from './check-vm-request-linkage-ui.mjs';
 
 import {checkSourceWindowModel} from './check-source-window.mjs';
-import {checkTrafficComparisonController} from './check-traffic-comparison-ui.mjs';
-import {checkTrafficComparisonModel} from './check-traffic-comparison.mjs';
 import {canvasEvidenceFixture, checkCanvasFixture} from './check-canvas-ui.mjs';
 import {checkConsoleDOM} from './check-console-workspace.mjs';
 import {checkNativeConsoleLiveDocuments} from './check-native-console-live-documents.mjs';
@@ -26,8 +24,6 @@ if (process.argv[2] && process.argv[2].startsWith('--') && !fieldsOnly) {
 const root = process.argv[fieldsOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkSourceWindowModel(root);
 await checkSourceTreeModel(root);
-await checkTrafficComparisonModel(root);
-await checkTrafficComparisonController(root);
 await checkConsoleDOM(root);
 await checkNativeConsoleLiveDocuments(root);
 await checkCollectionController(root);
@@ -761,14 +757,13 @@ assert.match(panel.nodes.selection.textContent,/1024 \/ 1,024/);assert.equal(pan
 console.log('PASS package panel explicit actions, exact download bytes, native fallback, clipboard ownership, keyed refresh focus, eviction, caps, paging, Escape/navigation and stale selection (DOM fixture; not rendered QA)');
 
 const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
-const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficPaneSignature,trafficTableTypeLabel,TRAFFIC_ROW_LIMIT})", {
+const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,TRAFFIC_ROW_LIMIT})", {
   document: trafficDocument, URL, TextEncoder, TextDecoder, Uint8Array, queueMicrotask,
   navigator: {clipboard: {writeText: async () => {}}}, setTimeout: () => 0,
   createSourceTokenizer: () => ({}), sourceSyntaxTokens: text => [{type: "plain", text}],
 });
 const uiRequest = (id, patch = {}) => ({id, path: `https://fixture.invalid/${id}`, method: "GET", status: "pending",
-  time: "pending", type: "xhr", origin: "live", tabId: "fixture-tab", operation: "request_started", events: [],
-  exchange: {request: {state: "empty", headers: []}, response: {state: "loading", headers: []}}, ...patch});
+  time: "pending", type: "xhr", origin: "live", tabId: "fixture-tab", operation: "request_started", events: [], ...patch});
 const retainedTraffic = Array.from({length: 5000}, (_, index) => uiRequest(String(index), {time: index % 20}));
 assert.equal(trafficUI.TRAFFIC_ROW_LIMIT, 500);
 for (const type of ["constructor", "__proto__", null]) assert.equal(trafficUI.trafficTableTypeLabel(type), "Other");
@@ -934,36 +929,26 @@ trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(4, 504), rowOptions);
 assert.equal(trafficDocument.activeElement, ledger.children[0]);
 assert.equal(ledger.children.length, 500);
 const details = new TrafficFixtureNode();
-let selectedTraffic = uiRequest("inspect", {exchange: {request: {state: "empty", headers: []}, response: {state: "available", mime: "text/plain", text: "first", headers: [["x-version", "one"]]}}});
-trafficUI.renderTrafficDetails(details, selectedTraffic, "response", () => {}, () => {});
-const responsePane = details.querySelector(".exchange-pane");
-const responseViewer = responsePane.querySelector(".exchange-content");
-const responseSearch = responsePane.querySelector(".exchange-search");
-responseSearch.focus(); responseViewer.scrollTop = 28;
-selectedTraffic = {...selectedTraffic, exchange: {...selectedTraffic.exchange, response: {...selectedTraffic.exchange.response, text: "other"}}};
-trafficUI.renderTrafficDetails(details, selectedTraffic, "response", () => {}, () => {});
-await Promise.resolve();
-assert.equal(details.querySelector(".exchange-pane"), responsePane);
-assert.match(responseViewer.textContent, /other/);
-assert.equal(responseViewer.scrollTop, 28);
-assert.equal(trafficDocument.activeElement, responseSearch);
-trafficUI.renderTrafficDetails(details, selectedTraffic, "headers", () => {}, () => {});
-assert.match(details.textContent, /x-versionone/);
-selectedTraffic.exchange.response.headers = [["x-version", "two"]];
-trafficUI.renderTrafficDetails(details, selectedTraffic, "headers", () => {}, () => {});
-assert.match(details.textContent, /x-versiontwo/);
-for (const [state, expected] of [["loading", /Loading response/], ["error", /could not be loaded/], ["empty", /No response body/], ["missing", /not captured/], ["redacted", /redacted/]]) {
-  selectedTraffic.exchange.response = {state, headers: []};
-  trafficUI.renderTrafficDetails(details, selectedTraffic, "response", () => {}, () => {});
-  assert.match(details.textContent, expected);
-}
-selectedTraffic.exchange.response = {state: "available", mime: "application/json", text: "{malformed", headers: []};
-trafficUI.renderTrafficDetails(details, selectedTraffic, "preview", () => {}, () => {});
-assert.match(details.textContent, /Invalid JSON/);
-assert.match(details.textContent, /malformed/);
-trafficUI.renderTrafficDetails(details, null, "headers", () => {}, () => {}, null, "Selected request left the retained window.");
+// Native rows carry no headers or bodies: the inspector shows General only and
+// says so, and search never reads anything beyond URL, method and status.
+let selectedTraffic = uiRequest("inspect", {status: 200, hostOnly: true, path: "fixture.invalid"});
+trafficUI.renderTrafficDetails(details, selectedTraffic);
+const generalSection = details.querySelector(".traffic-general");
+assert.match(details.textContent, /Request and response headers and bodies are not captured/);
+assert.match(details.textContent, /host only; path and query not captured/);
+assert.equal(details.querySelector(".exchange-pane"), null, "No request/response panes for native rows");
+selectedTraffic = {...selectedTraffic, status: 404};
+trafficUI.renderTrafficDetails(details, selectedTraffic);
+assert.equal(details.querySelector(".traffic-general"), generalSection, "Status updates reuse the General view");
+assert.match(details.textContent, /404/);
+const legacy = uiRequest("legacy", {exchange: {response: {state: "available", text: "legacy-body-needle", headers: [["x-legacy", "needle"]]}}});
+assert.equal(trafficUI.trafficSearchRequests([legacy], "legacy-body-needle").matches.size, 0, "Search ignores CDP-era exchange bodies");
+assert.equal(trafficUI.trafficSearchRequests([legacy], "/legacy").matches.size, 1);
+trafficUI.renderTrafficDetails(details, legacy);
+assert.doesNotMatch(details.textContent, /legacy-body-needle|x-legacy/, "General view never renders a CDP-era exchange");
+trafficUI.renderTrafficDetails(details, null, "Selected request left the retained window.");
 assert.match(details.textContent, /left the retained window/);
-console.log("PASS Traffic 500-row paging, sorting, anchored eviction, stable lifecycle focus, one-shot arrivals, equal-length body/header updates, and explicit capture states (DOM fixture; not rendered QA)");
+console.log("PASS Traffic 500-row paging, sorting, anchored eviction, stable lifecycle focus, one-shot arrivals, General-only native coverage and URL/method/status search (DOM fixture; not rendered QA)");
 
 // Run the actual source load/refresh lifecycle with rendering and transport
 // stubbed. This verifies retention and races, not browser interaction or pixels.
@@ -1188,19 +1173,18 @@ const packageReset=runInNewContext(appSection('      function resetRequestSelect
 
 // Every inspector render must refresh the strip from the same current request;
 // lifecycle callers must not be able to leave a stale pending/status badge.
-const summaryState = {selectedRequestId: "current", requests: [uiRequest("current")], inspectorTab: "headers",
+const summaryState = {selectedRequestId: "current", requests: [uiRequest("current")], inspectorTab: "general",
   trafficDetailOpen: true, trafficSelectionNotice: null};
 const summaryElements = {};
-for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestSearchScope", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
-summaryElements.requestSearchScope.value = "url";
-const summaryNodes = new Map(["#exchange-inspector", "#traffic-comparison", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
+for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
+const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
 let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
     state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}}, passiveSecurityPanel: {sync() {}}, capturedClientWorkflow: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
-    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, renderTrafficComparison() {}, openFieldProvenance() {},
+    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;},
   });
 for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
   summaryState.requests = [{...summaryState.requests[0], status, failed}];
@@ -1220,7 +1204,7 @@ assert.equal(summaryElements.requestCopyUrl.disabled, true);
 console.log("PASS selected strip and inspector share current pending/response/failed/empty request metadata");
 
 // Exercise the actual production listeners: selecting a tab is idempotent,
-// whereas the shortcut deliberately toggles Evidence back to Headers.
+// whereas the shortcut deliberately toggles Evidence back to General.
 const stickyInspectorState={inspectorTab:'evidence',fieldTab:'body',requests:[],selectedRequestId:null};
 const explicitEvidenceTab=new TrafficFixtureNode('button');explicitEvidenceTab.dataset.inspectorTab='evidence';
 const evidenceShortcut=new TrafficFixtureNode('button');
@@ -1229,15 +1213,15 @@ runInNewContext(appSection("      document.querySelectorAll('.inspector-tab').fo
   renderInspector(){},renderEvidence(){},refreshRequestSignalProfile(){}
 });
 explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
-evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'headers');
+evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'general');
 explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
 explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
-evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'headers');
-console.log('PASS explicit Evidence tab selection preserves sticky selection while its shortcut deliberately toggles to Headers');
+evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'general');
+console.log('PASS explicit Evidence tab selection preserves sticky selection while its shortcut deliberately toggles to General');
 
 const pivotProfile = {signals: [{category: "canvas", event_count: "1", confidence: "observed", relation: "parent_chain"}]};
 const pivotState = {requests: [uiRequest("selected", {operation:"request_started"})], selectedRequestId: "selected", signalProfile: pivotProfile,
-  signalProfileStatus: "ready", trafficDetailOpen: false, inspectorTab: "headers"};
+  signalProfileStatus: "ready", trafficDetailOpen: false, inspectorTab: "general"};
 const pivotElements = {signalRequestProfile: new TrafficFixtureNode(), signalDetail: new TrafficFixtureNode()};
 const signalTab = new TrafficFixtureNode("button");
 let pivotScreen;
@@ -2310,61 +2294,15 @@ if(process.env.REB_CANVAS_OWNERSHIP_RECEIPT)await writeFile(process.env.REB_CANV
 
 if (process.env.REB_SOURCE_OWNERSHIP_RECEIPT) await writeFile(process.env.REB_SOURCE_OWNERSHIP_RECEIPT, JSON.stringify({scope:'Production-function and DOM fixtures; not rendered acceptance',results:sourceOwnershipReceipt},null,2));
 
-// The decoded-field handoff must never silently rebind a chain to edited input
-// or another request, or turn a binary/preview result into a source-text match.
+// Decoder handoff roots keep exact UTF-8 bytes. Unpaired surrogates cannot be
+// an exact chain root and are refused rather than replaced.
+const navigationSource = await readFile(join(root, "apps/research-ui/investigation_navigation.js"), "utf8");
+const decoderBytesStart = navigationSource.indexOf("function provenanceDecoderBytes(");
+assert(decoderBytesStart >= 0, "Missing production provenanceDecoderBytes");
 const fieldHandoff = runInNewContext(
-  (await readFile(join(root, "apps/research-ui/field_provenance.js"), "utf8")) +
-    `;function decoderCurrentInputKey() {return currentKey;}
-    ({decodedFieldCandidate, clearDecoderFieldOrigin, provenanceDecoderBytes,
-      setup(selection, steps, selected, key = 'original') {
-        fieldProvenanceSelection = selection;
-        decoderFieldOrigin = {selection, key: 'original'};
-        state.decoderSteps = steps; state.decoderSelectedStepId = selected;
-        state.decoderPending = false; currentKey = key;
-      }, changeField() {fieldProvenanceSelection = {};}, pending() {state.decoderPending = true;}})`,
-  {
-    TextDecoder,
-    TextEncoder,
-    URL,
-    document: { querySelector: () => ({ hidden: true, addEventListener() {} }) },
-    state: {},
-    currentKey: "original",
-    decoderBase64ToBytes: (value) => new Uint8Array(Buffer.from(value, "base64")),
-  },
+  navigationSource.slice(decoderBytesStart, navigationSource.indexOf("\n}\n", decoderBytesStart) + 3) + ";({provenanceDecoderBytes})",
+  {TextDecoder, TextEncoder},
 );
-const candidateStep = (id, value) => ({
-  id, operation: "base64-decode", input_bytes: 32,
-  output_bytes: Buffer.byteLength(value), output_base64: Buffer.from(value).toString("base64"),
-});
-const field = { value: "original", selector: "/payload" };
-const steps = [candidateStep(1, "intermediate"), candidateStep(2, "\ufeff雪\r\n<script>inert</script>")];
-fieldHandoff.setup(field, steps, 2);
-const candidate = fieldHandoff.decodedFieldCandidate();
-assert.equal(candidate.value, "\ufeff雪\r\n<script>inert</script>");
-assert.equal(candidate.steps.length, 2);
-assert.equal(field.value, "original");
-fieldHandoff.setup(field, steps, 1);
-assert.equal(fieldHandoff.decodedFieldCandidate().steps.length, 1);
-fieldHandoff.setup(field, steps, null);
-assert.match(fieldHandoff.decodedFieldCandidate().error, /completed transformation/);
-fieldHandoff.setup(field, steps, 2, "edited");
-assert.match(fieldHandoff.decodedFieldCandidate().error, /Input changed/);
-fieldHandoff.setup(field, steps, 2);
-fieldHandoff.changeField();
-assert.match(fieldHandoff.decodedFieldCandidate().error, /field changed/);
-fieldHandoff.setup(field, steps, 2);
-fieldHandoff.pending();
-assert.match(fieldHandoff.decodedFieldCandidate().error, /Wait/);
-fieldHandoff.setup(field, [candidateStep(1, "x".repeat(4096))], 1);
-assert.equal(fieldHandoff.decodedFieldCandidate().value.length, 4096);
-for (const value of ["", "雪".repeat(1366)]) {
-  fieldHandoff.setup(field, [candidateStep(1, value)], 1);
-  assert.match(fieldHandoff.decodedFieldCandidate().error, /4 KiB/);
-}
-fieldHandoff.setup(field, [{ ...candidateStep(1, "x"), output_base64: "/w==" }], 1);
-assert.match(fieldHandoff.decodedFieldCandidate().error, /Binary/);
-fieldHandoff.clearDecoderFieldOrigin();
-assert.match(fieldHandoff.decodedFieldCandidate().error, /Start from/);
 const vmDispatchSample = {
   protocol_version: 2,
   session_id: "1", sequence_number: "1", monotonic_time_ns: "1",
@@ -2382,7 +2320,7 @@ assert.equal(fieldHandoff.provenanceDecoderBytes("\ud800"), null);
 assert.equal(fieldHandoff.provenanceDecoderBytes("\udc00"), null);
 assert.equal(new TextDecoder("utf-8", {ignoreBOM: true}).decode(
   fieldHandoff.provenanceDecoderBytes("\ufeff雪\r\n😀")), "\ufeff雪\r\n😀");
-console.log('PASS decoded field identity, chain prefix, UTF-8 and bounds');
+console.log('PASS decoder handoff keeps exact UTF-8 roots and refuses unpaired surrogates');
 async function sourceFactsBrowserFixture() {
   const text = '\ufeffconst 雪 = "😀";\nfunction shadow(雪) { return 雪; }\n雪;';
   const bytes = Buffer.from(text);

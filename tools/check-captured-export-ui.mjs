@@ -18,7 +18,7 @@ class Node {
   querySelector(selector){return this.options.find(option=>selector==='[value="'+option.value+'"]');}
 }
 function harness(native=false){
-  const fields=Object.fromEntries(['format','provider','source','file','policy','destination','submit','close','cancel','note','status','provider-field','policy-field','source-field','file-field'].map(name=>[name,new Node()]));fields.file.isFile=true;
+  const fields=Object.fromEntries(['format','provider','source','file','policy','destination','submit','close','cancel','note','status','format-field','provider-field','policy-field','source-field','file-field'].map(name=>[name,new Node()]));fields.file.isFile=true;
   fields.source.options=['capture','file'].map(value=>({value}));fields.format.options=['json','client','har','sdl'].map(value=>({value}));fields.destination.options=['save','copy'].map(value=>({value}));
   const dialog=new Node(),title=new Node(),context=new Node(),triggers={capture:new Node({exportOpen:'capture'}),run:new Node({exportOpen:'run'})};
   dialog.querySelector=selector=>fields[selector.slice(13,-1)];
@@ -109,6 +109,18 @@ for(const native of [false,true]){
   if(native){h.open();h.set('format','client');let done;h.holdBridge(new Promise(resolve=>{done=resolve;}));const saving=f.submit.click();assert(f.cancel.disabled&&f.close.disabled);h.workflow.close();assert(h.dialog.open,'Cannot claim cancellation after native handoff');h.setBridge({status:'canceled'});done();await saving;assert.match(f.status.textContent,/canceled/);h.holdBridge(null);}
   h.open();h.set('format','json');h.set('destination','copy');h.setClipboardError(true);await f.submit.click();assert.match(f.status.textContent,/authored clipboard denial/);h.setClipboardError(false);
   previous=count();h.expire();assert(f.submit.disabled&&!h.triggers.capture.disabled);h.set('format','sdl');h.set('source','file');await selectFile(JSON.stringify(schema));await f.submit.click();assert.equal(count(),++previous);h.open();assert.equal(f.format.value,'sdl');assert.equal(f.source.value,'file');assert(f.submit.disabled,'Closing clears prepared schema');assert(f.format.options.filter(o=>o.value!=='sdl').every(o=>o.disabled));await selectFile(JSON.stringify(schema));await f.submit.click();assert.equal(count(),++previous);assert.equal(h.notices.length,0,'Export status stays in the dialog, not unrelated navigation');
+}
+// Native Traffic rows carry no captureRecord. Without one the dialog offers only
+// local-file SDL: no hidden-but-disabled format choice and an explicit reason.
+{
+  const h=harness(false),f=h.fields;h.expire();h.open();
+  assert.equal(f.format.value,'sdl');assert.equal(f.source.value,'file');
+  assert(f['format-field'].hidden&&f['source-field'].hidden,'A single possible mode is not presented as a choice');
+  assert(f.format.options.filter(option=>option.value!=='sdl').every(option=>option.hidden&&option.disabled),'Capture-only formats are not offered');
+  assert(f.source.options.find(option=>option.value==='capture').hidden,'Selected response is not offered');
+  const context=h.document.querySelector('#captured-export-context').textContent;
+  assert.match(context,/capture JSON, client project and HAR exports are unavailable/);assert.doesNotMatch(context,/CDP|debugger/i);
+  assert.equal(h.document.querySelector('#captured-export-title').textContent,'Export GraphQL schema');
 }
 const html=await readFile(new URL('../apps/research-ui/index.html',import.meta.url),'utf8');
 for(const token of ['data-export-open="capture"','data-export-format','data-export-policy','data-export-file','captured_export_formats.js'])assert(html.includes(token));

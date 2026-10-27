@@ -17,7 +17,7 @@ const part = (source, first, last) => {
 function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   const stats = {};
   const clearStats = () => {
-    for (const name of ['created', 'geometryReads', 'scrollWrites', 'attributeWrites', 'moves', 'searches', 'sorts', 'scopes', 'bodyReads', 'bodyUnits', 'inspector', 'profiles', 'history']) stats[name] = 0;
+    for (const name of ['created', 'geometryReads', 'scrollWrites', 'attributeWrites', 'moves', 'searches', 'sorts', 'scopes', 'inspector', 'profiles', 'history']) stats[name] = 0;
   };
   clearStats();
   class Node {
@@ -72,22 +72,18 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
     querySelector: selector => { if (!nodes.has(selector)) nodes.set(selector, new Node()); return nodes.get(selector); },
     querySelectorAll: () => []
   };
-  const elements = Object.fromEntries(['requestTabScopes', 'requestDomain', 'requestFilter', 'requestSearchScope',
-    'requestSearchStatus', 'requestRows', 'requestLatest', 'selectedMethod', 'selectedStatus', 'selectedUrl',
+  const elements = Object.fromEntries(['requestTabScopes', 'requestDomain', 'requestFilter', 'requestRows', 'requestLatest', 'selectedMethod', 'selectedStatus', 'selectedUrl',
     'requestCopyUrl', 'prompt'].map(name => [name, new Node()]));
-  const text = 'Authored fixture padding '.repeat(170) + 'retained-needle';
-  const response = () => ({state: 'available', mime: 'text/plain', headers: [['x-authored', 'fixture']],
-    get text() { stats.bodyReads++; stats.bodyUnits += text.length; return text; }});
   const requests = Array.from({length: count}, (_, index) => ({id: `request-${index}`,
     method: index % 3 ? 'GET' : 'POST', path: `https://fixture-${index % 8}.invalid/item-${String(index).padStart(5, '0')}`,
     status: 200, time: index / 10, type: 'xhr', origin: 'demo', tabId: String(index % 8),
-    firstTimestamp: BigInt(index), operation: 'authored_fixture', events: [],
-    exchange: {request: {state: 'empty', headers: []}, response: response()}}));
+    firstTimestamp: BigInt(index), operation: 'authored_fixture', events: []}));
   const state = {requests, selectedRequestId: null, requestTabId: 'all', requestDomain: 'all', requestType: 'all',
     trafficSort: 'name', trafficSortDirection: 1, trafficWindowStart: 0, trafficWindowAnchor: null,
     trafficNewIds: new Set(), trafficKnownIds: null, originTraceGeneration: 0, signalProfileGeneration: 0,
     sessionMode: 'demo'};
-  elements.requestFilter.value = 'retained-needle'; elements.requestSearchScope.value = 'content';
+  // Native rows carry no bodies; search covers URL, method and status only.
+  elements.requestFilter.value = 'fixture-1.invalid';
   const context = {state, elements, document, URL, TextDecoder, TextEncoder, Uint8Array, stats,
     matchMedia: () => ({matches: true}), fieldSets: {body: []},
     renderRequestCount() {}, renderEvidence() {},
@@ -115,7 +111,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
 
 {
   const t = fixture(); t.api.renderRequests();
-  assert.equal(t.rows().length, 500); assert.match(t.elements.requestSearchStatus.textContent, /Partial content search/);
+  assert.equal(t.rows().length, 500); assert.equal(t.state.trafficSearchMatches.size, 625);
   const first = t.rows()[20], next = t.rows()[21], firstChildren = [...first.children];
   first.focus(); t.elements.requestRows.scrollTop = 360; t.elements.requestRows.scrollLeft = 11;
   t.clearStats(); first.click();
@@ -123,9 +119,9 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   assert.equal(t.document.activeElement, first); assert.deepEqual(first.children, firstChildren);
   assert.equal(t.elements.requestRows.scrollTop, 360); assert.equal(t.elements.requestRows.scrollLeft, 11);
   assert.equal(first.getAttribute('aria-selected'), 'true'); assert.equal(first.tabIndex, 0);
-  assert.equal(t.state.inspectorTab, 'response', 'Content match still opens the exact matching side');
+  assert.equal(t.state.inspectorTab, undefined, 'Selection does not switch inspector tabs');
   assert.equal(t.stats.searches, 0); assert.equal(t.stats.sorts, 0); assert.equal(t.stats.scopes, 0);
-  assert.equal(t.stats.bodyReads, 0); assert.equal(t.stats.created, 0); assert.equal(t.stats.geometryReads, 0);
+  assert.equal(t.stats.created, 0); assert.equal(t.stats.geometryReads, 0);
   assert.equal(t.stats.scrollWrites, 0); assert.equal(t.stats.moves, 0);
   assert.equal(t.stats.inspector, 1); assert.equal(t.stats.profiles, 1); assert.equal(t.stats.history, 1);
   let prevented = false;
@@ -139,7 +135,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
     t.api.moveRequestSelection({key, currentTarget: current, preventDefault() {}});
     assert.equal(t.document.activeElement.dataset.requestId, t.state.selectedRequestId);
   }
-  assert.equal(t.stats.searches, 0, 'Repeated navigation does not repeat a bounded content scan');
+  assert.equal(t.stats.searches, 0, 'Repeated navigation does not repeat the filter scan');
   const offPage = [...t.state.trafficSearchMatches.keys()].find(id => !t.rows().some(row => row.dataset.requestId === id));
   t.api.selectRequest(offPage);
   assert.doesNotMatch(t.nodes.get('#request-window-status').textContent, /Selection outside filter/,
@@ -162,7 +158,6 @@ for (const change of [
   t => { t.state.requests = [...t.state.requests]; },
   t => { t.state.requests.push({...t.state.requests[0], id: 'authored-arrival'}); },
   t => { t.elements.requestFilter.value = '/item-'; },
-  t => { t.elements.requestSearchScope.value = 'url'; },
   t => { t.state.requestTabId = '1'; },
   t => { t.state.requestDomain = 'fixture-1.invalid'; },
   t => { t.state.requestType = 'other'; },
@@ -192,14 +187,14 @@ for (const change of [
 // Preview/session reset retires the guard before any render can be skipped or
 // fail. No DOM paint or garbage-collection timing is needed to prove ownership.
 {
-  const oldRequests = [{id: 'retired', exchange: {response: {text: 'authored prior body'}}}];
+  const oldRequests = [{id: 'retired', path: 'authored-prior.invalid'}];
   const state = {requests: oldRequests, selectedRequestId: 'retired', trafficRenderedView: {requests: oldRequests}};
   const noop = () => {};
   const context = {state, elements: {gaps: {}}, evidencePackagePanel: {sync: noop}, passiveSecurityPanel: {sync: noop},
     eventGapLabel: () => '', emptyLocalAnalystWorkspace: () => ({limits: {}}), emptyDecoderEngine: () => ({})};
   for (const name of ['renderShellStatus', 'setNetworkNotice', 'renderEvidence', 'renderDebugger', 'renderSources',
     'renderVmLab', 'renderApiCollection', 'renderLocalAnalyst', 'setToolsNotice', 'renderTools']) context[name] = noop;
-  context.renderRequests = () => assert.equal(state.trafficRenderedView, null, 'Preview retires old bodies before repaint');
+  context.renderRequests = () => assert.equal(state.trafficRenderedView, null, 'Preview retires the old snapshot before repaint');
   const api = runInNewContext(part(app, '      function resetRequestSelection()', '      function renderRequestCount(') +
     part(app, '      function useStandalonePreview()', '      function enableTabKeyboardNavigation(') +
     ';({resetRequestSelection, useStandalonePreview})', context);
@@ -207,7 +202,7 @@ for (const change of [
   state.trafficRenderedView = {requests: oldRequests};
   api.useStandalonePreview(); assert.equal(state.trafficRenderedView, null); assert.equal(state.requests.length, 0);
 }
-console.log('PASS Traffic selection reuses rendered search/sort/window; no content reads, geometry reads, remounts or scroll writes; keyboard, focus, filters, exact-identity refusal, mutation refresh, partial/empty/evicted selection (controller/DOM model, not rendered UI)');
+console.log('PASS Traffic selection reuses rendered search/sort/window; no geometry reads, remounts or scroll writes; keyboard, focus, filters, exact-identity refusal, mutation refresh, partial/empty/evicted selection (controller/DOM model, not rendered UI)');
 
 const baseline = process.argv.find(value => value.startsWith('--baseline-ref='))?.slice('--baseline-ref='.length);
 if (baseline) {
@@ -225,7 +220,7 @@ if (baseline) {
       p95_ms: +samples[Math.floor(samples.length * 0.95)].toFixed(3), work: {...t.stats}};
   }
   console.log(JSON.stringify({kind: 'Node controller/DOM-work benchmark, not rendered browser latency', node: process.version,
-    fixture: {retained: 5000, mounted: 500, contentSearch: '8 MiB budget; partial results; literal response-body match', sort: 'name'},
+    fixture: {retained: 5000, mounted: 500, search: 'URL / method / status literal', sort: 'name'},
     baseline, before: measure(prior('apps/research-ui/app.js'), prior('apps/research-ui/traffic_view.js')),
     after: measure(app, traffic)}, null, 2));
 }

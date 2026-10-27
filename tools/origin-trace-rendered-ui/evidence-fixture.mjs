@@ -12,6 +12,9 @@ export const HOSTILE_URL = 'inert.test<svg/onload=window.__rebInjected=1>';
 export const HOSTILE_URL_MARKER = 'onload=window.__rebInjected=1';
 export const HOSTILE_SOURCE_URL = 'https://inert.test/<b id=reb-injected-markup>source</b>.js';
 export const HOSTILE_SOURCE_MARKER = '<img src=x onerror="window.__rebInjected=2">';
+// Guest bytecode is binary. Markup inside it must reach the hex view as inert
+// printable text, and invalid UTF-8 must not become decoded text.
+export const HOSTILE_BYTECODE_MARKUP = '<img src=x onerror="window.__rebInjected=3">';
 export const SYNTHETIC_REQUEST_COUNT = 72;
 export const SOURCE_LINE_COUNT = 400;
 
@@ -90,11 +93,16 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore})
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'javascript', mime_type: 'text/javascript', url: HOSTILE_SOURCE_URL},
   Buffer.from(lines.join('\n') + '\n', 'utf8'));
+  // A synthetic native guest bytecode buffer beside the real golden one (109).
+  const bytecode = await artifact(artifacts, {artifact_id: '310', session_id: '1', navigation_id: '100', frame_id: '200',
+    parent_artifact_id: '303', creator_event_id: '1', capture_origin: 'native_wasm_guest', kind: 'bytecode_buffer',
+    url: 'fixture://native-guest-hostile'},
+  Buffer.concat([Buffer.from(HOSTILE_BYTECODE_MARKUP, 'utf8'), Buffer.from([0xff, 0xfe, 0x00, 0x80]), Buffer.from(Array.from({length: 32}, (_, index) => index))]));
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
   assert(physical.events.some(event => event.type === 'wasm_dispatch_observation'), 'dispatch golden store holds an observation');
-  const manifest = [...demoArtifacts, source, ...guest.artifacts, ...physical.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, ...guest.artifacts, ...physical.artifacts];
   const events = [...demoEvents, ...requests, ...guest.events, ...physical.events];
   await writeFile(join(artifacts, 'manifest.jsonl'), manifest.map(record => JSON.stringify(record) + '\n').join(''));
   await writeFile(join(root, 'events.jsonl'), events.map(event => JSON.stringify(event) + '\n').join(''));

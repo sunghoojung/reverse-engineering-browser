@@ -40,7 +40,7 @@ for (const text of ['{"password":"synthetic-json","n":9007199254740993,"dup":1,"
   assert.equal(JSON.stringify(selected), original, 'Export copy must not alias retained data');
 }
 assert.throws(() => api.trafficCaptureDocument(selected,'automatic'), /Unknown/);
-assert.throws(() => api.trafficCaptureDocument(null), /Select/);
+assert.throws(() => api.trafficCaptureDocument(null), /saved capture record is required/);
 for (const state of ['missing','loading','error','empty']) {
   selected.captureRecord.request.body = {...body(),state,truncated:true,reason:'Synthetic capture limitation'};
   const exported = api.trafficCaptureDocument(selected,'redacted_copy');

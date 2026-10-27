@@ -81,8 +81,10 @@ async function main() {
   vm.runInContext(`
     showScreen('sources'); showScreen('traffic'); showScreen('api-collection');
     showScreen('vm'); showScreen('tools');
-    openFieldProvenance({request:{method:'GET',path:'https://fixture.invalid/?a=b'},
-      value:'b',selector:'a',kind:'query'});
+    // Field trace and Compare were fed only by CDP request bodies.
+    for (const name of ['openFieldProvenance', 'renderTrafficComparison', 'trafficExchange']) {
+      if (typeof globalThis[name] !== 'undefined') throw new Error(name + ' must not ship');
+    }
   `, context, {timeout: 10000});
   // Positive live capture is tested by the separate C++→Rust→viewer golden gate.
   // This authored row only tests startup's real native panel and truthful labels.

@@ -102,7 +102,6 @@ function initializePaneLayout() {
           .reduce((height, child) => height + child.getBoundingClientRect().height, 0);
         const emptyHeight = panes[0].querySelector('.request-empty')?.getBoundingClientRect().height ?? 0;
         minimum[0] = Math.max(minimum[0], Math.ceil(controls + panes[0].querySelector('.request-head').getBoundingClientRect().height + Math.max(56, emptyHeight) + panes[0].querySelector('.request-window').getBoundingClientRect().height + 2));
-        if (panes[1].querySelector('.exchange-html-preview')) minimum[1] = 320;
       }
       if (total < minimum[0] + minimum[1]) return null;
       // Clip to scrolling ancestors so a divider never floats over another screen.

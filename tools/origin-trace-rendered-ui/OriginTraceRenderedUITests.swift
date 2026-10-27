@@ -194,6 +194,7 @@ struct HarnessError: Error, CustomStringConvertible {
 struct Expectations: Decodable {
   let hostileUrlMarker: String
   let hostileSourceMarker: String
+  let hostileBytecodeMarkup: String
   let requestCount: Int
   let sourceLines: Int
 
@@ -214,6 +215,7 @@ let removedFeaturePhrases = [
   "WebSocket", "Breakpoint", "breakpoint", "Paused frame", "paused frame", "Call stack", "Live scripts",
   "Cookie import", "Import cookies", "Element screenshot", "Marker execution", "Run marker", "Local override",
   "Find in Memory", "Runtime hook", "Resume", "Step over", "Step into", "API catalog", "Passive security report", "Capture actions",
+  "Include headers and bodies", "Use selected as baseline", "Clear baseline", "Field trace", "Live Debugger",
 ]
 
 final class OriginTraceRenderedUITests: XCTestCase {
@@ -405,9 +407,80 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
     }
     for id in ["websocket-inspector", "runtime-hook-traffic", "request-memory-pivot", "screen-memory", "screen-experiments",
-      "open-api-catalog", "api-catalog", "passive-security", "traffic-capture-export"] {
+      "open-api-catalog", "api-catalog", "passive-security", "traffic-capture-export", "request-search-scope",
+      "inspector-tab-payload", "inspector-tab-preview", "inspector-tab-response", "inspector-tab-compare", "traffic-comparison",
+      "screen-field-provenance", "decoder-field-origin"] {
       let count = try await ui.value("document.querySelectorAll('#\(id)').length") as? Int ?? -1
       XCTAssertEqual(count, 0, "#\(id) must be removed, not hidden")
+    }
+  }
+
+  // Native rows carry no headers or bodies; guest bytecode is binary. Traffic,
+  // Export and Sources must offer only what that evidence supports.
+  @MainActor
+  func test7NativeOnlyTrafficExportAndBytecode() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: "item-3.scroll.test")
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      let tabs = try await ui.value("[...document.querySelectorAll('#screen-traffic .inspector-tab')].map(tab => tab.innerText.trim()).join('|')") as? String ?? ""
+      XCTAssertEqual(tabs, "General|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers no body, Compare or header-pane tabs")
+      let search = try await ui.value("document.querySelectorAll('#request-search-scope, #request-search-status, #traffic-comparison').length") as? Int ?? -1
+      XCTAssertEqual(search, 0, "\(size.name): content search and comparison are removed, not hidden")
+      let general = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(general.contains("Request and response headers and bodies are not captured"), "\(size.name): native coverage is explicit: \(general)")
+      let panes = try await ui.value("document.querySelectorAll('#exchange-inspector .exchange-pane').length") as? Int ?? -1
+      XCTAssertEqual(panes, 0, "\(size.name): no permanently empty request/response header panes")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) traffic general")
+      try await ui.screenshot("traffic-general-\(size.name)")
+
+      try await ui.click("#open-captured-export")
+      try await ui.waitUntil("document.querySelector('#captured-export-dialog').open", "export dialog did not open")
+      let exportState = try await ui.json("""
+        ({formatHidden: document.querySelector('[data-export-format-field]').hidden,
+          sourceHidden: document.querySelector('[data-export-source-field]').hidden,
+          fileShown: !document.querySelector('[data-export-file-field]').hidden,
+          title: document.querySelector('#captured-export-title').innerText,
+          context: document.querySelector('#captured-export-context').innerText})
+        """)
+      XCTAssertEqual(exportState["formatHidden"] as? Bool, true, "\(size.name): no format choice when only one mode works")
+      XCTAssertEqual(exportState["sourceHidden"] as? Bool, true, "\(size.name): no schema-source choice")
+      XCTAssertEqual(exportState["fileShown"] as? Bool, true, "\(size.name): local introspection file stays available")
+      XCTAssertEqual(exportState["title"] as? String, "Export GraphQL schema")
+      XCTAssertTrue((exportState["context"] as? String ?? "").contains("HAR exports are unavailable here"), "\(size.name): unavailable modes are explained: \(exportState)")
+      try await assertLayout(ui, "#captured-export-dialog", "\(size.name) export dialog")
+      try await ui.screenshot("export-native-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("!document.querySelector('#captured-export-dialog').open", "Escape did not close export")
+
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 109")
+      try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "golden guest bytecode did not render as hex")
+      let golden = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
+      XCTAssertTrue(golden.contains("00000000  00 42 00 00"), "\(size.name): real guest bytecode shows its bytes: \(golden)")
+      XCTAssertTrue(golden.contains("|.B..|"), "\(size.name): printable column replaces control bytes")
+      XCTAssertFalse(golden.contains("\u{0}"), "\(size.name): NUL bytes are never decoded as text")
+      let language = try await ui.value("document.querySelector('#source-language').innerText") as? String
+      XCTAssertEqual(language, "Guest bytecode hex", "\(size.name): bytecode is labeled as a hex view")
+
+      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 310")
+      try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('3c 69 6d 67')", "hostile bytecode did not render as hex")
+      let hostile = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
+      let prefix = String(expected.hostileBytecodeMarkup.prefix(16))
+      XCTAssertTrue(hostile.contains("|\(prefix)|"), "\(size.name): markup bytes appear only as printable hex-view text: \(hostile)")
+      XCTAssertTrue(hostile.contains("ff fe 00 80"), "\(size.name): invalid UTF-8 stays as bytes")
+      XCTAssertFalse(hostile.contains("\u{FFFD}"), "\(size.name): no lossy UTF-8 replacement characters")
+      try await assertInert(ui, "\(size.name) bytecode hex")
+      let icon = try await ui.json("""
+        (() => { const icon = document.querySelector('.source-editor-tab[aria-selected="true"] .source-file-icon');
+          return {text: icon?.innerText ?? '', clipped: icon ? icon.scrollWidth > icon.clientWidth + 1 : true}; })()
+        """)
+      XCTAssertEqual(icon["text"] as? String, "BC", "\(size.name): editor tab names the bytecode kind")
+      XCTAssertEqual(icon["clipped"] as? Bool, false, "\(size.name): the two-letter kind icon is not clipped")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) sources bytecode")
+      try await ui.screenshot("sources-bytecode-\(size.name)")
     }
   }
 }

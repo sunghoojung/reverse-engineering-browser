@@ -73,7 +73,7 @@ function capturedRequestIdentity(request) {
 
 function capturedClientCapture(request) {
   const identity = capturedRequestIdentity(request);
-  if (!identity) throw new TypeError('Select an exact retained CDP capture.');
+  if (!identity) throw new TypeError('A saved capture with an exact identity is required.');
   return capturedClientSource(identity, capturedClientTrafficDocument(request, 'raw'));
 }
 
@@ -1068,11 +1068,16 @@ function installCapturedExportDialog(options) {
     }
     if (!dialog.open) return;
     const project = fields.format.value === 'client', sdl = fields.format.value === 'sdl';
-    for (const option of fields.format.options) option.disabled = kind === 'run' ? option.value !== 'client' : snapshot === null && option.value !== 'sdl';
-    fields.source.querySelector('[value="capture"]').disabled = snapshot === null;
+    // Unavailable modes are removed from the choice, not offered disabled.
+    for (const option of fields.format.options) option.hidden = option.disabled = kind === 'run' ? option.value !== 'client' : snapshot === null && option.value !== 'sdl';
+    const fromCapture = fields.source.querySelector('[value="capture"]');
+    fromCapture.hidden = fromCapture.disabled = snapshot === null;
+    // Without a saved capture only local-file SDL works: show no choice at all.
+    const fileOnly = kind === 'capture' && snapshot === null;
+    query('format-field').hidden = fileOnly;
     query('provider-field').hidden = !project;
     query('policy-field').hidden = sdl;
-    query('source-field').hidden = !sdl;
+    query('source-field').hidden = !sdl || fileOnly;
     query('file-field').hidden = !fileMode();
     const save = fields.destination.querySelector('[value="save"]'), copy = fields.destination.querySelector('[value="copy"]');
     save.disabled = native && !project; copy.disabled = project;
@@ -1112,8 +1117,12 @@ function installCapturedExportDialog(options) {
       fields.format.value = kind === 'run' ? 'client' : snapshot === null ? 'sdl' : 'json'; fields.provider.value = 'standard';
       fields.source.value = snapshot === null ? 'file' : 'capture'; fields.policy.value = 'redacted_copy'; fields.destination.value = native && kind === 'capture' ? 'copy' : 'save';
       fields.file.value = ''; status('');
-      document.querySelector('#captured-export-title').textContent = kind === 'run' ? 'Export retained run' : 'Export capture';
-      document.querySelector('#captured-export-context').textContent = kind === 'run' ? 'One retained Repeater run' : snapshot === null ? 'No selected capture · choose local introspection JSON' : 'One selected Traffic request';
+      document.querySelector('#captured-export-title').textContent = kind === 'run' ? 'Export retained run' : snapshot === null ? 'Export GraphQL schema' : 'Export capture';
+      // Native Traffic rows carry no captureRecord: their headers and bodies are
+      // not captured, so only conversion of a local introspection file can work.
+      document.querySelector('#captured-export-context').textContent = kind === 'run' ? 'One retained Repeater run'
+        : snapshot === null ? 'Native Traffic rows retain no request or response headers or bodies, so capture JSON, client project and HAR exports are unavailable here. Convert a local GraphQL introspection JSON file to SDL.'
+          : 'One selected Traffic request';
       // Return focus to the exact toolbar action when dismissed.
       dialog.showModal(); sync(); fields.format.focus({preventScroll:true});
     } catch (error) { options.notice(error.message); }

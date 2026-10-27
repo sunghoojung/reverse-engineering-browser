@@ -1214,10 +1214,9 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function rebuildTrafficRequests() {
-        // Hidden Traffic must not keep the previous snapshot's bodies alive.
+        // Hidden Traffic must not keep the previous request snapshot alive.
         state.trafficRenderedView = null;
         state.requests = state.nativeRequests;
-        syncTrafficComparison();
       }
 
       function renderShellStatus() {
@@ -1894,13 +1893,10 @@ const capturedExportPanel = installCapturedExportDialog({
         const finding = (state.vmFindings ?? []).find(item => item.findingId === state.selectedVmFindingId);
         const interpreter = vmSourceArtifactForFinding(state.artifacts ?? [], finding, state.vmAnalysisSelection);
         const sessionId = interpreter?.session_id;
-        const joined = vmLiveCatalogMatchesSession(state.events, sessionId, state.sessionMode);
         const join = vmSessionSourceJoin({
           artifacts: state.artifacts,
-          scripts: [],
           interpreterArtifactId: workspace.interpreter_artifact_id,
-          sessionId,
-          liveSessionJoined: joined
+          sessionId
         });
         if (!join.scoped) {
           section.append(textElement('p', 'vm-workspace-empty', 'Interpreter artifact is not in the retained catalog, so same-session JavaScript cannot be listed. /api/artifacts is unchanged.'));
@@ -2458,7 +2454,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function trafficRequestFilterKey() {
         return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType,
-          elements.requestFilter.value.trim().toLowerCase(), elements.requestSearchScope.value === 'content',
+          elements.requestFilter.value.trim().toLowerCase(),
           state.trafficSort, state.trafficSortDirection]);
       }
 
@@ -2484,27 +2480,19 @@ const capturedExportPanel = installCapturedExportDialog({
         state.trafficRenderedView = null;
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
-        const includeContent = elements.requestSearchScope.value === 'content';
         const scoped = state.requests.filter(request =>
           (state.requestTabId === 'all' ||
             (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId) &&
           (state.requestDomain === 'all' || requestDomain(request) === state.requestDomain) &&
           (state.requestType === 'all' || request.type === state.requestType)
         );
-        const search = trafficSearchRequests(scoped, needle, includeContent);
+        const search = trafficSearchRequests(scoped, needle);
         state.trafficSearchMatches = search.matches;
         const visible = trafficSortedRequests(scoped.filter(request => search.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
         const filterKey = trafficRequestFilterKey();
         const filterChanged = filterKey !== state.trafficFilterKey;
         if (filterChanged) { state.trafficNewIds.clear(); state.trafficWindowStart = 0; state.trafficWindowAnchor = null; }
         state.trafficFilterKey = filterKey;
-        elements.requestSearchStatus.hidden = !includeContent;
-        elements.requestSearchStatus.dataset.kind = search.omitted ? 'partial' : '';
-        const searchMessage = !needle ? 'Search retained headers and text bodies. Content capture is unchanged.'
-          : `${visible.length} matching ${visible.length === 1 ? 'request' : 'requests'} · ` +
-            (search.omitted ? `Partial content search: ${search.inspected} of ${scoped.length} requests inspected, newest first. Narrow tab, domain, or type to search the rest. ` : '') +
-            'Retained text only; truncated prefixes and uncaptured or binary bodies limit coverage.';
-        if (elements.requestSearchStatus.textContent !== searchMessage) elements.requestSearchStatus.textContent = searchMessage;
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         const selectionCleared = state.selectedRequestId !== null && !state.requests.some(request => request.id === state.selectedRequestId);
         if (selectionCleared) resetRequestSelection();
@@ -2538,8 +2526,7 @@ const capturedExportPanel = installCapturedExportDialog({
           empty.textContent = state.requests.length === 0
             ? state.sessionMode === 'live' ? 'No live requests yet. Start a capture in the attached browser.'
               : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
-            : search.omitted ? 'No matches in inspected content. Narrow the filters to search the omitted requests.'
-              : 'No requests match the current filters. Clear the filter or choose another type.';
+            : 'No requests match the current filters. Clear the filter or choose another type.';
           const hadFocus = elements.requestRows.contains(document.activeElement);
           elements.requestRows.replaceChildren(empty);
           elements.requestRows.tabIndex = 0;
@@ -2557,7 +2544,6 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         renderTrafficRows(elements.requestRows, window.rows, {
           selectedId: state.selectedRequestId, newIds,
-          matches: includeContent && needle ? search.matches : null,
           onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection
         });
         state.trafficPendingCount = state.trafficNewIds.size;
@@ -2605,11 +2591,8 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         investigationBeforeSelection();
         state.originTraceController?.abort();
-        const match = elements.requestSearchScope.value === 'content' ? state.trafficSearchMatches?.get(id) : null;
-        if (match?.side) state.inspectorTab = match.mode === 'headers' ? 'headers' : match.side === 'Request' ? 'payload' : 'response';
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
-        if (state.selectedRequestId !== id) state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.selectedRequestId = id;
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
@@ -2847,6 +2830,8 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function renderInspector() {
         evidencePackagePanel.sync();
+        // History and notebook entries can name inspector tabs that no longer exist.
+        if (![...document.querySelectorAll('.inspector-tab')].some(tab => tab.dataset.inspectorTab === state.inspectorTab)) state.inspectorTab = 'general';
         document.querySelector('#request-package-entry').hidden = state.inspectorTab !== 'evidence';
         document.querySelectorAll('.inspector-tab').forEach(tab => {
           const selected = tab.dataset.inspectorTab === state.inspectorTab;
@@ -2854,33 +2839,23 @@ const capturedExportPanel = installCapturedExportDialog({
           tab.tabIndex = selected ? 0 : -1;
         });
         const exchangeInspector = document.querySelector('#exchange-inspector');
-        const showingExchange = ['headers', 'payload', 'preview', 'response'].includes(state.inspectorTab) || state.selectedRequestId === null;
+        const showingGeneral = state.inspectorTab === 'general' || state.selectedRequestId === null;
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         updateSelectionSummary(request);
 
         document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
-        const showingComparison = state.inspectorTab === 'compare';
-        const comparisonPanel = document.querySelector('#traffic-comparison');
-        comparisonPanel.hidden = !showingComparison;
-        renderTrafficComparison(comparisonPanel, request, showingComparison);
-        exchangeInspector.hidden = !showingExchange || showingComparison;
+        exchangeInspector.hidden = !showingGeneral;
         exchangeInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
         const evidenceToggle = document.querySelector('#request-evidence-toggle');
-        evidenceToggle.textContent = state.inspectorTab === 'evidence' ? 'Headers' : 'Evidence';
+        evidenceToggle.textContent = state.inspectorTab === 'evidence' ? 'General' : 'Evidence';
         evidenceToggle.setAttribute('aria-expanded', String(state.inspectorTab === 'evidence'));
         evidenceToggle.disabled = !request;
         elements.requestCollectionPivot.disabled = !request;
-        elements.requestInspector.hidden = showingExchange || showingComparison;
-        document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange || showingComparison);
-        if (showingComparison) return;
-        if (showingExchange) {
-          renderTrafficDetails(exchangeInspector, request, state.inspectorTab, (value, selection) => {
-            const identity = investigationRequestIdentity(request);
-            investigationDecode(value, {route: identity ? {kind: 'request', identity, inspectorTab: state.inspectorTab} : null,
-              description: `${selection.side} · ${selection.path} · selected inspector value. UTF-8 string bytes are retained; raw HTTP byte offsets are unavailable.${identity ? '' : ' Exact request identity is unavailable.'}`});
-          }, openFieldProvenance, elements.requestSearchScope.value === 'content' && state.trafficSearchMatches?.get(request?.id)?.side
-            ? {...state.trafficSearchMatches.get(request.id), query: elements.requestFilter.value.trim()} : null, state.trafficSelectionNotice);
+        elements.requestInspector.hidden = showingGeneral;
+        document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
+        if (showingGeneral) {
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -2940,15 +2915,6 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.prompt.textContent = 'Initiator';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = true;
-          if (isFieldCallSites(request?.initiator) && request.initiator.sites.length) {
-            const rows = request.initiator.sites.flatMap((site, index) => [
-              {key: `call site ${index + 1}`, value: `${site.function || '(anonymous)'} · ${site.source || '(URL unavailable)'}:${site.line + 1}:${site.column + 1}`, type: 'observed'},
-              {key: 'source identity', value: `target ${site.target_id} · script ${site.script_id}${site.source_hash ? ' · hash ' + site.source_hash : ''}`, type: 'id'}
-            ]);
-            for (const gap of request.initiator.gaps) rows.push({key: 'capture gap', value: gap.replaceAll('_', ' '), type: 'unavailable'});
-            renderInspectorDetails(rows);
-            return;
-          }
           const lifecycleEvents = request?.events ?? [];
           const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0);
           const initiated = lifecycleEvents.find(event => event.type === 'request_initiated');
@@ -3009,13 +2975,6 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function renderEvidence() {
         evidencePackagePanel.sync();
-        document.querySelectorAll('.nav-button[data-screen="experiments"]')
-          .forEach(button => {
-            button.disabled = false;
-            button.title = state.selectedField
-              ? 'Open disposable experiments for the selected request field.'
-              : 'Experiments use the attached debugger target; selecting a request field is optional.';
-          });
         evidenceWorkspace.sync();
         const currentTrace = state.originTraceKey === originTraceSelection()?.key ? state.originTrace : null;
         elements.evidenceLinkCount.textContent = String(currentTrace?.steps?.length ?? 0);
@@ -4971,7 +4930,6 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function renderDecoder() {
-        renderDecoderFieldOrigin();
         toolsElements.engineBadge.textContent = state.decoderEngine.available ? (state.decoderEngine.busy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
         toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? '' : 'offline';
         let parsedInput = null;
@@ -5120,7 +5078,6 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function resetDecoderChain(message = 'Decoder chain cleared. Input was preserved.') {
         investigationDecoderOrigin = null;
-        clearDecoderFieldOrigin();
         state.decoderInputSnapshot = null;
         state.decoderSteps = [];
         state.decoderSelectedStepId = null;
@@ -6882,14 +6839,14 @@ const capturedExportPanel = installCapturedExportDialog({
             if (hash !== artifact.sha256) throw new Error('The artifact bytes do not match the selected SHA-256.');
             artifact.contentVerified = true;
           }
-          if (artifact.kind !== 'wasm') {
+          if (!sourceHexArtifact(artifact)) {
             try {new TextDecoder('utf-8', {fatal: true}).decode(buffer); artifact.contentLossy = false;}
             catch {artifact.contentLossy = true;}
           }
           // Hex is only a view. Format every byte whose rows fit in the editor
           // index (about 1.6 MiB). The immutable blob is untouched.
-          const hexBytes = artifact.kind === 'wasm' ? Math.min(buffer.length, wasmHexByteLimit()) : buffer.length;
-          const content = artifact.kind === 'wasm'
+          const hexBytes = sourceHexArtifact(artifact) ? Math.min(buffer.length, wasmHexByteLimit()) : buffer.length;
+          const content = sourceHexArtifact(artifact)
             ? formatWasmHex(buffer.subarray(0, hexBytes))
             : new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer);
           if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
@@ -6902,9 +6859,9 @@ const capturedExportPanel = installCapturedExportDialog({
           }
           artifact.sourceTextLength = content.length;
           artifact.content = content;
-          artifact.wasmHexBytes = artifact.kind === 'wasm' ? hexBytes : undefined;
-          artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > hexBytes);
-          if (artifact.contentTruncated) artifact.content += artifact.kind === 'wasm'
+          artifact.wasmHexBytes = sourceHexArtifact(artifact) ? hexBytes : undefined;
+          artifact.contentTruncated = artifact.byte_size > buffer.length || (sourceHexArtifact(artifact) && buffer.length > hexBytes);
+          if (artifact.contentTruncated) artifact.content += sourceHexArtifact(artifact)
             ? `\n\n[Hex preview limited to the first ${hexBytes} bytes; original bytes are unchanged]`
             : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
           if (!canvasOwner) boundSourcePreviews();
@@ -7152,7 +7109,7 @@ const capturedExportPanel = installCapturedExportDialog({
         navigation.open = false;
         if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'traffic') {
-          // Hidden debugger refreshes update the model without painting Traffic.
+          // Hidden evidence refreshes update the model without painting Traffic.
           // A quiet backend may return 304 indefinitely after we return here.
           renderRequests();
           updateSelectionSummary(state.requests.find(request => request.id === state.selectedRequestId) ?? null);
@@ -7469,7 +7426,7 @@ const capturedExportPanel = installCapturedExportDialog({
         if (state.inspectorTab === 'signals') refreshRequestSignalProfile();
       }));
       document.querySelector('#request-evidence-toggle').addEventListener('click', () => {
-        state.inspectorTab = state.inspectorTab === 'evidence' ? 'headers' : 'evidence';
+        state.inspectorTab = state.inspectorTab === 'evidence' ? 'general' : 'evidence';
         renderInspector();
       });
       enableTabKeyboardNavigation('.inspector-tab');
@@ -7488,7 +7445,6 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.backtraceSteps.querySelector('.trace-row')?.focus();
       });
       elements.requestFilter.addEventListener('input', renderRequests);
-      elements.requestSearchScope.addEventListener('change', renderRequests);
       function closeRequestDetails() {
         state.trafficDetailOpen = false;
         renderInspector();
@@ -7781,7 +7737,6 @@ const capturedExportPanel = installCapturedExportDialog({
       toolsElements.inputEncoding.addEventListener('change', scheduleDecoderInputRender);
       toolsElements.operation.addEventListener('change', renderTools);
       toolsElements.useField.addEventListener('click', useSelectedFieldInDecoder);
-      toolsElements.findSources.addEventListener('click', searchDecodedFieldSources);
       toolsElements.removeAfter.addEventListener('click', () => {
         const index = state.decoderSteps.findIndex(step => step.id === state.decoderSelectedStepId);
         if (index < 0) return;

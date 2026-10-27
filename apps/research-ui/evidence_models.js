@@ -407,20 +407,6 @@
           body.artifacts.every(isArtifact);
       }
 
-      function isFieldSite(site) {
-        return isPlainObject(site) && isBoundedText(site.script_id, 4096) && Boolean(site.script_id) &&
-          (site.source_hash === undefined || site.source_hash === null || isBoundedText(site.source_hash, 256)) && isBoundedText(site.target_id, 4096) && isBoundedText(site.source, 8192) &&
-          (site.source_truncated === undefined || typeof site.source_truncated === 'boolean') &&
-          isBoundedText(site.function, 256) && isSafeIntegerInRange(site.line, 0, 0x7fffffff) &&
-          isSafeIntegerInRange(site.column, 0, 0x7fffffff);
-      }
-
-      function isFieldCallSites(value) {
-        return isPlainObject(value) && Array.isArray(value.sites) && value.sites.length <= 16 &&
-          value.sites.every(isFieldSite) && Array.isArray(value.gaps) && value.gaps.length <= 8 &&
-          value.gaps.every(gap => ['initiator_unavailable', 'malformed_call_site', 'call_site_limit', 'async_parent_unresolved'].includes(gap));
-      }
-
       function isRepeaterRequest(request, resolved = false) {
         if (!isPlainObject(request) || !isBoundedText(request.url, 8 * 1024) ||
             !isBoundedText(request.method, resolved ? 32 : 256) ||
@@ -1962,25 +1948,11 @@
         return 'Static only. sampler-unavailable. No dispatch samples were retained, so host links stay reason dispatch-samples-unavailable and guest_position null. Static handlers remain listed. This is the missing sampler, not an empty workspace. Real samples without rebuilding the browser come from reb-native-vm-fixture --emit-dispatch-events-v1.';
       }
 
-      function vmLiveCatalogMatchesSession(events, sessionId, sessionMode) {
-        if (sessionMode !== 'live' || sessionId === undefined || sessionId === null || String(sessionId).length === 0) return false;
-        const wanted = String(sessionId);
-        return Array.isArray(events) && events.some(event => event && String(event.session_id) === wanted);
-      }
-
-      function vmLiveScriptRank(script) {
-        const url = typeof script?.url === 'string' ? script.url : '';
-        if (vmBrowserInternalSourceUrl(url)) return 0;
-        if (/hsw|hcaptcha|captcha|challenge/i.test(url)) return 3;
-        if (url.length === 0 || /^(?:blob|data):/i.test(url)) return 2;
-        return 1;
-      }
-
       function vmSessionSourceGapText() {
-        return 'No page or challenge JavaScript artifact is stored for this session. /api/artifacts lists receiver blobs only. A response is stored as JavaScript when the network tee sees a script resource type or a JavaScript MIME type. application/wasm and compile, module, or instantiate hooks store Wasm, often at a synthetic wasm:// URL, without copying the loader script. Fetch or XHR bodies with another MIME type, and generated source that misses the allocating-script hook, stay out of the store. chrome:// and other browser-UI scripts are noise, not the challenge loader. Live Debugger.scriptParsed entries are not written into the artifact store.';
+        return 'No page or challenge JavaScript artifact is stored for this session. /api/artifacts lists receiver blobs only. A response is stored as JavaScript when the network tee sees a script resource type or a JavaScript MIME type. application/wasm and compile, module, or instantiate hooks store Wasm, often at a synthetic wasm:// URL, without copying the loader script. Fetch or XHR bodies with another MIME type, and generated source that misses the allocating-script hook, stay out of the store. chrome:// and other browser-UI scripts are noise, not the challenge loader.';
       }
 
-      function vmSessionSourceJoin({artifacts, scripts, interpreterArtifactId, sessionId, liveSessionJoined} = {}) {
+      function vmSessionSourceJoin({artifacts, interpreterArtifactId, sessionId} = {}) {
         const scoped = sessionId !== undefined && sessionId !== null && String(sessionId).length > 0;
         const wanted = String(sessionId ?? '');
         const stored = [];
@@ -2009,37 +1981,13 @@
             });
           }
         }
-        const ranked = [];
-        if (scoped && liveSessionJoined && Array.isArray(scripts)) {
-          scripts.forEach((script, index) => {
-            if (!script || script.language === 'WebAssembly' || typeof script.script_id !== 'string' ||
-              script.script_id.length === 0 || script.script_id.length > 4096) return;
-            ranked.push({script, index});
-          });
-          ranked.sort((left, right) => vmLiveScriptRank(right.script) - vmLiveScriptRank(left.script) || left.index - right.index);
-        }
-        const live = ranked.slice(0, 32).map(({script}) => {
-          const url = vmBoundedSourceUrl(script.url);
-          const internal = vmBrowserInternalSourceUrl(url);
-          return {
-            record: 'cdp-script',
-            role: internal ? 'browser-noise' : url.length === 0 || /^(?:blob|data):/i.test(url) ? 'generated-javascript' : 'page-javascript',
-            script_id: script.script_id,
-            url,
-            language: 'JavaScript',
-            relation: 'Live Debugger.scriptParsed catalog for the attached target. Not an /api/artifacts record. Same-target presence is correlation, not loader provenance, and guest_position stays null.'
-          };
-        });
         const pageJavaScriptCount = stored.filter(row => row.role === 'page-javascript' ||
           (row.role === 'interpreter' && row.kind === 'javascript' && !vmBrowserInternalSourceUrl(row.url))).length;
         return {
           scoped,
           stored,
-          live,
-          liveOmitted: Math.max(0, ranked.length - live.length),
           pageJavaScriptCount,
           omission: scoped && pageJavaScriptCount === 0 ? 'no-page-javascript-artifact' : null,
-          gapText: scoped && pageJavaScriptCount === 0 ? vmSessionSourceGapText() : null,
-          liveJoined: Boolean(scoped && liveSessionJoined)
+          gapText: scoped && pageJavaScriptCount === 0 ? vmSessionSourceGapText() : null
         };
       }

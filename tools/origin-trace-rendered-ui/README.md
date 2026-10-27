@@ -13,8 +13,9 @@ The driver, [`check-origin-trace-rendered-ui.mjs`](../check-origin-trace-rendere
 1. copies `build/Origin Trace.app` to a temporary directory and verifies its
    signature, so nothing resolves through source-tree paths;
 2. builds a bounded synthetic session with
-   [`evidence-fixture.mjs`](evidence-fixture.mjs) from the `make e2e` demo
-   stores and the native Wasm evidence stores that `make native-wasm-golden-check`
+   [`evidence-fixture.mjs`](evidence-fixture.mjs) (including a synthetic guest
+   bytecode buffer with embedded markup and invalid UTF-8) from the `make e2e`
+   demo stores and the native Wasm evidence stores that `make native-wasm-golden-check`
    exports under `build/native-golden/`. Those stores are the exact artifacts and
    events the Rust golden tests built from `build/reb-native-wasm-guest-golden`
    and `build/reb-native-wasm-dispatch-golden`, so nothing is mirrored by hand;

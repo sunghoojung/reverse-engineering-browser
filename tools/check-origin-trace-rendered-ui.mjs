@@ -11,7 +11,7 @@ import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {buildEvidence, HOSTILE_SOURCE_MARKER, HOSTILE_SOURCE_URL, HOSTILE_URL, HOSTILE_URL_MARKER, SOURCE_LINE_COUNT,
+import {buildEvidence, HOSTILE_BYTECODE_MARKUP, HOSTILE_SOURCE_MARKER, HOSTILE_SOURCE_URL, HOSTILE_URL, HOSTILE_URL_MARKER, SOURCE_LINE_COUNT,
   SYNTHETIC_REQUEST_COUNT} from './origin-trace-rendered-ui/evidence-fixture.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -131,7 +131,8 @@ try {
       REB_RENDERED_UI_OUTPUT: join(report, 'screenshots'),
       REB_RENDERED_UI_PROBES: join(harness, 'probes.js'),
       REB_RENDERED_UI_EXPECT: JSON.stringify({hostileUrl: HOSTILE_URL, hostileUrlMarker: HOSTILE_URL_MARKER, hostileSourceUrl: HOSTILE_SOURCE_URL,
-        hostileSourceMarker: HOSTILE_SOURCE_MARKER, requestCount: SYNTHETIC_REQUEST_COUNT, sourceLines: SOURCE_LINE_COUNT}),
+        hostileSourceMarker: HOSTILE_SOURCE_MARKER, hostileBytecodeMarkup: HOSTILE_BYTECODE_MARKUP,
+        requestCount: SYNTHETIC_REQUEST_COUNT, sourceLines: SOURCE_LINE_COUNT}),
     },
   });
   target.TestingEnvironmentVariables = {...target.TestingEnvironmentVariables,

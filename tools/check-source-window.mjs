@@ -18,7 +18,7 @@ export async function checkSourceWindowModel(root) {
   assert.equal(model.sourceName({kind:'wasm', url:'https://accounts.hcaptcha.com/hcaptcha.html', capture_origin:'webassembly_instantiate', artifact_id:'5', source_type:'artifact'}), 'wasm webassembly instantiate');
   assert.equal(model.sourceName({kind:'wasm', url:'https://cdn.invalid/path/module.wasm?x=1', capture_origin:'webassembly_instantiate', artifact_id:'6', source_type:'artifact'}), 'module.wasm');
   assert.equal(model.sourceName({kind:'javascript', url:'https://accounts.hcaptcha.com/hcaptcha.html', artifact_id:'7', source_type:'artifact'}), 'hcaptcha.html');
-  assert.equal(model.sourceName({source_type:'script', script_id:'9'}), '(anonymous 9)');
+  assert.equal(model.sourceName({source_type:'artifact', artifact_id:'9'}), 'artifact-9');
   for(const text of ['', '\n', 'a\r\nb\n', '\ufeffconst 雪="😀";\r\nK İ k\n', '\n'.repeat(385)+'last']) {
     const index=model.sourceDocumentIndex(text),lines=text.split('\n');
     assert.equal(index.lineCount,lines.length);

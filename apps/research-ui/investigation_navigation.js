@@ -60,7 +60,7 @@ let investigationRange = null;
 let investigationPendingReturn = null;
 let investigationPassiveSource = false;
 let investigationDecoderOrigin = null;
-const investigationNames = {traffic:'Requests', evidence:'Evidence', backtrace:'Backtrace', sources:'Sources', tools:'Decoder', signals:'Fingerprinting', 'api-collection':'Collection', 'field-provenance':'Field trace', experiments:'Experiments', analyst:'Analyst', memory:'Memory', vm:'VM candidates'};
+const investigationNames = {traffic:'Requests', evidence:'Evidence', backtrace:'Backtrace', sources:'Sources', tools:'Decoder', signals:'Fingerprinting', 'api-collection':'Collection', analyst:'Analyst', vm:'VM candidates'};
 const investigationScreen = () => document.querySelector('.screen:not([hidden])')?.id.replace('screen-', '') ?? 'traffic';
 function investigationSelector(node, root = document, stableOnly = false) {
   if (!node || !root.contains(node)) return null;
@@ -98,7 +98,7 @@ function investigationSnapshot() {
   const requestIdentity = investigationRequestIdentity(request);
   const source = selectedSource();
   const scroll = [];
-  const panes = '.exchange-content, .detail-pane, .sources-editor, .sources-navigator, .debug-panes, .trace-inspector, .trace-list-pane, .decoder-column, .tools-shell, #request-rows, #source-code-wrap, #source-tree, #backtrace-steps, #decoder-input, #decoder-output, #evidence-rows, #evidence-inspector, #evidence-package-mode';
+  const panes = '.detail-pane, .sources-editor, .sources-navigator, .debug-panes, .trace-inspector, .trace-list-pane, .decoder-column, .tools-shell, #request-rows, #source-code-wrap, #source-tree, #backtrace-steps, #decoder-input, #decoder-output, #evidence-rows, #evidence-inspector, #evidence-package-mode';
   for (const node of new Set([root, ...root.querySelectorAll(panes)])) {
     if (scroll.length >= 32) break;
     const selector = investigationSelector(node, root);
@@ -289,10 +289,10 @@ function openInvestigation({kind, identity, relation, inspectorTab, range}) {
   if (artifact && state.artifacts.filter(item => item.artifact_id === result.record.artifact_id).length !== 1) {
     investigationNotice('This artifact identifier is shared by multiple retained records. The current Sources selector cannot disambiguate it.', 'ambiguous'); return false;
   }
-  if (artifact && !['javascript','wasm','source_map','response_body'].includes(result.record.kind)) {investigationNotice('This retained artifact has no Sources view. Its identity remains in the trace.', 'unavailable'); return false;}
+  if (artifact && !['javascript','wasm','source_map','response_body','wasm_guest_adapter','bytecode_buffer'].includes(result.record.kind)) {investigationNotice('This retained artifact has no Sources view. Its identity remains in the trace.', 'unavailable'); return false;}
   if (artifact && range && (result.record.kind !== 'javascript' || !sourceFactsRange(range, result.record.byte_size))) {investigationNotice('This original byte range is unavailable through the verified JavaScript Facts view.', 'unavailable'); return false;}
   if (kind === 'trace' && identity.type !== 'captured-request') {
-    investigationNotice('A debugger/native host-and-time match is correlation only. No exact captured request trace link is available.', 'unavailable'); return false;
+    investigationNotice('A host-and-time match is correlation only. No exact captured request trace link is available.', 'unavailable'); return false;
   }
   const destination = artifact ? 'sources' : kind === 'trace' ? 'backtrace' : 'traffic';
   if (artifact || investigationScreen() === destination) investigationNavigation?.record();
@@ -331,7 +331,7 @@ function investigationTraceArtifact(step) {
   const matches = state.artifacts.filter(item => investigationId(item.session_id) === session && investigationId(item.artifact_id) === id);
   if (matches.length === 1 && state.artifacts.filter(item => investigationId(item.artifact_id) === id).length > 1) return {status:'ambiguous', message:'This artifact identifier is reused across retained sessions; Sources cannot disambiguate it.'};
   if (matches.length !== 1) return {status:matches.length ? 'ambiguous' : 'unavailable', message:matches.length ? 'Multiple retained artifacts match this trace identity.' : 'The source artifact for this exact session is not retained. No refetch is attempted.'};
-  if (!['javascript','wasm','source_map','response_body'].includes(matches[0].kind)) return {status:'unavailable', message:'This retained artifact has no Sources view. Its identity remains in this trace.'};
+  if (!['javascript','wasm','source_map','response_body','wasm_guest_adapter','bytecode_buffer'].includes(matches[0].kind)) return {status:'unavailable', message:'This retained artifact has no Sources view. Its identity remains in this trace.'};
   const identity = investigationArtifactIdentity(matches[0]);
   return identity ? {status:'ready', identity} : {status:'unavailable', message:'Artifact hash or byte-size identity is unavailable.'};
 }
@@ -340,6 +340,13 @@ function investigationAllowDecoderReplace() {
   if ((toolsElements.input.value || state.decoderSteps.length) && !window.confirm('Replace the current Decoder input and chain with this selected value? Existing source and request evidence stay unchanged.')) return false;
   return true;
 }
+function provenanceDecoderBytes(value) {
+  const bytes = new TextEncoder().encode(value);
+  // TextEncoder replaces unpaired UTF-16 surrogates. Such a string cannot
+  // become an exact UTF-8 chain root; preserve it as captured evidence instead.
+  return new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes) === value ? bytes : null;
+}
+
 function investigationDecode(value, origin) {
   if (!investigationAllowDecoderReplace()) return false;
   const bytes = typeof value === 'string' ? provenanceDecoderBytes(value) : value;

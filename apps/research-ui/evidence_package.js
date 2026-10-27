@@ -631,7 +631,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
         if (!onSource(current.artifact.identity)) message('The exact source could not be opened. No other artifact or URL was substituted.');
       }, 'source');
       sourceButton.id = 'evidence-open-source';
-      const supported = ['javascript', 'wasm', 'source_map', 'response_body'].includes(artifact.kind);
+      const supported = ['javascript', 'wasm', 'source_map', 'response_body', 'wasm_guest_adapter', 'bytecode_buffer'].includes(artifact.kind);
       sourceButton.disabled = row.artifact.status !== 'ready' || row.duplicate || !supported || !canOpenSource();
       card.append(sourceButton); source.append(card);
       if (artifact.urlTruncated) source.append(node('p', 'Artifact URL display is limited to 2,048 characters. Navigation uses exact identity, never this text.', 'evidence-detail-hint'));

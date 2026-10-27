@@ -58,10 +58,6 @@
               <div class="request-pane">
                 <div class="network-tools">
                   <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests…" aria-label="Filter requests" /></label>
-                  <select id="request-search-scope" class="request-search-scope" aria-label="Search request content">
-                    <option value="url">URL / method / status</option>
-                    <option value="content">Include headers and bodies</option>
-                  </select>
                   <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
@@ -79,7 +75,6 @@
                   </div>
                 </div>
 
-                <div id="request-search-status" class="request-search-status" role="status" aria-live="polite" hidden></div>
                 <div id="network-notice" class="network-notice" data-kind="loading" role="status" aria-live="polite">Connecting to the local evidence broker…</div>
 
                 <div class="request-scope" aria-label="Captured request scope">
@@ -109,19 +104,14 @@
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                 </div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
-                  <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="exchange-inspector" aria-selected="true">Headers</button>
-                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Payload</button>
-                  <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Preview</button>
-                  <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Response</button>
-                  <button id="inspector-tab-compare" class="inspector-tab" type="button" role="tab" data-inspector-tab="compare" aria-controls="traffic-comparison" aria-selected="false" tabindex="-1">Compare</button>
+                  <button id="inspector-tab-general" class="inspector-tab" type="button" role="tab" data-inspector-tab="general" aria-controls="exchange-inspector" aria-selected="true">General</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
                   <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
                   <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
                   <button id="inspector-tab-evidence" class="inspector-tab" type="button" role="tab" data-inspector-tab="evidence" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Evidence</button>
                 </div>
-                <section id="traffic-comparison" class="traffic-comparison" role="tabpanel" aria-labelledby="inspector-tab-compare" hidden></section>
-                <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
-                <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
+                <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-general"></div>
+                <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-initiator" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
                   <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence.</span></div>
                   <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">
@@ -219,21 +209,6 @@
             </section>
           </section>
 
-          <section id="screen-field-provenance" class="screen" aria-label="Request field provenance" hidden>
-            <header class="screen-head"><div><h1>Field trace</h1><p id="field-provenance-target"></p></div><button id="field-provenance-back" class="secondary-button" type="button">Traffic</button></header>
-            <div class="field-provenance-body">
-              <pre id="field-provenance-value" class="field-provenance-value" tabindex="0" aria-label="Selected value preview"></pre>
-              <section id="field-provenance-derived" class="field-provenance-derived" aria-label="Derived source search" hidden>
-                <h2>Decoded search value</h2>
-                <pre id="field-provenance-derived-value" tabindex="0"></pre>
-                <p>Researcher-applied transformations. Source matches are candidates; page value flow remains unobserved. Live request replay is not available.</p>
-                <details><summary>Transformation history</summary><pre id="field-provenance-derived-steps"></pre></details>
-              </section>
-              <div class="field-provenance-actions"><button id="field-provenance-decode" class="secondary-button" type="button">Decode value</button><button id="field-provenance-original" class="secondary-button" type="button" hidden>Use original value</button></div>
-              <section aria-label="Source candidates"><div class="field-provenance-section-head"><h2>Sources</h2><span id="field-provenance-notice" role="status"></span></div><div id="field-provenance-candidates"></div></section>
-              <details class="field-provenance-coverage"><summary>Coverage</summary><ul id="field-provenance-gaps"></ul></details>
-            </div>
-          </section>
           <section id="screen-sources" class="screen" data-sidebar-open="false" aria-label="Sources" hidden>
             <aside class="sources-navigator" aria-label="Sources navigator">
               <div class="source-side-tabs" role="tablist" aria-label="Source collections">
@@ -619,11 +594,6 @@
                         <pre id="decoder-output" tabindex="0" data-empty-label="No bytes to display. Enter input to begin.">No bytes selected.</pre>
                         <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
                         <section id="investigation-decoder-origin" class="decoder-field-origin" aria-label="Decoded value evidence origin" hidden><p></p><button class="secondary-button" type="button">Open original evidence</button></section>
-                        <section id="decoder-field-origin" class="decoder-field-origin" aria-label="Request field source search" hidden>
-                          <p id="decoder-field-origin-label"></p>
-                          <button id="decoder-find-sources" class="secondary-button" type="button" disabled>View decoded field</button>
-                          <p id="decoder-field-origin-notice" role="status"></p>
-                        </section>
                       </div>
                       <details class="tool-detail-disclosure"><summary>Result details</summary>
                       <div class="decoder-facts"><div class="decoder-fact"><span>Selected bytes</span><strong id="decoder-selected-bytes">0 B</strong></div><div class="decoder-fact"><span>Retained</span><strong id="decoder-retained-bytes">0 B / 4 MiB</strong></div><div class="decoder-fact"><span>Engine time</span><strong id="decoder-duration">Not run</strong></div><div class="decoder-fact"><span>Execution</span><strong>Explicit only</strong></div></div>
@@ -741,7 +711,7 @@
         <div class="captured-export-body">
           <p id="captured-export-context" class="captured-export-context"></p>
           <div class="captured-export-fields">
-            <label>Format<select data-export-format><option value="json">Capture JSON</option><option value="client">Client project · ZIP</option><option value="har">HAR · network archive</option><option value="sdl">GraphQL schema · SDL</option></select></label>
+            <label data-export-format-field>Format<select data-export-format><option value="json">Capture JSON</option><option value="client">Client project · ZIP</option><option value="har">HAR · network archive</option><option value="sdl">GraphQL schema · SDL</option></select></label>
             <label data-export-provider-field hidden>Client runtime<select data-export-provider><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label>
             <label data-export-source-field hidden>Schema source<select data-export-source><option value="capture">Selected response</option><option value="file">Local introspection JSON</option></select></label>
             <label data-export-file-field hidden>Introspection file<input type="file" accept=".json,application/json" data-export-file><span>Up to 1 MiB · complete __schema or data.__schema</span></label>
@@ -771,7 +741,6 @@
     <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_facts.js"></script>
-    <script src="traffic_comparison.js"></script>
     <script src="traffic_view.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
@@ -785,7 +754,6 @@
     <script src="vm_opcode_ledger.js"></script>
     <script src="vm_opcode_ledger_view.js"></script>
     <script src="vm_semantics.js"></script>
-    <script src="field_provenance.js"></script>
     <script src="pane_layout.js"></script>
     <script src="native_console_completion.js"></script>
     <script src="native_console.js"></script>

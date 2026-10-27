@@ -62,8 +62,9 @@ const opcodeSource = await readFile(join(root, 'apps/origin-trace-backend/src/vm
 const samplerDetail = opcodeSource.match(/"reason":"sampler-unavailable", "detail":\s*("[^"\n]+")/);
 assert(samplerDetail, 'The no-samples producer diagnostic must be available to the UI regression');
 const samplerOmission = {reason: 'sampler-unavailable', detail: JSON.parse(samplerDetail[1])};
-assert(samplerOmission.detail.startsWith('No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented.'), 'Observed missing samples and the automatic sampler limitation must lead, not follow secondary caveats');
-assert(samplerOmission.detail.includes('A caller-fed writer still needs a runtime producer.'), 'A writer must remain distinct from a guest-interpreter sampler');
+assert(samplerOmission.detail.startsWith('No native dispatch samples were retained. Rebuild with native guest capture, enable an exact matching adapter, and inspect capture omissions.'), 'Observed missing samples must lead immediately into the native rebuild/adapter requirements, before secondary caveats');
+assert(samplerOmission.detail.endsWith('Static dispatch, Canvas calls and snapshots alone do not prove a guest PC.'), 'Native adapter availability must not turn static evidence or snapshots alone into guest-PC proof');
+assert(!samplerOmission.detail.includes('sampling is not implemented'), 'The no-samples state must not deny the implemented native adapter capture path');
 assert(!samplerOmission.detail.includes('no guest dispatch emitter'), 'Missing samples must not deny caller-fed writer capability');
 const analysis = {
   contract_version: 1, document_kind: 'vm-analysis', document_digest: fixture.analysis_digest,

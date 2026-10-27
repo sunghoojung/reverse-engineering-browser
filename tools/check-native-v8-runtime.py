@@ -210,12 +210,16 @@ def main():
             "test/test262/data", "third_party/depot_tools",
         )})
         receipt["excluded_dependency_paths"] = sorted(excluded)
+        # custom_deps=None does not suppress GCS objects in pinned gclient.
+        # Its type filter applies to every recursively parsed DEPS file.
+        receipt["ignored_dependency_types"] = ["gcs", "cipd"]
         (work / ".gclient").write_text("solutions = " + repr([{
             "name": "v8", "url": "https://github.com/v8/v8.git", "managed": False,
             "deps_file": "DEPS", "custom_deps": excluded,
             "custom_vars": {"checkout_benchmarks": False, "download_remoteexec_cfg": False},
         }]) + "\ntarget_os = ['linux']\n")
         run(["python3", str(depot / "gclient.py"), "sync", "--nohooks", "--noprehooks", "--shallow",
+             "--ignore-dep-type=gcs", "--ignore-dep-type=cipd",
              "-j", "2", "--revision", "v8@" + v8_pin])
         gn_source = work / "gn-source"
         # GN's version generator needs its initial-commit tag/history.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Authored inputs only: controller/CLI checks and a real-browser integration flow.
+// Authored inputs only: offline controller/CLI checks; no browser driver.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {readFile,writeFile,mkdtemp,rm} from 'node:fs/promises';
@@ -78,22 +78,5 @@ export async function checkContextualController() {
   } finally {await rm(dir,{recursive:true,force:true});}
   console.log('PASS contextual controller and CLI: state identity, ordered macros, jumps, bounds, inert text, focus, cancellation, fixed-workflow discovery');
 }
-export async function checkVmContextualInteractions({evaluate,viewport,click,key,screenshot}) {
-  const fixture=await contextualFixture();
-  const hit=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'})`);await click(selector);};
-  await viewport(1440,900);await evaluate("showScreen('vm')");await hit('#vm-show-contextual');
-  for(const kind of ['definition','image','evidence'])await evaluate(`(async()=>{const ui=vmExecutionWorkspace.contextualAnalysis,input=ui.fileInputs.${kind},transfer=new DataTransfer();transfer.items.add(new File([${JSON.stringify(JSON.stringify(fixture[kind]))}],'authored-${kind}.json',{type:'application/json'}));input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));while(input.value)await new Promise(r=>setTimeout(r,10));})()`);
-  await evaluate("vmExecutionWorkspace.contextualAnalysis.analyze.focus()");await key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r'});
-  await evaluate("(async()=>{const end=performance.now()+5000;while(!vmExecutionWorkspace.contextualAnalysis.getLinked()){if(performance.now()>end)throw Error('Contextual analysis timed out');await new Promise(r=>setTimeout(r,10));}})()");
-  assert.match(await evaluate("vmExecutionWorkspace.contextualAnalysis.detail.textContent"),/matches_declared/);
-  for(const [width,height] of [[1440,900],[760,560],[360,740]]) {
-    await viewport(width,height);await hit('[data-vm-contextual-id="context:0:alternate"]');
-    assert.equal(await evaluate('vmExecutionWorkspace.contextualAnalysis.getSelected()'),'context:0:alternate');
-    assert(await evaluate('document.activeElement===vmExecutionWorkspace.contextualAnalysis.detail'));
-    assert(await evaluate("(()=>{const e=document.querySelector('#vm-contextual-workspace');return e.scrollWidth<=e.clientWidth+1;})()"),'No horizontal clipping');
-    await screenshot(`vm-contextual-${width}x${height}.png`);
-  }
-  await viewport(1440,900);await hit('#vm-show-static');await hit('#vm-show-contextual');assert.equal(await evaluate('vmExecutionWorkspace.contextualAnalysis.getSelected()'),'context:0:alternate');
-  return {status:'passed',source:'authored inputs, not captured execution',viewports:[[1440,900],[760,560],[360,740]],checks:['real file input events','keyboard analyze','state-distinct selection','declared versus observed jumps','mode retention','responsive scrolling']};
-}
+
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)await checkContextualController();

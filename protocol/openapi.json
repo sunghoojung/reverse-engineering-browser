@@ -19,7 +19,10 @@
   "security": [],
   "x-reb-mcp": {
     "transport": "stdio",
-    "command": ["reb-api", "mcp"],
+    "command": [
+      "reb-api",
+      "mcp"
+    ],
     "tool_name": "operationId",
     "default_tools": "read_only_eligible",
     "effects_flag": "--allow-effects",
@@ -27,7 +30,11 @@
     "binary_inline": false,
     "oversized_json": "structural_summary",
     "summary_string_chars": 160,
-    "protocols": ["2024-11-05", "2025-03-26", "2025-06-18"],
+    "protocols": [
+      "2024-11-05",
+      "2025-03-26",
+      "2025-06-18"
+    ],
     "batching": false,
     "message_limit_bytes": 33554432
   },
@@ -544,235 +551,6 @@
             {
               "path": "apps/origin-trace-backend/src/app.rs",
               "symbol": "App::get"
-            }
-          ]
-        },
-        "x-reb-execution-schema": {
-          "$ref": "#/components/schemas/RebExecutionMetadata"
-        }
-      }
-    },
-    "/api/debugger": {
-      "get": {
-        "operationId": "get_debugger",
-        "summary": "get debugger",
-        "description": "Existing local research UI operation.",
-        "tags": [
-          "debugger"
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DebuggerSnapshot"
-                }
-              }
-            },
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store",
-                  "type": "string"
-                }
-              },
-              "ETag": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Host/Origin/Sec-Fetch-Site rejected.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "304": {
-            "description": "ETag unchanged; no response body.",
-            "headers": {
-              "ETag": {
-                "schema": {
-                  "type": "string"
-                }
-              },
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store",
-                  "type": "string"
-                }
-              }
-            }
-          }
-        },
-        "x-source": "apps/origin-trace-backend/src/app.rs",
-        "parameters": [
-          {
-            "name": "wait_ms",
-            "in": "query",
-            "required": false,
-            "description": "Canonical decimal; duplicate or blank values rejected. Only waits when If-None-Match matches the current generation.",
-            "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000,
-              "default": 0
-            }
-          },
-          {
-            "name": "If-None-Match",
-            "in": "header",
-            "required": false,
-            "description": "Exact server ETag from a previous response.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "x-reb-execution": {
-          "kind": "operation",
-          "effects": [],
-          "state_dependent_effects": [],
-          "uncertainties": [],
-          "prerequisites": [
-            {
-              "id": "local-request",
-              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
-            }
-          ],
-          "confirmations": [],
-          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
-          "sources": [
-            {
-              "path": "apps/origin-trace-backend/src/app.rs",
-              "symbol": "App::get"
-            }
-          ]
-        },
-        "x-reb-execution-schema": {
-          "$ref": "#/components/schemas/RebExecutionMetadata"
-        }
-      }
-    },
-    "/api/debugger/source": {
-      "get": {
-        "operationId": "get_debugger_source",
-        "summary": "get debugger source",
-        "description": "Existing local research UI operation.",
-        "tags": [
-          "debugger"
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ScriptSource"
-                }
-              }
-            },
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Host/Origin/Sec-Fetch-Site rejected.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "State conflict, unavailable live session, or stale generation.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "The live debugger returned malformed source or protocol data.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "x-source": "apps/origin-trace-backend/src/app.rs",
-        "parameters": [
-          {
-            "name": "script_id",
-            "in": "query",
-            "required": true,
-            "description": "Live script identity; required nonempty value.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "x-reb-execution": {
-          "kind": "operation",
-          "effects": [
-            "browser-control"
-          ],
-          "state_dependent_effects": [],
-          "uncertainties": [],
-          "prerequisites": [
-            {
-              "id": "local-request",
-              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
-            },
-            {
-              "id": "live-script",
-              "condition": "script_id must identify a live script within the 2 MiB limit and an available page/worker session."
-            }
-          ],
-          "confirmations": [],
-          "notes": "Requests source through an existing page/worker debugger session; it does not evaluate that source. WebAssembly scriptSource is empty in CDP; non-empty bytecode, or Debugger.getWasmBytecode, is returned as standard base64 in source with encoding base64. Those bytes are also retained as a kind=wasm session artifact.",
-          "sources": [
-            {
-              "path": "apps/origin-trace-backend/src/debugger/mod.rs",
-              "symbol": "Debugger::source"
             }
           ]
         },
@@ -2574,170 +2352,6 @@
         }
       }
     },
-    "/api/debugger/actions": {
-      "post": {
-        "operationId": "debugger_action",
-        "summary": "debugger action",
-        "description": "Explicit action allowlist; live controls require the configured debugger; some local state actions work without a browser. State-specific locks and confirmation gates apply. Schema-invalid action fields return 400; unavailable state, ownership conflicts, and some action-specific semantic checks return 409. Do not retry mutation or evaluation automatically after an uncertain transport failure. describe --action names effects and the fields a captured Wasm or paused import action still requires.",
-        "tags": [
-          "debugger"
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DebuggerResult"
-                }
-              }
-            },
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Host/Origin/Sec-Fetch-Site rejected.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "State conflict, unavailable live session, or stale generation.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Worker/protocol response or input processing failure.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "408": {
-            "description": "The bounded request-body or local worker deadline expired.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "A required local debugger transport or worker is unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Local I/O or contract validator failure.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "x-source": "apps/origin-trace-backend/src/app.rs",
-        "requestBody": {
-          "required": true,
-          "description": "JSON object. Explicit decimal Content-Length required; 1..131072 encoded bytes. Chunked request bodies are not supported.",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DebuggerAction"
-              }
-            }
-          }
-        },
-        "x-max-body-bytes": 131072,
-        "x-reb-execution": {
-          "kind": "action-dependent",
-          "effects": null,
-          "state_dependent_effects": [],
-          "uncertainties": [],
-          "prerequisites": [
-            {
-              "id": "local-request",
-              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
-            },
-            {
-              "id": "bounded-json-object",
-              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
-            },
-            {
-              "id": "debugger-memory-owner",
-              "condition": "While Memory Origin Trace is armed/capturing/stepping/stopping, only stop_memory_origin_trace passes this guard."
-            },
-            {
-              "id": "debugger-exclusive-owner",
-              "condition": "No interception request may be running and Object Lab must not be navigating/searching/mutating. Active Repeater permits only cancel_repeater_request. Runtime Hooks arming/armed/handling/stopping permits disarm_runtime_hooks and dispose_request_interception_experiment, because disposal disarms hooks as cleanup. compare_runtime_field_test stays blocked."
-            },
-            {
-              "id": "debugger-automation-owner",
-              "condition": "Active or arming/running/stopping Automation permits only cancel_automation_recipe or disarm_automation_recipes. When auto_armed, only the recipe actions, navigate_object_experiment, and dispose_request_interception_experiment pass the automatic-owner guard."
-            },
-            {
-              "id": "debugger-action-lock",
-              "condition": "The action lock must be idle except for stop_memory_origin_trace, disarm_runtime_hooks, cancel_repeater_request, cancel_automation_recipe, and disarm_automation_recipes. Exemption from this lock does not bypass other ownership guards."
-            }
-          ],
-          "confirmations": [],
-          "notes": "Use reb-api describe debugger_action --action NAME for that action's effects, confirmations, and required fields. Effectful actions stay off the default MCP tool list until --allow-effects. list_live_wasm_objects and read_live_wasm_memory need the navigated Object Lab page, or confirmed true plus captured_owner (instance_id, connection_epoch, document_epoch, target_id). inspect_paused_import_object needs expected_generation, owner, call_frame_id, scope_index, and binding_name. Missing fields are rejected and are not inferred. No action inherits a default effect classification.",
-          "sources": [
-            {
-              "path": "apps/origin-trace-backend/src/app.rs",
-              "symbol": "App::post"
-            },
-            {
-              "path": "apps/origin-trace-backend/src/debugger/mod.rs",
-              "symbol": "Debugger::action"
-            },
-            {
-              "path": "apps/origin-trace-backend/src/debugger/mod.rs",
-              "symbol": "check_action_owner"
-            }
-          ]
-        },
-        "x-reb-execution-schema": {
-          "$ref": "#/components/schemas/RebExecutionMetadata"
-        }
-      }
-    },
     "/api/wasm": {
       "get": {
         "operationId": "inspect_wasm",
@@ -4482,7 +4096,7 @@
             },
             {
               "id": "exact-retained-traffic",
-              "condition": "All five original identity fields must match current retained Traffic. The public request ID must be unique across the retained window. Scope and sharing authorization are the researcher’s responsibility."
+              "condition": "All five original identity fields must match current retained Traffic. The public request ID must be unique across the retained window. Scope and sharing authorization are the researcher\u2019s responsibility."
             }
           ],
           "confirmations": [],
@@ -6658,6 +6272,10 @@
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/effect"
                 }
+              },
+              "native_wasm_sample_count": {
+                "type": "integer",
+                "minimum": 1
               }
             },
             "allOf": [
@@ -6671,12 +6289,6 @@
                 },
                 "then": {
                   "properties": {
-                    "state": {
-                      "const": "unknown"
-                    },
-                    "sample_count": {
-                      "const": 0
-                    },
                     "effects": {
                       "maxItems": 0
                     }
@@ -6685,7 +6297,41 @@
                     "required": [
                       "handler_index"
                     ]
-                  }
+                  },
+                  "anyOf": [
+                    {
+                      "required": [
+                        "native_wasm_sample_count",
+                        "label"
+                      ],
+                      "properties": {
+                        "state": {
+                          "const": "observed"
+                        },
+                        "sample_count": {
+                          "minimum": 1
+                        },
+                        "label": {
+                          "pattern": "^br_table .*default$"
+                        }
+                      }
+                    },
+                    {
+                      "not": {
+                        "required": [
+                          "native_wasm_sample_count"
+                        ]
+                      },
+                      "properties": {
+                        "state": {
+                          "const": "unknown"
+                        },
+                        "sample_count": {
+                          "const": 0
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             ]
@@ -6925,6 +6571,17 @@
               },
               "captured_module_preview": {
                 "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/modulePreview"
+              },
+              "native_wasm_observations": {
+                "type": "array",
+                "maxItems": 4096,
+                "items": {
+                  "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeWasmObservation"
+                }
+              },
+              "native_wasm_observation_count": {
+                "type": "integer",
+                "minimum": 0
               }
             },
             "allOf": [
@@ -6941,8 +6598,30 @@
                     }
                   }
                 }
+              },
+              {
+                "if": {
+                  "required": [
+                    "native_wasm_observations"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "runtime": {
+                      "const": "webassembly"
+                    }
+                  }
+                }
               }
-            ]
+            ],
+            "dependentRequired": {
+              "native_wasm_observations": [
+                "native_wasm_observation_count"
+              ],
+              "native_wasm_observation_count": [
+                "native_wasm_observations"
+              ]
+            }
           },
           "effectSpan": {
             "type": "object",
@@ -7699,6 +7378,58 @@
                 "pattern": "^(?:[0-9a-f]{2})+$"
               },
               "truncated": {
+                "type": "boolean"
+              }
+            }
+          },
+          "nativeWasmObservation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "function_index",
+              "module_byte_offset",
+              "selector",
+              "table_count",
+              "sample_index",
+              "selected_arm",
+              "event",
+              "is_default"
+            ],
+            "properties": {
+              "function_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "module_byte_offset": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 16777215
+              },
+              "selector": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "table_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 15
+              },
+              "selected_arm": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "event": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/eventIdentity"
+              },
+              "is_default": {
                 "type": "boolean"
               }
             }
@@ -20170,6 +19901,8 @@
               "request_completed",
               "request_failed",
               "vm_finding",
+              "vm_dispatch_sample",
+              "wasm_dispatch_observation",
               "artifact_captured",
               "artifact_capture_failed"
             ]

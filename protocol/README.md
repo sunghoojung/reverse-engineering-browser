@@ -308,3 +308,11 @@ and separate bounded effect/coverage/traversal declarations. Historical v1
 workspaces are rejected rather than silently upconverted.
 
 - [Owned opcode experiments v1](owned-opcode-experiments-v1.md): explicit, input-specific native confirmation and counterexamples.
+
+## Native-only capture
+
+Executable CDP APIs/transport have been removed. Legacy schemas may describe
+historical saved records, not supported runtime operations.
+[Native Wasm dispatch observations](native-wasm-dispatch-v1.md) use a separate
+typed128-byte payload and exact artifact/site validation; they are not legacy
+guest-PC samples.

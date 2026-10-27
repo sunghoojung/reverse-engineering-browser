@@ -1,0 +1,9 @@
+{
+  "name": "reb-native-only-ui-startup-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Explicit development-only DOM model dependency; never bundled with Origin Trace.",
+  "devDependencies": {
+    "linkedom": "0.18.14"
+  }
+}

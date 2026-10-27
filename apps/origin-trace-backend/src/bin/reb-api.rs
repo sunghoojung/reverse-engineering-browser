@@ -1090,14 +1090,12 @@ mod tests {
         }
         for id in [
             "capture_action",
-            "debugger_action",
             "analyst_action",
             "decoder_action",
             "native_console_action",
             "replace_api_collection",
             "get_native_console",
             "get_vm_analysis",
-            "get_debugger_source",
             "get_source_facts",
             "get_deobfuscation",
         ] {
@@ -1517,25 +1515,26 @@ mod tests {
     }
 
     #[test]
-    fn selected_debugger_action_keeps_constraints_and_mapped_response() {
-        let spec = specification().unwrap();
-        let operation = &operations(&spec).unwrap()["debugger_action"];
-        let detail = describe(&spec, operation, Some("add_watch")).unwrap();
+    fn selected_native_action_keeps_constraints_and_mapped_response() {
+        let mut spec = specification().unwrap();
+        // Exercise optional response mapping without reviving a removed CDP route.
+        spec["paths"]["/api/capture/actions"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"] = json!({"oneOf":[{"$ref":"#/components/schemas/CaptureResult"}],"x-action-results":{"clear":{"$ref":"#/components/schemas/CaptureResult"}}});
+        let ops = operations(&spec).unwrap();
+        let operation = &ops["capture_action"];
+        let detail = describe(&spec, operation, Some("clear")).unwrap();
         let request = &detail["requestBody"]["content"]["application/json"]["schema"]["oneOf"][0];
-        assert_eq!(request["required"], json!(["action", "expression"]));
-        assert_eq!(
-            request["properties"]["expression"]["x-max-utf8-bytes"],
-            4096
-        );
+        assert_eq!(request["required"], json!(["action", "confirm"]));
+        assert_eq!(request["properties"]["confirm"]["const"], true);
         let response = &detail["responses"]["200"]["content"]["application/json"]["schema"];
         assert_eq!(response["oneOf"].as_array().unwrap().len(), 1);
         assert_eq!(
             response["oneOf"][0]["$ref"],
-            "#/components/schemas/DebuggerAcknowledgementResult"
+            "#/components/schemas/CaptureResult"
         );
         assert_eq!(response["x-action-results"].as_object().unwrap().len(), 1);
         assert_eq!(detail["responses"]["409"], operation.2["responses"]["409"]);
-        assert_eq!(detail["x-max-body-bytes"], 131072);
+        assert_eq!(detail["x-max-body-bytes"], 256);
         assert_self_contained(&detail);
     }
 
@@ -1552,7 +1551,7 @@ mod tests {
     fn unknown_actions_fail_explicitly() {
         let spec = specification().unwrap();
         let ops = operations(&spec).unwrap();
-        for id in ["debugger_action", "get_health"] {
+        for id in ["capture_action", "get_health"] {
             assert!(
                 describe(&spec, &ops[id], Some("not_an_action"))
                     .unwrap_err()
@@ -1560,12 +1559,13 @@ mod tests {
             );
         }
         let mut spec = spec;
-        spec["components"]["schemas"]["DebuggerResult"]["x-action-results"]
-            .as_object_mut()
-            .unwrap()
-            .remove("pause");
+        let mut operation = ops["capture_action"].clone();
+        operation.2["responses"]["200"]["content"]["application/json"]["schema"] =
+            json!({"oneOf":[{"$ref":"#/components/schemas/CaptureResult"}],"x-action-results":{}});
+        spec["components"]["schemas"]["CaptureAction"]["oneOf"][0]["x-result-schema"] =
+            json!("#/components/schemas/CaptureResult");
         assert!(
-            describe(&spec, &ops["debugger_action"], Some("pause"))
+            describe(&spec, &operation, Some("stop"))
                 .unwrap_err()
                 .contains("Missing response schema")
         );
@@ -1575,18 +1575,18 @@ mod tests {
     fn missing_or_unsupported_action_metadata_never_inherits_a_default() {
         for replacement in [Value::Null, json!({"kind": "operation"})] {
             let mut spec = specification().unwrap();
-            let action = spec["components"]["schemas"]["DebuggerAction"]["oneOf"]
+            let action = spec["components"]["schemas"]["CaptureAction"]["oneOf"]
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
-                .find(|v| v["properties"]["action"]["const"] == "pause")
+                .find(|v| v["properties"]["action"]["const"] == "stop")
                 .unwrap();
             action["x-reb-execution"] = replacement;
             assert!(
                 describe(
                     &spec,
-                    &operations(&spec).unwrap()["debugger_action"],
-                    Some("pause")
+                    &operations(&spec).unwrap()["capture_action"],
+                    Some("stop")
                 )
                 .unwrap_err()
                 .contains("execution metadata")
@@ -1695,27 +1695,21 @@ mod tests {
     fn describe_action_flag_is_optional_and_call_still_requires_an_endpoint() {
         assert!(Options::try_parse_from(["reb-api", "list"]).is_ok());
         assert!(Options::try_parse_from(["reb-api", "spec"]).is_ok());
-        assert!(Options::try_parse_from(["reb-api", "describe", "debugger_action"]).is_ok());
+        assert!(Options::try_parse_from(["reb-api", "describe", "capture_action"]).is_ok());
         assert!(
-            Options::try_parse_from([
-                "reb-api",
-                "describe",
-                "debugger_action",
-                "--action",
-                "pause"
-            ])
-            .is_ok()
+            Options::try_parse_from(["reb-api", "describe", "capture_action", "--action", "stop"])
+                .is_ok()
         );
-        assert!(Options::try_parse_from(["reb-api", "call", "debugger_action"]).is_err());
+        assert!(Options::try_parse_from(["reb-api", "call", "capture_action"]).is_err());
         assert!(
             Options::try_parse_from([
                 "reb-api",
                 "call",
-                "debugger_action",
+                "capture_action",
                 "--base-url",
                 "http://127.0.0.1:7319",
                 "--action",
-                "pause"
+                "stop"
             ])
             .is_err()
         );

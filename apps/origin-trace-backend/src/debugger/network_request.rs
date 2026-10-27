@@ -229,16 +229,16 @@ mod tests {
         .unwrap()
     }
     async fn fixture() -> Arc<Debugger> {
-        let mut options = crate::config::Options::parse_from(["test"]);
-        options.capture_network_content = true;
+        let options = crate::config::Options::parse_from(["test"]);
         let debugger = Debugger::new(&options);
         debugger.update(|s| {
             s["target"] = json!({"id":"synthetic-target","title":"Synthetic title"});
+            s["network"]["capture_enabled"] = json!(true);
             s["console"] = json!({"unrelated":"synthetic-unrelated-console"});
             s["error"] = json!("synthetic-unrelated-debugger-error");
         });
         for (id, time) in [("selected", 0.1000000001), ("other", 0.1000000002)] {
-            debugger.network("Network.requestWillBeSent", &json!({
+            debugger.historical_fixture("Network.requestWillBeSent", &json!({
                 "requestId":id,"timestamp":time,"type":"Fetch","documentURL":"https://example.test/",
                 "request":{"url":format!("https://user:synthetic-pass@example.test/{id}?token=synthetic-query#fragment"),
                     "method":"POST","postData":format!("synthetic-{id}-body"),
@@ -292,7 +292,7 @@ mod tests {
         assert!(text.contains("synthetic-pass"));
         assert_eq!(value["request"]["response"]["body"]["state"], "loading");
         assert_eq!(before, debugger.snapshot());
-        assert!(debugger.connection.lock().await.is_none());
+        assert!(debugger.action(&json!({"action":"connect"})).await.is_err());
     }
     #[tokio::test]
     async fn body_completion_and_redirect_hops_preserve_original_selection() {
@@ -301,6 +301,9 @@ mod tests {
         let pending = output(&debugger, &selected);
         assert_eq!(pending["request"]["response"]["body"]["state"], "loading");
         debugger.update(|state| {
+            // Import a later authored snapshot; there is no live transport to
+            // advance this historical generation on our behalf.
+            state["generation"] = json!(state["generation"].as_u64().unwrap() + 1);
             state["network"]["requests"][0]["response"]["body"] = json!({
                 "state":"available", "mime":"application/json",
                 "text":"{\"synthetic\":true}", "base64":"",
@@ -320,7 +323,7 @@ mod tests {
 
         // One protocol ID owns distinct public identities for redirect hops.
         debugger
-            .network(
+            .historical_fixture(
                 "Network.requestWillBeSent",
                 &json!({
                     "requestId":"selected", "timestamp":0.2,

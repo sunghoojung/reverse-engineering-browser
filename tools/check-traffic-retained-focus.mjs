@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
 
-// Synthetic validated snapshots exercise production projection, identity, selection
+// Historical validated snapshots exercise inert projection, identity, selection
 // rebuild, and comparison ownership. This is not rendered UI or native-probe QA.
 const read = name => readFile(new URL(`../apps/research-ui/${name}`, import.meta.url), 'utf8');
 const [models, traffic, catalog, navigation, app] = await Promise.all(
@@ -23,22 +23,27 @@ function fixture() {
   let resets=0,aborts=0;
   state.originTraceController={abort(){aborts++;}};
   const api=runInNewContext(`${models}\n${traffic}\n${catalog}\n${navigation.slice(0,navigation.indexOf('function investigationResolve('))}\n${rebuild}\n;({rebuildTrafficRequests,apiCatalogRequestIdentity,
-    apiCatalogResolveSource,trafficComparisonOwner,trafficHttpSnapshotOwner,trafficRetainedHttpIdentity,
+    apiCatalogResolveSource,trafficComparisonOwner,trafficHttpSnapshotOwner,trafficRetainedHttpIdentity,requestsFromDebuggerNetwork,
     pin:request=>trafficComparisonController.pin(request,state.requests,trafficComparisonOwner()),
     baseline:()=>trafficComparisonController.sync(state.requests,trafficComparisonOwner()),
     signalTabKey:${app.slice(app.indexOf('      function signalTabKey('),app.indexOf('      function renderFingerprintTabScopes(')).trim().replace('function signalTabKey(', 'function(')},
     fingerprintEventsFromEvents})`, {state,TextEncoder,TextDecoder,URL,Uint8Array,
       apiCatalogPanel:{sync(){}},investigationNotice(){},requestTraceRoot:()=>null,
       resetRequestSelection(){resets++;state.selectedRequestId=null;state.selectedCaptureIdentity=null;}});
+  // Feed already-normalized retained rows to the native-only rebuild. This is
+  // offline reader compatibility, not restoration of a live debugger producer.
+  state.nativeRequests=api.requestsFromDebuggerNetwork(state.debuggerSession.network);
   api.rebuildTrafficRequests();
   const a=state.requests[0];state.selectedRequestId=a.id;state.selectedCaptureIdentity=api.apiCatalogRequestIdentity(a);assert(api.pin(a));
-  function refresh(change) {
+  function refresh(change, projectHistorical = true) {
     const previous=state.debuggerSession;
     // No render follows this production rebuild: model hidden Traffic, whose
     // former rendered-view guard must not retain evicted response bodies.
     state.trafficRenderedView={requests:state.requests};
     state.debuggerSession=structuredClone(previous);state.debuggerSession.generation++;
-    change?.(state.debuggerSession);api.rebuildTrafficRequests(previous);
+    change?.(state.debuggerSession);
+    if(projectHistorical)state.nativeRequests=api.requestsFromDebuggerNetwork(state.debuggerSession.network);
+    api.rebuildTrafficRequests(previous);
     assert.equal(state.trafficRenderedView,null,'Hidden refresh/clear/session change retires the old rendered snapshot');
   }
   return {state,api,refresh,resets:()=>resets,aborts:()=>aborts};
@@ -84,7 +89,7 @@ for(const [name,change] of [
   assert.equal(f.state.selectedCaptureIdentity,null,`${name}: no silent rebind`);assert.equal(f.api.baseline(),null,`${name}: baseline stays expired`);
 }
 {
-  const f=fixture();delete f.state.debuggerSession.network.requests[0].capture_owner;f.api.rebuildTrafficRequests();
+  const f=fixture();delete f.state.debuggerSession.network.requests[0].capture_owner;f.state.nativeRequests=f.api.requestsFromDebuggerNetwork(f.state.debuggerSession.network);f.api.rebuildTrafficRequests();
   // A legacy row can be explicitly selected, but cannot survive a focus epoch change.
   const a=f.state.requests[0];f.state.selectedCaptureIdentity=f.api.apiCatalogRequestIdentity(a);f.state.selectedRequestId=a.id;
   assert(f.api.pin(a));f.refresh(focusB);assert.equal(f.state.selectedCaptureIdentity,null);assert.equal(f.api.baseline(),null);
@@ -93,7 +98,7 @@ for(const [name,change] of [
   const f=fixture();const native={id:'native-row',origin:'live',operation:'request_started'};
   f.state.nativeRequests=[native];f.state.requests=[native];f.state.selectedRequestId=native.id;
   f.state.selectedCaptureIdentity=null;f.state.debuggerSession.network.capture_enabled=false;
-  f.refresh();assert.equal(f.state.selectedRequestId,native.id);assert.equal(f.resets(),0,'Native selection is untouched by HTTP ownership');
+  f.refresh(null,false);assert.equal(f.state.selectedRequestId,native.id);assert.equal(f.resets(),0,'Native selection is untouched by HTTP ownership');
 }
 {
   const f=fixture();const events=[{protocol_version:3,tab_id:'11',category:'canvas'},

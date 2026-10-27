@@ -89,18 +89,6 @@ mod tests {
                 assert!(valid_details(spec, &details));
             }
         }
-        for variant in spec["components"]["schemas"]["DebuggerAction"]["oneOf"]
-            .as_array()
-            .unwrap()
-        {
-            assert!(
-                variant["x-reb-requires-live-target"].is_boolean(),
-                "Every action must declare live target admission"
-            );
-        }
-        assert!(crate::validation::requires_live_target("pause"));
-        assert!(!crate::validation::requires_live_target("clear_console"));
-        assert!(crate::validation::requires_live_target("unknown"));
     }
     #[test]
     fn guidance_never_echoes_rejected_values() {

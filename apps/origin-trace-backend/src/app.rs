@@ -33,7 +33,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 37] = [
+const UI_ASSETS: [&str; 33] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -62,15 +62,11 @@ const UI_ASSETS: [&str; 37] = [
     "vm_debugger.js",
     "vm_program_workspace.js",
     "traffic_comparison.js",
-    "request_value_test.js",
     "field_provenance.js",
     "app.js",
-    "captured_vm_lab.js",
     "pane_layout.js",
     "native_console.js",
     "native_console_completion.js",
-    "element_screenshot.js",
-    "local_override_manager.js",
 ];
 #[derive(Clone, Copy)]
 enum PackageOperation {
@@ -176,7 +172,6 @@ impl App {
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
         });
         app.native_console.arm_live_bridge().await;
-        app.debugger.start().await;
         app
     }
     pub fn router(self: &Arc<Self>) -> Router {
@@ -356,7 +351,7 @@ impl App {
                 value["live_admission"] = json!(session_context::live_admission(
                     self.options.capture_mode(),
                     value["debugger_state"].as_str().unwrap_or("unavailable"),
-                    self.options.devtools_active_port.is_some(),
+                    false,
                 ));
                 value["broker_connected"] =
                     json!(self.options.socket.is_some() && self.broker_connected().await);
@@ -407,29 +402,6 @@ impl App {
                 value
             }
             "/api/local-analyst/runner" => self.analyst.state(),
-            "/api/debugger" => {
-                let wait = q.number("wait_ms", Some("0"), 32, false)?;
-                if wait > 25000 {
-                    return Err(Error::bad(
-                        "Debugger wait must be between 0 and 25000 milliseconds",
-                    ));
-                }
-                let notified = self.debugger.changed.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                let value = self.debugger.snapshot();
-                let current = format!("\"debugger-{}\"", value["generation"]);
-                if wait > 0
-                    && headers.get("if-none-match").and_then(|v| v.to_str().ok())
-                        == Some(current.as_str())
-                {
-                    let _ = tokio::time::timeout(Duration::from_millis(wait), notified).await;
-                }
-                let value = self.debugger.snapshot();
-                etag = Some(format!("\"debugger-{}\"", value["generation"]));
-                value
-            }
-            "/api/debugger/source" => self.debugger.source(q.required("script_id")?).await?,
             "/api/source-facts" => {
                 // Never infer identity from a URL, live script, or selected UI row.
                 if q.0
@@ -843,7 +815,6 @@ impl App {
                 }
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
-            "/api/debugger/actions" => self.debugger.action(value).await,
             "/api/native-console/actions" => self.native_console.action(value).await,
             "/api/capture/actions" => {
                 validation::schema("CaptureAction", value, 400)?;
@@ -949,6 +920,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             && !app.trusted(&parts.headers)
         {
             return Err(Error::new(403, "Local request origin rejected"));
+        }
+        if path == "/api/debugger" || path.starts_with("/api/debugger/") {
+            return Err(crate::debugger::removed());
         }
         // A preflight can race a backend restart at the same port. Bind each
         // cooperating client's request to this process before any dispatch.

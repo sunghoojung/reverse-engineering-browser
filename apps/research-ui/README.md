@@ -2,13 +2,34 @@
 
 Origin Trace reads local event, trace, signal, and artifact stores. The macOS
 application is the normal product path. The [Rust backend](../origin-trace-backend/)
-serves browser development and live debugger sessions, with the same HTTP
+serves browser development and native evidence sessions, with the same HTTP
 contracts and tools. The native Brave broker, artifact receiver, probes, and
 wire formats remain C++. See the [backend boundary](../../docs/architecture/origin-trace-backend-boundary.md).
 
 Project-wide authorization, capture, and privacy policy is in
 [SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
 and limits.
+
+## Native-only capture
+
+The application no longer launches or connects a CDP debugger. Debugger attach,
+Page source catalogs, live breakpoints/watches, CDP Memory Explorer, Experiments,
+request replay, runtime hooks, screenshot capture and local response overrides
+have been removed from the executable UI. Saved request definitions remain
+local authoring data; they cannot be sent from Collection. Field trace retains
+recorded identities and local decoding, not live lookup or replay.
+
+Native console, native owned-VM debugging, retained Sources/static analysis,
+local exports and native evidence inspection remain. Historical `cdp-attached`
+provenance labels and recorded event schemas remain readable; they do not enable
+an attachment. Older workflow descriptions below that mention removed CDP
+controls describe historical captures, not available execution paths.
+
+The Findings **Native observations** tab displays native Wasm module offsets,
+function indexes and unsigned selectors/default arms. These are physical Wasm
+dispatch observations, not recovered guest-interpreter PCs or guest opcodes.
+Host causality remains unproven. Run `node tools/check-native-only-ui.mjs` for
+the static shipped-asset removal contract; this does not replace rendered QA.
 
 ## VM desktop workspace
 
@@ -26,39 +47,6 @@ clears an excluding filter. Arrow keys, Home and End navigate visible listing
 rows. No-match filters keep the selected evidence available and disable stepping.
 These docks expose existing evidence, not a native-code decompiler or editable
 Ghidra project. The deterministic fixture remains explicitly opt-in.
-
-## Local file override manager
-
-In **Experiments → Interceptor**, create an isolated context and apply **Target**
-scope to its primary page. **Local file override** chooses a single browser File,
-validates at most 64 KiB of exact UTF-8, and shows inert preview text and SHA-256.
-Set the exact canonical URL (including query), GET/HEAD, content type and 1–300
-second lifetime. Review the bytes and settings, then **Prepare snapshot** and
-**Arm prepared override** separately. Preparation sends nothing; Arm sends only
-to the existing local debugger and never requests the target URL. Later matching
-requests may execute replacement JavaScript in that disposable target.
-
-Edits invalidate preparation. The snapshot is frozen; later on-disk edits never
-change armed bytes. The panel shows exact target, experiment, URL, digest and
-absolute expiry. Arm replaces the single existing rule slot. **Disarm exact
-override** uses the original identity guard, including after expiry or an unknown
-receipt, and cannot remove a different rule. A failed receipt is explicitly
-unknown and is never retried automatically. Public rule summaries omit URL
-queries, so a matching summary alone never confirms an unknown arm operation.
-
-The browser grants bytes, not a trusted OS path or symlink metadata. The CLI's
-strict regular-file and symlink checks are a separate workflow. This UI neither
-watches files nor saves them; clear drops preview bytes but retains the attempted
-identity for guarded disarm. Reloading loses that identity and never rearms;
-original expiry still applies. Arm transfers the selected bytes to the local
-backend and serves them only to matching disposable-target requests; it performs
-no third-party/provider upload. Native macOS file-picker behavior requires native
-validation. See [Scoped local overrides v1](../../protocol/local-overrides-v1.md).
-
-Native proxy destruction and redirect handoff are displayed as **incomplete**
-observations, with the final network outcome explicitly unavailable. They are
-not evidence that the underlying request failed or successfully completed. See
-the [native startup contract](../../protocol/native-network-startup-v1.md).
 
 ## Traffic identity and resource filters
 
@@ -371,16 +359,12 @@ history remain ephemeral. See [Native Console v2](../../protocol/native-console-
 for exact operation, bounds, contracts and required post-build verification.
 The synthetic wire fixture supplies scripted responses and never executes JS.
 
-### Private cookie import
+### Private cookie import (removed)
 
-For an explicitly selected Chrome/Firefox cookie export, use the separate
-[user-operated import tool](../../protocol/cookie-import-v1.md):
-`node tools/import-browser-cookies.mjs --browser /absolute/path/to/chromium`.
-It applies and privately verifies a strict supported subset in a fresh,
-short-lived off-record browser context. A second local confirmation is required
-before browsing; clear/expiry closes the context and owned browser. This is a
-terminal handoff, not a menu/API action or a cookie-enabled Traffic experiment.
-Real credentials must remain with the user. The tool is not an origin firewall.
+The former [cookie import tool](../../protocol/cookie-import-v1.md) is retired.
+It refuses before reading private input or launching a browser. There is no
+CDP transport, fallback, UI/API import action, or native replacement for cookie
+import. Offline export validation tests remain; they do not install cookies.
 
 ## Run
 

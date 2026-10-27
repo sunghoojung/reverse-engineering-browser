@@ -171,7 +171,7 @@ function restoreInvestigation(entry) {
     const panel = document.querySelector('#console-experiment-traffic');
     if (panel.dataset.session !== entry.consoleScope.session || panel.dataset.document !== entry.consoleScope.target) {investigationNotice('Return unavailable: this separate Console activity view has been replaced.', 'stale'); return false;}
   }
-  if (entry.runtimeHook && (runtimeHooksState()?.session_id !== entry.runtimeHook.sessionId || !runtimeHooksState()?.requests.some(item => item.id === entry.runtimeHook.id))) {investigationNotice('Return unavailable: the isolated request trail expired.', 'stale'); return false;}
+  if (entry.runtimeHook) {investigationNotice('Return unavailable: the isolated request trail expired.', 'stale'); return false;}
   if (entry.screen === 'evidence' && !evidenceWorkspace.canRestore(entry.evidence, request?.record ?? state.requests.find(item => item.id === state.selectedRequestId))) {
     investigationNotice('Return unavailable: the original Evidence request or selected native record is missing, changed or ambiguous.', 'stale'); return false;
   }
@@ -349,7 +349,6 @@ function openInvestigation({kind, identity, relation, inspectorTab, range}) {
     delete document.querySelector('#screen-traffic').dataset.consoleTraffic;
     document.querySelector('#console-experiment-traffic').hidden = true;
     state.selectedRuntimeHookRequest = null;
-    renderRuntimeHookTraffic();
     if (state.selectedRequestId !== result.record.id || kind === 'request') selectRequest(result.record.id, identity);
     if (inspectorTab) {state.inspectorTab = inspectorTab; renderInspector();}
     const ready = kind === 'trace' ? refreshOriginTrace() : null;

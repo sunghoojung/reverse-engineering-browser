@@ -18,7 +18,6 @@ pub mod float32;
 mod native_console;
 mod origin_trace;
 mod owned_vm_debugger;
-mod provenance;
 mod session_context;
 mod source_facts;
 mod validation;

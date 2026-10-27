@@ -44,17 +44,6 @@ pub fn schema(name: &str, value: &Value, status: u16) -> Result<()> {
         Error::new(status, format!("{name} contract is invalid: {e}"))
     })
 }
-/// Admission metadata lives beside each action contract so extensions cannot
-/// silently inherit a different target prerequisite from a dispatcher list.
-pub fn requires_live_target(action: &str) -> bool {
-    SPEC["components"]["schemas"]["DebuggerAction"]["oneOf"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|variant| variant["properties"]["action"]["const"] == action)
-        .is_none_or(|variant| variant["x-reb-requires-live-target"] != false)
-}
-
 pub fn fields(value: &Value, expected: &[&str], label: &str) -> Result<()> {
     let object = value
         .as_object()

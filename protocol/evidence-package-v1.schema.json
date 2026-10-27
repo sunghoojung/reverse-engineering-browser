@@ -561,6 +561,8 @@
             "request_completed",
             "request_failed",
             "vm_finding",
+            "vm_dispatch_sample",
+            "wasm_dispatch_observation",
             "artifact_captured",
             "artifact_capture_failed"
           ]

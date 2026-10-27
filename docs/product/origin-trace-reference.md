@@ -1,5 +1,11 @@
 # Origin Trace reference
 
+> Native-only migration: the legacy CDP debugger, browser automation, request
+> replay/interception, and related experiment controls described in older sections
+> below are retired. They are not current capabilities or fallback instructions.
+> See the [current UI guide](../../apps/research-ui/README.md) and
+> [native observation contract](../../protocol/native-wasm-dispatch-v1.md).
+
 The research UI is the human-facing investigation workspace.
 Project-wide authorization, capture, and privacy policy is defined in
 [`SAFETY.md`](../../SAFETY.md). This reference describes implemented UI

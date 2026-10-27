@@ -79,7 +79,8 @@ cp "${decoder_binary}" "${macos_path}/OriginTraceDecoder"
 chmod 755 "${macos_path}/OriginTraceDecoder"
 cp "${repo_root}/build/reb-event-broker" "${macos_path}/OriginTraceEventBroker"
 cp "${repo_root}/build/reb-artifact-receiver" "${macos_path}/OriginTraceArtifactReceiver"
-cp "${repo_root}/build/reb-debugger-transport" "${macos_path}/OriginTraceDebuggerTransport"
+# Never retain a retired transport in an incrementally rebuilt app bundle.
+rm -f "${macos_path}/OriginTraceDebuggerTransport"
 cp "${repo_root}/build/reb-native-vm-fixture" "${macos_path}/OriginTraceOwnedVmFixture"
 chmod 755 "${macos_path}/OriginTraceOwnedVmFixture"
 cp "${repo_root}/build/reb-console" "${macos_path}/OriginTraceNativeConsole"
@@ -88,7 +89,6 @@ cp "${repo_root}/build/reb-heap-snapshot" "${macos_path}/OriginTraceHeapSnapshot
 chmod 755 \
   "${macos_path}/OriginTraceEventBroker" \
   "${macos_path}/OriginTraceArtifactReceiver" \
-  "${macos_path}/OriginTraceDebuggerTransport" \
   "${macos_path}/OriginTraceHeapSnapshot"
 cp "${deobfuscation_binary}" "${macos_path}/OriginTraceDeobfuscator"
 chmod 755 "${macos_path}/OriginTraceDeobfuscator"

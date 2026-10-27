@@ -28,7 +28,7 @@
           'module_instantiated', 'request_started', 'response_completed', 'gap',
           'request_initiated', 'request_redirected', 'response_started',
           'request_completed', 'request_failed', 'vm_finding',
-          'vm_dispatch_sample',
+          'vm_dispatch_sample', 'wasm_dispatch_observation',
           'artifact_captured', 'artifact_capture_failed'
         ])
       };
@@ -227,6 +227,22 @@
           typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean';
       }
 
+      function decodeNativeWasmObservation(event) {
+        if (event?.type !== 'wasm_dispatch_observation' || event.protocol_version !== 3 || event.category !== 'vm' ||
+          event.payload_size !== 128 || event.payload_encoding !== 'hex' || event.payload_truncated !== false ||
+          event.flags !== 0 || event.parent_event_id !== '0' || Object.hasOwn(event,'dispatch_provenance') ||
+          !['session_id','sequence_number','monotonic_time_ns','frame_id','artifact_id'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) ||
+          !['process_id','thread_id'].every(key => isSafeIntegerInRange(event[key], 1, 0xffffffff)) ||
+          typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload)) return null;
+        const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
+        const view = new DataView(bytes.buffer);
+        if (view.getUint16(0,true) !== 1 || view.getUint16(2,true) !== 128 || bytes.slice(24).some(byte => byte !== 0)) return null;
+        const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
+          selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true)};
+        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
+          row.table_count < 16777216 && row.sample_index < 16 ? row : null;
+      }
+
       function isBrokerEvent(event) {
         if (!isPlainObject(event) || !Number.isInteger(event.protocol_version)) return false;
         const payloadLimit = event.protocol_version === 1 ? 48
@@ -261,7 +277,8 @@
         if (!isSafeIntegerInRange(event.status_code, -0x80000000, 0x7fffffff)) return false;
         if (!isSafeIntegerInRange(event.error_code, -0x80000000, 0x7fffffff)) return false;
         if (typeof event.payload_truncated !== 'boolean') return false;
-        return event.payload_truncated === Boolean(event.flags & 1);
+        return event.payload_truncated === Boolean(event.flags & 1) &&
+          (event.type !== 'wasm_dispatch_observation' || decodeNativeWasmObservation(event) !== null);
       }
 
       function isBrokerResponse(body) {
@@ -2414,7 +2431,7 @@
 
       function isVmOpcodeHandler(handler) {
         if (!isPlainObject(handler) || !hasOnlyKeys(handler, new Set([
-          'opcode', 'handler_index', 'state', 'source', 'label', 'operand_width', 'sample_count', 'notes', 'effects'
+          'opcode', 'handler_index', 'state', 'source', 'label', 'operand_width', 'sample_count', 'notes', 'effects', 'native_wasm_sample_count'
         ])) || !(handler.opcode === null || isSafeIntegerInRange(handler.opcode, 0, 0xffffffff)) ||
           !['observed', 'inferred', 'correlated', 'unknown'].includes(handler.state) ||
           !isVmOpcodeCoordinate(handler.source) || !isVmOpcodeEffects(handler.effects)) return false;
@@ -2422,8 +2439,11 @@
           (handler.label === undefined || isBoundedText(handler.label, 80)) &&
           isSafeIntegerInRange(handler.operand_width, 0, 8) &&
           isSafeIntegerInRange(handler.sample_count, 0, Number.MAX_SAFE_INTEGER) && isBoundedText(handler.notes, 240) &&
-          (handler.opcode !== null || (handler.state === 'unknown' && handler.sample_count === 0 &&
-            handler.handler_index === undefined && handler.effects.length === 0));
+          (handler.native_wasm_sample_count === undefined || isSafeIntegerInRange(handler.native_wasm_sample_count, 1, handler.sample_count)) &&
+          (handler.opcode !== null || (handler.handler_index === undefined && handler.effects.length === 0 &&
+            ((handler.state === 'unknown' && handler.sample_count === 0 && handler.native_wasm_sample_count === undefined) ||
+             (handler.state === 'observed' && handler.native_wasm_sample_count === handler.sample_count &&
+              handler.sample_count > 0 && /^br_table(?: f[0-9]+)? default$/.test(handler.label)))));
       }
 
       function isVmOpcodeSnapshot(snapshot) {
@@ -2638,11 +2658,27 @@
           inventory.candidates.some(site => site.byte_offset === inventory.selected_byte_offset && site.loop_depth > 0);
       }
 
+      function isNativeWasmObservation(row, workspace) {
+        if (!vmWorkspaceExact(row, ['event','function_index','module_byte_offset','selector','table_count','sample_index','selected_arm','is_default']) ||
+          !vmSampleEvent(row.event) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
+          !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
+          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,15) ||
+          row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
+        const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
+        return site ? site.kind === 'br_table' && site.function_index === row.function_index && site.arm_count === row.table_count
+          : (workspace.dispatch_inventory?.omitted_site_count ?? 0) > 0;
+      }
+      function nativeWasmMatchesHandler(row, handler) {
+        return row.module_byte_offset === handler.source.byte_offset &&
+          (row.is_default ? handler.opcode === null && /^br_table(?: f[0-9]+)? default$/.test(handler.label)
+            : handler.opcode === row.selector);
+      }
+
       function isVmOpcodeWorkspace(workspace) {
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
           'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory',
-          'evidence_class', 'machine_state', 'handler_tables'
+          'evidence_class', 'machine_state', 'handler_tables', 'native_wasm_observations', 'native_wasm_observation_count'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
@@ -2667,7 +2703,20 @@
           !isSafeIntegerInRange(workspace.sample_count, workspace.samples.length, Number.MAX_SAFE_INTEGER) ||
           !isVmByteCoverage(workspace.coverage, workspace.snapshots, workspace.handlers, workspace.unknowns) ||
           !isVmInstructionTraversal(workspace.traversal, workspace.snapshots, workspace.handlers)) return false;
-        const truncated = workspace.sample_count > workspace.samples.length;
+        const nativeRows = workspace.native_wasm_observations ?? [];
+        const nativeCount = workspace.native_wasm_observation_count ?? 0;
+        if ((workspace.native_wasm_observations === undefined) !== (workspace.native_wasm_observation_count === undefined) ||
+          (workspace.native_wasm_observations !== undefined && workspace.runtime !== 'webassembly') ||
+          !Array.isArray(nativeRows) || nativeRows.length > 4096 || !nativeRows.every(row => isNativeWasmObservation(row,workspace)) ||
+          !isSafeIntegerInRange(nativeCount,nativeRows.length,workspace.sample_count) ||
+          new Set([...workspace.samples,...nativeRows].map(row => vmSampleEventKey(row.event))).size !== workspace.samples.length + nativeRows.length) return false;
+        if (nativeRows.some(row => workspace.handlers.filter(handler => nativeWasmMatchesHandler(row,handler)).length > 1)) return false;
+        const nativeTruncated = nativeCount > nativeRows.length;
+        if (nativeTruncated !== workspace.coverage.omissions.some(row => row.reason === 'native-wasm-observation-limit') ||
+          (nativeTruncated && nativeRows.length !== 4096)) return false;
+        const legacyCount = workspace.sample_count - nativeCount;
+        if (legacyCount < workspace.samples.length) return false;
+        const truncated = legacyCount > workspace.samples.length;
         if (truncated !== workspace.coverage.omissions.some(row => row.reason === 'sample-limit') ||
           (truncated && workspace.samples.length !== 4096)) return false;
         const opcodeUses = new Map();
@@ -2684,16 +2733,21 @@
             opcodeUses.get(handler.opcode) > 1;
           // A br_table selector index is local to that instruction. One sample does not
           // prove that every site with the same number handled the guest opcode.
+          const nativeRetained = nativeRows.filter(row => nativeWasmMatchesHandler(row,handler)).length;
+          const handlerNative = handler.native_wasm_sample_count ?? 0;
+          if (handlerNative > nativeCount || handlerNative < nativeRetained || (!nativeTruncated && handlerNative !== nativeRetained) ||
+            (handlerNative > 0 && (workspace.runtime !== 'webassembly' || handler.state !== 'observed'))) return false;
+          const handlerLegacy = handler.sample_count - handlerNative;
           if (repeatedSelector) {
-            if (handler.sample_count !== 0 || handler.state === 'observed') return false;
-          } else if (handler.sample_count < retained || (!truncated && handler.sample_count !== retained)) return false;
-          if (!truncated && handler.state === 'observed' && retained > 0 &&
+            if (handlerLegacy !== 0 || (handlerNative === 0 && handler.state === 'observed')) return false;
+          } else if (handlerLegacy < retained || (!truncated && handlerLegacy !== retained)) return false;
+          if (!truncated && handlerNative === 0 && handler.state === 'observed' && retained > 0 &&
             !workspace.samples.some(sample => sample.opcode === handler.opcode && sample.provenance === undefined)) return false;
           total += handler.sample_count;
         }
         if (workspace.samples.some(sample => sample.provenance !== undefined) &&
           !workspace.coverage.omissions.some(row => row.reason === 'caller-samples-unverified')) return false;
-        if (!truncated && workspace.samples.length > 0 && workspace.samples.every(sample => sample.provenance !== undefined) &&
+        if (!truncated && nativeCount === 0 && workspace.samples.length > 0 && workspace.samples.every(sample => sample.provenance !== undefined) &&
           !workspace.coverage.omissions.some(row => ['sampler-unavailable', 'dispatch-sample-budget'].includes(row.reason))) return false;
         return total <= workspace.sample_count;
       }
@@ -2745,13 +2799,17 @@
         return matches.length === 1 ? matches[0] : null;
       }
 
+      function vmNativeWasmPositionText(row) {
+        return `Native Wasm byte ${row.module_byte_offset} · function ${row.function_index} · selector ${row.selector} · ${row.is_default ? 'default arm' : `arm ${row.selected_arm}`} · guest PC unknown`;
+      }
       function vmOpcodeSamplePositions(samples) {
-        return samples.slice(0, 4).map(sample =>
+        return samples.slice(0, 4).map(sample => sample.module_byte_offset !== undefined ? vmNativeWasmPositionText(sample) :
           `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`);
       }
 
       function vmOpcodeHandlerRow(workspace, handler) {
-        const retainedSamples = workspace.samples.filter(sample => sample.opcode === handler.opcode);
+        const retainedSamples = [...workspace.samples.filter(sample => sample.opcode === handler.opcode),
+          ...(workspace.native_wasm_observations ?? []).filter(row => nativeWasmMatchesHandler(row,handler))];
         return {
           key: `${handler.opcode}:${handler.handler_index ?? ''}:${handler.source.byte_offset}`,
           opcode: handler.opcode === null ? 'unknown' : `0x${handler.opcode.toString(16).padStart(2, '0')}`,
@@ -2774,7 +2832,8 @@
         const offset = first.source.byte_offset;
         const size = first.source.byte_size;
         const opcodes = new Set(handlers.map(handler => handler.opcode));
-        const retainedSamples = workspace.samples.filter(sample => opcodes.has(sample.opcode));
+        const retainedSamples = [...workspace.samples.filter(sample => opcodes.has(sample.opcode)),
+          ...(workspace.native_wasm_observations ?? []).filter(row => handlers.some(handler => nativeWasmMatchesHandler(row,handler)))];
         const notes = first.notes || 'No handler notes recorded.';
         const sameWidth = handlers.every(handler => handler.operand_width === first.operand_width);
         const brTable = handlers.every(handler => typeof handler.label === 'string' && handler.label.startsWith('br_table'));
@@ -2963,7 +3022,7 @@
           (link.guest_position === null || link.guest_position === undefined));
         let headline;
         if (staticOnly && links.length > 0) {
-          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null on every row. Same session, navigation, and frame is correlation, not a proven Wasm loader and not request-value provenance. Static handlers stay listed. This is the missing sampler, not an empty workspace. Session sources lists stored JavaScript and any joined live CDP scripts separately.';
+          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null on every row. Same session, navigation, and frame is correlation, not a proven Wasm loader and not request-value provenance. Static handlers stay listed. This is the missing sampler, not an empty workspace. Session sources lists stored artifacts only.';
         } else if (staticOnly) {
           headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null because no native dispatch samples were retained, and no host event shared this session, navigation, and frame (host-events-unavailable). This is not an empty workspace.';
         } else if (links.length === 0) {
@@ -2985,6 +3044,7 @@
         if (workspace.coverage.omissions.some(row => row?.reason === 'caller-samples-unverified')) {
           return 'Caller-supplied dispatch reports are unverified, not native runtime observations. They do not confirm handlers, guest PC units or host-call causality. Native sampler omissions remain where no native samples were retained.';
         }
+        if ((workspace.native_wasm_observation_count ?? 0) > 0) return 'Native Wasm dispatch observed. Exact physical br_table site and selector are retained; guest PC, guest opcode ISA and host-call causality remain unknown.';
         if (workspace.sample_count !== 0) return null;
         if (!workspace.coverage.omissions.some(row => row?.reason === 'sampler-unavailable')) return null;
         return 'Static only. sampler-unavailable. No dispatch samples were retained, so host links stay reason dispatch-samples-unavailable and guest_position null. Static handlers remain listed. This is the missing sampler, not an empty workspace. Real samples without rebuilding the browser come from reb-native-vm-fixture --emit-dispatch-events-v1.';

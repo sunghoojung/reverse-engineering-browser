@@ -372,7 +372,7 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         rejected["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("No request was sent")
+            .contains("Unknown OpenAPI operationId")
     );
     let after = client
         .get(format!("{}/api/debugger", server.url.trim_end_matches('/')))
@@ -434,7 +434,9 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(expanded_names.contains(&"debugger_action"));
+    assert!(!expanded_names.contains(&"debugger_action"));
+    assert!(!expanded_names.contains(&"get_debugger"));
+    assert!(!expanded_names.contains(&"get_debugger_source"));
     assert!(expanded_names.contains(&"get_vm_analysis"));
     let health = effects.request("tools/call", json!({"name": "get_health"}));
     assert_eq!(health["result"]["isError"], false);
@@ -976,7 +978,7 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
     std::fs::write(&canonical, &second.url).unwrap();
     let changed = mcp.request(
         "tools/call",
-        json!({"name": "debugger_action", "arguments": {"body": {"action": "pause"}}}),
+        json!({"name": "capture_action", "arguments": {"body": {"action": "stop"}}}),
     );
     assert_eq!(changed["result"]["isError"], true, "{changed}");
     assert!(tool_text(&changed).contains("Reconnect"), "{changed}");
@@ -1168,7 +1170,7 @@ fn backend_replacement_after_health_cannot_receive_an_old_instances_action() {
     let rejected = mcp.request(
         "tools/call",
         json!({
-            "name": "debugger_action", "arguments": {"body": {"action": "pause"}}
+            "name": "capture_action", "arguments": {"body": {"action": "stop"}}
         }),
     );
     assert_eq!(rejected["result"]["isError"], true, "{rejected}");
@@ -1200,7 +1202,7 @@ async fn instance_precondition_rejects_duplicate_headers_before_body_dispatch() 
         .unwrap();
     let id = health["instance_id"].as_str().unwrap();
     for headers in [vec![id, id], vec![id, "0:0"], vec!["not-an-instance"]] {
-        let mut request = client.post(format!("{}/api/debugger", server.url));
+        let mut request = client.post(format!("{}/api/capture/actions", server.url));
         for value in headers {
             request = request.header("x-reb-expected-instance", value);
         }
@@ -1262,7 +1264,7 @@ fn session_context_reports_actual_mcp_admission_and_action_guidance() {
         if !allow_effects {
             continue;
         }
-        for (name, valid) in [("debugger_action", "pause"), ("capture_action", "stop")] {
+        for (name, valid) in [("capture_action", "stop")] {
             let response = mcp.request("tools/call", json!({"name":name,"arguments":{"body":{}}}));
             assert_eq!(response["result"]["isError"], true);
             let error = &response["result"]["structuredContent"];

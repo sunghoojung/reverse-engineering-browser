@@ -105,6 +105,7 @@ EVENT_TYPES = {
     "response_started",
     "vm_finding",
     "vm_dispatch_sample",
+    "wasm_dispatch_observation",
 }
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)
@@ -192,6 +193,26 @@ def validate_event(event: object, line_number: int) -> None:
         or any(payload[72:])
     ):
         raise ValueError(f"line {line_number}: VM dispatch sample payload is invalid")
+    if event["type"] == "wasm_dispatch_observation" and (
+        protocol_version != 3
+        or event["category"] != "vm"
+        or event["flags"] != 0
+        or event["payload_truncated"]
+        or event["parent_event_id"] != "0"
+        or any(event[key] == "0" for key in (
+            "session_id", "sequence_number", "monotonic_time_ns", "frame_id", "artifact_id"
+        ))
+        or not 1 <= event["process_id"] <= 0xFFFFFFFF
+        or not 1 <= event["thread_id"] <= 0xFFFFFFFF
+        or len(payload) != 128
+        or payload[:4] != bytes((1, 0, 128, 0))
+        or int.from_bytes(payload[4:8], "little") >= 16777216
+        or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
+        or int.from_bytes(payload[16:20], "little") >= 16777216
+        or int.from_bytes(payload[20:24], "little") >= 16
+        or any(payload[24:])
+    ):
+        raise ValueError(f"line {line_number}: native Wasm dispatch observation is invalid")
     lowered_payload = payload.lower()
     if any(marker in lowered_payload for marker in SENSITIVE_PAYLOAD_MARKERS):
         raise ValueError(f"line {line_number}: payload contains sensitive HTTP metadata")

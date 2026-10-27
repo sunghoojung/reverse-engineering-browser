@@ -11,10 +11,12 @@ use std::{
     sync::LazyLock,
 };
 
+#[path = "vm_opcode_native_wasm.rs"]
+mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.5.0";
+const PRODUCER_VERSION: &str = "2.6.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1091,6 +1093,7 @@ pub(crate) fn workspace(
             }
         }
     }
+    let observations = native_wasm::collect(artifact, bytes, events);
     let budget_dropped = budget_losses
         .iter()
         .filter(|loss| {
@@ -1104,7 +1107,7 @@ pub(crate) fn workspace(
         omissions.push(json!({"reason":"caller-samples-unverified", "detail":
             "Caller-supplied dispatch reports were retained, not independently observed by a native sampler. They cannot confirm handlers, PC units, invocation identity or host-call causality."}));
     }
-    if native_samples.is_empty() && budget_dropped == 0 {
+    if native_samples.is_empty() && observations.count == 0 && budget_dropped == 0 {
         omissions.push(json!({"reason":"sampler-unavailable", "detail":
             "No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented. A caller-fed writer still needs a runtime producer. Static dispatch, Canvas calls and snapshots do not prove a guest PC."}));
     }
@@ -1137,6 +1140,16 @@ pub(crate) fn workspace(
                 handler["state"] = json!("observed");
             }
         }
+    }
+    observations.attach(&mut handlers);
+    if observations.invalid > 0 {
+        omissions.push(json!({"reason":"native-wasm-observation-invalid","detail":format!("Rejected {} malformed, mismatched or out-of-scope native Wasm observations.", observations.invalid)}));
+    }
+    if observations.count > observations.rows.len() as u64 {
+        omissions.push(json!({"reason":"native-wasm-observation-limit","detail":"Only the first 4096 native Wasm observations are retained; counts include all accepted observations."}));
+    }
+    if observations.count > 0 {
+        unknowns.push("Native br_table observations prove physical Wasm site and selector execution, not a guest PC, guest opcode ISA, invocation or host-call causality.".into());
     }
     if opcode_sites
         .iter()
@@ -1262,7 +1275,7 @@ pub(crate) fn workspace(
         "source_artifact_sha256": artifact["sha256"],
         "runtime": result["runtime"],
         "capture_mode": "unknown",
-        "sample_count": sample_count,
+        "sample_count": sample_count + observations.count,
         "samples": retained_samples,
         "finding_id": result["finding_id"],
         "model": model,
@@ -1272,6 +1285,10 @@ pub(crate) fn workspace(
         "unknowns": unknowns,
         "traversal": traversal,
     });
+    if runtime == "webassembly" {
+        workspace["native_wasm_observations"] = json!(observations.rows);
+        workspace["native_wasm_observation_count"] = json!(observations.count);
+    }
     if runtime == "webassembly"
         && let Some(inventory) = result["frontend"].get("dispatch_inventory")
     {
@@ -1388,6 +1405,55 @@ mod tests {
             "type":"vm_dispatch_sample",
             "payload":hex::encode(payload),
         })
+    }
+
+    #[test]
+    fn native_wasm_observations_bind_only_exact_sites_and_default() {
+        let bytes = wasm_fixture("two_br_tables");
+        for selector in [0, 2, u32::MAX] {
+            let event = native_wasm::tests::event(selector);
+            let (_, _, document) = analyze_artifact(&bytes, "wasm", &[event.clone(), event]);
+            assert_schema(&document);
+            let workspace = &document["workspaces"][0];
+            assert_eq!(workspace["sample_count"], 1);
+            assert_eq!(workspace["native_wasm_observation_count"], 1);
+            assert_eq!(workspace["samples"], json!([]));
+            let observed = workspace["handlers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|h| h["state"] == "observed")
+                .collect::<Vec<_>>();
+            assert_eq!(observed.len(), 1);
+            assert_eq!(observed[0]["source"]["byte_offset"], 47);
+            assert_eq!(observed[0]["native_wasm_sample_count"], 1);
+            assert_ne!(workspace["evidence_class"], "guest-opcode-isa");
+        }
+        let mut conflict = native_wasm::tests::event(1);
+        conflict["flags"] = json!(1);
+        let (_, _, document) =
+            analyze_artifact(&bytes, "wasm", &[native_wasm::tests::event(0), conflict]);
+        assert_eq!(
+            document["workspaces"][0]["native_wasm_observation_count"],
+            0
+        );
+    }
+    #[test]
+    fn native_wasm_observation_requires_digest_verified_artifact() {
+        let bytes = wasm_fixture("br_table");
+        let (root, _, document) = analyze_artifact(&bytes, "wasm", &[native_wasm::tests::event(0)]);
+        let hash = document["workspaces"][0]["source_artifact_sha256"]
+            .as_str()
+            .unwrap();
+        let mut corrupted = bytes;
+        corrupted[47] = 0x01;
+        fs::write(root.path().join(format!("blobs/{hash}.bin")), corrupted).unwrap();
+        crate::vm::store(root.path(), &root.path().join("events.jsonl")).unwrap();
+        let rebuilt: Value = serde_json::from_slice(
+            &fs::read(root.path().join("analysis/vm-opcode-workspace-v2.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt["workspaces"], json!([]));
     }
 
     fn budget_gap(sequence: u64, dropped: u64) -> Value {

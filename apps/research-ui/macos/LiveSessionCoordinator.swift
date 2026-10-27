@@ -121,7 +121,6 @@ final class LiveSessionCoordinator {
       macOSURL.appendingPathComponent("OriginTraceVMAnalyzer"),
       macOSURL.appendingPathComponent("OriginTraceEventBroker"),
       macOSURL.appendingPathComponent("OriginTraceArtifactReceiver"),
-      macOSURL.appendingPathComponent("OriginTraceDebuggerTransport"),
       macOSURL.appendingPathComponent("OriginTraceHeapSnapshot"),
       macOSURL.appendingPathComponent("OriginTraceDecoder"),
       macOSURL.appendingPathComponent("OriginTraceDeobfuscator"),
@@ -191,7 +190,6 @@ final class LiveSessionCoordinator {
     environment["REB_LIVE_SESSION_ROOT"] = sessionRootURL.path
     environment["REB_BRAVE_CACHE_ROOT"] = browserCacheRootURL.path
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
-    environment["REB_CDP_NETWORK_CAPTURE"] = captureNetworkContent ? "1" : "0"
     environment["REB_CAPTURE_CANVAS_IMAGES"] =
       environment["REB_CAPTURE_CANVAS_IMAGES"] ?? (captureNetworkContent ? "1" : "0")
     environment["REB_USE_SYSTEM_KEYCHAIN"] = useSystemKeychain ? "1" : "0"
@@ -202,10 +200,6 @@ final class LiveSessionCoordinator {
     environment["REB_ARTIFACT_RECEIVER_BINARY"] =
       macOSURL.appendingPathComponent(
         "OriginTraceArtifactReceiver"
-      ).path
-    environment["REB_DEBUGGER_TRANSPORT_BINARY"] =
-      macOSURL.appendingPathComponent(
-        "OriginTraceDebuggerTransport"
       ).path
     environment["REB_HEAP_SNAPSHOT_BINARY"] =
       macOSURL.appendingPathComponent(

@@ -541,6 +541,10 @@
           "items": {
             "$ref": "#/$defs/effect"
           }
+        },
+        "native_wasm_sample_count": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "allOf": [
@@ -554,12 +558,6 @@
           },
           "then": {
             "properties": {
-              "state": {
-                "const": "unknown"
-              },
-              "sample_count": {
-                "const": 0
-              },
               "effects": {
                 "maxItems": 0
               }
@@ -568,7 +566,41 @@
               "required": [
                 "handler_index"
               ]
-            }
+            },
+            "anyOf": [
+              {
+                "required": [
+                  "native_wasm_sample_count",
+                  "label"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "observed"
+                  },
+                  "sample_count": {
+                    "minimum": 1
+                  },
+                  "label": {
+                    "pattern": "^br_table .*default$"
+                  }
+                }
+              },
+              {
+                "not": {
+                  "required": [
+                    "native_wasm_sample_count"
+                  ]
+                },
+                "properties": {
+                  "state": {
+                    "const": "unknown"
+                  },
+                  "sample_count": {
+                    "const": 0
+                  }
+                }
+              }
+            ]
           }
         }
       ]
@@ -803,9 +835,22 @@
         "traversal": {
           "$ref": "#/$defs/traversal"
         },
-        "dispatch_inventory": {"$ref": "#/$defs/dispatchInventory"},
+        "dispatch_inventory": {
+          "$ref": "#/$defs/dispatchInventory"
+        },
         "captured_module_preview": {
           "$ref": "#/$defs/modulePreview"
+        },
+        "native_wasm_observations": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/nativeWasmObservation"
+          }
+        },
+        "native_wasm_observation_count": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "allOf": [
@@ -822,8 +867,30 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "required": [
+              "native_wasm_observations"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime": {
+                "const": "webassembly"
+              }
+            }
+          }
         }
-      ]
+      ],
+      "dependentRequired": {
+        "native_wasm_observations": [
+          "native_wasm_observation_count"
+        ],
+        "native_wasm_observation_count": [
+          "native_wasm_observations"
+        ]
+      }
     },
     "effectSpan": {
       "type": "object",
@@ -1580,6 +1647,58 @@
           "pattern": "^(?:[0-9a-f]{2})+$"
         },
         "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "nativeWasmObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "function_index",
+        "module_byte_offset",
+        "selector",
+        "table_count",
+        "sample_index",
+        "selected_arm",
+        "event",
+        "is_default"
+      ],
+      "properties": {
+        "function_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        "module_byte_offset": {
+          "type": "integer",
+          "minimum": 8,
+          "maximum": 16777215
+        },
+        "selector": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "table_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        "sample_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "selected_arm": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "event": {
+          "$ref": "#/$defs/eventIdentity"
+        },
+        "is_default": {
           "type": "boolean"
         }
       }

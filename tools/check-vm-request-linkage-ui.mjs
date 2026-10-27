@@ -121,6 +121,7 @@ async function loadHarness(root) {
     const navigation = Object.assign(new Element(), {open: false});
     const symbols = new Element();
     const document = {activeElement: null, createElement: tag => new Element(tag),
+      getElementById: id => screens.find(screen => screen.id === id) ?? null,
       querySelectorAll: selector => selector === '.screen' ? screens : selector === '.nav-button' ? [nav] : [],
       querySelector: selector => selector === '#advanced-navigation' ? navigation : selector === '#vm-symbol-list' ? symbols : null};
     const fixture = {calls, notices, sourceSelections, elements, nav, document,

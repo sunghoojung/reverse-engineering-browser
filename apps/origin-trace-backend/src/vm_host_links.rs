@@ -92,11 +92,24 @@ pub(crate) fn store(
         let mut omissions = Vec::new();
         let native_samples_available = samples
             .iter()
-            .any(|sample| sample.get("provenance").is_none());
+            .any(|sample| sample.get("provenance").is_none())
+            || workspace["native_wasm_observation_count"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0;
         if !native_samples_available {
             omissions.push("dispatch-samples-unavailable");
         }
-        if workspace["sample_count"].as_u64().unwrap_or(0) > samples.len() as u64 {
+        if workspace["sample_count"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(
+                workspace["native_wasm_observation_count"]
+                    .as_u64()
+                    .unwrap_or(0),
+            )
+            > samples.len() as u64
+        {
             omissions.push("dispatch-sample-retention-limit");
         }
         for event in events.iter().filter(|event| {
@@ -170,6 +183,18 @@ mod tests {
         assert_eq!(document["document_digest"], vm::digest(&unsigned).unwrap());
         assert!(!document.to_string().contains("PRIVATE HOST PAYLOAD"));
         document
+    }
+    #[test]
+    fn native_physical_dispatch_never_proves_guest_position() {
+        let (mut workspace, artifact, host) = inputs();
+        workspace["workspaces"][0]["samples"] = json!([]);
+        workspace["workspaces"][0]["native_wasm_observation_count"] = json!(1);
+        let document = analyze(&workspace, &[artifact], &[host]);
+        let result = &document["workspaces"][0];
+        assert_eq!(result["links"][0]["state"], "correlated");
+        assert_eq!(result["links"][0]["reason"], "guest-position-unproven");
+        assert!(result["links"][0]["guest_position"].is_null());
+        assert_eq!(result["omissions"], json!([]));
     }
     #[test]
     fn exact_retained_dispatch_parent_proves_position_without_payload() {

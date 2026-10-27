@@ -33,8 +33,6 @@ heap-snapshot: $(HEAP_SNAPSHOT_BINARY)
 
 decoder: $(DECODER_BINARY)
 
-debugger-transport: $(DEBUGGER_TRANSPORT_BINARY)
-
 native-console-build: $(NATIVE_CONSOLE_BINARY)
 
 native-console: native-console-build
@@ -43,7 +41,7 @@ native-console: native-console-build
 native-console-check: native-console-build origin-trace-backend
 	python3 tools/check-native-console.py --binary $(NATIVE_CONSOLE_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
 
-e2e: native-request-identity-check origin-trace-backend native-vm-fixture producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder native-console-check
+e2e: native-request-identity-check origin-trace-backend native-vm-fixture producer broker artifact-producer artifact-receiver heap-snapshot decoder native-console-check
 	@mkdir -p $(BUILD_DIR)/sessions
 	python3 tools/check-native-request-identity.py --broker $(BROKER_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
@@ -84,19 +82,12 @@ ui: e2e heap-snapshot decoder deob-worker-build
 origin-trace-backend:
 	cargo build --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 
-traffic-capture-check: origin-trace-backend debugger-transport broker
-	node tools/check-browser-test-process.mjs
-	node tools/check-traffic-multitarget.mjs
-	node tools/check-traffic-browser-sessions.mjs
-	node tools/check-traffic-multitarget-browser.mjs
+# CDP-backed live-browser operations were removed, not silently emulated.
+traffic-capture-check backend-e2e element-screenshot-ui-check:
+	@echo "Removed CDP workflow: use native capture checks and backend tests." >&2
+	@exit 2
 
-backend-e2e: traffic-capture-check heap-snapshot decoder deob-worker-build
-	node tools/check-origin-trace-debugger.mjs
-
-element-screenshot-ui-check: origin-trace-backend debugger-transport heap-snapshot decoder deob-worker-build
-	node tools/check-origin-trace-debugger.mjs --element-screenshot-ui-browser
-
-app-build: heap-snapshot decoder broker artifact-receiver debugger-transport native-console-build $(NATIVE_VM_FIXTURE_BINARY)
+app-build: heap-snapshot decoder broker artifact-receiver native-console-build $(NATIVE_VM_FIXTURE_BINARY)
 	./scripts/build-research-app.sh
 
 app: app-build
@@ -110,7 +101,7 @@ app-demo: app-build e2e
 		--signal-store "$(CURDIR)/$(BUILD_DIR)/sessions/request-signals.jsonl" \
 		--artifacts "$(CURDIR)/$(BUILD_DIR)/sessions/artifacts"
 
-live: app-build broker artifact-receiver debugger-transport
+live: app-build broker artifact-receiver
 	./scripts/run-live-session.sh
 
 deob-benchmark: deob-worker-build

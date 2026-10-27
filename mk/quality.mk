@@ -12,8 +12,15 @@ magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decode
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
 
-check: all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
+check: native-wasm-dispatch-golden all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
+	rm -f "$(abspath $(BUILD_DIR)/native-wasm-workspace.json)"
+	REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
+		REB_NATIVE_WASM_WORKSPACE_OUTPUT="$(abspath $(BUILD_DIR)/native-wasm-workspace.json)" \
+		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml native_wasm_cpp_golden -- --ignored
+	REB_NATIVE_WASM_WORKSPACE_INPUT="$(abspath $(BUILD_DIR)/native-wasm-workspace.json)" \
+		REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
+		node tools/check-vm-opcode-workspace-ui.mjs --fixture-only
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
 		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml owned_vm_real_helper -- --ignored
@@ -113,9 +120,6 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 javascript-check: capture-completeness-check
-	node tools/check-live-wasm.mjs
-	node tools/check-runtime-import-object.mjs
-	node tools/check-captured-vm-lab.mjs
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-vm-request-linkage-ui.mjs
@@ -124,14 +128,12 @@ javascript-check: capture-completeness-check
 	node tools/check-event-window.mjs
 	node tools/check-traffic-retained-focus.mjs
 	node tools/check-traffic-capture-qa.mjs
-	node tools/check-public-demo-passive-smoke.mjs
 	node tools/check-websocket-inspection.mjs
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
 	node tools/check-captured-export-ui.mjs
 	node tools/check-local-overrides.mjs
-	node tools/check-local-override-manager.mjs
 	node tools/check-graphql-sdl.mjs
 	node tools/check-passive-security.mjs
 	node tools/check-marker-fuzz.mjs
@@ -158,7 +160,6 @@ javascript-check: capture-completeness-check
 	node tools/check-vm-observed-path.mjs
 	node tools/check-vm-compare-cli.mjs
 	node tools/check-python-client-project.mjs
-	node tools/check-element-screenshot.mjs
 	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-launcher.mjs --cleanup-only
@@ -177,8 +178,9 @@ capture-completeness-check:
 	node tools/check-capture-completeness-report.mjs
 
 # Exact browser version must be explicitly selected with REB_REFERENCE_BROWSER_VERSION.
-capture-completeness-browser-check: capture-completeness-check origin-trace-backend debugger-transport
-	node tools/check-capture-completeness-browser.mjs .
+capture-completeness-browser-check:
+	@echo "CDP capture comparison was removed; native-browser acceptance requires a rebuilt Brave." >&2
+	@exit 2
 
 .PHONY: native-artifact-capture-check
 

@@ -1,4 +1,3 @@
-import {selectRenderedOption} from './rendered-keyboard.mjs';
 // Original scripted native replies. These fixtures never execute page JavaScript.
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -70,9 +69,6 @@ export function createConsoleFixture() {
 // Input coordinates must be measured after the shared pane refresh and the
 // disclosure's asynchronous toggle/ResizeObserver positioning have painted.
 // This observes rendering only; strict hit testing and real input stay in click.
-async function settleConsoleLayout(evaluate) {
-  await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-}
 
 // Deterministically model the browser's scroll clamping when the shared
 // divider temporarily expands a scrollport during restore/measure/reapply.
@@ -148,11 +144,11 @@ async function checkConsolePaneScroll(root) {
   closeDock();reopenDock();
   assert.throws(pointerClick,/Pane refresh moved the summary/,'The original immediate click must expose the scheduling counterexample');
   closeDock();reopenDock();
-  await settleConsoleLayout(async expression=>{
-    const queued=queue.size,result=runInNewContext(expression,context);
+  {
+    const queued=queue.size,result=runInNewContext('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))',context);
     assert(result&&typeof result.then==='function'&&queue.size>queued,'Readiness must observe a future render frame');
-    flush();return await result;
-  });
+    flush();await result;
+  }
   assert.doesNotThrow(pointerClick,'Read-only paint readiness must precede strict measurement and pointer delivery');
   console.log('PASS Console immediate-reopen pointer counterexample and read-only paint readiness (production pane scheduler; not rendered QA)');
   for(let i=0;i<65;i++){const owner=scrollOwner(800,()=>100);owner.scrollTop=10;extraOwners.push(owner);documentEvents.scroll({target:owner});}flush();mutations[0]([{attributeName:'hidden'}]);flush();
@@ -354,211 +350,4 @@ export async function checkConsoleDOM(root) {
   const broken=createConsoleFixture();const request={url:'/api/native-console/actions',async *[Symbol.asyncIterator](){yield '{malformed';}},reply={destroyed:false,writeHead(status){this.status=status;},end(text){this.text=text;}};assert.equal(await broken.handle(request,reply),true);assert.equal(reply.status,500);assert.equal(broken.errors.length,1);
   const wrong={url:'/api/native-console/actions',async *[Symbol.asyncIterator](){yield JSON.stringify({action:'runtime',session_id:'wrong',target_id:'101',command:{operation:'poll'}});}};await broken.handle(wrong,reply);assert.equal(reply.status,500);assert.equal(broken.receipts.at(-1).phase,'failed');assert.equal(broken.errors.length,2);
   console.log('PASS Console serialized command/result identity, editable drafts, bounded property paging, shrink/regrowth and focus, held-poll Clear epochs, atomic malformed-poll/timestamp recovery without coercion, inert rendering, retry/reconnect, fixture error receipts, and transcript/filter/history bounds (DOM fixture; not rendered QA)');
-}
-
-export async function checkConsoleInteractions({evaluate,viewport,click,key,wheel,type,screenshot,fixture,recordGeometry=()=>{}}) {
-  const eventually=async(predicate,message)=>{for(let i=0;i<150;i++){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,30));}assert.fail(message);};
-  const until=(expression,message)=>eventually(()=>evaluate(expression),message);
-  const press=value=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Escape:27,ArrowDown:40,ArrowUp:38,Home:36,Tab:9}[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
-  const reveal=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`);await settleConsoleLayout(evaluate);await click(selector);};
-  const fill=async(selector,text)=>{await click(selector);await key('a','KeyA',{modifiers:process.platform==='darwin'?4:2,windowsVirtualKeyCode:65});await type(text);};
-  const evaluations=()=>fixture.calls.filter(call=>call.command?.operation==='evaluate');
-  const commandChecks=[];
-  const finishCommand=async record=>{
-    await eventually(()=>evaluations().length===record.before+1,`No unique native evaluation for ${record.source}`);
-    const action=evaluations().at(-1);assert.equal(action.command.source,record.source);assert.equal(action.session_id,record.session);assert.equal(action.target_id,record.document);
-    let receipt;
-    await eventually(()=>{receipt=fixture.receipts.find(item=>item.sequence>record.receiptSequence&&item.operation==='evaluate'&&item.source===record.source&&item.session_id===record.session&&item.target_id===record.document);return receipt?.phase==='complete';},`Missing evaluation response receipt for ${record.source}`);
-    const commandSelector=`.native-console-command[data-command-number="${record.number}"][data-console-session="${record.session}"][data-console-document="${record.document}"]`;
-    await until(`(()=>{const row=document.querySelector(${JSON.stringify(commandSelector)});return row && !row.querySelector('.native-console-command-status').textContent.includes('Running') && document.querySelector('#native-console-run').textContent==='Run';})()`,`Missing terminal command ownership for ${record.source}`);
-    if(receipt.http_status!==200)assert.match(await evaluate(`document.querySelector(${JSON.stringify(commandSelector)}).textContent`),/Outcome unavailable/);
-    else {
-      const resultSelector=`.native-console-result:not(.native-console-command)[data-command-number="${record.number}"][data-console-session="${record.session}"][data-console-document="${record.document}"][data-request-id="${receipt.request_id}"]`;
-      await until(`!!document.querySelector(${JSON.stringify(resultSelector)})`,`Missing exact session/document/request result for ${record.source}`);
-      assert.equal(await evaluate(`document.querySelector(${JSON.stringify(commandSelector)}).dataset.requestId`),receipt.request_id);
-    }
-    assert.equal(evaluations().length,record.before+1,'A Run must issue exactly one evaluation');
-    commandChecks.push({source:record.source,command_number:record.number,session_id:record.session,document_id:record.document,native_request_id:receipt.request_id,http_status:receipt.http_status,status:receipt.status,trigger:record.trigger});
-    return record;
-  };
-  const command=async(source,wait=true,trigger='keyboard')=>{
-    const record={source,before:evaluations().length,receiptSequence:fixture.receiptSequence,session:fixture.session,document:fixture.target,trigger};
-    const beforeNumber=await evaluate("Math.max(0,...[...document.querySelectorAll('.native-console-command')].map(row=>Number(row.dataset.commandNumber)))");
-    await fill('#native-console-source',source);await press('Escape');if(trigger==='pointer')await click('#native-console-run');else await press('Enter');
-    await until(`Array.from(document.querySelectorAll('.native-console-command')).some(row=>Number(row.dataset.commandNumber)>${beforeNumber}&&row.dataset.command===${JSON.stringify(source)}&&row.dataset.consoleSession===${JSON.stringify(record.session)}&&row.dataset.consoleDocument===${JSON.stringify(record.document)})`,`Run did not create a newly owned command for ${source}`);
-    record.number=await evaluate(`Array.from(document.querySelectorAll('.native-console-command')).find(row=>Number(row.dataset.commandNumber)>${beforeNumber}&&row.dataset.command===${JSON.stringify(source)}).dataset.commandNumber`);
-    if(wait)await finishCommand(record);return record;
-  };
-  const selectDocument=async()=>{
-    await selectRenderedOption({evaluate,click,key,selector:'#native-console-target',index:1});
-    await until("!document.querySelector('#native-console-source').disabled",'Explicit document selection failed');
-  };
-  const connectionSnapshot=()=>evaluate(`(()=>{
-    const connection=document.querySelector('#native-console-connection');
-    const box=node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
-    const summary=connection.querySelector('summary'),bounds=box(summary),hit=document.elementFromPoint((bounds.left+bounds.right)/2,(bounds.top+bounds.bottom)/2);
-    return {open:connection.open,panelHidden:document.querySelector('#native-console-panel').hidden,panel:box(document.querySelector('#native-console-panel')),summary:bounds,summaryHit:summary.contains(hit),hit:{id:hit?.id,tag:hit?.tagName},menu:box(connection.querySelector('.native-console-connection-body')),stop:box(document.querySelector('#native-console-stop')),tracks:document.querySelector('#workspace').style.getPropertyValue('grid-template-rows')};
-  })()`);
-  const openConnection=async()=>{
-    await settleConsoleLayout(evaluate);
-    const before=await connectionSnapshot();recordGeometry({label:'Session settings before pointer click',...before});
-    assert.equal(before.open,false,'Session settings must start closed; never blindly toggle an already-open disclosure');
-    assert.equal(before.panelHidden,false);assert(before.summaryHit,'The settled summary must own its pointer target');
-    await click('#native-console-connection > summary');
-    await settleConsoleLayout(evaluate);
-    const after=await connectionSnapshot();recordGeometry({label:'Session settings after one pointer click',...after});
-    assert.equal(after.open,true,'Session settings must open from one real summary click');
-    assert.deepEqual(after.summary,before.summary,'Opening Session settings must not race dock geometry');
-  };
-  const refresh=async()=>{await openConnection();await reveal('#native-console-refresh');await until("!document.querySelector('#native-console-target').disabled",'Document refresh did not settle');await selectDocument();};
-  const geometry=async()=>{
-    const value=await evaluate(`(()=>{const box=id=>{const r=document.querySelector(id).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height}};return {panel:box('#native-console-panel'),scroll:box('#native-console-scroll'),form:box('#native-console-form'),run:box('#native-console-run'),width:innerWidth,height:innerHeight};})()`);
-    assert(value.scroll.height>=28,'Transcript must retain a readable line');assert(value.scroll.bottom<=value.form.top,'Composer must not overlap transcript');
-    assert(value.form.bottom<=value.panel.bottom+1&&value.run.right<=value.width&&value.run.left>=0,'Composer must remain visible');return value;
-  };
-  const upperPaneChecks=[];
-  const upperPane=async label=>{
-    const value=await evaluate(`(()=>{
-      const box=node=>{const r=node.getBoundingClientRect();return {top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:r.height};};
-      const pane=document.querySelector('#screen-traffic .request-pane'),tools=pane.querySelector('.network-tools'),notice=pane.querySelector('.network-notice'),searchStatus=pane.querySelector('.request-search-status'),scope=pane.querySelector('.request-scope'),consolePanel=document.querySelector('#native-console-panel');
-      return {label:${JSON.stringify(label)},viewport:{width:innerWidth,height:innerHeight},pane:{...box(pane),scrollTop:pane.scrollTop,clientHeight:pane.clientHeight,scrollHeight:pane.scrollHeight},tools:box(tools),filters:[...tools.querySelectorAll('.type-filter')].map(box),searchMode:document.querySelector('#request-search-scope').value,searchStatus:{...box(searchStatus),hidden:searchStatus.hidden},notice:{...box(notice),hidden:notice.hidden},scope:box(scope),head:box(pane.querySelector('.request-head')),console:box(consolePanel),consoleHidden:consolePanel.hidden};
-    })()`);
-    upperPaneChecks.push(value);recordGeometry(value);
-    assert(value.filters.every(filter=>filter.top>=value.tools.top-1&&filter.bottom<=value.tools.bottom+1),`${label}: resource filters must fit inside their intrinsic toolbar row`);
-    if(!value.searchStatus.hidden){
-      assert(value.searchStatus.top>=value.tools.bottom-1,`${label}: content-search status must remain below the toolbar`);
-      assert(value.searchStatus.height>0,`${label}: selected content-search status must be visible`);
-    }
-    const aboveScope=value.searchStatus.hidden?value.tools.bottom:value.searchStatus.bottom;
-    if(value.notice.hidden){
-      assert.equal(value.notice.height,0,`${label}: hidden Traffic status must occupy no space`);
-      assert(value.scope.top>=aboveScope-1,`${label}: target scope must follow the toolbar when status is hidden`);
-    }else{
-      assert(value.notice.top>=aboveScope-1,`${label}: warning must remain below filters and any visible search status`);
-      assert(value.notice.height>0,`${label}: a visible warning must keep its intrinsic height`);
-      assert(value.scope.top>=value.notice.bottom-1,`${label}: target scope must follow the warning`);
-    }
-    assert(value.head.top>=value.scope.bottom-1,`${label}: request header must remain below scope controls`);
-    if(!value.consoleHidden)assert(value.pane.bottom<=value.console.top+1,`${label}: upper pane must stay above Console`);
-    return value;
-  };
-  const scrollUpperPane=async label=>{
-    let before=await upperPane(label);
-    if(before.pane.scrollHeight<=before.pane.clientHeight+1){
-      assert(before.notice.hidden,`${label}: a Requests pane that fits must be hiding the status line`);
-      return;
-    }
-    if(before.pane.scrollTop>0){await wheel('#screen-traffic .request-pane',-Math.max(1000,before.pane.scrollHeight),'scrollbar');before=await upperPane(label+' prepared by wheel');assert(before.pane.scrollTop<=1,`${label}: genuine wheel must prepare the top boundary`);}
-    const nestedBefore=await evaluate("({rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
-    await wheel('#screen-traffic .request-pane',100,'scrollbar');
-    const after=await upperPane(label+' after scroll');
-    assert(after.pane.scrollTop>before.pane.scrollTop,`${label}: upper-pane wheel must reach overflowed content`);
-    assert.equal(after.console.top,before.console.top,`${label}: upper-pane scrolling must not move Console`);
-    assert.equal(after.pane.clientHeight,before.pane.clientHeight,`${label}: pure scrolling must not resize the upper pane`);
-    assert.deepEqual(await evaluate("({rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})"),nestedBefore,`${label}: outer scroll must not consume a nested list or Console offset`);
-    await wheel('#screen-traffic .request-pane',-1000,'scrollbar');
-    assert((await upperPane(label+' restored top')).pane.scrollTop<=1,`${label}: genuine wheel must restore the top boundary`);
-  };
-  const scrollNestedLedger=async label=>{
-    await wheel('#screen-traffic .request-pane',1000,'scrollbar');
-    const before=await evaluate("({outer:document.querySelector('#screen-traffic .request-pane').scrollTop,rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
-    await wheel('#request-rows',84);
-    const after=await evaluate("({outer:document.querySelector('#screen-traffic .request-pane').scrollTop,rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
-    recordGeometry({label:label+' nested ledger ownership',before,after});
-    assert(after.rows>before.rows,`${label}: nested request ledger must scroll independently`);assert.equal(after.outer,before.outer,`${label}: nested wheel must not move its parent`);assert.equal(after.console,before.console,`${label}: nested wheel must not move Console`);
-    // Repeated real broker refreshes render Requests and Inspector while both
-    // scroll owners are mid-read. Never wait around or disable periodic refresh.
-    for(let i=0;i<3;i++){
-      await until("(async()=>{if(state.refreshing)return false;await refresh();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return true;})()",'An owned broker refresh must execute and finish');
-      const retained=await evaluate("({outer:document.querySelector('#screen-traffic .request-pane').scrollTop,rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
-      recordGeometry({label:label+' broker refresh '+(i+1),before:after,after:retained});
-      assert.deepEqual(retained,after,`${label}: broker refresh must retain outer, ledger and Console reading offsets`);
-    }
-    await wheel('#screen-traffic .request-pane',-1000,'scrollbar');
-    assert.equal(await evaluate("document.querySelector('#request-rows').scrollTop"),after.rows,`${label}: scrolling the parent must preserve the nested reading position`);
-  };
-  await click('#native-console-toggle');await until("!document.querySelector('#native-console-start').disabled",'Availability never became ready');
-  await screenshot('console-connect');await fill('#native-console-url','https://fixture.invalid/console');await click('#native-console-start');
-  await until("document.querySelector('#native-console-target').options.length===2",'Document listing missing');await selectDocument();
-  await geometry();await screenshot('console-ready');
-  // Real keyboard resizing uses the shared app divider, not injected layout CSS.
-  const beforeResize=await geometry();const separatorBefore=await evaluate("Number(document.querySelector('#pane-divider-native-console').getAttribute('aria-valuenow'))");
-  await click('#pane-divider-native-console');for(let i=0;i<4;i++)await key('ArrowUp','ArrowUp',{modifiers:8,windowsVirtualKeyCode:38});
-  const afterResize=await geometry();await upperPane('enlarged dock');assert(afterResize.panel.height>beforeResize.panel.height,'Keyboard divider must actually enlarge the dock');assert(await evaluate("Number(document.querySelector('#pane-divider-native-console').getAttribute('aria-valuenow'))")<separatorBefore,'Separator value must track the resize');
-  await command('fixture.object');assert.equal(fixture.calls.filter(call=>call.command?.operation==='inspect').length,0);
-  await reveal('.native-console-object > summary');await until("document.querySelectorAll('.native-console-property').length===16",'Object properties missing');
-  await screenshot('console-object-properties');
-  await reveal('.native-console-property-pager button:nth-child(2)');await until("document.querySelector('.native-console-properties').textContent.includes('property16')",'Property next page missing');
-  assert.equal(await evaluate("document.querySelectorAll('.native-console-property').length"),16);
-  fixture.inspectMode='error';await reveal('.native-console-property-pager button:nth-child(2)');await until("document.querySelector('.native-console-property-status').textContent.includes('expired')",'Inspection error missing');await screenshot('console-inspection-retry');
-  fixture.inspectMode='ok';await reveal('.native-console-property-pager button:nth-child(3)');await until("document.querySelector('.native-console-properties').textContent.includes('property32')",'Inspection retry failed');
-  // Shrink/regrowth uses genuine native offset semantics, with keyboard focus
-  // staying on a usable pager action when Next becomes unavailable.
-  await reveal('.native-console-property-pager button:nth-child(1)');await until("document.querySelector('.native-console-properties').textContent.includes('property16')",'Previous page missing');
-  fixture.propertyCount=4;await reveal('.native-console-property-pager button:nth-child(2)');await until("document.querySelector('.native-console-property-status').textContent.includes('4 properties remain')",'Live shrink was treated as malformed');assert.equal(await evaluate("document.activeElement.textContent"),'First properties');
-  await screenshot('console-shrunk-object');fixture.propertyCount=48;await press('Tab');assert.equal(await evaluate("document.activeElement.textContent"),'Reload this page');await press('Enter');await until("document.querySelector('.native-console-properties').textContent.includes('property32')",'Explicit reload did not recover regrowth');assert.equal(await evaluate("document.activeElement.textContent"),'Previous properties');
-  const slowCommand=await command('fixture.slow',false);await until("document.querySelector('#native-console-run').textContent==='Running…'",'Running state missing');
-  await fill('#native-console-source','next draft');await press('Escape');await press('Enter');assert.equal(fixture.calls.filter(call=>call.command?.source==='next draft').length,0);
-  await screenshot('console-running-editable-draft');fixture.release();await finishCommand(slowCommand);assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'next draft');
-  await command('fixture.fail');await until("document.querySelector('#native-console-source').disabled",'Connection failure not visible');await screenshot('console-transport-failure');await refresh();
-  const inspections=fixture.calls.filter(call=>call.command?.operation==='inspect').length;
-  await reveal('.native-console-property-pager button:nth-child(1)');await until("document.querySelector('.native-console-property-status').textContent.includes('earlier document')",'Stale value identity was not rejected');assert.equal(fixture.calls.filter(call=>call.command?.operation==='inspect').length,inspections);
-  await command('fixture.stale');await until("!document.querySelector('#native-console-target').value",'Stale document was retained');await refresh();
-  await command('fixture.throw');assert.equal(await evaluate("document.querySelector('#native-console-output script')"),null);
-  fixture.messages.push({level:'info',text:'old poll before Clear',time:0,truncated:false});fixture.pollMode='pending';await eventually(()=>fixture.pending.length>0,'Quiet poll did not enter held state');
-  await click('#native-console-clear');assert.equal(await evaluate("document.querySelector('#native-console-output').children.length"),0);
-  const afterClear=await command('fixture.afterClear',false);await type('new draft after Clear');fixture.pollMode='ok';fixture.release();await finishCommand(afterClear);
-  assert.doesNotMatch(await evaluate("document.querySelector('#native-console-output').textContent"),/old poll before Clear/);assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'new draft after Clear');assert.equal(await evaluate("document.activeElement.id"),'native-console-source');
-  const beforeMalformed=await evaluate("document.querySelector('#native-console-output').textContent");fixture.messages.push({level:'info',text:'must not partially append',time:0},{level:'invented',text:'invalid',time:0});
-  await until("document.querySelector('#native-console-source').disabled",'Malformed quiet poll did not fail closed');assert.equal(await evaluate("document.querySelector('#native-console-output').textContent"),beforeMalformed);await screenshot('console-malformed-poll');await refresh();
-  const beforeMalformedTime=await evaluate("document.querySelector('#native-console-output').textContent");fixture.messages.push({level:'info',text:'must remain atomic',time:0},{level:'info',text:'bad timestamp',time:{valueOf:0,toString:0}});
-  await until("document.querySelector('#native-console-source').disabled",'Malformed timestamp did not fail closed');assert.equal(await evaluate("document.querySelector('#native-console-output').textContent"),beforeMalformedTime);assert.match(await evaluate("document.querySelector('#native-console-notice').textContent"),/Malformed page message/);await screenshot('console-malformed-timestamp');await refresh();
-  for(let i=0;i<140;i++)fixture.messages.push({level:i%9?'info':'warning',text:`Synthetic message ${i} · <script>inert</script>`,time:0,truncated:false});
-  await until("document.querySelector('#native-console-output-count').textContent.includes('older removed')",'Output eviction not visible');
-  const upperBeforeConsoleWheel=await evaluate("document.querySelector('#screen-traffic .request-pane').scrollTop");
-  await wheel('#native-console-scroll',-1000);assert.equal(await evaluate("document.querySelector('#screen-traffic .request-pane').scrollTop"),upperBeforeConsoleWheel,'Console wheel must preserve the upper pane reading position');await until("!document.querySelector('#native-console-latest').hidden",'Latest output navigation missing');
-  const before=await evaluate("document.querySelector('#native-console-scroll').scrollTop");fixture.messages.push({level:'info',text:'Synthetic new arrival',time:0,truncated:false});
-  await until("document.querySelector('#native-console-latest').textContent.includes('new')",'New output indicator missing');
-  const after=await evaluate("document.querySelector('#native-console-scroll').scrollTop");assert(after<=before+1,'New output must not jump a reader down the transcript');await click('#native-console-latest');
-  assert.equal(await evaluate("document.querySelector('#native-console-latest').hidden"),true);
-  await click('#native-console-search');await type('absent-result');await until("!document.querySelector('#native-console-no-matches').hidden",'No-match state missing');await press('Escape');
-  assert.equal(await evaluate("document.activeElement.id"),'native-console-source');
-  // Original inert UI records make the inner ledger scrollable independently
-  // of its toolbar-owning parent. They do not enable capture or run target code.
-  await evaluate("state.requests=Array.from({length:40},(_,i)=>({id:'console-scroll-'+i,path:'https://fixture.invalid/scroll-item-'+i,method:'GET',status:200,time:i,type:'xhr',origin:'demo',tabId:'console-scroll-fixture',hostOnly:false,operation:'synthetic_console_scroll_fixture',events:[]}));renderRequests();");
-  for(const [width,height,name]of [[760,560,'console-narrow'],[360,740,'console-phone']]){
-    await viewport(width,height);await geometry();await scrollUpperPane(name);await screenshot(name);
-    // Exercise the real selector and the optional fifth grid track. No
-    // synthetic style, hidden-attribute or application-state mutation is used.
-    await reveal('#request-search-scope');await selectRenderedOption({evaluate,click,key,selector:'#request-search-scope',index:1});
-    await until("document.querySelector('#request-search-scope').value==='content'&&!document.querySelector('#request-search-status').hidden",'Content-search selector must reveal its status row');
-    await scrollUpperPane(name+' content search');await screenshot(name+'-content-search');
-    await reveal('#request-search-scope');await selectRenderedOption({evaluate,click,key,selector:'#request-search-scope',index:0});
-    await until("document.querySelector('#request-search-scope').value==='url'&&document.querySelector('#request-search-status').hidden",'URL search must restore the four-track pane');
-    await upperPane(name+' restored URL search');await scrollNestedLedger(name);await screenshot(name+'-nested-ledger');await command('fixture.object',true,'pointer');
-  }
-  await click('#native-console-clear');await until("document.querySelector('#native-console-output').children.length===0",'Clear failed');await screenshot('console-cleared');
-  // History still works after clearing; recalling is not execution.
-  await click('#native-console-source');await press('ArrowUp');assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');
-  await click('#native-console-close');assert.equal(await evaluate("document.activeElement.id"),'native-console-toggle');
-  await until("document.querySelector('#native-console-panel').hidden&&!document.querySelector('#workspace').style.getPropertyValue('grid-template-rows')",'Closing the narrow Console must release its saved split tracks');
-  await click('#native-console-toggle');
-  await until("!document.querySelector('#native-console-panel').hidden&&!!document.querySelector('#workspace').style.getPropertyValue('grid-template-rows')",'Reopening the narrow Console must restore its saved split tracks');
-  assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');
-  const oldSession=fixture.session;await openConnection();await screenshot('console-phone-session-settings');await reveal('#native-console-stop');await until("!document.querySelector('#native-console-start').disabled",'Disconnect did not complete');await reveal('#native-console-start');await until("document.querySelector('#native-console-target').options.length===2",'Reconnect did not list documents');await selectDocument();assert.notEqual(fixture.session,oldSession);assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');const reconnected=await command('fixture.object');assert.equal(reconnected.session,fixture.session);assert.notEqual(reconnected.session,commandChecks[0].session_id);await screenshot('console-reconnected');
-  // Restore the full Requests pane after a large saved dock and narrow reflow.
-  await viewport(1440,900);await fill('#native-console-source','draft survives dock resize');await press('Escape');await click('#native-console-close');
-  // Visibility changes schedule a full divider refresh on the next frame.
-  // Observe that real readiness boundary rather than measuring pre-paint tracks.
-  await until("document.querySelector('#native-console-panel').hidden&&!document.querySelector('#workspace').style.getPropertyValue('grid-template-rows')",'Closing Console must release its saved split tracks');
-  const fullPane=await upperPane('return to full Requests');assert(fullPane.consoleHidden);assert(fullPane.pane.clientHeight>afterResize.panel.height);
-  fullPane.workspace=await evaluate("(()=>{const r=document.querySelector('#workspace').getBoundingClientRect();return {top:r.top,bottom:r.bottom};})()");
-  assert(Math.abs(fullPane.pane.top-fullPane.workspace.top)<=1&&Math.abs(fullPane.pane.bottom-fullPane.workspace.bottom)<=1,'Closed Console must return the full workspace height to Requests');
-  assert(fullPane.tools.top>=fullPane.pane.top-1,'Returning to the full pane must restore the toolbar into view');await screenshot('console-closed-full-requests');
-  await click('#native-console-toggle');
-  await until("!document.querySelector('#native-console-panel').hidden&&!!document.querySelector('#workspace').style.getPropertyValue('grid-template-rows')",'Reopening Console must restore its saved split tracks');
-  assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'draft survives dock resize');
-  const reopened=await geometry();assert(Math.abs(reopened.panel.height-afterResize.panel.height)<=1,'Reopening at the original viewport must restore the saved dock height');await upperPane('reopened after full Requests');
-  assert.deepEqual(fixture.errors,[],'Synthetic fixture raised an unexpected error');
-  return {status:'passed',upper_pane_geometry:upperPaneChecks,command_receipts:commandChecks,resize:{before:beforeResize,after:afterResize},path:'browser development Console UI',source:'scripted native replies; no target JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['hit-tested connection and explicit document selection','keyboard command entry and divider resizing','fixed composer geometry','intrinsic Requests toolbar/search-status/warning rows and independent upper-pane scroll','genuine content-search selector and URL restoration at both narrow widths','owned outer scrollbar, nested ledger and Console wheel isolation with failure-time receipts','narrow reflow and full-pane return preserve geometry/draft','lazy getter-safe property paging','live shrink/regrowth and keyboard pager focus','inspection retry preserves page','pending editable draft and duplicate-submit rejection','transport failure and explicit recovery','stale document and value rejection','inert exception text','128-entry eviction and anchored arrival scroll','Find/Escape focus','pointer Run at narrow widths','Clear invalidates older quiet polls and preserves newer command/result ownership','malformed quiet poll fails closed without partial output','non-numeric timestamp batch is atomic without coercion','clear preserves history','close/reopen preserves draft','disconnect/reconnect requires fresh document selection and preserves draft']};
 }

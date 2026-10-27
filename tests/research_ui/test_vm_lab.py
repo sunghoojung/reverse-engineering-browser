@@ -446,10 +446,10 @@ process.stdout.write(JSON.stringify({{
         if bash is None:
             self.skipTest("Bash is not installed")
         script = (UI_DIRECTORY.parents[1] / "scripts" / "run-live-session.sh").read_text(encoding="utf-8")
-        start = script.index("# Persist the launch fact after startup succeeds.")
+        start = script.index("# This launch never opens a DevTools transport.")
         end = script.index('if [[ "${embedded_session}" == 1 ]]; then', start)
         with tempfile.TemporaryDirectory() as temporary:
-            for quiet, mode in [("1", "native-stealth"), ("0", "cdp-attached")]:
+            for quiet, mode in [("1", "native-stealth"), ("0", "native-stealth")]:
                 subprocess.run([bash, "-c", script[start:end]], check=True, env={
                     **os.environ, "artifact_store_path": temporary,
                     "session_id": "18446744073709551615", "native_quiet_mode": quiet,

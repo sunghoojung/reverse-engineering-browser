@@ -95,36 +95,25 @@ assert(buttons.filter(button => button.dataset.trafficDestination === 'download'
 assert.match(saveRaw.title,/Native file download is unavailable/);
 console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JSON/form/plain/binary preservation, nonmutating explicit redaction, original-byte equality, bounds disclosure, duplicate-click and stale-copy ownership, native download restriction and Escape (DOM model; not native runtime)');
 
-// HTTP capture ownership is independent of the selected Sources debugger page.
+// Retained historical record validation and native failed-request notices.
 {
   const models = await readFile(new URL('../apps/research-ui/evidence_models.js', import.meta.url), 'utf8');
   const app = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
-  const start = app.indexOf('      function networkContentCaptureEnabled()');
-  const end = app.indexOf('      function textElement(', start);
-  assert(start >= 0 && end > start);
-  const status = {scope:'http-page-targets',state:'ready',attached_targets:2,eligible_targets:2,
-    target_limit:8,target_overflow:0,failed_targets:0,gaps:0,last_error:null,message:'Synthetic coverage'};
-  const state = {sessionMode:'live',broker:'connected',events:[],requests:[],
-    debuggerSession:{state:'waiting',network:{capture_enabled:true,capture_status:status,dropped:0}}};
+  const start=app.indexOf('      function renderNetworkNotice()');
+  const end=app.indexOf('      function textElement(',start);
+  assert(start>=0 && end>start);
+  const status={scope:'http-page-targets',state:'ready',attached_targets:2,eligible_targets:2,target_limit:8,target_overflow:0,failed_targets:0,gaps:0,last_error:null,message:'Synthetic coverage'};
+  const state={sessionMode:'live',broker:'connected',events:[{category:'network',type:'request_completed',error_code:0,session_id:'1',process_id:1,sequence_number:'1'}],requests:[],debuggerSession:{network:{capture_enabled:true,capture_status:status,dropped:0,websockets:{dropped_connections:0,dropped_frames:0}}}};
   let notice;
-  const networkNotice = {hidden:false, textContent:'', dataset:{}};
-  const standingProse = /newest-network window|Recording live requests|eligible (?:page|browser) targets attached|Mode: passive browser target discovery|Mode: page-target polling fallback|without requesting startup pauses|first-request capture is not guaranteed|Requests before attachment|native probes stay in Traffic|WebSockets remain scoped/;
-  const assertQuiet = () => {
-    assert.equal(networkNotice.hidden, true, 'Healthy Traffic capture hides the status line');
-    assert.equal(networkNotice.textContent, '');
-  };
-  const helperStart = source.indexOf('function trafficRequestFailed(');
-  const helperEnd = source.indexOf('function renderTrafficRows(', helperStart);
-  assert(helperStart >= 0 && helperEnd > helperStart, 'Failed-request notice helper must live with the Traffic row status');
-  const checks = runInNewContext(source.slice(helperStart, helperEnd) + '\n' + models + '\n' + app.slice(start,end) +
-    ';({isDebuggerNetworkCaptureStatus,isDebuggerNetwork,networkContentCaptureActive,renderNetworkNotice,trafficRequestFailed,trafficFailedRequestCount,trafficFailedRequestNotice})',
-    {state, TextEncoder, countSequenceGaps:()=>0n, countReportedQueueDrops:()=>0n,
-      elements:{networkNotice}, setNetworkNotice(kind, text) {
-        notice = {kind, text};
-        networkNotice.hidden = false;
-        networkNotice.textContent = text;
-        networkNotice.dataset.kind = kind;
-      }});
+  const networkNotice={hidden:false,textContent:'',dataset:{}};
+  const assertQuiet=()=>{assert.equal(networkNotice.hidden,true);assert.equal(networkNotice.textContent,'');};
+  const standingProse=/CDP capture|debugger is disconnected/;
+  const helperStart=source.indexOf('function trafficRequestFailed(');
+  const helperEnd=source.indexOf('function renderTrafficRows(',helperStart);
+  const checks=runInNewContext(source.slice(helperStart,helperEnd)+'\n'+models+'\n'+app.slice(start,end)+';({isDebuggerNetworkCaptureStatus,isDebuggerNetwork,renderNetworkNotice,trafficRequestFailed,trafficFailedRequestCount,trafficFailedRequestNotice})',{
+    state,TextEncoder,shownSequenceGaps:()=>0n,shownQueueDrops:()=>0n,eventCountScopeLabel:()=>"authored fixture",elements:{networkNotice},
+    setNetworkNotice(kind,text){notice={kind,text};networkNotice.hidden=false;networkNotice.textContent=text;networkNotice.dataset.kind=kind;}
+  });
   assert.equal(checks.isDebuggerNetworkCaptureStatus(status),true);
   for (const limit of [1, 8, 32, 128]) {
     const expanded = {...status,scope:'http-browser-targets',transport_mode:'browser-sessions',startup_mode:'passive',target_limit:limit,
@@ -143,94 +132,6 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   assert.equal(checks.isDebuggerNetwork(network),true);
   assert.equal(checks.isDebuggerNetwork({...network,capture_status:undefined}),true,'Older snapshots remain compatible');
   assert.equal(checks.isDebuggerNetwork({...network,capture_status:{...status,attached_targets:129}}),false);
-  assert.equal(checks.networkContentCaptureActive(),true,'Healthy HTTP owners do not depend on Sources attachment');
-  checks.renderNetworkNotice();
-  assertQuiet();
-  state.debuggerSession.target={id:'ninth-page'};status.attached_target_ids=['first-page','second-page'];
-  checks.renderNetworkNotice();assert.equal(notice.kind,'gap');
-  assert.match(notice.text,/selected debugger page is not attached for HTTP capture/);
-  assert.doesNotMatch(notice.text, standingProse);
-  status.attached_target_ids.push('ninth-page');checks.renderNetworkNotice();
-  assertQuiet();
-  delete status.attached_target_ids;
-  status.unattached_targets=Array.from({length:5},(_,i)=>({id:'page-'+i,title:'Missing page '+i}));
-  status.unattached_targets_omitted=2;checks.renderNetworkNotice();
-  assert.match(notice.text,/Not attached: Missing page 0 \[page-0\]/);
-  assert.match(notice.text,/4 more targets not listed here/);
-  assert(!notice.text.includes('Missing page 3'),'Coverage labels stay bounded');
-  assert.doesNotMatch(notice.text, standingProse);
-  delete status.unattached_targets;delete status.unattached_targets_omitted;
-  Object.assign(status,{state:'partial',attached_targets:7,eligible_targets:10,target_overflow:2,failed_targets:1,gaps:3,last_error:'DO NOT ECHO RAW ERROR'});
-  checks.renderNetworkNotice();
-  assert.equal(notice.kind,'gap'); assert.match(notice.text,/2 page targets exceed the capture limit/);
-  assert.match(notice.text,/1 target attachments failed; retry is pending/);
-  assert.match(notice.text,/3 HTTP capture owner losses or retirements/);
-  assert(!notice.text.includes(status.last_error),'Raw errors are not echoed into coverage notices');
-  assert.doesNotMatch(notice.text, standingProse);
-  const savedGaps = status.gaps, savedState = status.state;
-  Object.assign(status, {gaps: 0, state: 'partial', document_navigation_gaps: 1});
-  checks.renderNetworkNotice();
-  assert.equal(notice.kind, 'gap');
-  assert.match(notice.text, /1 document navigation was already committed when Network capture attached/);
-  assert.match(notice.text, /absent from the CDP list/);
-  assert.match(notice.text, /An unmatched native row may still show the host/);
-  assert.doesNotMatch(notice.text, /owner losses/);
-  status.document_navigation_gaps = 2;
-  checks.renderNetworkNotice();
-  assert.match(notice.text, /2 document navigations were already committed/);
-  delete status.document_navigation_gaps;
-  status.gaps = savedGaps;
-  status.state = savedState;
-  status.discovery_stale=true;checks.renderNetworkNotice();
-  assert.match(notice.text,/Target discovery is unavailable; counts are last known and new tabs may not attach/);
-  assert.doesNotMatch(notice.text, standingProse);
-  assert.equal(checks.networkContentCaptureActive(),true,'Existing healthy owners remain active during discovery failure');
-  delete status.discovery_stale;
-  Object.assign(status,{state:'waiting',attached_targets:0});
-  assert.equal(checks.networkContentCaptureActive(),false);
-  checks.renderNetworkNotice();assert.equal(notice.kind,'disconnected');
-  state.debuggerRefreshFailed=true;Object.assign(status,{state:'ready',attached_targets:2});
-  assert.equal(checks.networkContentCaptureActive(),false,'Failed poll cannot claim healthy capture');
-  checks.renderNetworkNotice();assert.match(notice.text,/live debugger is disconnected/);
-  state.debuggerRefreshFailed=false;
-  Object.assign(status,{scope:'http-browser-targets',state:'ready',target_limit:32,
-    attached_targets:12,eligible_targets:12,target_overflow:0,failed_targets:0,gaps:0});
-  checks.renderNetworkNotice();
-  assertQuiet();
-  status.event_queue_drops = 4;
-  checks.renderNetworkNotice();
-  assert.equal(notice.kind, 'gap');
-  assert.match(notice.text, /4 debugger events were dropped/);
-  assert.match(notice.text, /browser connection stayed open/);
-  assert.match(notice.text, /page under test kept its capture owner/);
-  assert.doesNotMatch(notice.text, standingProse);
-  delete status.event_queue_drops;
-  assert.equal(checks.isDebuggerNetworkCaptureStatus({...status, event_queue_drops: -1}), false);
-  assert.equal(checks.isDebuggerNetworkCaptureStatus({...status, event_queue_drops: 4}), true);
-  status.catalog_incomplete=true;checks.renderNetworkNotice();assert.match(notice.text,/counts cover only known targets/);assert.equal(notice.kind,'gap');
-  assert.doesNotMatch(notice.text, standingProse);
-  delete status.catalog_incomplete;
-  Object.assign(status,{state:'partial',target_limit:128,attached_targets:128,eligible_targets:130,target_overflow:2});
-  checks.renderNetworkNotice();assert.equal(notice.kind,'gap');
-  assert.match(notice.text,/2 browser targets exceed the capture limit/);
-  Object.assign(status,{scope:'http-page-targets',state:'ready',attached_targets:32,eligible_targets:32,target_limit:32,target_overflow:0});
-  checks.renderNetworkNotice();
-  assertQuiet();
-  delete state.debuggerSession.network.capture_status;
-  state.debuggerSession.state='running';assert.equal(checks.networkContentCaptureActive(),true);
-  state.debuggerSession.network.capture_enabled=false;assert.equal(checks.networkContentCaptureActive(),false);
-  console.log('PASS bounded HTTP coverage validation, independent owners, overflow/failure/gap notices, quiet healthy capture, old snapshots and disconnect handling (model; not rendered QA)');
-
-  // A Failed row is not a queue drop or a capture-transport drop. error_code stays untouched.
-  state.sessionMode='live';state.broker='connected';state.eventFailureKind=null;state.eventsLimited=false;state.debuggerRefreshFailed=false;
-  state.events=[{category:'network',type:'request_completed',error_code:0,session_id:'1',process_id:1,sequence_number:'1'}];
-  state.debuggerSession.state='running';
-  state.debuggerSession.target={id:'example-target'};
-  state.debuggerSession.network.capture_enabled=true;
-  state.debuggerSession.network.dropped=0;
-  state.debuggerSession.network.websockets={dropped_connections:0,dropped_frames:0};
-  state.debuggerSession.network.capture_status={scope:'http-page-targets',state:'ready',attached_targets:1,eligible_targets:1,
-    target_limit:8,target_overflow:0,failed_targets:0,gaps:0,last_error:null,message:'Synthetic coverage',attached_target_ids:['example-target']};
   const loadingFailed={id:'cdp-failed',path:'https://example.com/logo.png',method:'GET',status:200,failed:true,
     captureRecord:{state:'failed',status:200,url:'https://example.com/logo.png',timing_evidence:{completion_source:'loadingFailed'}}};
   const nativeFailed={id:'row-failed',path:'https://example.com/asset',method:'GET',status:'failed',failed:true};
@@ -252,7 +153,7 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   const eventsBefore=JSON.stringify(state.events);
   state.requests=[ok,loadingFailed];
   checks.renderNetworkNotice();
-  assert.equal(notice.kind,'active','A failed HTTP row does not become a capture gap');
+  assert.equal(notice.kind,'empty','A failed HTTP row does not become a capture gap');
   assert.match(notice.text,/Failed requests: 1\./);
   assert.doesNotMatch(notice.text,/queue reports|Dropped:/);
   assert.doesNotMatch(notice.text, standingProse);
@@ -263,13 +164,13 @@ console.log('PASS raw-default retained CDP export, synthetic credentials/URLs/JS
   assert.equal(state.events[0].error_code,0);
   state.requests=[ok,loadingFailed,nativeFailed];
   checks.renderNetworkNotice();
-  assert.equal(notice.kind,'active');
+  assert.equal(notice.kind,'empty');
   assert.match(notice.text,/Failed requests: 2\./);
   state.requests=[ok,httpError];
   checks.renderNetworkNotice();
   assertQuiet();
   assert.equal(state.debuggerSession.network.dropped,0);
-  console.log('PASS failed HTTP/CDP requests are counted in the network notice without changing queue drops, dropped_connections, or error_code (model; not rendered QA)');
+  console.log('PASS historical schema validation and native failed-row notices without changing queue or error counters');
 }
 
 // The WebSocket status keeps "Dropped: N connections" for capture-transport drops only.

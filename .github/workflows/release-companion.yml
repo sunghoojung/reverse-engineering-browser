@@ -67,7 +67,7 @@ jobs:
           make check
           make app-build
           codesign --verify --deep --strict "build/Origin Trace.app"
-      - name: Exercise relocated companion with stock Chrome CDP
+      - name: Exercise relocated native-only companion
         run: |
           export ORIGIN_TRACE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
           test -x "$ORIGIN_TRACE_TEST_BROWSER"

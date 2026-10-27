@@ -29,19 +29,15 @@ it.
 ## Default capture
 
 - Opening the packaged Origin Trace app starts a visibly labeled local research
-  session with all implemented native capture categories, bounded CDP request
-  and response content, and Canvas image artifacts enabled. Launch this profile
-  only for authorized targets and data. The session expires after one hour.
-  **New Live Session…** offers metadata-only capture;
-  `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects that mode for automatic launch.
-- Standalone probes remain inactive without an enabled session. Metadata-only
-  Traffic sessions retain native host-level observations without CDP headers or
-  bodies. This is a collection boundary, not a promise that artifact metadata
-  is secret-free: enabled artifact capture retains raw source URLs locally.
-- Retained CDP Traffic header values, URLs and bodies, and retained artifact and
-  provenance source URLs, are shown/stored without automatic credential masking.
-  Authorization, cookies, custom tokens, URL userinfo/query/fragments and personal
-  data may be present. Only collect data covered by the session authorization.
+  session with implemented native capture categories. CDP collection and injected
+  JavaScript hooks have been removed. Launch only for authorized targets/data.
+  The session expires after one hour. Native Wasm dispatch instrumentation is
+  an additional explicit opt-in requiring a rebuilt browser.
+- Standalone probes remain inactive without an enabled session. Enabled artifact
+  capture retains raw source URLs locally; metadata is not necessarily secret-free.
+- Historical captures can include sensitive URLs, headers, bodies and source.
+  Removal of CDP does not sanitize previously saved evidence. Only collect and
+  disclose data covered by authorization.
 - Operational bounds remain enforced. Missing data, truncated prefixes and
   evictions must be visible; raw display never means complete wire capture.
 - Redaction is an explicit export-copy operation. It never rewrites retained

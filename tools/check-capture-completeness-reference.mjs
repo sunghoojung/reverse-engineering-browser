@@ -133,146 +133,6 @@ for (const bad of [
 assert.equal(completenessVerdict({...good, uncovered: true}), 'fail');
 assert.equal(completenessVerdict({...good, netlog: {state: 'mismatch'}}), 'fail');
 
-// Exercise the actual observer initialization rather than only the event model.
-const {PassiveReference} = await import('./capture-completeness-reference.mjs');
-class SocketFixture extends EventTarget {
-  commands = [];
-  send(raw) {
-    const command = JSON.parse(raw);
-    this.commands.push(command);
-    queueMicrotask(() => {
-      let result = {};
-      if (command.method === 'Target.getTargets')
-        result = {targetInfos: [{targetId: 'page', type: 'page'}]};
-      if (command.method === 'Target.attachToTarget') {
-        result = {sessionId: 'session'};
-        this.dispatchEvent(
-          new MessageEvent('message', {
-            data: JSON.stringify({
-              method: 'Target.attachedToTarget',
-              params: {sessionId: 'session', targetInfo: {targetId: 'page', type: 'page'}},
-            }),
-          }),
-        );
-      }
-      this.dispatchEvent(
-        new MessageEvent('message', {data: JSON.stringify({id: command.id, result})}),
-      );
-    });
-  }
-  close() {
-    this.dispatchEvent(new Event('close'));
-  }
-}
-const socket = new SocketFixture(),
-  observer = new PassiveReference(socket);
-await observer.start();
-assert(socket.commands.some((c) => c.method === 'Network.enable' && c.sessionId === 'session'));
-assert(
-  socket.commands
-    .filter((c) => c.method === 'Target.setAutoAttach')
-    .every((c) => c.params.waitForDebuggerOnStart === false),
-);
-assert(
-  socket.commands.every(
-    (c) =>
-      ![
-        'Debugger.enable',
-        'Fetch.enable',
-        'Network.setCacheDisabled',
-        'Network.setBypassServiceWorker',
-        'Runtime.runIfWaitingForDebugger',
-      ].includes(c.method),
-  ),
-);
-assert.equal(
-  observer.ledger.sessions.size,
-  1,
-  'attach event plus reply does not duplicate session',
-);
-observer.ledger.finalize();
-const frozen = structuredClone(observer.ledger.snapshot());
-observer.ledger.ingest({
-  method: 'Network.loadingFinished',
-  sessionId: 'session',
-  params: {requestId: 'late'},
-});
-assert.deepEqual(
-  observer.ledger.snapshot(),
-  frozen,
-  'post-window events do not mutate frozen comparison',
-);
-observer.close();
-assert(!observer.ledger.errors.has('transport-closed'), 'deliberate close is not transport loss');
-const unexpected = new PassiveReference(new SocketFixture());
-unexpected.socket.close();
-assert(unexpected.ledger.errors.has('transport-closed'));
-const invalid = new ReferenceLedger();
-invalid.ingest(null);
-invalid.ingest({method: 'Network.loadingFinished', params: null});
-assert.equal(invalid.errors.size, 2);
-
-assert.equal(compareCapture({...reference, epoch: 2}, network).verdict, 'incomplete');
-
-// Reproduce discovery versus recursive-auto-attach overlap in both orderings.
-class OverlapSocket extends SocketFixture {
-  constructor(order, failDetach = false) {
-    super();
-    this.order = order;
-    this.failDetach = failDetach;
-  }
-  send(raw) {
-    const c = JSON.parse(raw);
-    if (
-      c.method !== 'Target.attachToTarget' &&
-      !(this.failDetach && c.method === 'Target.detachFromTarget')
-    )
-      return super.send(raw);
-    this.commands.push(c);
-    const message = (value) =>
-      this.dispatchEvent(new MessageEvent('message', {data: JSON.stringify(value)}));
-    queueMicrotask(() => {
-      if (this.failDetach && c.method === 'Target.detachFromTarget') {
-        message({id: c.id, error: {code: -32000, message: 'synthetic detach rejected'}});
-        return;
-      }
-      const attached = () =>
-        message({
-          method: 'Target.attachedToTarget',
-          sessionId: 'parent',
-          params: {sessionId: 'auto', targetInfo: {targetId: 'page', type: 'page'}},
-        });
-      if (this.order === 'event-first') attached();
-      message({id: c.id, result: {sessionId: 'manual'}});
-      if (this.order === 'reply-first') queueMicrotask(attached);
-    });
-  }
-}
-for (const order of ['event-first', 'reply-first']) {
-  const socket = new OverlapSocket(order),
-    reference = new PassiveReference(socket);
-  await reference.start();
-  await reference.ready();
-  const primary = order === 'event-first' ? 'auto' : 'manual';
-  const secondary = order === 'event-first' ? 'manual' : 'auto';
-  assert.deepEqual(
-    socket.commands.filter((c) => c.method === 'Network.enable').map((c) => c.sessionId),
-    [primary],
-  );
-  const detached = socket.commands.filter((c) => c.method === 'Target.detachFromTarget');
-  assert.equal(detached.length, 1);
-  assert.equal(detached[0].params.sessionId, secondary);
-  assert.equal(detached[0].sessionId, order === 'reply-first' ? 'parent' : undefined);
-  assert.equal(reference.attachments.get('page'), primary);
-  assert.equal(reference.duplicateSessions, 1);
-  assert.deepEqual(reference.ledger.snapshot().errors, []);
-  reference.close();
-}
-const detachFailure = new PassiveReference(new OverlapSocket('reply-first', true));
-await detachFailure.start();
-await detachFailure.ready();
-assert(detachFailure.ledger.errors.has('duplicate-detach-failed'));
-detachFailure.close();
 const {CaptureIdentityTracker} = await import('./capture-completeness-reference.mjs');
 const tracker = new CaptureIdentityTracker();
 const startup = (state, epoch) => ({
@@ -296,52 +156,6 @@ assert.equal(
   }).mismatchReasons.status,
   1,
 );
-
-class InitializationFailureSocket extends OverlapSocket {
-  send(raw) {
-    const command = JSON.parse(raw);
-    if (command.method !== 'Network.enable') return super.send(raw);
-    this.commands.push(command);
-    queueMicrotask(() =>
-      this.dispatchEvent(
-        new MessageEvent('message', {
-          data: JSON.stringify({
-            id: command.id,
-            error: {code: -32000, message: 'synthetic primary failure'},
-          }),
-        }),
-      ),
-    );
-  }
-}
-const primaryFailure = new PassiveReference(new InitializationFailureSocket('reply-first'));
-await primaryFailure.start();
-await primaryFailure.ready();
-assert(primaryFailure.ledger.errors.has('session-initialization'));
-assert(primaryFailure.ledger.errors.has('command-rejected-network-enable'));
-assert.equal(
-  primaryFailure.ledger.sessions.size,
-  1,
-  'secondary rejection does not fabricate a ready replacement',
-);
-primaryFailure.close();
-
-const delayed = new PassiveReference(new OverlapSocket('reply-first'));
-await delayed.start();
-await delayed.ready();
-delayed.socket.dispatchEvent(
-  new MessageEvent('message', {
-    data: JSON.stringify({method: 'Target.detachedFromTarget', params: {sessionId: 'manual'}}),
-  }),
-);
-delayed.admit('auto', {targetId: 'page', type: 'page'}, 'parent');
-assert.equal(
-  delayed.attachments.has('page'),
-  false,
-  'late rejected reply cannot become a replacement owner',
-);
-assert.equal(delayed.ledger.sessions.has('auto'), false);
-delayed.close();
 
 // Browser-owned main resources can start on a parent Network manager and
 // finish on the new frame/worker manager. Keep the start identity and require
@@ -548,23 +362,8 @@ assert.deepEqual(
 repeatedUrl.emit('loadingFinished', {requestId: 'second-target', timestamp: 11}, 'second-worker');
 assert.equal(compareLedger(repeatedUrl.ledger).verdict, 'pass');
 
-// The observer preserves manual-session ownership while learning target
-// lineage from the rejected recursive-auto-attachment, in either order.
-for (const order of ['event-first', 'reply-first']) {
-  const socket = new OverlapSocket(order),
-    reference = new PassiveReference(socket);
-  reference.ledger.session('parent', 'ancestor', {type: 'page'});
-  await reference.start();
-  const primary = reference.attachments.get('page'),
-    info = reference.ledger.sessionInfo.get(primary);
-  assert.equal(info.targetParentSessionId, 'parent');
-  assert.equal(info.parentSessionId, order === 'event-first' ? 'parent' : null);
-  assert.equal(info.type, 'page');
-  assert.deepEqual([...reference.ledger.errors], []);
-  reference.close();
-}
 console.log(
-  'Main-resource handoff: iframe/worker lineage, terminal provenance, manual attachment, repeated URLs, raw-ID collisions, ambiguous/unrelated owners, epochs and pending negative controls passed.',
+  'Main-resource handoff: iframe/worker lineage, terminal provenance, historical session metadata, repeated URLs, raw-ID collisions, ambiguous/unrelated owners, epochs and pending negative controls passed.',
 );
 
 // Diagnostic counters expose only fixed field names, side, and multiplicity.

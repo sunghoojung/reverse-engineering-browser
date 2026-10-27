@@ -1,48 +1,18 @@
 # Independent capture completeness harness
 
-This is a controlled localhost experiment, not a losslessness guarantee. The
-reference collector has no REB capture imports, and the fixture oracle has no
-CDP dependencies. Both observers run against the same disposable browser
-session. Server receipts and a version-pinned Chrome NetLog adapter crosscheck
-shared CDP blind spots. Only authored operations are in scope.
+The former CDP browser comparison runner has been removed. The remaining
+fixture and report contracts below describe offline/historical evidence only,
+not an executable live comparison or a losslessness guarantee.
 
 ## Run
 
-Use Node.js 22 or newer. The deterministic offline gate is:
-
-```sh
-make capture-completeness-check
-```
-
-The browser gate builds the backend and transport, then launches two fresh
-profiles. Set `ORIGIN_TRACE_TEST_BROWSER` (or `REB_UI_CHROMIUM`) to an installed
-Chromium executable and `REB_REFERENCE_BROWSER_VERSION` to its exact four-part
-version. A missing or mismatched version fails the comparison.
-
-```sh
-REB_REFERENCE_BROWSER_VERSION=<exact-version> make capture-completeness-browser-check
-```
-
-`REB_REFERENCE_ONLY=1 node tools/check-capture-completeness-browser.mjs .` is a
-diagnostic reference-only run; it cannot pass the REB comparison. The full
-repository handoff gates remain `make lint`, `make check`, `make e2e`,
-`make sanitize`, and `git diff --check`.
-
-The startup cohort navigates immediately at browser launch; its early events
-remain in the denominator. Immediately after browser launch, the independent
-reference startup and REB process launch are initiated together: neither waits
-for the other's discovery, socket, version check, initialization, or readiness.
-The report's `startupTimeline` contains monotonic millisecond offsets from cohort
-setup (0–120000), with null for milestones not reached. `referenceReadyMs` means
-its initialization promise settled successfully; ledger gaps still invalidate
-coverage. `rebReadyMs` means the existing capture identity/readiness check passed.
-`fixtureNavigationMs` is the explicit prearmed navigation only; startup navigation
-is requested by the browser launch arguments. These timings diagnose launch skew,
-not event completeness. No cache or service-worker bypass is introduced.
-The prearmed cohort navigates only after both
-collectors are ready. Worker, frame, and popup startup inside either page is
-never paused for attachment. The passive collector must not use
-`waitForDebuggerOnStart: true` to improve its score.
+The retained offline models are checked by `make capture-completeness-check`.
+`make capture-completeness-browser-check` fails explicitly because its CDP runner
+was removed. Native live-browser acceptance instead requires the rebuilt Brave
+and the [native observation contract](../../protocol/native-wasm-dispatch-v1.md).
+Historical browser commands in archived reports must not be treated as current
+capabilities. Full handoff gates remain `make lint`, `make check`, `make e2e`, and
+`make sanitize`; unavailable stages must be reported as such.
 
 ## Independent fixture API
 

@@ -457,11 +457,76 @@ mod tests {
                 "headers": {"Content-Type": "Application/JSON; token=synthetic-request-mime", "Authorization": "Bearer synthetic-header", "Cookie": "synthetic-cookie"}}})
     }
     fn debugger(enabled: bool) -> std::sync::Arc<Debugger> {
-        let mut options = crate::config::Options::parse_from(["test"]);
-        options.capture_network_content = enabled;
+        let options = crate::config::Options::parse_from(["test"]);
         let debugger = Debugger::new(&options);
-        debugger.update(|s| s["target"] = json!({"id": "synthetic-target"}));
+        debugger.update(|s| {
+            s["target"] = json!({"id": "synthetic-target"});
+            s["network"]["capture_enabled"] = json!(enabled);
+        });
         debugger
+    }
+    // Authored retained-record fixture builder, compiled only in these reader
+    // tests. It has no socket, target, browser, or executable protocol path.
+    impl Debugger {
+        pub(crate) async fn historical_fixture(&self, kind: &str, event: &Value) {
+            self.update(|s| {
+                if s["network"]["capture_enabled"] != true { return; }
+                let headers = |value: &Value| -> Vec<Value> {
+                    value.as_object().into_iter().flatten().map(|(k,v)|json!([k,v])).collect()
+                };
+                let respond = |row: &mut Value, response: &Value, redirected: bool| {
+                    row["status"] = response["status"].clone();
+                    row["response"]["headers"] = json!(headers(&response["headers"]));
+                    row["response"]["body"]["mime"] = response["mimeType"].as_str().unwrap_or("").into();
+                    if redirected {
+                        row["state"] = json!("complete");
+                        row["response"]["body"]["state"] = json!("missing");
+                        row["response"]["body"]["reason"] = json!("Historical redirect body unavailable");
+                    }
+                };
+                let id = event["requestId"].as_str().unwrap_or("");
+                if kind == "Network.requestWillBeSent" {
+                    let request = &event["request"];
+                    let mime = request["headers"].as_object().into_iter().flatten()
+                        .find(|(key,_)|key.eq_ignore_ascii_case("content-type"))
+                        .and_then(|(_,v)|v.as_str()).unwrap_or("text/plain");
+                    let epoch=s["network"]["capture_epoch"].as_u64().unwrap_or(0);
+                    let target=s["target"]["id"].as_str().unwrap_or("synthetic-target").to_owned();
+                    let title=s["target"]["title"].as_str().unwrap_or("").to_owned();
+                    let rows=s["network"]["requests"].as_array_mut().unwrap();
+                    if event["redirectResponse"].is_object() {
+                        if let Some(row)=rows.iter_mut().rev().find(|r|r["protocol_request_id"]==id) {
+                            respond(row,&event["redirectResponse"],true);
+                        }
+                    }
+                    let public_id=format!("historical-{epoch}-{}-{id}", rows.len());
+                    rows.push(json!({
+                        "id":public_id,"protocol_request_id":id,"target_id":target,"target_title":title,
+                        "started_monotonic_ms":event["timestamp"].as_f64().unwrap()*1000.0,
+                        "method":request["method"],"method_truncated":false,
+                        "url":request["url"],"url_truncated":false,
+                        "resource_type":event["type"].as_str().unwrap_or(""),
+                        "document_url":event["documentURL"].as_str().unwrap_or(""),"document_url_truncated":false,
+                        "wall_time_ms":0,"state":"pending","status":null,"status_text":"",
+                        "protocol":"","mime_type":"","duration_ms":null,"encoded_data_length":0,
+                        "from_disk_cache":false,"from_service_worker":false,"error_text":"",
+                        "initiator":{"sites":[],"gaps":["initiator_unavailable"]},
+                        "request":{"headers":headers(&request["headers"]),"headers_truncated":false,
+                            "body":{"state":if request["postData"].is_string(){"available"}else{"empty"},
+                            "mime":mime,"text":request["postData"].as_str().unwrap_or(""),"base64":"","truncated":false,"reason":""}},
+                        "response":{"headers":[],"headers_truncated":false,"body":{"state":"loading","mime":"","text":"","base64":"","truncated":false,"reason":"Historical response pending"}}
+                    }));
+                    if rows.len()>1000 {
+                        rows.remove(0);
+                        s["network"]["dropped"]=json!(s["network"]["dropped"].as_u64().unwrap_or(0)+1);
+                    }
+                } else if kind == "Network.responseReceived" {
+                    if let Some(row)=s["network"]["requests"].as_array_mut().unwrap().iter_mut().rev().find(|r|r["protocol_request_id"]==id) {
+                        respond(row,&event["response"],false);
+                    }
+                }
+            });
+        }
     }
     fn validate(output: &Value) {
         let spec: Value =
@@ -474,12 +539,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_uses_real_capture_and_preserves_raw_values_and_scoped_sources() {
+    async fn catalog_reads_authored_historical_records_without_mutating_values() {
         let debugger = debugger(true);
         let raw_url = "https://synthetic-user:synthetic-pass@example.test/v1/items?token=synthetic-query&id=3&id=4#synthetic-fragment";
-        debugger.network("Network.requestWillBeSent", &request(1, raw_url,
+        debugger.historical_fixture("Network.requestWillBeSent", &request(1, raw_url,
             r#"{"items":[{"id":1,"value":"synthetic-body"},{"id":"two"}],"empty":[],"nested.key":{"/":true}}"#)).await;
-        debugger.network("Network.responseReceived", &json!({"requestId":"1", "response":{
+        debugger.historical_fixture("Network.responseReceived", &json!({"requestId":"1", "response":{
             "status": 201, "headers":{"Content-Type":"application/problem+json; profile=synthetic-response-mime","Set-Cookie":"synthetic-response"}}})).await;
         debugger.update(|s| {
             s["network"]["requests"][0]["response"]["body"] = json!({"state":"available", "mime":"application/problem+json; profile=synthetic-response-mime", "text":"{\"ok\":true}", "base64":"", "truncated":false});
@@ -628,7 +693,7 @@ mod tests {
     async fn tail_bounds_drops_capture_off_and_body_unknowns_are_not_complete_claims() {
         let disabled = debugger(false);
         disabled
-            .network(
+            .historical_fixture(
                 "Network.requestWillBeSent",
                 &request(0, "https://example.test/", "{}"),
             )
@@ -640,7 +705,7 @@ mod tests {
         let debugger = debugger(true);
         for id in 0..70 {
             debugger
-                .network(
+                .historical_fixture(
                     "Network.requestWillBeSent",
                     &request(id, "https://example.test/same", "{}"),
                 )
@@ -681,7 +746,7 @@ mod tests {
         let debugger = debugger(true);
         let original = request(1, "https://example.test/same", "{}");
         debugger
-            .network("Network.requestWillBeSent", &original)
+            .historical_fixture("Network.requestWillBeSent", &original)
             .await;
         let first = debugger.api_catalog().unwrap();
         debugger.update(|state| {
@@ -689,7 +754,7 @@ mod tests {
             state["network"]["capture_epoch"] = json!(1);
         });
         debugger
-            .network("Network.requestWillBeSent", &original)
+            .historical_fixture("Network.requestWillBeSent", &original)
             .await;
         let second = debugger.api_catalog().unwrap();
         validate(&second);
@@ -713,7 +778,9 @@ mod tests {
         ] {
             let mut event = request(id, url, "{}");
             event["request"]["method"] = json!(method);
-            debugger.network("Network.requestWillBeSent", &event).await;
+            debugger
+                .historical_fixture("Network.requestWillBeSent", &event)
+                .await;
         }
         let output = debugger.api_catalog().unwrap();
         validate(&output);
@@ -747,7 +814,7 @@ mod tests {
             .enumerate()
         {
             debugger
-                .network(
+                .historical_fixture(
                     "Network.requestWillBeSent",
                     &request(id, &format!("https://example.test{path}"), "{}"),
                 )
@@ -758,19 +825,19 @@ mod tests {
             .collect::<Vec<_>>()
             .join("&");
         debugger
-            .network(
+            .historical_fixture(
                 "Network.requestWillBeSent",
                 &request(5, &format!("https://example.test/q?{query}"), "{}"),
             )
             .await;
         debugger
-            .network(
+            .historical_fixture(
                 "Network.requestWillBeSent",
                 &request(6, "data:text/plain,hello", "{}"),
             )
             .await;
         debugger
-            .network(
+            .historical_fixture(
                 "Network.requestWillBeSent",
                 &request(
                     7,
@@ -815,7 +882,7 @@ mod tests {
             ),
         ] {
             debugger
-                .network("Network.requestWillBeSent", &request(id, url, body))
+                .historical_fixture("Network.requestWillBeSent", &request(id, url, body))
                 .await;
         }
         let before = debugger.snapshot();
@@ -1020,7 +1087,7 @@ mod tests {
         let debugger = debugger(true);
         for method in ["Network.webSocketCreated", "Network.webSocketFrameReceived"] {
             debugger
-                .network(
+                .historical_fixture(
                     method,
                     &json!({"requestId":"socket", "url":"wss://example.test/socket"}),
                 )
@@ -1031,7 +1098,7 @@ mod tests {
         assert_eq!(output["coverage"]["window_records"], 0);
         assert_eq!(output["endpoints"], json!([]));
         debugger
-            .network(
+            .historical_fixture(
                 "Network.requestWillBeSent",
                 &request(1, "wss://example.test/socket", "{}"),
             )
@@ -1047,7 +1114,7 @@ mod tests {
     async fn redirects_and_auth_statuses_preserve_only_observed_http_hops() {
         let debugger = debugger(true);
         debugger
-            .network(
+            .historical_fixture(
                 "Network.requestWillBeSent",
                 &request(1, "https://first.test/start?token=synthetic-redirect", "{}"),
             )
@@ -1064,10 +1131,10 @@ mod tests {
             "headers": {"Location":"https://second.test/final", "Set-Cookie":"synthetic-session"}
         });
         debugger
-            .network("Network.requestWillBeSent", &redirected)
+            .historical_fixture("Network.requestWillBeSent", &redirected)
             .await;
         debugger
-            .network(
+            .historical_fixture(
                 "Network.responseReceived",
                 &json!({"requestId":"1", "response":{
                     "status":401, "headers":{"WWW-Authenticate":"Bearer synthetic-realm"}
@@ -1115,7 +1182,7 @@ mod tests {
         let debugger = debugger(true);
         for id in 0..1002 {
             debugger
-                .network(
+                .historical_fixture(
                     "Network.requestWillBeSent",
                     &request(id, "https://example.test/same", "{}"),
                 )

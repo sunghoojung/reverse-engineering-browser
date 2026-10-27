@@ -7,7 +7,7 @@ export async function checkInvestigationCore(root) {
   const app = await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const requestRoot = app.slice(app.indexOf('      function requestTraceRoot('),app.indexOf('      function requestSignalProfileSelection('));
   const source = await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
-  const model = runInNewContext(`function integerText(event,field){return String(event[field]);}\n${requestRoot}\n${source}\n;({investigationId,investigationEventIdentity,investigationArtifactIdentity,investigationScriptIdentity,investigationRequestIdentity,investigationSame,investigationResolve,createInvestigationHistory})`);
+  const model = runInNewContext(`function integerText(event,field){return String(event[field]);}\n${requestRoot}\n${source}\n;({investigationId,investigationEventIdentity,investigationArtifactIdentity,investigationRequestIdentity,investigationSame,investigationResolve,createInvestigationHistory})`);
   const event={session_id:'18446744073709551615',process_id:17,sequence_number:'9007199254740993',request_id:'91',type:'request_started'};
   const request={id:'native',origin:'live',operation:'request_started',events:[event]};
   const identity=model.investigationRequestIdentity(request);
@@ -20,16 +20,6 @@ export async function checkInvestigationCore(root) {
   const artifact={session_id:'11',artifact_id:'7',sha256:'a'.repeat(64),byte_size:100};
   const artifactId=model.investigationArtifactIdentity(artifact);
   for(const altered of [{session_id:'12'},{sha256:'b'.repeat(64)},{byte_size:99},{artifact_id:'8'}]) assert.equal(model.investigationSame(artifactId,model.investigationArtifactIdentity({...artifact,...altered})),false);
-  const script={script_id:'live-1',target_id:'target-1',hash:'opaque-token',execution_context_id:7,start_line:2,start_column:3,length:40};
-  const scriptId=model.investigationScriptIdentity(script);assert.equal(scriptId.type,'live-script');
-  for(const field of ['script_id','target_id','hash']) {
-    assert(model.investigationScriptIdentity({...script,[field]:'x'.repeat(256)}));
-    for(const value of ['x'.repeat(257),'x'.repeat(2*1024*1024),'']) assert.equal(model.investigationScriptIdentity({...script,[field]:value}),null);
-  }
-  for(const field of ['execution_context_id','start_line','start_column','length']) {
-    assert.equal(model.investigationSame(scriptId,model.investigationScriptIdentity({...script,[field]:script[field]+1})),false);
-    assert.equal(model.investigationScriptIdentity({...script,[field]:Number.MAX_SAFE_INTEGER+1}),null);
-  }
   assert.equal(model.investigationResolve(artifactId,[],model.investigationArtifactIdentity).status,'stale');
   assert.equal(model.investigationResolve(artifactId,[artifact,artifact],model.investigationArtifactIdentity).status,'ambiguous');
   assert.equal(model.investigationResolve(artifactId,[{...artifact,session_id:'12'},artifact],model.investigationArtifactIdentity).record,artifact);
@@ -229,13 +219,13 @@ export async function checkAdvancedNavigation(root) {
     document.querySelectorAll=selector=>selector==='.screen'?screens:selector==='.nav-button'?buttons:[];
     document.querySelector=selector=>selector==='#advanced-navigation'?group:selector.endsWith('.back-button')?destination:null;
     const noop=()=>{};
-    const context={document,state:{requests:[],selectedRequestId:null,originTraceStatus:'idle',sourceHooksOpen:false},investigationRevision:0,
+    const context={document,state:{requests:[],selectedRequestId:null,originTraceStatus:'idle'},investigationRevision:0,
       investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
       evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},
       evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
       window:{matchMedia:()=>({matches:narrow})},requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
       elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};
-    for(const name of ['renderRequests','updateSelectionSummary','renderInspector','renderFingerprintActivity','renderRuntimeHookTraffic','renderBacktrace','renderExperiment','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderDebugger','renderSources','renderMemory','renderVmLab'])context[name]=noop;
+    for(const name of ['renderRequests','updateSelectionSummary','renderInspector','renderFingerprintActivity','renderBacktrace','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderSources','renderVmLab'])context[name]=noop;
     const showScreen=runInNewContext(source+';showScreen',context);
     const flush=()=>{for(const callback of frames.splice(0))callback();};
     for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence','vm','field-provenance']) {
@@ -303,7 +293,7 @@ async function checkInvestigationReturns(root) {
   const nav=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
   const section=(a,b)=>{const start=app.indexOf(a),end=app.indexOf(b,start+1);assert(start>=0&&end>start,`Missing retained app boundary: ${a} → ${b}`);return app.slice(start,end);};
   const selection=section('      function selectRequest(', '      function moveRequestSelection(');
-  const artifactSelection=section('      function sourceArtifactIdentityMatches(', '      function selectScript(');
+  const artifactSelection=section('      function sourceArtifactIdentityMatches(', '      function closeSource(');
   const rootFunction=section('      function requestTraceRoot(', '      function requestSignalProfileSelection(');
   const traceSelection=section('      function originTraceSelection(', '      async function refreshOriginTrace(');
   const traceReader=section('      async function refreshOriginTrace(', '      function traceStepDetails(');
@@ -317,13 +307,13 @@ async function checkInvestigationReturns(root) {
     const notice={textContent:''}, panel={dataset:{},querySelector:()=>({open:false})}, consolePanel={dataset:{}};
     const requests=[1,2].map(n=>({id:`request-${n}`,origin:'live',operation:'request_started',events:[{session_id:'11',process_id:17,sequence_number:String(n),request_id:String(n),type:'request_started'}]}));
     const artifacts=[7,8].map(n=>({session_id:'11',artifact_id:String(n),sha256:'a'.repeat(64),byte_size:100,kind:'javascript'}));
-    const state={requests,artifacts,selectedRequestId:'request-2',selectedArtifactId:'7',selectedScriptId:null,selectedRuntimeHookRequest:null,originTrace:{steps:[]},originTraceGeneration:0,signalProfileGeneration:0,decoderSteps:[],openArtifactIds:[],inspectorTab:'evidence',fieldTab:'body',sourceFormatted:false,sourceDeobfuscated:false,sourceWasm:false};
+    const state={requests,artifacts,selectedRequestId:'request-2',selectedArtifactId:'7',originTrace:{steps:[]},originTraceGeneration:0,signalProfileGeneration:0,decoderSteps:[],openArtifactIds:[],inspectorTab:'evidence',fieldTab:'body',sourceFormatted:false,sourceDeobfuscated:false,sourceWasm:false};
     const globals={state,CSS:{escape:s=>s},Promise,URLSearchParams,AbortController,TextDecoder,setTimeout,clearTimeout,location:{protocol:'http:'},
       sourceFactsReadBytes:async response=>new TextEncoder().encode(JSON.stringify(await response.json())),
       document:{activeElement:trigger,querySelector:s=>s==='.screen:not([hidden])'?{id:`screen-${screen}`}:s==='#investigation-notice'?notice:s==='#investigation-navigation'?panel:s==='#investigation-back'?back:s.startsWith('#screen-')?rootNode:s==='#console-experiment-traffic'?consolePanel:null},
       requestAnimationFrame:fn=>raf.push(fn),integerText:(e,k)=>String(e[k]),sourceFactsPanel:{navigate:()=>null,cancel:()=>{cancelled++;}},
-      selectedSource:()=>state.artifacts.find(a=>a.artifact_id===state.selectedArtifactId),liveSources:()=>[],runtimeHooksState:()=>null,
-      renderInspector(){},renderRequests(){},renderEvidence(){},renderBacktrace(){},refreshRequestSignalProfile(){},updateSelectionSummary(){},renderRuntimeHookTraffic(){},
+      selectedSource:()=>state.artifacts.find(a=>a.artifact_id===state.selectedArtifactId),
+      renderInspector(){},renderRequests(){},renderEvidence(){},renderBacktrace(){},refreshRequestSignalProfile(){},updateSelectionSummary(){},
       sourceIdentity:source=>JSON.stringify([source.session_id,source.artifact_id,source.sha256]),retireSourceAnalysis(){},renderSourceHealth(){},
       renderSources:()=>renders.push({id:state.selectedArtifactId,passive:run('investigationPassiveSource')}),loadArtifactContent:async artifact=>{sourceReads.push(artifact.artifact_id);},
       fieldSets:{body:[]},elements:{requestSearchScope:{value:'all'},prompt:{},sourceCodeWrap:{focus(){focused.push('code');}}},
@@ -333,13 +323,6 @@ async function checkInvestigationReturns(root) {
     run(rootFunction+'\n'+selection+'\n'+artifactSelection+'\n'+traceSelection+'\n'+nav);
     return {run,context,state,pane,raf,focused,notice,sourceReads,renders,setScreen:value=>{screen=value;},traceReads:()=>traceReads,cancelled:()=>cancelled,
       async flush(){await Promise.resolve();await Promise.resolve();for(const callback of raf.splice(0))callback();}};
-  }
-  {
-    const t=setup();t.context.selectedSource=()=>({source_type:'script',script_id:'live-1',target_id:'target-1',hash:'x'.repeat(2*1024*1024)});
-    const saved=t.run('investigationSnapshot()');assert.equal(saved.script.unavailable,true);assert.equal(Object.hasOwn(saved.script,'owner'),false);
-    assert(JSON.stringify(saved).length<8192,'An oversized live owner must never be copied into history');
-    t.context.entry=saved;assert.equal(t.run('restoreInvestigation(entry)'),false);assert.match(t.notice.textContent,/bounded navigation metadata/);
-    assert.deepEqual(t.sourceReads,[],'Unavailable ownership must not degrade to a generic Sources return');
   }
   const sourceEntry=t=>({screen:'sources',label:'Sources',artifact:t.run('investigationArtifactIdentity(state.artifacts[0])'),script:null,request:null,sourceRange:{start:1,end:3},sourceFormatted:false,sourceDeobfuscated:false,sourceWasm:false,focus:'#source-trigger',scroll:[{selector:'#pane',top:20,left:0}],notice:'original source'});
   for(const interaction of ['different-artifact','same-artifact-interaction']) {
@@ -444,14 +427,14 @@ async function checkInvestigationReturns(root) {
     const notice={textContent:''},bar={dataset:{},querySelector:()=>({open:false})},consolePanel={dataset:{}};
     const navigation={open:false,contains:()=>false};
     const request={id:'native',origin:'live',operation:'request_started',events:[{session_id:'11',process_id:17,sequence_number:'41',request_id:'91',type:'request_started'}]};
-    const state={requests:[request],selectedRequestId:'native',selectedRuntimeHookRequest:null,inspectorTab:'evidence',fieldTab:'body',originTraceStatus:'ready',decoderSteps:[]};
+    const state={requests:[request],selectedRequestId:'native',inspectorTab:'evidence',fieldTab:'body',originTraceStatus:'ready',decoderSteps:[]};
     const noop=()=>{};
     document.querySelector=s=>s==='.screen:not([hidden])'?screens.find(screen=>!screen.hidden):s==='#advanced-navigation'?navigation:s==='#investigation-back'?back:s==='#investigation-notice'?notice:s==='#investigation-navigation'?bar:s==='#console-experiment-traffic'?consolePanel:screens.find(screen=>'#'+screen.id===s)??null;
     document.querySelectorAll=s=>s==='.screen'?screens:[];
     document.getElementById=id=>screens.find(screen=>screen.id===id)??null;
     const context=createContext({document,state,CSS:{escape:s=>s},Promise,requestAnimationFrame:fn=>frames.push(fn),integerText:(e,k)=>String(e[k]),
       selectedSource:()=>null,sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
-      renderRequests:noop,updateSelectionSummary:noop,renderInspector:noop,renderRuntimeHookTraffic:noop,fieldSets:{body:[]},elements:{requestRows:{querySelectorAll:()=>[row]},requestFilter:row}});
+      renderRequests:noop,updateSelectionSummary:noop,renderInspector:noop,fieldSets:{body:[]},elements:{requestRows:{querySelectorAll:()=>[row]},requestFilter:row}});
     const run=code=>runInContext(code,context);
     run(rootFunction+'\n'+nav+'\n'+section('      function showScreen(', '      async function refresh()'));
     context.entry={screen:'traffic',label:'Requests',request:run('investigationRequestIdentity(state.requests[0])'),inspectorTab:'evidence',fieldTab:'body',fieldPath:'',focus:'#trace-origin',scroll:[]};

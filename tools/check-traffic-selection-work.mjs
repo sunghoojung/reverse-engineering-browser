@@ -100,7 +100,6 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
     investigationNotice: text => { state.notice = text; },
     apiCatalogRequestIdentity: request => request.id};
   const instrument = `
-    renderWebSocketInspector = () => {};
     const search = trafficSearchRequests;
     trafficSearchRequests = (...args) => { stats.searches++; return search(...args); };
     const sort = trafficSortedRequests;

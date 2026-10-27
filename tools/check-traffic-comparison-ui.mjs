@@ -36,7 +36,7 @@ export async function checkTrafficComparisonController(root) {
   const navigation = await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
   const algorithms = await readFile(join(root,'apps/research-ui/traffic_comparison.js'),'utf8');
   const requestRoot = app.slice(app.indexOf('      function requestTraceRoot('),app.indexOf('      function requestSignalProfileSelection('));
-  const state = {sessionMode:'live',requests:[],selectedRequestId:null,debuggerSession:{generation:5,target:{id:'target-a'},network:{target_id:'target-a',capture_enabled:true}}};
+  const state = {sessionMode:'live',requests:[],selectedRequestId:null};
   const document = {activeElement:null};
   class Node {
     constructor(tag) {this.tagName=tag;this.children=[];this.dataset={};this.events={};this.attributes={};this.text='';}
@@ -54,18 +54,18 @@ export async function checkTrafficComparisonController(root) {
   const redraw=()=>ui.renderTrafficComparison(container,state.requests.find(value=>value.id===state.selectedRequestId),true);
   ui=runInNewContext(`${requestRoot}\n${navigation}\n${algorithms}\n${source}\n;({createTrafficComparisonController,investigationRequestIdentity,investigationSame,renderTrafficComparison,syncTrafficComparison,identity:()=>trafficComparisonController?.identity})`,
     {state,document,TextEncoder,TextDecoder,Uint8Array,URL,integerText:(event,key)=>String(event[key]),renderInspector:redraw});
-  const owner={mode:'live',target:'target-a',capture:true,generation:5};
+  const owner={mode:'live'};
   const body=text=>({state:'available',mime:'application/json',text,headers:[['content-type','application/json']]});
   const request=(id,patch={})=>({id,origin:'live',operation:'cdp_completed',tabId:'target-a',protocolRequestId:id,firstTimestamp:1n,method:'POST',path:'https://fixture.invalid/test',status:200,
     exchange:{request:body('{"request":1}'),response:body('{"response":1}')},...patch});
   const a=request('a'),b=request('b');
   const controller=ui.createTrafficComparisonController(ui.investigationRequestIdentity,ui.investigationSame);
   assert(controller.pin(a,[a,b],owner));
-  assert.equal(controller.sync([a,b],{...owner,generation:6}),a);
+  assert.equal(controller.sync([a,b],owner),a);
   assert.deepEqual(Object.keys(controller.identity).sort(),['id','protocol','started','target','type']);
   assert.equal(controller.sync([b],owner),null);assert.match(controller.notice,/expired/);
   assert.equal(controller.sync([a,b],owner),null,'An expired baseline must never silently rebind');
-  for(const change of [{target:'target-b'},{generation:1},{capture:false},{mode:'demo'}]){
+  for(const change of [{mode:'demo'},{mode:'idle'}]){
     assert(controller.pin(a,[a,b],owner));assert.equal(controller.sync([a,b],{...owner,...change}),null);assert.equal(controller.sync([a,b],owner),null);
   }
   assert.equal(controller.pin(a,[a,{...a}],owner),false);
@@ -107,8 +107,8 @@ export async function checkTrafficComparisonController(root) {
   b.exchange.response={...body(''),bytes:new TextEncoder().encode('{"response":3}')};delete b.exchange.response.text;redraw();
   b.exchange.response.bytes[12]=52;redraw();assert.match(container.textContent,/Selected: 4/,'In-place byte updates invalidate comparison exactly');
   assert(view.byteSnapshots.reduce((sum,value)=>sum+(value?.bytes.length??0),0)<=4*128*1024);
-  state.debuggerSession.generation=1;redraw();assert.equal(ui.identity(),null);assert.match(container.textContent,/Baseline expired/);assert.equal(view.result.children.length,0);assert.equal(document.activeElement,view.pin,'Expiry transfers focused summary to the enabled pin action');
-  state.debuggerSession.generation=5;redraw();assert.equal(ui.identity(),null);
+  state.sessionMode='demo';redraw();assert.equal(ui.identity(),null);assert.match(container.textContent,/Baseline expired/);assert.equal(view.result.children.length,0);assert.equal(document.activeElement,view.pin,'Expiry transfers focused summary to the enabled pin action');
+  state.sessionMode='live';redraw();assert.equal(ui.identity(),null);
   state.selectedRequestId='a';redraw();container.rebComparison.pin.click();state.selectedRequestId='b';redraw();
   view.result.children.find(value=>value.dataset.label==='Response body').children[0].focus();
   state.requests=[a,b,{...b,tabId:'other-target'}];redraw();
@@ -125,5 +125,5 @@ export async function checkTrafficComparisonController(root) {
   state.requests=[{...state.requests[0],id:'renamed-native'}];state.selectedRequestId='renamed-native';redraw();
   assert.match(view.identitySummary.textContent,/Baseline:.*renamed-native.*selected:.*renamed-native/,'Visible row IDs refresh even when exact native event identity is unchanged');
   ui.renderTrafficComparison(container,b,false);assert.equal(container.children.length,0,'Leaving comparison erases its copied result DOM');
-  console.log('PASS captured comparison: production identity/session/generation expiry, ambiguity, explicit repin/clear, inert DOM and unchanged refresh ownership');
+  console.log('PASS captured comparison: production identity/evidence-mode expiry, ambiguity, explicit repin/clear, inert DOM and unchanged refresh ownership');
 }

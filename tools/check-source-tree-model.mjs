@@ -36,8 +36,8 @@ export async function checkSourceTreeModel(root) {
   const part=(text,start,end)=>text.slice(text.indexOf(start),text.indexOf(end,text.indexOf(start)));
   const program=part(facts,'const sourceFactsFields','function sourceFactsUnavailable')+
     part(syntax,'      function sourceName(','      function formatByteSize(')+
-    part(app,'      function liveScriptIdentity(','      function setSourceCursor(')+
-    part(app,'      function sourceDisplayName(','      function markLiveSourceStale(')+
+    part(app,'      function sourceIdentity(','      function retireSourceAnalysis(')+
+    part(app,'      function sourceDisplayName(','      function selectedSource(')+
     part(app,'      const SOURCE_TREE_LIMITS','      function renderSourceHealth(')+
     ';({sourceTreeModel,sourceTreeVisible,renderSourceTree,toggleSourceTree,sourceTreeFocus,sourceTreeState,sourceTreeKeydown,SOURCE_TREE_LIMITS})';
   const artifact=(id,url=`https://a.invalid/shared/nested/${id}.js`)=>({source_type:'artifact',artifact_id:String(id),url,
@@ -47,10 +47,10 @@ export async function checkSourceTreeModel(root) {
     const document={activeElement:null,created:0,createElement(tag){this.created++;return new TreeNode(tag,this);}};
     const tree=document.createElement('div');
     const state={sourceCollection:'captured',artifacts:[artifact(1),artifact(2),artifact(3,'https://b.invalid/shared/nested/3.js')],
-      selectedArtifactId:'1',selectedScriptId:null,staleScriptIds:new Set(),debuggerSession:{target:{id:'page-a'},scripts:[]}};
+      selectedArtifactId:'1'};
     const calls=[];
     const api=runInNewContext(program,{URL,document,state,elements:{sourceTree:tree},
-      selectArtifact:id=>calls.push(['artifact',id]),selectScript:id=>calls.push(['script',id]),renderSourceHealth:()=>calls.push(['health'])});
+      selectArtifact:id=>calls.push(['artifact',id]),renderSourceHealth:()=>calls.push(['health'])});
     return {document,tree,state,api,calls};
   };
   const rows=t=>[...t.api.sourceTreeState().rows.values()].map(value=>value.row);
@@ -130,14 +130,6 @@ export async function checkSourceTreeModel(root) {
     for(const value of ['Enter',' ']){const count=t.calls.length;assert.equal(key(t,row,value).prevented,false);assert.equal(t.calls.length,count);row.dispatch('click');assert.equal(t.calls.length,count+1);}
     const stale=nav.visible.find(node=>node.source?.artifact_id==='1');const staleRow=nav.rows.get(stale.key).row;
     t.state.artifacts[0]={...t.state.artifacts[0],sha256:'b'.repeat(64)};staleRow.dispatch('click');assert.equal(t.calls.at(-1)[0],'health');
-  }
-  {
-    const t=fixture();t.api.renderSourceTree();const captured=branch(t,'shared');t.api.toggleSourceTree(captured.key,false);
-    t.state.debuggerSession.scripts=[{script_id:'live1',url:'https://a.invalid/shared/nested/1.js',hash:'v1',language:'JavaScript',length:8,execution_context_id:4}];
-    t.state.sourceCollection='page';t.api.renderSourceTree();const live=branch(t,'shared');assert.notEqual(live.key,captured.key);
-    assert.equal(t.api.sourceTreeState().rows.get(live.key).row.getAttribute('aria-expanded'),'true');
-    t.state.sourceCollection='captured';t.api.renderSourceTree();assert.equal(t.api.sourceTreeState().rows.get(captured.key).row.getAttribute('aria-expanded'),'false');
-    t.state.sourceCollection='page';t.state.staleScriptIds.add('live1');t.api.renderSourceTree();assert.equal(rows(t).length,0);assert.match(t.tree.children[0].textContent,/Detached/);
   }
   {
     const t=fixture();const hostile='<img onerror=alert(1)> & "quoted"';

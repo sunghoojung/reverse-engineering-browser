@@ -1274,27 +1274,13 @@ const capturedExportPanel = installCapturedExportDialog({
         renderFingerprintDetail(orderedEvents.find(event => signalEventKey(event) === state.selectedSignalEventKey) ?? null);
       }
 
-      function rebuildTrafficRequests(previousSession = null) {
+      function rebuildTrafficRequests() {
         // Hidden Traffic must not keep the previous snapshot's bodies alive.
         state.trafficRenderedView = null;
-        const previousSelection = state.selectedCaptureIdentity
-          ? apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record : null;
         state.requests = state.nativeRequests;
-        const oldOwner = trafficHttpSnapshotOwner(previousSession, state.sessionMode);
-        const newOwner = trafficHttpSnapshotOwner(state.debuggerSession, state.sessionMode);
-        const snapshotReset = previousSession && previousSelection && !trafficHttpSnapshotContinues(oldOwner, newOwner);
-        const retainedSelection = previousSelection && trafficRetainedFocusRequest(previousSelection, state.requests, oldOwner, newOwner);
-        if (retainedSelection) {
-          state.selectedCaptureIdentity = apiCatalogRequestIdentity(retainedSelection);
-          // Old-epoch asynchronous details must not relabel the renewed selection.
-          state.originTraceController?.abort();
-          state.originTraceGeneration += 1;
-          state.signalProfileGeneration += 1;
-        }
         syncTrafficComparison();
         const selected = apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record;
-        const previousRetention = trafficRetainedHttpIdentity(previousSelection);
-        if (state.selectedCaptureIdentity && (snapshotReset || !selected || previousRetention && trafficRetainedHttpIdentity(selected) !== previousRetention)) {
+        if (state.selectedCaptureIdentity && !selected) {
           resetRequestSelection();
           state.trafficSelectionNotice = 'The selected captured request expired or its exact source changed. Choose another request.';
           investigationNotice(state.trafficSelectionNotice, 'stale');
@@ -2019,26 +2005,28 @@ const capturedExportPanel = installCapturedExportDialog({
         const panel = document.createElement('section');
         panel.append(textElement('h4', '', 'Native Wasm dispatch observations'),
           textElement('p', 'vm-workspace-notice', 'Physical module offsets and selectors are not guest-interpreter PCs or recovered guest opcodes. No host causality is inferred from physical-only rows.'));
-        const rows = workspace.native_wasm_observations ?? [];
-        appendVmPagedRows(panel, rows, 'native Wasm observations', row => {
+        const nativeRow = (row, position) => {
           const item = document.createElement('details'); item.className = 'vm-effect-row';
-          item.append(textElement('summary', '', vmNativeWasmPositionText(row)),
-            textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(row, null, 2)));
+          const summary = document.createElement('summary');
+          summary.append(textElement('span', 'vm-native-row-identity', vmNativeRowIdentityText(row, state.events)), document.createElement('br'),
+            textElement('span', 'vm-native-row-position', position));
+          item.append(summary, textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(row, null, 2)));
           return item;
-        });
+        };
+        const rows = Array.isArray(workspace.native_wasm_observations) ? workspace.native_wasm_observations : [];
+        appendVmPagedRows(panel, rows, 'native Wasm observations', row => nativeRow(row, vmNativeWasmPositionText(row)));
         if (!rows.length) panel.append(textElement('p', 'vm-selection-empty', 'No native Wasm dispatch observations retained.'));
-        if ((workspace.native_wasm_observation_count ?? 0) > rows.length) panel.append(textElement('p', 'vm-workspace-notice',
-          `${workspace.native_wasm_observation_count - rows.length} accepted observations are outside the retained window.`));
-        const guestRows = workspace.native_guest_samples ?? [];
+        const physicalCount = vmNativeAcceptedCount(workspace.native_wasm_observation_count, rows.length);
+        if (physicalCount > rows.length) panel.append(textElement('p', 'vm-workspace-notice',
+          `${physicalCount - rows.length} accepted observations are outside the retained window.`));
+        const guestRows = Array.isArray(workspace.native_guest_samples) ? workspace.native_guest_samples : [];
         panel.append(textElement('h4', '', 'Native guest state (adapter interpreted)'),
           textElement('p', 'vm-workspace-notice', 'Actual typed local values and memory bytes are retained. Explicit adapters interpret those values; verified-dataflow labels require a reviewed exact module binding. Guest positions on host links require verified guest semantics plus an exact synchronous retained parent.'));
-        appendVmPagedRows(panel, guestRows, 'native guest samples', row => {
-          const item = document.createElement('details'); item.className = 'vm-effect-row';
-          item.append(textElement('summary', '', `PC ${row.instruction_pointer} bytes · opcode ${row.opcode} · instance ${row.instance_id} · ${row.interpretation}`),
-            textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(row,null,2)));
-          return item;
-        });
+        appendVmPagedRows(panel, guestRows, 'native guest samples', row => nativeRow(row, vmNativeGuestPositionText(row)));
         if (!guestRows.length) panel.append(textElement('p','vm-selection-empty','No native guest samples retained.'));
+        const guestCount = vmNativeAcceptedCount(workspace.native_guest_sample_count, guestRows.length);
+        if (guestCount > guestRows.length) panel.append(textElement('p', 'vm-workspace-notice',
+          `${guestCount - guestRows.length} accepted guest samples are outside the retained window.`));
         return panel;
       }
 
@@ -2086,7 +2074,8 @@ const capturedExportPanel = installCapturedExportDialog({
           observations.append(textElement('h4', '', 'Retained positions'));
           appendVmPagedRows(observations, row.retainedSamples, 'retained samples', sample => {
             const item = document.createElement('details'); item.className = 'vm-effect-row';
-            item.append(textElement('summary', '', sample.module_byte_offset !== undefined ? vmNativeWasmPositionText(sample) : `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(sample, null, 2)));
+            const position = vmNativeIsGuestRow(sample) ? vmNativeGuestPositionText(sample) : sample.module_byte_offset !== undefined ? vmNativeWasmPositionText(sample) : `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`;
+            item.append(textElement('summary', '', sample.module_byte_offset !== undefined ? `${vmNativeRowIdentityText(sample, state.events)} · ${position}` : position), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(sample, null, 2)));
             return item;
           });
           if (!row.retainedSamples.length) observations.append(textElement('p', 'vm-selection-empty', 'No retained PC or guest-byte position.'));
@@ -2458,16 +2447,15 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function renderRequestScopes() {
         const groups = requestTabGroups();
-        const targetScope = state.debuggerSession?.network?.capture_status?.scope === 'http-browser-targets';
         const availableTabs = new Set(groups.map(group => group.id));
         if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
         const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
-        const buttons = [{id: 'all', label: targetScope ? 'All targets' : 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
+        const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
           const domains = [...new Set(group.requests.map(requestDomain))];
           const title = group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean);
           const domain = domains.find(value => value && value !== 'unknown');
-          const fallback = `${targetScope ? 'Target' : 'Tab'} ${index + 1}`;
+          const fallback = `Tab ${index + 1}`;
           const label = group.id === 'unattributed' ? 'Unattributed'
             : title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
             : domain || fallback;
@@ -2492,9 +2480,9 @@ const capturedExportPanel = installCapturedExportDialog({
           button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
           if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
           if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
-          button.title = scope.id === 'all' ? targetScope ? 'Show requests from every captured browser target' : 'Show requests from every captured browser tab'
-            : scope.id === 'unattributed' ? targetScope ? 'Events without a browser target identifier' : 'Events without a browser tab identifier'
-              : `${scope.label} · ${scope.domains.join(', ')} · ${targetScope ? 'target' : 'tab'} id ${scope.id}`;
+          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab'
+            : scope.id === 'unattributed' ? 'Events without a browser tab identifier'
+              : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
           if (created) button.addEventListener('click', () => {
             state.requestTabId = scope.id;
             state.requestDomain = 'all';
@@ -2564,7 +2552,6 @@ const capturedExportPanel = installCapturedExportDialog({
           return;
         }
         state.trafficRenderedView = null;
-        renderWebSocketInspector(document.querySelector('#websocket-inspector'),state.debuggerSession?.network,Boolean(state.debuggerError));
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
         const includeContent = elements.requestSearchScope.value === 'content';
@@ -2902,7 +2889,6 @@ const capturedExportPanel = installCapturedExportDialog({
             ? `${request.method} ${request.path} · request ${integerText(root, 'request_id')}`
             : 'No broker-backed trace target selected';
           elements.traceButton.disabled = !root;
-          elements.requestMemoryPivot.disabled = true;
           elements.requestDecoderPivot.disabled = true;
           return;
         }
@@ -2925,7 +2911,6 @@ const capturedExportPanel = installCapturedExportDialog({
           ? `request-${state.selectedRequestId} · ${selected.label} · ${selected.path}`
           : 'Select a traceable field';
         elements.traceButton.disabled = !selected;
-        elements.requestMemoryPivot.disabled = !selected;
         elements.requestDecoderPivot.disabled = !selected;
       }
 
@@ -5557,26 +5542,14 @@ const capturedExportPanel = installCapturedExportDialog({
         }
       }
 
-      function liveScriptIdentity(script) {
-        return JSON.stringify([script.target_id ?? state.debuggerSession?.target?.id ?? '', script.script_id, script.hash,
-          script.execution_context_id ?? null, script.start_line ?? 0, script.start_column ?? 0, script.length ?? null]);
-      }
-
       // Source ownership never comes from a URL. Captured documents reuse the
-      // Facts identity; live documents include the actual page/worker target.
+      // Facts identity of their immutable stored artifact.
       function sourceIdentity(source) {
-        if (!source) return null;
-        if (source.source_type === 'script' || (source.artifact_id === undefined && source.script_id !== undefined)) {
-          return JSON.stringify(['script', source.script_id, liveScriptIdentity(source),
-            source.execution_context_id ?? null, source.start_line ?? 0, source.start_column ?? 0]);
-        }
-        return sourceFactsIdentity({...source, source_type: 'artifact'});
+        return source ? sourceFactsIdentity({...source, source_type: 'artifact'}) : null;
       }
 
       function sourceIsCurrent(source) {
-        const candidates = source.source_type === 'script' || (source.artifact_id === undefined && source.script_id !== undefined)
-          ? (state.debuggerSession?.scripts ?? []).filter(value => value.script_id === source.script_id && !state.staleScriptIds?.has(value.script_id))
-          : state.artifacts.filter(value => value.artifact_id === source.artifact_id);
+        const candidates = state.artifacts.filter(value => value.artifact_id === source.artifact_id);
         return candidates.length === 1 && sourceIdentity(candidates[0]) === sourceIdentity(source);
       }
 
@@ -5584,27 +5557,6 @@ const capturedExportPanel = installCapturedExportDialog({
         // Navigator/tab/Quick Open handlers must not keep an evicted document
         // alive through a hidden DOM closure. Keep descriptors, never payloads.
         return Object.fromEntries(Object.entries(source).filter(([key]) => !['content', 'deobfuscation', 'controller'].includes(key)));
-      }
-
-      function setSourceCursor(source, line, column) {
-        if (source?.source_type !== 'script' || !sourceIsCurrent(source) ||
-            sourceIdentity(selectedSource()) !== sourceIdentity(source) ||
-            state.sourceDeobfuscated || state.sourceFormatted || state.sourceWasm ||
-            !Number.isSafeInteger(line) || line < 0 || !Number.isSafeInteger(column) || column < 0) return false;
-        const editor = state.sourceEditorView;
-        if (editor?.identity === sourceIdentity(source) && !editor.view.derived && !editor.view.formatted) {
-          const local = line - (source.start_line ?? 0), bounds = sourceDocumentLine(editor.index, local);
-          const localColumn = column - sourceRuntimeColumn(source, local);
-          if (!bounds || localColumn < 0 || localColumn > bounds.length) return false;
-        }
-        state.sourceCursor = {identity: sourceIdentity(source), representation: 'original', scriptId: source.script_id, line, column};
-        return true;
-      }
-
-      function sourceCursorFor(source) {
-        return !state.sourceDeobfuscated && !state.sourceFormatted && !state.sourceWasm &&
-          state.sourceCursor?.identity === sourceIdentity(source) && state.sourceCursor?.representation === 'original'
-          ? state.sourceCursor : null;
       }
 
       function retireSourceAnalysis(except = null) {
@@ -5622,15 +5574,8 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function releaseSourcePreview(source) {
         const identity = sourceIdentity(source);
-        const preview = source.source_type === 'script'
-          ? state.liveScriptContent.get(source.script_id)
-          : state.artifacts.find(value => sourceIdentity(value) === identity);
-        if (source.source_type === 'script') {
-          if (preview?.identity === liveScriptIdentity(source)) {
-            preview.controller?.abort();
-            state.liveScriptContent.delete(source.script_id);
-          }
-        } else if (preview) {
+        const preview = state.artifacts.find(value => sourceIdentity(value) === identity);
+        if (preview) {
           preview.controller?.abort();
           for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
         }
@@ -5642,15 +5587,12 @@ const capturedExportPanel = installCapturedExportDialog({
           }
         }
         if (state.sourceEditorView?.identity === identity) state.sourceEditorView = null;
-        if (state.sourceCursor?.identity === identity) state.sourceCursor = null;
       }
 
       function boundSourcePreviews(protectedSource = null) {
         const protectedIdentity = sourceIdentity(selectedSource() ?? protectedSource);
-        const entries = [
-          ...(state.artifacts ?? []).filter(source => source.kind !== 'canvas_data_url').map(source => ({source, preview: source})),
-          ...(state.debuggerSession?.scripts ?? []).map(source => ({source: {...source, source_type: 'script'}, preview: state.liveScriptContent.get(source.script_id)}))
-        ].filter(({preview}) => preview && (preview.loading || preview.content !== undefined));
+        const entries = (state.artifacts ?? []).filter(source => source.kind !== 'canvas_data_url').map(source => ({source, preview: source}))
+          .filter(({preview}) => preview && (preview.loading || preview.content !== undefined));
         entries.sort((a, b) => (a.preview.previewUsed ?? 0) - (b.preview.previewUsed ?? 0));
         let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
         let documents = entries.length;
@@ -5681,17 +5623,6 @@ const capturedExportPanel = installCapturedExportDialog({
         }
       }
 
-      function pruneLiveScriptContent() {
-        const identities = new Map((state.debuggerSession?.scripts ?? [])
-          .map(script => [script.script_id, liveScriptIdentity(script)]));
-        for (const [scriptId, cached] of state.liveScriptContent) {
-          if (identities.get(scriptId) !== cached.identity || state.staleScriptIds.has(scriptId)) {
-            cached.controller?.abort();
-            state.liveScriptContent.delete(scriptId);
-          }
-        }
-      }
-
       function capturedSources() {
         return state.artifacts
           .filter(artifact => artifact.kind !== 'canvas_data_url')
@@ -5706,18 +5637,10 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function sourceDisplayName(source) {
-        const identity = source.source_type === 'script'
-          ? `script ${source.script_id}` : `artifact ${source.artifact_id}`;
-        if (source.source_type === 'script' && !source.url) return `anonymous · ${identity}`;
-        return `${sourceName(source)} · ${identity}`;
+        return `${sourceName(source)} · artifact ${source.artifact_id}`;
       }
 
       function sourceDisplayMeta(source) {
-        if (source.source_type === 'script') {
-          const language = source.language === 'WebAssembly' ? 'WASM' : 'JS';
-          const context = source.execution_context_id > 0 ? `ctx ${source.execution_context_id}` : 'ctx unknown';
-          return `${language} · ${source.target_type === 'worker' ? 'worker' : 'page'} · live · ${context}`;
-        }
         return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${source.kind}`;
       }
 
@@ -5732,29 +5655,8 @@ const capturedExportPanel = installCapturedExportDialog({
         return 'JS';
       }
 
-      function markLiveSourceStale(scriptId, reason = 'The live source detached before its bytes could be loaded.') {
-        if (!scriptId) return;
-        state.staleScriptIds ??= new Set();
-        state.staleScriptIds.add(scriptId);
-        state.liveScriptContent.get(scriptId)?.controller?.abort();
-        state.liveScriptContent.delete(scriptId);
-        state.openScriptIds = state.openScriptIds.filter(id => id !== scriptId);
-        if (state.selectedScriptId === scriptId) {
-          state.selectedScriptId = null;
-          state.pendingSourceLine = null;
-          state.sourceDeobfuscated = false;
-          state.sourceFormatted = false;
-          state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
-          state.sourceCollection = 'captured';
-        }
-        state.sourceNoticeKind = 'error';
-        state.sourceNotice = `${reason} The stale live source was removed from Page and open tabs.`;
-      }
-
       function selectedSource() {
-        const matches = state.selectedScriptId !== null
-          ? [].filter(source => source.script_id === state.selectedScriptId)
-          : capturedSources().filter(source => source.artifact_id === state.selectedArtifactId);
+        const matches = capturedSources().filter(source => source.artifact_id === state.selectedArtifactId);
         return matches.length === 1 ? matches[0] : null;
       }
 
@@ -5763,8 +5665,7 @@ const capturedExportPanel = installCapturedExportDialog({
       const SOURCE_TREE_LIMITS = Object.freeze({catalog: 5000, nodes: 10000, visible: 1000, depth: 16, url: 4096, identity: 8192});
 
       function sourceTreeModel(collection) {
-        const page = collection === 'page';
-        const catalog = page ? state.debuggerSession?.scripts ?? [] : state.artifacts;
+        const catalog = state.artifacts;
         const nodes = new Map();
         const rootKey = JSON.stringify([collection, 'root']);
         const root = {key: rootKey, kind: 'root', label: 'top', depth: 0, parent: null, children: [], count: 0};
@@ -5780,14 +5681,10 @@ const capturedExportPanel = installCapturedExportDialog({
         };
         for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
           const raw = catalog[index];
-          if (page ? state.staleScriptIds?.has(raw.script_id) : raw.kind === 'canvas_data_url') continue;
+          if (raw.kind === 'canvas_data_url') continue;
           // Refuse an overlong path before URL parsing or identity serialization.
           if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
-          const source = {...sourceReference(raw), source_type: page ? 'script' : 'artifact'};
-          if (page) {
-            source.target_id ??= state.debuggerSession?.target?.id ?? '';
-            source.kind = source.language === 'WebAssembly' ? 'wasm' : 'javascript';
-          }
+          const source = {...sourceReference(raw), source_type: 'artifact'};
           const identity = sourceIdentity(source);
           if (!identity || identity.length > SOURCE_TREE_LIMITS.identity) {limits.omitted++; continue;}
           const key = JSON.stringify([collection, 'source', identity]);
@@ -5927,10 +5824,8 @@ const capturedExportPanel = installCapturedExportDialog({
           if (!current) return;
           sourceTreeScope(nav, nav.model.collection).focus = node.key;
           if (current.children) toggleSourceTree(node.key);
-          else if (sourceIsCurrent(current.source)) {
-            if (current.source.source_type === 'script') selectScript(current.source.script_id);
-            else selectArtifact(current.source.artifact_id);
-          } else {
+          else if (sourceIsCurrent(current.source)) selectArtifact(current.source.artifact_id);
+          else {
             state.sourceNoticeKind = 'warning';
             state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
             renderSourceHealth();
@@ -5955,8 +5850,7 @@ const capturedExportPanel = installCapturedExportDialog({
         if (previousScope) {previousScope.scrollTop = tree.scrollTop; previousScope.scrollLeft = tree.scrollLeft;}
         if (refresh || !previous || previous.collection !== state.sourceCollection) nav.model = sourceTreeModel(state.sourceCollection);
         const model = nav.model, scope = sourceTreeScope(nav, model.collection);
-        // Deleted branches cannot grow an unbounded preference history. Page
-        // and Captured retain independent, session-only navigation state.
+        // Deleted branches cannot grow an unbounded preference history.
         for (const key of scope.collapsed) if (!model.nodes.get(key)?.children) scope.collapsed.delete(key);
         const {visible, limited} = sourceTreeVisible(model, scope.collapsed);
         const keys = new Set(visible.map(node => node.key));
@@ -5967,9 +5861,7 @@ const capturedExportPanel = installCapturedExportDialog({
           }
           return null;
         };
-        const selectedCandidates = [...model.nodes.values()].filter(node => node.source && (node.source.source_type === 'script'
-          ? node.source.script_id === state.selectedScriptId
-          : state.selectedScriptId === null && node.source.artifact_id === state.selectedArtifactId));
+        const selectedCandidates = [...model.nodes.values()].filter(node => node.source && node.source.artifact_id === state.selectedArtifactId);
         // Selection must agree with the authoritative raw catalog, including
         // records omitted by path/node limits. Never scan beyond the catalog cap
         // merely to decorate a row: an incomplete catalog cannot prove uniqueness.
@@ -5993,7 +5885,7 @@ const capturedExportPanel = installCapturedExportDialog({
           icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '›' : '⌄';
           detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
           if (node.source) {
-            row.dataset[node.source.source_type === 'script' ? 'scriptId' : 'artifactId'] = node.source.source_type === 'script' ? node.source.script_id : node.source.artifact_id;
+            row.dataset.artifactId = node.source.artifact_id;
             row.setAttribute('aria-selected', String(node === selected));
           } else {
             row.setAttribute('aria-expanded', String(!scope.collapsed.has(node.key)));
@@ -6011,11 +5903,7 @@ const capturedExportPanel = installCapturedExportDialog({
         if (limited) notices.push(`Showing the first ${SOURCE_TREE_LIMITS.visible.toLocaleString()} expanded rows. Collapse branches to see later rows, or use Open file.`);
         if (!visible.length || notices.length) {
           nav.notice ??= document.createElement('div'); nav.notice.className = 'source-tree-empty'; nav.notice.setAttribute('role', 'status');
-          nav.notice.textContent = notices.join(' ') || (state.sourceCollection === 'page'
-            ? state.debuggerSession?.state === 'waiting' || state.debuggerSession?.state === 'connecting'
-              ? 'Waiting for an authorized browser target. Open a page in the live Brave session.'
-              : 'No live scripts available. Detached execution contexts are excluded from Page.'
-            : 'No source artifacts captured. Canvas images are shown in Fingerprinting.');
+          nav.notice.textContent = notices.join(' ') || 'No source artifacts captured. Canvas images are shown in Fingerprinting.';
           // Keep limit disclosures above the rows, including when the navigator
           // itself is empty after filtering or rejecting over-limit paths.
           containers.get(tree).unshift(nav.notice);
@@ -6061,8 +5949,8 @@ const capturedExportPanel = installCapturedExportDialog({
           for (const source of sources) result.set(source[field], result.has(source[field]) ? null : sourceReference(source));
           return result;
         };
-        const live = index([], 'script_id'), captured = index(capturedSources(), 'artifact_id');
-        const sources = [...state.openScriptIds.map(id => live.get(id)), ...state.openArtifactIds.map(id => captured.get(id))].filter(Boolean);
+        const captured = index(capturedSources(), 'artifact_id');
+        const sources = state.openArtifactIds.map(id => captured.get(id)).filter(Boolean);
         if (sources.length === 0) {
           const placeholder = document.createElement('span');
           placeholder.className = 'source-tab-placeholder';
@@ -6079,9 +5967,7 @@ const capturedExportPanel = installCapturedExportDialog({
           tab.setAttribute('aria-keyshortcuts', 'Delete');
           tab.dataset.sourceIdentity = sourceIdentity(source);
           tab.title = source.url || sourceDisplayName(source);
-          const selected = source.source_type === 'script'
-            ? source.script_id === state.selectedScriptId
-            : source.artifact_id === state.selectedArtifactId && state.selectedScriptId === null;
+          const selected = source.artifact_id === state.selectedArtifactId;
           tab.setAttribute('aria-selected', String(selected));
           tab.tabIndex = selected ? 0 : -1;
           const icon = document.createElement('span');
@@ -6094,15 +5980,14 @@ const capturedExportPanel = installCapturedExportDialog({
           close.className = 'source-tab-close';
           close.textContent = '×';
           close.setAttribute('aria-hidden', 'true');
-          const kind = document.createElement('span'); kind.className = 'source-tab-kind'; kind.textContent = source.source_type === 'script' ? 'live' : 'captured';
+          const kind = document.createElement('span'); kind.className = 'source-tab-kind'; kind.textContent = 'captured';
           tab.append(icon, name, kind, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
               return;
             }
-            if (source.source_type === 'script') selectScript(source.script_id);
-            else selectArtifact(source.artifact_id);
+            selectArtifact(source.artifact_id);
           });
           tab.addEventListener('keydown', event => {
             const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Delete'];
@@ -6115,9 +6000,7 @@ const capturedExportPanel = installCapturedExportDialog({
             }
             const next = event.key === 'Home' ? 0 : event.key === 'End' ? sources.length - 1
               : (index + (event.key === 'ArrowRight' ? 1 : -1) + sources.length) % sources.length;
-            const target = sources[next];
-            if (target.source_type === 'script') selectScript(target.script_id);
-            else selectArtifact(target.artifact_id);
+            selectArtifact(sources[next].artifact_id);
             elements.sourceEditorTabs.querySelector('[aria-selected="true"]')?.focus({preventScroll: true});
           });
           return tab;
@@ -6140,22 +6023,14 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         const list = document.createElement('dl');
         list.className = 'artifact-facts';
-        const facts = source.source_type === 'script'
-          ? [
-              ['Runtime', 'live target'], ['Target', source.target_title || source.target_id || 'attached browser'],
-              ['Script', source.script_id],
-              ['Context', source.execution_context_id], ['Language', source.language],
-              ['Module', source.is_module ? 'yes' : 'no'], ['Source map', source.source_map_url_omitted ? 'unavailable (URL exceeds 64 KiB)' : source.source_map_url || 'none'],
-              ['Hash', source.hash || 'unreported'], ['Length', formatByteSize(source.length)]
-            ]
-          : [
-              ['Artifact', source.artifact_id], ['Kind', source.kind], ['Session', source.session_id],
-              ['Navigation', source.navigation_id], ['Frame', source.frame_id], ['Creator', source.creator_event_id],
-              ['Context', source.execution_context_id ?? 'unreported'],
-              ['Origin', source.capture_origin?.replaceAll('_', ' ') ?? 'legacy capture'],
-              ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
-              ['Sensitive', source.sensitive ? 'approved' : 'no']
-            ];
+        const facts = [
+          ['Artifact', source.artifact_id], ['Kind', source.kind], ['Session', source.session_id],
+          ['Navigation', source.navigation_id], ['Frame', source.frame_id], ['Creator', source.creator_event_id],
+          ['Context', source.execution_context_id ?? 'unreported'],
+          ['Origin', source.capture_origin?.replaceAll('_', ' ') ?? 'legacy capture'],
+          ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
+          ['Sensitive', source.sensitive ? 'approved' : 'no']
+        ];
         const wasm = source.kind === 'wasm' ? state.wasmCache.get(wasmKey(source)) : null;
         if (wasm) facts.push(['Inspection', wasm.notice], ['Coverage', wasm.status === 'partial' ? wasm.omissions.join(' ') : 'All sections and function bodies decoded.'], ['Limits', '2 MiB input, 8,192 rows, 128 sections, 2 seconds.']);
         facts.forEach(([label, value]) => {
@@ -6218,8 +6093,7 @@ const capturedExportPanel = installCapturedExportDialog({
         if (!query) {
           state.sourceSearchIndex = 0;
           elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', false));
-          const cursor = sourceCursorFor(source);
-          elements.sourcePosition.textContent = `Line ${(cursor?.line ?? sourceRuntimeLine(source, editor.window.line)) + 1}, Column ${(cursor?.column ?? editor.window.column) + 1}`;
+          elements.sourcePosition.textContent = `Line ${editor.window.line + 1}, Column ${editor.window.column + 1}`;
           status(`${coverage}. Find is a case-insensitive, single-line literal; no source is fetched.`);
           return;
         }
@@ -6249,10 +6123,8 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         highlightRows();
         const row = elements.sourceCode.querySelector(`[data-local-line="${match.line}"]`);
-        const transformed = state.sourceDeobfuscated || state.sourceFormatted;
-        const line = sourceRuntimeLine(source, match.line);
-        const column = match.column + (transformed ? 0 : sourceRuntimeColumn(source, match.line));
-        if (reveal && source.source_type === 'script' && !transformed) {setSourceCursor(source, line, column); updateSourceDecorations();}
+        const line = match.line;
+        const column = match.column;
         elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? 'Inspection row' : 'Line'} ${line + 1}, Column ${column + 1}`;
         status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
         if (!row) return;
@@ -6304,54 +6176,10 @@ const capturedExportPanel = installCapturedExportDialog({
             !Number.isSafeInteger(column) || column < 0 || column > (sourceDocumentLine(editor.index, line)?.length ?? 0)) return false;
         renderSourceContent(source, editor.view, {line, column, search: false});
         applySourceSearch(false, 0, {reveal: false});
-        elements.sourcePosition.textContent = `Line ${sourceRuntimeLine(source, line) + 1}, Column ${column + 1} · Retained display location`;
+        elements.sourcePosition.textContent = `Line ${line + 1}, Column ${column + 1} · Retained display location`;
         const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
         revealSourceColumn(row, column, true);
         return true;
-      }
-
-      function sourceRuntimeLine(source, sourceLine) {
-        return source?.source_type === 'script' ? (source.start_line ?? 0) + sourceLine : sourceLine;
-      }
-
-      function sourceRuntimeColumn(source, sourceLine) {
-        return source?.source_type === 'script' && sourceLine === 0 ? source.start_column ?? 0 : 0;
-      }
-
-      function sourceClickColumn(line, event) {
-        const text = line.querySelector('.source-text');
-        if (!text) return 0;
-        // DOM Range offsets and CDP columns both count UTF-16 code units.
-        // Measure across syntax spans, excluding the line-number gutter.
-        const caret = document.caretPositionFromPoint?.(event.clientX, event.clientY);
-        const range = caret ? null : document.caretRangeFromPoint?.(event.clientX, event.clientY);
-        const node = caret?.offsetNode ?? range?.startContainer;
-        const offset = caret?.offset ?? range?.startOffset;
-        if (!node || !text.contains(node)) return 0;
-        const prefix = document.createRange();
-        prefix.selectNodeContents(text);
-        prefix.setEnd(node, offset);
-        return prefix.toString().length;
-      }
-
-      function breakpointLinesForSource(source) {
-        const byLine = new Map();
-        if (source?.source_type !== 'script') return byLine;
-        (state.debuggerSession?.breakpoints ?? []).forEach(breakpoint => {
-          const resolved = breakpoint.locations?.filter(location => location.script_id === source.script_id) ?? [];
-          if (resolved.length > 0) {
-            resolved.forEach(location => { if (!byLine.has(location.line)) byLine.set(location.line, breakpoint); });
-            return;
-          }
-          if ((source.url && breakpoint.url === source.url) || breakpoint.script_id === source.script_id) {
-            if (!byLine.has(breakpoint.line)) byLine.set(breakpoint.line, breakpoint);
-          }
-        });
-        return byLine;
-      }
-
-      function breakpointAt(source, line) {
-        return breakpointLinesForSource(source).get(line) ?? null;
       }
 
       function sourceFormattedView(source, value, variant) {
@@ -6447,7 +6275,7 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.sourceLanguage.textContent = 'Detecting syntax';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
-          elements.sourceCodeEmpty.textContent = source.source_type === 'script' ? 'Loading live script source…' : 'Loading immutable artifact bytes…';
+          elements.sourceCodeEmpty.textContent = 'Loading immutable artifact bytes…';
           return;
         }
         if ((source.loadError || source.content === undefined) && sourceFactsPanel.original(source) === undefined) {
@@ -6472,27 +6300,18 @@ const capturedExportPanel = installCapturedExportDialog({
         const sameDocument = previous?.representation === representation && previous.content === content && previous.mapping === mapping && previous.formatting === formatting;
         const index = sameDocument ? previous.index : sourceDocumentIndex(content);
         const savedWindow = state.sourceWindow?.identity === identity && state.sourceWindow.representation === representation ? state.sourceWindow : null;
-        const pendingLine = !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity
-          ? state.pendingSourceLine.line - (source.source_type === 'script' ? source.start_line ?? 0 : 0) : null;
-        const pendingKey = pendingLine === null ? null : `${identity}:${state.pendingSourceLine.line}:${state.pendingSourceLine.column ?? 0}:${state.pendingSourceLine.revision ?? 0}`;
-        const requestedLine = target.line ?? (pendingKey && pendingKey !== previous?.pendingKey ? pendingLine : savedWindow?.line ?? 0);
-        const pendingColumn = pendingKey && pendingKey !== previous?.pendingKey ? Math.max(0, (state.pendingSourceLine.column ?? 0) - sourceRuntimeColumn(source, pendingLine)) : null;
-        const requestedColumn = target.column ?? pendingColumn ?? savedWindow?.column ?? 0;
+        const requestedLine = target.line ?? savedWindow?.line ?? 0;
+        const requestedColumn = target.column ?? savedWindow?.column ?? 0;
         const clampedLine = Math.max(0, Math.min(index.lineCount - 1, Number.isSafeInteger(requestedLine) ? requestedLine : 0));
         const window = sameDocument && previous.window.line === clampedLine && previous.window.column === requestedColumn
           ? previous.window : sourceDocumentWindow(index, clampedLine, requestedColumn);
         state.sourceWindow = {identity, representation, line: window.line, column: window.column};
-        const requestedUnavailable = requestedLine !== window.line || requestedColumn !== window.column;
-        const newPending = Boolean(pendingKey && pendingKey !== previous?.pendingKey && target.line === undefined);
         const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column;
         if (sameWindow) {
           const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
-          previous.pendingKey = pendingKey;
           previous.view = view;
-          updateSourceDecorations(); renderSourceWindowControls(previous);
+          renderSourceWindowControls(previous);
           if (coverageChanged && target.search !== false) applySourceSearch(false, 0, {reveal: false});
-          if (newPending) revealSourceColumn(elements.sourceCode.querySelector('.source-line.current'), window.column);
-          if (newPending && requestedUnavailable) elements.sourcePosition.textContent = 'Requested live location lies outside retained text; the available preview remains visible.';
           return;
         }
         elements.sourceCodeEmpty.replaceChildren();
@@ -6504,37 +6323,25 @@ const capturedExportPanel = installCapturedExportDialog({
         const mappedLines = mappingContext?.(window.rows);
         if (!sameDocument) state.sourceSearchIndex = 0;
         state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext,
-          pendingKey, search: sameDocument ? previous.search : null};
+          search: sameDocument ? previous.search : null};
         const lineMap = view.lineMap;
-        const breakpointsByLine = breakpointLinesForSource(source);
         // Later/column-clipped windows cannot assume the lexical state of an omitted prefix.
         const plainWindow = window.start > 0 || window.rows.some(row => row.columnStart > 0 || row.columnEnd < row.fullLength);
         const tokenizer = createSourceTokenizer(view.wasmRows || plainWindow ? {kind: 'plain', mime_type: 'text/plain'} : source);
-        const cursor = sourceCursorFor(source);
 
         const nodes = window.rows.map((excerpt, rowIndex) => {
           const {text: line, line: index} = excerpt;
-          const runtimeLine = sourceRuntimeLine(source, index);
           const mapped = lineMap ? lineMap[index] ?? null : mappedLines?.[rowIndex] ?? null;
           const mappedLine = mapped?.originalLine ?? null;
           const row = document.createElement('span');
           row.className = 'source-line';
-          row.dataset.line = String(runtimeLine + 1);
+          row.dataset.line = String(index + 1);
           row.dataset.localLine = String(index);
           row.dataset.columnStart = String(excerpt.columnStart);
-          const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
-          if (breakpoint) row.classList.add('breakpoint');
-          if (source.source_type === 'script' && !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity && state.pendingSourceLine.line === runtimeLine) {
-            row.classList.add('current');
-          }
-          if (source.source_type === 'script' && cursor?.line === runtimeLine) {
-            row.classList.add('cursor');
-          }
           const gutter = document.createElement('button');
           gutter.type = 'button';
           gutter.className = 'source-gutter';
-          gutter.textContent = String((mappedLine ?? runtimeLine) + 1);
-          const transformed = state.sourceDeobfuscated || state.sourceFormatted;
+          gutter.textContent = String((mappedLine ?? index) + 1);
           gutter.disabled = mappedLine === null;
           gutter.title = mappedLine === null ? 'Retained source line' : `Show original source at line ${mappedLine + 1}`;
           gutter.setAttribute('aria-label', gutter.title);
@@ -6584,30 +6391,6 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.sourceCodeWrap.scrollLeft = 0;
           if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
         }
-        if (newPending) revealSourceColumn(elements.sourceCode.querySelector('.source-line.current'), window.column);
-        if (newPending && requestedUnavailable) elements.sourcePosition.textContent = 'Requested live location lies outside retained text; the available preview remains visible.';
-      }
-
-      function updateSourceDecorations() {
-        const source = selectedSource();
-        if (source?.source_type !== 'script' || elements.sourceCode.hidden || state.sourceDeobfuscated || state.sourceFormatted || state.sourceWasm) return;
-        const breakpointsByLine = breakpointLinesForSource(source);
-        const identity = sourceIdentity(source);
-        const enabled = source.target_type !== 'worker' && !state.sourceDeobfuscated && !state.sourceFormatted && ['running', 'paused'].includes(state.debuggerSession?.state) && !memoryOriginTraceActive();
-        elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => {
-          const runtimeLine = Number(row.dataset.line) - 1;
-          const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
-          const current = !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity && state.pendingSourceLine.line === runtimeLine;
-          row.classList.toggle('breakpoint', Boolean(breakpoint));
-          row.classList.toggle('current', current);
-          row.classList.toggle('cursor', sourceCursorFor(source)?.line === runtimeLine);
-          const gutter = row.querySelector('.source-gutter');
-          if (!gutter) return;
-          gutter.disabled = !enabled;
-          gutter.setAttribute('aria-label', `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`);
-        });
-        // Explicit pause/reveal changes choose their window while rendering.
-        // Ordinary debugger refresh must not pull a Find result back to a frame.
       }
 
       function renderSources() {
@@ -6628,7 +6411,7 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.sourceLocation.textContent = source?.url || (source ? sourceDisplayName(source) : 'Select a source');
         elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
-        elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
+        elements.sourceHash.textContent = source?.sha256 ? `sha256 ${source.sha256}` : '';
         syncSourceDisplayControls(source, view);
         renderSourceContent(source, view);
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
@@ -6664,8 +6447,7 @@ const capturedExportPanel = installCapturedExportDialog({
           return report ? `${report.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets` : request?.status === 'error' ? 'Inspection failed · original bytes preserved' : request?.status === 'loading' ? 'Inspection pending' : 'Inspection preview released';
         }
         view ??= source?.content !== undefined ? sourceDisplayView(source) : null;
-        const original = source?.source_type === 'script' ? 'Live runtime source'
-          : sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
+        const original = sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
           : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}${source?.contentTruncated ? ' · truncated' : ''}`;
         if (view?.formatError) return `${original} · ${view.formatError}`;
         if (state.sourceDeobfuscated && sourceDerivedView(source)) {
@@ -6688,28 +6470,24 @@ const capturedExportPanel = installCapturedExportDialog({
         if (sourceIdentity(selectedSource()) !== sourceIdentity(source)) return;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
-        if (source.source_type === 'script') {
-          setSourceCursor(source, sourceRuntimeLine(source, line), (column ?? 0) + sourceRuntimeColumn(source, line));
-        }
         const view = sourceDisplayView(source);
         renderSourceContent(source, view, {line, column: column ?? 0, search: false});
         syncSourceDisplayControls(source, view);
         renderDeobfuscationReport(source);
         applySourceSearch(false, 0, {reveal: false});
-        const runtimeLine = sourceRuntimeLine(source, line);
-        const row = [...elements.sourceCode.querySelectorAll('.source-line')].find(candidate => Number(candidate.dataset.line) === runtimeLine + 1);
+        const row = [...elements.sourceCode.querySelectorAll('.source-line')].find(candidate => Number(candidate.dataset.line) === line + 1);
         if (row) {
           revealSourceColumn(row, column ?? 0, true);
-          elements.sourcePosition.textContent = `Original line ${runtimeLine + 1}, Column ${(column ?? 0) + sourceRuntimeColumn(source, line) + 1}`;
+          elements.sourcePosition.textContent = `Original line ${line + 1}, Column ${(column ?? 0) + 1}`;
         } else {
-          elements.sourcePosition.textContent = `Original line ${runtimeLine + 1} is outside the displayed preview. Facts can read verified original-byte ranges.`;
+          elements.sourcePosition.textContent = `Original line ${line + 1} is outside the displayed preview. Facts can read verified original-byte ranges.`;
         }
       }
 
       function revealSourceFactRange(source, range, position) {
         if (sourceFactsIdentity(selectedSource()) !== sourceFactsIdentity(source)) return;
         // This uses separately hash-verified, strict UTF-8 original bytes, never
-        // a lossy preview, derived text, or a live debugger script.
+        // a lossy preview or derived text.
         if (getComputedStyle(elements.sourceSidebar).position === 'absolute') {
           state.sourceSidebarOpen = false;
           renderSourceSidebar();
@@ -6735,25 +6513,15 @@ const capturedExportPanel = installCapturedExportDialog({
         return `${sourceIdentity(source)}|intrinsics:${Boolean(state.deobfuscationAssumeIntrinsics)}`;
       }
 
-      function sourceOwnedLiveText(source) {
-        if (source?.source_type !== 'script' || !sourceIsCurrent(source)) return null;
-        const entry = state.liveScriptContent.get(source.script_id);
-        return entry?.identity === liveScriptIdentity(source) && !entry.loading && !entry.loadError &&
-          entry.contentTruncated === false && typeof entry.content === 'string' && entry.sourceTextLength === entry.content.length
-          ? entry.content : null;
-      }
-
-      async function validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal = null) {
+      async function validateSourceAnalysis(payload, source, assumeIntrinsics) {
         const original = payload?.original_source;
         const representation = payload?.representation;
         const expectedAssumptions = assumeIntrinsics ? ['standard-intrinsics'] : [];
         if (payload?.schema !== 'deobfuscation-analysis-v1' || !['rust-oxc', 'python-lexical'].includes(payload.engine) || payload.mode !== 'derived' || payload.source_truncated !== false ||
-            payload.artifact_id !== (source.source_type === 'artifact' ? source.artifact_id : null) ||
-            payload.script_id !== (source.source_type === 'script' ? source.script_id : null) ||
+            source.source_type !== 'artifact' || payload.artifact_id !== source.artifact_id || payload.script_id !== null ||
             typeof original !== 'string' || original.length > 4 * 1024 * 1024 ||
             !/^[0-9a-f]{64}$/.test(payload.analysis?.source?.sha256) ||
-            (source.source_type === 'artifact' && (!/^[0-9a-f]{64}$/.test(source.sha256) || payload.analysis.source.sha256 !== source.sha256)) ||
-            (source.source_type === 'script' && (liveOriginal === null || original !== liveOriginal)) ||
+            !/^[0-9a-f]{64}$/.test(source.sha256) || payload.analysis.source.sha256 !== source.sha256 ||
             JSON.stringify(payload.analysis?.assumptions) !== JSON.stringify(expectedAssumptions) ||
             typeof representation?.text !== 'string' || representation.text.length > 4 * 1024 * 1024 + 512 * 1024 ||
             !Array.isArray(representation.segments) || representation.segments.length > 250000 ||
@@ -6831,14 +6599,10 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       async function loadDeobfuscation(source, {retry = false} = {}) {
-        const sourceId = source?.source_type === 'artifact' ? source.artifact_id : source?.script_id;
-        const sourceParam = source?.source_type === 'artifact' ? 'artifact_id' : 'script_id';
+        const sourceId = source?.source_type === 'artifact' ? source.artifact_id : null;
         if (!sourceId || !sourceIsCurrent(source)) return;
         const key = deobfuscationKey(source);
         const identity = sourceIdentity(source);
-        const liveOwner = source.source_type === 'script' ? state.liveScriptContent.get(source.script_id) : null;
-        const liveOriginal = source.source_type === 'script' ? sourceOwnedLiveText(source) : null;
-        if (source.source_type === 'script' && state.deobfuscationCache.get(key)?.original_source !== liveOriginal) state.deobfuscationCache.delete(key);
         const assumeIntrinsics = Boolean(state.deobfuscationAssumeIntrinsics);
         const previous = state.deobfuscationRequests.get(key);
         if (previous?.status === 'loading' || (!retry && (['error', 'cancelled'].includes(previous?.status) || state.deobfuscationCache.has(key)))) return;
@@ -6849,8 +6613,7 @@ const capturedExportPanel = installCapturedExportDialog({
         renderSources();
         while (state.deobfuscationRequests.size > 128) state.deobfuscationRequests.delete(state.deobfuscationRequests.keys().next().value);
         const current = () => state.deobfuscationRequests.get(key) === request && request.status === 'loading' &&
-          !controller.signal.aborted && sourceIsCurrent(source) && deobfuscationKey(source) === key &&
-          (source.source_type !== 'script' || state.liveScriptContent.get(source.script_id) === liveOwner);
+          !controller.signal.aborted && sourceIsCurrent(source) && deobfuscationKey(source) === key;
         const timeout = setTimeout(() => {
           if (state.deobfuscationRequests.get(key) !== request || request.status !== 'loading') return;
           request.status = 'error'; request.error = 'Analysis timed out. Retry explicitly; original bytes are preserved.';
@@ -6858,14 +6621,13 @@ const capturedExportPanel = installCapturedExportDialog({
           if (sourceIdentity(selectedSource()) === identity) renderSources();
         }, 10000);
         try {
-          if (source.source_type === 'script' && liveOriginal === null) throw new Error('Load the complete owned live source before analyzing it; truncated previews cannot establish exact text.');
-          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived&assume_intrinsics=${assumeIntrinsics ? 1 : 0}`, {cache: 'no-store', signal: controller.signal});
+          const response = await fetch(`/api/deobfuscation?artifact_id=${encodeURIComponent(sourceId)}&mode=derived&assume_intrinsics=${assumeIntrinsics ? 1 : 0}`, {cache: 'no-store', signal: controller.signal});
           const bytes = await sourceFactsReadBytes(response, 33 * 1024 * 1024, controller.signal);
           if (!current()) return;
           if (bytes.length > 32 * 1024 * 1024) throw new Error('The analyzer response exceeds the retained-document budget.');
           const payload = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
           if (!response.ok) throw new Error(payload.error || `Deobfuscation analysis returned ${response.status}`);
-          const inspection = await validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal);
+          const inspection = await validateSourceAnalysis(payload, source, assumeIntrinsics);
           if (!current()) return;
           state.sourceAnalysisVersion = (state.sourceAnalysisVersion ?? 0) + 1;
           payload.sourceWindowVersion = state.sourceAnalysisVersion;
@@ -6986,17 +6748,6 @@ const capturedExportPanel = installCapturedExportDialog({
         const change = owner?.payload.sourceInspection?.changes[view.change];
         if (!change || !owner.payload.sourceInspection.byteRanges || view.revealing) return;
         const wire = owner.payload.representation.segments[change.index];
-        if (owner.source.source_type === 'script') {
-          if (sourceOwnedLiveText(owner.source) !== owner.payload.original_source) return;
-          const position = sourceDocumentPosition(sourceDocumentIndex(owner.payload.original_source), change.original_start);
-          if (getComputedStyle(elements.sourceSidebar).position === 'absolute') {
-            state.sourceSidebarOpen = false;
-            renderSourceSidebar();
-          }
-          revealOriginalLine(owner.source, position.line, position.column);
-          elements.sourcePosition.textContent = `Original live-source UTF-8 bytes [${wire.original_start}, ${wire.original_end}) · Line ${sourceRuntimeLine(owner.source, position.line) + 1}, Column ${position.column + sourceRuntimeColumn(owner.source, position.line) + 1}`;
-          return;
-        }
         const unavailable = sourceFactsUnavailable(owner.source, location.protocol);
         if (unavailable) {view.notice = unavailable; renderDeobfuscationReport(owner.source); return;}
         if (['loading', 'loading-source'].includes(sourceFactsPanel.model.status)) {
@@ -7106,7 +6857,7 @@ const capturedExportPanel = installCapturedExportDialog({
           const changes = inspection.changes;
           nodes.push(textElement('strong', 'deobfuscation-title', `Static cleanup · ${changes.length ? `${changes.length} changed spans` : 'No safe rewrites found'}`));
           nodes.push(deobfuscationRow('Bytes', `${formatByteSize(inspection.originalBytes)} → ${formatByteSize(inspection.derivedBytes)}`));
-          nodes.push(deobfuscationRow('Source', `${target.source_type === 'script' ? 'Live script' : 'Captured artifact'} ${target.script_id ?? target.artifact_id}`));
+          nodes.push(deobfuscationRow('Source', `Captured artifact ${target.artifact_id}`));
           nodes.push(deobfuscationRow('Original SHA-256', analysis.source.sha256));
           nodes.push(deobfuscationRow('Cleaned SHA-256', inspection.derivedSha256));
           nodes.push(textElement('p', 'deobfuscation-note', 'Original bytes are unchanged. Cleanup runs locally without executing the input or uploading it to a third-party service. SHA-256 identifies each complete UTF-8 text, not its preview. Static reconstruction does not prove equivalent runtime behavior. Pretty printing is a separate display layer.'));
@@ -7344,10 +7095,7 @@ const capturedExportPanel = installCapturedExportDialog({
         retireSourceAnalysis(identity);
         investigationBeforeSelection();
         sourceFactsPanel.cancel();
-        state.sourceCollection = 'captured';
-        state.selectedScriptId = null;
         state.selectedArtifactId = artifactId;
-        state.pendingSourceLine = null;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
         state.sourceWasm = false;
@@ -7362,54 +7110,14 @@ const capturedExportPanel = installCapturedExportDialog({
         return true;
       }
 
-      function selectScript(scriptId, line = null, column = null) {
-        const candidates = [].filter(candidate => candidate.script_id === scriptId);
-        if (candidates.length !== 1) {
-          state.sourceNoticeKind = 'warning';
-          state.sourceNotice = 'This live script ID is missing or ambiguous. Refresh the Page catalog before opening it.';
-          renderSourceHealth();
-          return false;
-        }
-        const source = candidates[0];
-        investigationPassiveSource = false;
-        state.sourceNotice = null;
-        retireSourceAnalysis(sourceIdentity(source));
-        investigationBeforeSelection();
-        sourceFactsPanel.cancel();
-        state.sourceCollection = 'page';
-        state.selectedScriptId = scriptId;
-        state.selectedArtifactId = null;
-        state.sourceRevealRevision = (state.sourceRevealRevision ?? 0) + 1;
-        state.pendingSourceLine = line === null ? null : { identity: sourceIdentity(source), scriptId, line, column, revision: state.sourceRevealRevision };
-        state.sourceDeobfuscated = false;
-        state.sourceFormatted = false;
-        state.sourceWasm = false;
-        if (!state.openScriptIds.includes(scriptId)) state.openScriptIds.push(scriptId);
-        renderSources();
-
-      }
-
       function closeSource(source) {
         if (!sourceIsCurrent(source)) return;
         releaseSourcePreview(source);
-        if (source.source_type === 'script') {
-          const closedIndex = state.openScriptIds.indexOf(source.script_id);
-          state.openScriptIds = state.openScriptIds.filter(id => id !== source.script_id);
-          if (state.selectedScriptId === source.script_id) {
-            state.selectedScriptId = state.openScriptIds[Math.max(0, closedIndex - 1)] ?? null;
-            if (state.selectedScriptId === null) {
-              state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
-              state.sourceCollection = 'captured';
-            }
-          }
-        } else {
-          const closedIndex = state.openArtifactIds.indexOf(source.artifact_id);
-          state.openArtifactIds = state.openArtifactIds.filter(id => id !== source.artifact_id);
-          if (state.selectedArtifactId === source.artifact_id && state.selectedScriptId === null) {
-            state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
-          }
+        const closedIndex = state.openArtifactIds.indexOf(source.artifact_id);
+        state.openArtifactIds = state.openArtifactIds.filter(id => id !== source.artifact_id);
+        if (state.selectedArtifactId === source.artifact_id) {
+          state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
         }
-        state.pendingSourceLine = null;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
         state.sourceWasm = false;
@@ -7421,7 +7129,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function renderQuickOpen() {
         const needle = elements.quickOpenInput.value.trim().toLowerCase();
-        const matches = [...[], ...capturedSources()].map(sourceReference).filter(source =>
+        const matches = capturedSources().map(sourceReference).filter(source =>
           !needle || `${sourceDisplayName(source)} ${source.url}`.toLowerCase().includes(needle)
         );
         const rows = matches.map(source => {
@@ -7429,12 +7137,11 @@ const capturedExportPanel = installCapturedExportDialog({
           row.type = 'button';
           row.className = 'quick-open-row';
           const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
-          const path = document.createElement('small'); path.textContent = `${source.source_type === 'script' ? 'Live' : 'Captured'} · ${source.url || '(anonymous)'}`;
+          const path = document.createElement('small'); path.textContent = `Captured · ${source.url || '(anonymous)'}`;
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;
-            if (source.source_type === 'script') selectScript(source.script_id);
-            else selectArtifact(source.artifact_id);
+            selectArtifact(source.artifact_id);
           });
           return row;
         });
@@ -7446,39 +7153,6 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.quickOpenInput.value = '';
         renderQuickOpen();
         requestAnimationFrame(() => elements.quickOpenInput.focus());
-      }
-
-      // One in-flight action and one bounded result. UI ownership is not native cancellation.
-
-      function debuggerValueText(value) {
-        if (!value) return 'unavailable';
-        if (value.unserializable_value) return value.unserializable_value;
-        const suffix = value.value_truncated ? '…' : '';
-        if (value.type === 'string') return `${JSON.stringify(value.value ?? '')}${suffix}`;
-        if (value.value !== null && value.value !== undefined) return `${String(value.value)}${suffix}`;
-        return value.description || value.class_name || value.subtype || value.type;
-      }
-
-      function debuggerScriptName(scriptId, fallbackUrl = '') {
-        const script = state.debuggerSession?.scripts.find(candidate => candidate.script_id === scriptId);
-        if (script) return sourceName({ ...script, source_type: 'script' });
-        if (fallbackUrl) return sourceName({ url: fallbackUrl, source_type: 'script', script_id: scriptId });
-        return `(script ${scriptId})`;
-      }
-
-      function debuggerLocationText(location, fallbackUrl = '') {
-        return `${debuggerScriptName(location.script_id, fallbackUrl)}:${location.line + 1}:${location.column + 1}`;
-      }
-
-      function selectedCallFrame() {
-        const frames = state.debuggerSession?.paused?.call_frames ?? [];
-        return frames.find(frame => frame.id === state.selectedCallFrameId) ?? frames[0] ?? null;
-      }
-
-      function memoryOriginTraceActive() {
-        return ['armed', 'capturing', 'stepping', 'stopping'].includes(
-          state.debuggerSession?.memory_origin_trace?.state
-        );
       }
 
       function renderSourceSidebar() { const open = Boolean(state.sourceSidebarOpen); elements.sourceSidebar.hidden = !open; document.querySelector('#screen-sources').dataset.sidebarOpen = String(open); elements.sourceSidebarToggle.setAttribute('aria-expanded', String(open)); }
@@ -7748,7 +7422,6 @@ const capturedExportPanel = installCapturedExportDialog({
         state.artifactReceiverConfigured = false;
         state.artifactReceiverConnected = false;
         state.artifactReceiverError = null;
-        state.staleScriptIds?.clear();
         state.sourceNotice = null;
         state.selectedRequestId = null;
         state.selectedField = null;
@@ -8047,17 +7720,9 @@ const capturedExportPanel = installCapturedExportDialog({
       });
       document.querySelectorAll('[data-source-collection]').forEach(button => button.addEventListener('click', () => {
         state.sourceCollection = button.dataset.sourceCollection;
-        if (state.sourceCollection === 'page') {
-          const script = [].find(source => source.script_id === state.selectedScriptId) ?? [][0];
-          if (script) selectScript(script.script_id);
-          else renderSources();
-        } else {
-          state.selectedScriptId = null;
-          state.pendingSourceLine = null;
-          const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? state.artifacts[0];
-          if (artifact) selectArtifact(artifact.artifact_id);
-          else renderSources();
-        }
+        const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? state.artifacts[0];
+        if (artifact) selectArtifact(artifact.artifact_id);
+        else renderSources();
       }));
       elements.deobfuscationIntrinsics.addEventListener('change', () => {
         retireSourceAnalysis();
@@ -8101,10 +7766,6 @@ const capturedExportPanel = installCapturedExportDialog({
         state.sourceSidebarOpen = elements.sourceSidebar.hidden;
         renderSourceSidebar();
       });
-
-      enableTabKeyboardNavigation('.experiment-mode-tab');
-
-      enableTabKeyboardNavigation('.repeater-editor-tab');
 
 
       elements.collectionRetry.addEventListener('click', () => refreshApiCollection(true));

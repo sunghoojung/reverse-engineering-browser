@@ -678,75 +678,18 @@ function renderTrafficDetails(container, request, tab, onDecode, onTrace, find =
   }
 }
 
-// HTTP row owners are immutable and independent of the selected debugger target.
-// Missing ownership fails closed: legacy snapshots cannot survive an epoch change.
-function trafficRetainedHttpIdentity(request) {
-  const row = request?.captureRecord;
-  const text = value => typeof value === 'string' && value.length > 0;
-  if (request?.origin !== 'live' || !String(request.operation).startsWith('cdp_') || !row ||
-      !text(request.captureOwner?.[0]) || !text(row.capture_owner) ||
-      !text(row.id) || request.id !== row.id || !text(row.target_id) || request.tabId !== row.target_id ||
-      !text(row.protocol_request_id) || request.protocolRequestId !== row.protocol_request_id ||
-      !Number.isFinite(row.started_monotonic_ms) || row.started_monotonic_ms < 0 ||
-      !Number.isSafeInteger(row.wall_time_ms) || row.wall_time_ms < 0) return null;
-  return JSON.stringify([request.captureOwner[0], row.capture_owner, row.id, row.target_id,
-    row.protocol_request_id, row.started_monotonic_ms, row.wall_time_ms]);
-}
-
-function trafficHttpSnapshotOwner(session, mode) {
-  return {mode, target: session?.network?.target_id ?? session?.target?.id ?? null,
-    capture: session?.network?.capture_enabled ?? false, generation: session?.generation ?? null,
-    instance: session?.network?.instance_id ?? null, epoch: session?.network?.capture_epoch ?? null};
-}
-
-function trafficHttpSnapshotContinues(previous, next) {
-  return previous?.mode === 'live' && next?.mode === 'live' && previous.capture === true && next.capture === true &&
-    typeof previous.instance === 'string' && previous.instance.length > 0 && previous.instance === next.instance &&
-    Number.isSafeInteger(previous.generation) && previous.generation >= 0 &&
-    Number.isSafeInteger(next.generation) && next.generation >= previous.generation &&
-    Number.isSafeInteger(previous.epoch) && previous.epoch >= 0 && Number.isSafeInteger(next.epoch) && next.epoch >= previous.epoch;
-}
-
-function trafficHttpFocusTransition(previous, next) {
-  return trafficHttpSnapshotContinues(previous, next) &&
-    typeof previous.target === 'string' && previous.target.length > 0 &&
-    typeof next.target === 'string' && next.target.length > 0 && previous.target !== next.target && next.epoch > previous.epoch;
-}
-
-function trafficRetainedFocusRequest(previous, requests, oldOwner, newOwner) {
-  const identity = trafficRetainedHttpIdentity(previous);
-  if (!identity || !trafficHttpFocusTransition(oldOwner, newOwner) ||
-      previous.captureOwner[0] !== oldOwner.instance || previous.captureOwner[1] !== oldOwner.epoch) return null;
-  const candidates = requests.filter(request => trafficRetainedHttpIdentity(request) === identity &&
-    request.captureOwner[0] === newOwner.instance && request.captureOwner[1] === newOwner.epoch);
-  return candidates.length === 1 && requests.filter(request => request.id === previous.id).length === 1 ? candidates[0] : null;
-}
-
 // A baseline is an exact reference into the retained window, never a body copy.
-// Restarts and lost ownership retire it permanently. Verified focus-only changes
-// may retain the same immutable HTTP row, without weakening endpoint epoch guards.
+// Leaving the evidence mode retires it; the native ledger has no target focus.
 function createTrafficComparisonController(identityOf, sameIdentity) {
-  let baseline = null, retention = null, scope = null, generation = null, previousOwner = null, notice = '';
-  const exact = (identity, requests, retained = null) => requests.filter(value => sameIdentity(identity, identityOf(value)) &&
-    (!retained || trafficRetainedHttpIdentity(value) === retained));
+  let baseline = null, scope = null, notice = '';
+  const exact = (identity, requests) => requests.filter(value => sameIdentity(identity, identityOf(value)));
   function sync(requests, owner) {
-    const nextScope = JSON.stringify([owner.mode, owner.target, owner.capture, owner.instance, owner.epoch]);
-    let replaced = scope !== null && (scope !== nextScope ||
-      Number.isSafeInteger(generation) && Number.isSafeInteger(owner.generation) && owner.generation < generation ||
-      retention && previousOwner && !trafficHttpSnapshotContinues(previousOwner, owner));
-    if (replaced && retention && trafficHttpFocusTransition(previousOwner, owner)) {
-      const retained = requests.filter(value => trafficRetainedHttpIdentity(value) === retention &&
-        value.captureOwner[0] === owner.instance && value.captureOwner[1] === owner.epoch);
-      if (retained.length === 1 && requests.filter(value => value.id === retained[0].id).length === 1) {
-        const renewed = identityOf(retained[0]);
-        if (renewed) { baseline = renewed; replaced = false; }
-      }
-    }
-    const matches = baseline ? exact(baseline, requests, retention) : [];
+    const replaced = scope !== null && scope !== owner.mode;
+    const matches = baseline ? exact(baseline, requests) : [];
     const unique = matches.length === 1 && requests.filter(value => value.id === matches[0].id).length === 1;
-    scope = nextScope; generation = owner.generation; previousOwner = {...owner};
+    scope = owner.mode;
     if (baseline && (replaced || !unique)) {
-      baseline = null; retention = null;
+      baseline = null;
       notice = 'Baseline expired: its exact capture is no longer uniquely retained or the capture session changed. Select it again explicitly.';
     }
     return baseline ? matches[0] : null;
@@ -759,16 +702,16 @@ function createTrafficComparisonController(identityOf, sameIdentity) {
       if (!identity || exact(identity, requests).length !== 1 || requests.filter(value => value.id === request.id).length !== 1) {
         notice = 'A unique retained capture identity is required. Sample data cannot be pinned.'; return false;
       }
-      baseline = identity; retention = trafficRetainedHttpIdentity(request); notice = ''; return true;
+      baseline = identity; notice = ''; return true;
     },
-    clear() {baseline = null; retention = null; notice = 'Baseline cleared.';},
+    clear() {baseline = null; notice = 'Baseline cleared.';},
     get identity() {return baseline;},
     get notice() {return notice;}
   };
 }
 
 function trafficComparisonOwner() {
-  return trafficHttpSnapshotOwner(state.debuggerSession, state.sessionMode);
+  return {mode: state.sessionMode};
 }
 
 // Lazy initialization keeps pure viewer/model fixtures independent of navigation.
@@ -1003,86 +946,3 @@ function installTrafficCaptureExport(host, getRequest) {
 
 // Reuse the explicit export-copy policy from the offline client-project command.
 if (typeof module === 'object' && module?.exports && typeof require === 'function') module.exports = {trafficCaptureDocument};
-
-// CDP message observations are distinct from HTTP rows and not reconstructed streams.
-function webSocketModel(network) {
-  const capture=network?.websockets;
-  const unavailable=reason=>({available:false,reason,connections:[],frames:[]});
-  if(network?.capture_enabled!==true)return unavailable('WebSocket content capture is disabled.');
-  if(capture?.format!=='reb-websocket-capture-v1')return unavailable('This backend snapshot has no WebSocket message capture.');
-  const integer=value=>Number.isSafeInteger(value)&&value>=0;
-  if(typeof network.instance_id!=='string'||!integer(network.capture_epoch)||typeof network.target_id!=='string')return unavailable('WebSocket capture ownership is unavailable.');
-  if(!Array.isArray(capture.connections)||capture.connections.length>64||!Array.isArray(capture.frames)||capture.frames.length>512||
-      !['dropped_connections','dropped_frames','orphan_events','malformed_events'].every(key=>integer(capture[key])))return unavailable('Malformed WebSocket capture; no messages displayed.');
-  const ids=new Set(),sequences=new Set();
-  for(const item of capture.connections) {
-    if(!item||!integer(item.id)||ids.has(item.id)||typeof item.url!=='string'||item.url.length>8192||item.target_id!==network.target_id||typeof item.protocol_request_id!=='string'||typeof item.state!=='string')return unavailable('Malformed WebSocket connection identity.');
-    ids.add(item.id);
-  }
-  for(const frame of capture.frames) {
-    if(!frame||!integer(frame.sequence)||sequences.has(frame.sequence)||!integer(frame.connection_id)||typeof frame.target_id!=='string'||
-        !['sent','received'].includes(frame.direction)||!integer(frame.opcode)||frame.opcode>15||typeof frame.monotonic_seconds!=='number'||!Number.isFinite(frame.monotonic_seconds)||frame.monotonic_seconds<0||
-        !['utf8','base64'].includes(frame.encoding)||typeof frame.payload!=='string'||frame.payload.length>5464||typeof frame.truncated!=='boolean'||!['available','oversized'].includes(frame.payload_state))return unavailable('Malformed WebSocket message; no messages displayed.');
-    sequences.add(frame.sequence);
-  }
-  return {available:true,...capture,scope:JSON.stringify([network.instance_id??null,network.capture_epoch??null,network.target_id??null])};
-}
-
-function renderWebSocketInspector(root,network,stale=false) {
-  if(!root)return;
-  const model=webSocketModel(network);
-  // HTTP-only captures keep their full workspace. An open panel retains explicit
-  // empty/disabled status, but a closed panel appears only with retained sockets.
-  const hide=!root.open&&model.connections.length===0;
-  if(hide&&root.contains(document.activeElement))document.querySelector?.('#request-filter')?.focus({preventScroll:true});
-  root.hidden=hide;
-  if(!root._rebWebsocket) {
-    const summary=document.createElement('summary'),status=trafficNode('p','',''),controls=trafficNode('div','websocket-controls'),select=document.createElement('select'),direction=document.createElement('select'),frames=trafficNode('div','websocket-frames');
-    select.setAttribute('aria-label','WebSocket connection');direction.setAttribute('aria-label','WebSocket direction');
-    for(const [value,label] of [['all','Both directions'],['sent','Sent'],['received','Received']]) {const option=document.createElement('option');option.value=value;option.textContent=label;direction.append(option);}
-    direction.value='all';
-    controls.append(select,direction);status.setAttribute('role','status');root.append(summary,status,controls,frames);
-    root._rebWebsocket={summary,status,select,direction,frames,scope:null,optionKey:null,frameKey:null,model:null,stale:false};
-    const refresh=()=>renderWebSocketInspector(root,root._rebWebsocket.network,root._rebWebsocket.stale);
-    select.addEventListener('change',refresh);direction.addEventListener('change',refresh);root.addEventListener('toggle',refresh);
-  }
-  const ui=root._rebWebsocket;ui.network=network;ui.stale=stale;ui.model=model;
-  ui.summary.textContent=`WebSockets · ${model.connections.length} retained connections · ${model.frames.length} retained messages`;
-  ui.select.disabled=ui.direction.disabled=!model.available;
-  if(!model.available){ui.status.textContent=model.reason;ui.frames.replaceChildren();ui.frameKey=null;return;}
-  const changedScope=ui.scope!==model.scope;ui.scope=model.scope;
-  if(changedScope){const focused=ui.frames.contains(document.activeElement);ui.frames.replaceChildren();ui.frameKey=null;if(focused)ui.select.focus({preventScroll:true});}
-  const optionKey=JSON.stringify(model.connections.map(item=>[item.id,item.url,item.state]));
-  if(changedScope||optionKey!==ui.optionKey) {
-    const previous=changedScope?'':ui.select.value;ui.optionKey=optionKey;
-    const options=model.connections.map(item=>{const option=document.createElement('option');option.value=String(item.id);option.textContent=`#${item.id} ${item.state} ${item.url}`;return option;});
-    ui.select.replaceChildren(...options);
-    if(options.some(option=>option.value===previous))ui.select.value=previous;
-    else if(options.length)ui.select.value=options[options.length-1].value;
-  }
-  const selected=model.connections.find(item=>String(item.id)===ui.select.value);
-  const orphaned=model.frames.filter(frame=>!model.connections.some(connection=>connection.id===frame.connection_id)).length;
-  const failedNotice=trafficFailedRequestNotice(network?.requests);
-  ui.status.textContent=(stale?'Debugger refresh unavailable; last retained snapshot. ':'')+
-    'Raw captured content can be sensitive. Monotonic seconds; CDP messages are not wire frames or reassembled streams. '+
-    `Dropped: ${model.dropped_connections} connections, ${model.dropped_frames} messages. Unmatched events: ${model.orphan_events}; malformed: ${model.malformed_events}; messages whose connection was evicted: ${orphaned}.`+
-    (failedNotice?` ${failedNotice}`:'')+
-    (selected?` Selected #${selected.id}: ${selected.state}; handshake status ${selected.handshake_status??'unknown'}; errors ${selected.error_count??0}.`:' No retained connections.');
-  if(!root.open)return;
-  const matching=model.frames.filter(frame=>selected&&frame.connection_id===selected.id&&frame.target_id===selected.target_id&&(ui.direction.value==='all'||frame.direction===ui.direction.value));
-  const visible=matching.slice(-100),key=JSON.stringify([model.scope,selected?.id,ui.direction.value,visible]);
-  if(key===ui.frameKey)return;ui.frameKey=key;
-  const previousFrames=new Map((changedScope?[]:[...ui.frames.children]).filter(node=>node.dataset?.sequence).map(node=>[node.dataset.sequence,node]));
-  const active=document.activeElement,restore=ui.frames.contains(active);
-  const nodes=[trafficNode('p','',`${visible.length} of ${matching.length} matching retained messages shown, newest 100. Payload prefixes are at most 4 KiB.`)];
-  for(const frame of visible) {
-    const old=previousFrames.get(String(frame.sequence));
-    const article=old??document.createElement('details'),summary=old?.children[0]??document.createElement('summary'),payload=old?.children[1]??document.createElement('pre');
-    article.dataset.sequence=String(frame.sequence);
-    summary.textContent=`#${frame.sequence} ${frame.direction} · opcode ${frame.opcode} · ${frame.monotonic_seconds}s · ${frame.encoding}${frame.truncated?' · truncated':''}`;
-    payload.tabIndex=0;payload.textContent=frame.payload_state==='oversized'?'Binary payload exceeded its decode bound; bytes unavailable.':frame.payload;
-    if(!old)article.append(summary,payload);nodes.push(article);
-  }
-  ui.frames.replaceChildren(...nodes);
-  if(restore){if(ui.frames.contains(active))active.focus({preventScroll:true});else ui.select.focus({preventScroll:true});}
-}

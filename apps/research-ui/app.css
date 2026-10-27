@@ -2145,7 +2145,8 @@
       .request-domain-filter { font-size: 10px; }
       .request-domain-filter select { min-width: 0; max-width: 140px; height: 25px; font-size: 10px; }
       .request-pane > .request-table { grid-row: -2 / -1; }
-      .request-table { grid-template-rows: 28px minmax(28px, 1fr) auto; }
+      /* The footer wraps at narrow table widths; its row must grow with it. */
+      .request-table { grid-template-rows: 28px minmax(28px, 1fr) max-content; }
       .request-head, .request-row { grid-template-columns: minmax(100px, 1fr) 70px 70px 64px 76px; }
       .request-head { min-height: 28px; background: var(--bg); overflow-y: auto; scrollbar-gutter: stable; }
       .request-head > button { display: block; min-width: 0; height: 27px; padding: 0 7px; text-align: left; border: 0; border-right: 1px solid var(--line-soft); background: transparent; color: var(--muted); font: 11px var(--sans); white-space: nowrap; }
@@ -3615,7 +3616,12 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-metric span { font-size: 9px; color: var(--muted); }
 #screen-vm .vm-metric strong { margin: 0; font: 600 10px var(--mono); color: var(--text); }
 #screen-vm .vm-workspace-host { display: flex; flex: 1; flex-direction: column; min-height: 0; }
-#screen-vm .vm-workspace { display: grid; flex: 1; min-height: 0; grid-template-rows: auto minmax(150px, 1.4fr) minmax(145px, 1fr); gap: 0; margin: 0; }
+/* Notices, title and evidence class vary in number and keep their own height;
+   only the handler body and the analysis dock share the remaining space. */
+#screen-vm .vm-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 0; margin: 0; }
+#screen-vm .vm-workspace > * { flex: none; }
+#screen-vm .vm-workspace > .vm-workbench-body { flex: 1.4 1 150px; }
+#screen-vm .vm-workspace > .vm-workbench-inspector { flex: 1 1 145px; }
 #screen-vm .vm-workspace:has(> .vm-workspace-notice) { grid-template-rows: auto auto minmax(150px, 1.4fr) minmax(145px, 1fr); }
 #screen-vm .vm-workspace-title { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 10px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
 #screen-vm .vm-workspace-title span { font-size: 9px; }
@@ -3762,7 +3768,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-list-pane { display: grid; grid-template-rows: 25px minmax(90px, 1fr) minmax(140px, 1fr); overflow: hidden; }
 #screen-vm .vm-list-head { min-height: 25px; box-sizing: border-box; padding: 4px 7px; background: var(--panel-2); border-bottom: 1px solid var(--line); color: var(--text); font: 600 11px var(--sans); text-transform: none; letter-spacing: 0; }
 #screen-vm .vm-list-head > span { color: var(--muted); font-size: 10px; font-weight: 400; }
-#screen-vm .vm-list { min-height: 0; overflow: auto; align-content: start; }
+#screen-vm .vm-list { min-height: 0; overflow: auto; align-content: start; grid-auto-rows: max-content; }
 #screen-vm .vm-row { padding: 5px 7px 5px 20px; gap: 2px; border-left: 1px solid var(--line-soft); margin-left: 8px; }
 #screen-vm .vm-row::before { top: 5px; left: 6px; }
 #screen-vm .vm-symbol-dock { display: flex; min-height: 0; flex-direction: column; border-top: 4px solid var(--line); }

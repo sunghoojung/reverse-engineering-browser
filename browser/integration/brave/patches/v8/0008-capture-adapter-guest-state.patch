@@ -119,7 +119,7 @@ index c128c92..652d1b3 100644
                  wasm_module_bytes_callback)
  
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index a695fec..af876eb 100644
+index a695fec..78d3310 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
 @@ -204,6 +204,7 @@ namespace wasm {
@@ -143,7 +143,7 @@ index a695fec..af876eb 100644
    V(WasmModuleBytesCallback, wasm_module_bytes_callback, nullptr)           \
    V(SharedArrayBufferConstructorEnabledCallback,                            \
      sharedarraybuffer_constructor_enabled_callback, nullptr)                \
-@@ -1446,6 +1453,33 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1446,6 +1453,36 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    wasm::StackPool& stack_pool() { return stack_pool_; }
  #endif  // V8_ENABLE_WEBASSEMBLY
  
@@ -170,6 +170,9 @@ index a695fec..af876eb 100644
 +    uint32_t next_rejected_module = 0;
 +    uint64_t next_id = 1, epoch = 0;
 +    bool enabled = false;
++    // Set when the Wasm stack outgrew the frame table. Entries then recheck
++    // depth until it fits again, so deeper frames stay untracked meanwhile.
++    bool stack_overflowed = false;
 +  };
 +  RebGuestCaptureState& reb_guest_capture_state() {
 +    return reb_guest_capture_state_;
@@ -177,7 +180,7 @@ index a695fec..af876eb 100644
    GlobalHandles* global_handles() const { return global_handles_; }
  
    TracedHandles* traced_handles() { return &traced_handles_; }
-@@ -2679,6 +2713,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2679,6 +2716,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    UnicodeCache* unicode_cache_ = nullptr;
    AccountingAllocator* allocator_ = nullptr;
    InnerPointerToCodeCache* inner_pointer_to_code_cache_ = nullptr;
@@ -201,7 +204,7 @@ index 3b73178..df42efb 100644
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_tier_up)
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_dynamic_tiering)
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index c3b231c..1b5fcac 100644
+index c3b231c..960eb71 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -2,6 +2,8 @@
@@ -221,7 +224,7 @@ index c3b231c..1b5fcac 100644
  #include "src/handles/handles.h"
  #include "src/heap/factory.h"
  #include "src/heap/read-only-heap.h"
-@@ -149,47 +152,322 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+@@ -149,47 +152,328 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
    return ret;
  }
  
@@ -345,7 +348,11 @@ index c3b231c..1b5fcac 100644
 +  }
 +  if (state.next_id == UINT64_MAX) return;
 +  // Returned frames are reclaimed lazily: the full stack walk runs only when
-+  // the bounded table is full, never on an ordinary admitted entry.
++  // the bounded table is full or the stack previously outgrew it.
++  if (state.stack_overflowed) {
++    if (!PurgeReturnedGuestFrames(isolate)) return;
++    state.stack_overflowed = false;
++  }
 +  for (int attempt = 0; attempt < 2; ++attempt) {
 +    for (auto& saved : state.frames) {
 +      if (!saved.fp) {
@@ -357,6 +364,7 @@ index c3b231c..1b5fcac 100644
 +  }
 +  // Fail closed: deeper stacks than the table can describe lose all parents.
 +  for (auto& saved : state.frames) saved = {};
++  state.stack_overflowed = true;
 +}
 +struct BorrowedGuestState {
 +  WasmFrame* frame;
@@ -414,6 +422,7 @@ index c3b231c..1b5fcac 100644
 +  }
 +  for (auto& frame : state.frames) frame = {};
 +  for (auto& rejected : state.rejected_modules) rejected = {};
++  state.stack_overflowed = false;
 +  // Never reset next_id: old observations cannot become current again.
 +}
 +bool GetCurrentRebGuestContext(Isolate* isolate,
@@ -811,7 +820,7 @@ index 7106d5a..2a24e26 100644
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c541..1ef80cf 100644
+index 7f4c541..7156fa9 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,13 +6,17 @@
@@ -832,7 +841,7 @@ index 7f4c541..1ef80cf 100644
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1359,648 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1359,652 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1437,6 +1446,10 @@ index 7f4c541..1ef80cf 100644
 +  for (int i = 0; i < 3; ++i) CHECK_EQ(5, r.Call());
 +  CHECK_EQ(3, guest_admission_calls);
 +  CHECK_EQ(0, guest_calls);
++  // Unadmitted dispatches still reach the consumer without identities, so it
++  // revokes any previous parent instead of silently skipping the boundary.
++  CHECK_EQ(11, guest_failures);
++  guest_failures = 0;
 +  // A replaced policy forgets old rejections and can admit the same module.
 +  guest_admission_result = v8::WasmGuestModuleAdmission::kAdmit;
 +  isolate->SetWasmGuestDispatchCallback(ObserveNativeGuest, EnableGuestCapture,

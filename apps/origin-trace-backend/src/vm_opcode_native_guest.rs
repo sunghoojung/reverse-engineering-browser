@@ -1,22 +1,28 @@
 //! Actual native runtime values, interpreted by a retained, digest-bound adapter.
 //! A caller's adapter is not proof of a recovered instruction set.
+use super::native_module::Module;
 use crate::evidence;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path};
-use wasmparser::{Operator, Parser, Payload, TypeRef, ValType};
+use wasmparser::ValType;
 
-const MAX_BYTES: usize = 65536;
+// Match kNativeGuestAdapterLimit and kNativeGuestSnapshotLimit in
+// components/reverse_engineering_browser/common/native_wasm_guest.h.
+const MAX_ADAPTER_BYTES: usize = 8192;
+const MAX_SNAPSHOT_BYTES: usize = 65536;
 #[derive(Default)]
 pub(super) struct Samples {
     pub rows: Vec<Value>,
     pub count: u64,
     pub invalid: u64,
+    /// Samples for a module whose section structure did not decode.
+    pub undecodable: u64,
 }
-type FunctionState = (Vec<ValType>, BTreeMap<u32, u32>);
+/// Per-workspace caches. Adapter recipes are keyed by adapter artifact id and
+/// hold only checks that do not depend on the sampled event.
 struct ModuleFacts {
-    functions: BTreeMap<u32, Option<FunctionState>>,
-    imports: Vec<u32>,
     binding: Option<crate::native_guest_binding::VerifiedGuestBinding>,
+    adapters: BTreeMap<String, Option<Value>>,
 }
 fn exact(v: &Value, keys: &[&str]) -> bool {
     v.as_object()
@@ -84,136 +90,6 @@ fn child<'a>(artifacts: &'a [Value], id: u64, module: &Value, kind: &str) -> Opt
         && evidence::canonical(&a["creator_event_id"], 64, true))
     .then_some(a)
 }
-// Local indexing includes parameters. Unsupported GC types fail closed.
-fn function_state(module: &[u8], wanted: u32) -> Option<FunctionState> {
-    let mut types = Vec::new();
-    let mut functions = Vec::new();
-    let mut imported = 0u32;
-    let mut body_index = 0u32;
-    for item in Parser::new(0).parse_all(module) {
-        match item.ok()? {
-            Payload::TypeSection(r) => {
-                for t in r.into_iter_err_on_gc_types() {
-                    types.push(t.ok()?);
-                }
-            }
-            Payload::ImportSection(r) => {
-                for i in r {
-                    if let TypeRef::Func(t) = i.ok()?.ty {
-                        functions.push(t);
-                        imported = imported.checked_add(1)?;
-                    }
-                }
-            }
-            Payload::FunctionSection(r) => {
-                for t in r {
-                    functions.push(t.ok()?);
-                }
-            }
-            Payload::CodeSectionEntry(body) => {
-                let index = imported.checked_add(body_index)?;
-                body_index += 1;
-                if index != wanted {
-                    continue;
-                }
-                let mut locals = types
-                    .get(*functions.get(index as usize)? as usize)?
-                    .params()
-                    .to_vec();
-                for local in body.get_locals_reader().ok()? {
-                    let (n, ty) = local.ok()?;
-                    if locals.len().checked_add(n as usize)? > 65536 {
-                        return None;
-                    }
-                    locals.extend(std::iter::repeat_n(ty, n as usize));
-                }
-                let mut sites = BTreeMap::new();
-                let mut r = body.get_operators_reader().ok()?;
-                while !r.eof() {
-                    let offset = u32::try_from(r.original_position()).ok()?;
-                    if let Operator::BrTable { targets } = r.read().ok()? {
-                        sites.insert(offset, targets.len());
-                    }
-                }
-                return Some((locals, sites));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-fn global_import_sites(module: &[u8]) -> Option<Vec<u32>> {
-    let mut imported = 0u32;
-    let mut calls = Vec::new();
-    let mut instructions = 0usize;
-    for item in Parser::new(0).parse_all(module) {
-        match item.ok()? {
-            Payload::ImportSection(r) => {
-                for i in r {
-                    if matches!(i.ok()?.ty, TypeRef::Func(_)) {
-                        imported = imported.checked_add(1)?;
-                    }
-                }
-            }
-            Payload::CodeSectionEntry(body) => {
-                let mut r = body.get_operators_reader().ok()?;
-                while !r.eof() {
-                    instructions += 1;
-                    if instructions > 1_000_000 {
-                        return None;
-                    }
-                    let offset = u32::try_from(r.original_position()).ok()?;
-                    if let Operator::Call { function_index } = r.read().ok()?
-                        && function_index < imported
-                    {
-                        calls.push(offset);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    Some(calls)
-}
-fn memory_supported(module: &[u8], wanted: u32) -> bool {
-    let mut index = 0u32;
-    for item in Parser::new(0).parse_all(module) {
-        let Ok(item) = item else {
-            return false;
-        };
-        let mut check = |m: wasmparser::MemoryType| {
-            let selected = index == wanted;
-            index += 1;
-            selected.then_some(!m.shared && !m.memory64)
-        };
-        match item {
-            Payload::ImportSection(r) => {
-                for i in r {
-                    let Ok(i) = i else {
-                        return false;
-                    };
-                    if let TypeRef::Memory(m) = i.ty
-                        && let Some(ok) = check(m)
-                    {
-                        return ok;
-                    }
-                }
-            }
-            Payload::MemorySection(r) => {
-                for m in r {
-                    let Ok(m) = m else {
-                        return false;
-                    };
-                    if let Some(ok) = check(m) {
-                        return ok;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
 fn local_kind(locals: &[ValType], index: &Value, kind: &Value) -> bool {
     let expected = match kind.as_str() {
         Some("i32") => ValType::I32,
@@ -253,10 +129,80 @@ fn source(v: &Value, actual: u64, locals: &[ValType]) -> bool {
         _ => false,
     }
 }
+/// Event-independent adapter checks, run once per adapter artifact.
+fn adapter_recipe<'c>(
+    root: &Path,
+    adapter: &Value,
+    module: &Value,
+    wasm: &mut Module<'_>,
+    cache: &'c mut BTreeMap<String, Option<Value>>,
+) -> Option<&'c Value> {
+    let key = adapter["artifact_id"].as_str()?;
+    if !cache.contains_key(key) {
+        let recipe = read_recipe(root, adapter, module, wasm);
+        cache.insert(key.to_owned(), recipe);
+    }
+    cache.get(key)?.as_ref()
+}
+fn read_recipe(
+    root: &Path,
+    adapter: &Value,
+    module: &Value,
+    wasm: &mut Module<'_>,
+) -> Option<Value> {
+    let adapter_bytes = evidence::content(root, adapter, MAX_ADAPTER_BYTES).ok()?;
+    let recipe: Value = serde_json::from_slice(&adapter_bytes).ok()?;
+    // Exact canonical bytes reject duplicate keys and alternate JSON spellings.
+    if crate::vm::canonical(&recipe).ok()? != adapter_bytes {
+        return None;
+    }
+    if !exact(
+        &recipe,
+        &[
+            "version",
+            "sample_limit",
+            "module_sha256",
+            "function_index",
+            "dispatch_module_offset",
+            "pc",
+            "bytecode",
+            "opcode",
+            "import_call_offsets",
+        ],
+    ) || recipe["version"] != 1
+        || recipe["sample_limit"]
+            .as_u64()
+            .is_none_or(|n| n == 0 || n > 256)
+        || recipe["module_sha256"] != module["sha256"]
+        || uint(&recipe["function_index"]).is_none()
+        || uint(&recipe["dispatch_module_offset"]).is_none()
+    {
+        return None;
+    }
+    // The native parser requires strictly increasing offsets of actual
+    // direct calls to imported functions.
+    let offsets = recipe["import_call_offsets"].as_array()?;
+    if offsets.len() > 64 {
+        return None;
+    }
+    let mut previous = None;
+    for offset in offsets {
+        let offset = uint(offset)?;
+        if previous.is_some_and(|before| offset <= before)
+            || !wasm
+                .function_at(offset)
+                .is_some_and(|facts| facts.import_calls.contains(&offset))
+        {
+            return None;
+        }
+        previous = Some(offset);
+    }
+    Some(recipe)
+}
 fn resolve(
     root: &Path,
     module: &Value,
-    bytes: &[u8],
+    wasm: &mut Module<'_>,
     artifacts: &[Value],
     event: &Value,
     invocations: &BTreeMap<(String, u32, String), &Value>,
@@ -287,7 +233,7 @@ fn resolve(
         || invocation == 0
         || index >= 256
         || length == 0
-        || length as usize > MAX_BYTES
+        || length as usize > MAX_SNAPSHOT_BYTES
         || base.checked_add(length as u64).is_none()
     {
         return None;
@@ -336,46 +282,33 @@ fn resolve(
     {
         return None;
     }
-    let adapter_bytes = evidence::content(root, adapter, MAX_BYTES).ok()?;
-    let recipe: Value = serde_json::from_slice(&adapter_bytes).ok()?;
-    // Exact canonical bytes reject duplicate keys and alternate JSON spellings.
-    if crate::vm::canonical(&recipe).ok()? != adapter_bytes {
-        return None;
-    }
-    if !exact(
-        &recipe,
-        &[
-            "version",
-            "sample_limit",
-            "module_sha256",
-            "function_index",
-            "dispatch_module_offset",
-            "pc",
-            "bytecode",
-            "opcode",
-            "import_call_offsets",
-        ],
-    ) || recipe["version"] != 1
-        || recipe["sample_limit"]
-            .as_u64()
-            .is_none_or(|n| n == 0 || n > 256 || u64::from(index) >= n)
-        || recipe["module_sha256"] != module["sha256"]
+    let recipe = adapter_recipe(root, adapter, module, wasm, &mut facts.adapters)?;
+    if recipe["sample_limit"]
+        .as_u64()
+        .is_none_or(|n| u64::from(index) >= n)
         || uint(&recipe["function_index"]) != Some(function)
         || uint(&recipe["dispatch_module_offset"]) != Some(site)
     {
         return None;
     }
-    let (locals, sites) = facts
-        .functions
-        .entry(function)
-        .or_insert_with(|| function_state(bytes, function))
-        .as_ref()?;
-    if sites.get(&site) != Some(&count) || !memory_supported(bytes, memory) {
-        return None;
-    }
     let pc_recipe = &recipe["pc"];
     let byte_recipe = &recipe["bytecode"];
     let op_recipe = &recipe["opcode"];
+    if !wasm.memory_supported(memory) {
+        return None;
+    }
+    for source in [&byte_recipe["base"], &byte_recipe["length"]] {
+        if source["kind"] == "memory-chain"
+            && !wasm.memory_supported(uint(&source["memory_index"])?)
+        {
+            return None;
+        }
+    }
+    let function_facts = wasm.function(function)?;
+    if function_facts.br_tables.get(&site) != Some(&count) {
+        return None;
+    }
+    let locals = function_facts.locals.as_deref()?;
     if !exact(
         pc_recipe,
         &[
@@ -409,25 +342,7 @@ fn resolve(
     if resolved != pc {
         return None;
     }
-    for source in [&byte_recipe["base"], &byte_recipe["length"]] {
-        if source["kind"] == "memory-chain"
-            && !memory_supported(bytes, uint(&source["memory_index"])?)
-        {
-            return None;
-        }
-    }
-    let import_sites = recipe["import_call_offsets"].as_array()?;
-    if import_sites.len() > 64
-        || import_sites
-            .iter()
-            .any(|v| uint(v).is_none_or(|n| !facts.imports.contains(&n)))
-        || import_sites
-            .iter()
-            .enumerate()
-            .any(|(i, v)| import_sites[..i].contains(v))
-    {
-        return None;
-    }
+    let import_sites = &recipe["import_call_offsets"];
     let width = uint(&op_recipe["width"])? as usize;
     if ![1, 2, 4].contains(&width) {
         return None;
@@ -438,7 +353,7 @@ fn resolve(
     {
         return None;
     }
-    let captured = evidence::content(root, snapshot, MAX_BYTES).ok()?;
+    let captured = evidence::content(root, snapshot, MAX_SNAPSHOT_BYTES).ok()?;
     let start = usize::try_from(pc).ok()?;
     let opbytes = captured.get(start..start.checked_add(width)?)?;
     let observed = match op_recipe["endian"].as_str() {
@@ -489,6 +404,7 @@ pub(super) fn collect(
     root: &Path,
     module: &Value,
     bytes: &[u8],
+    mut wasm: Option<&mut Module<'_>>,
     artifacts: &[Value],
     events: &[Value],
 ) -> Samples {
@@ -496,14 +412,11 @@ pub(super) fn collect(
     if module["kind"] != "wasm" {
         return result;
     }
-    let Some(imports) = global_import_sites(bytes) else {
-        return result;
-    };
     let mut facts = ModuleFacts {
-        functions: BTreeMap::new(),
-        imports,
-        binding: crate::native_guest_binding::verify(bytes),
+        binding: None,
+        adapters: BTreeMap::new(),
     };
+    let mut binding_checked = false;
     let invocations = events
         .iter()
         .filter(|e| e["type"] == "wasm_guest_invocation")
@@ -513,10 +426,19 @@ pub(super) fn collect(
         .iter()
         .filter(|e| e["type"] == "wasm_guest_dispatch" && e["artifact_id"] == module["artifact_id"])
     {
+        let Some(wasm) = wasm.as_deref_mut() else {
+            result.undecodable += 1;
+            continue;
+        };
+        // The QuickJS binding walk runs only when guest samples exist.
+        if !binding_checked {
+            facts.binding = crate::native_guest_binding::verify(bytes);
+            binding_checked = true;
+        }
         if let Some(row) = resolve(
             root,
             module,
-            bytes,
+            wasm,
             artifacts,
             event,
             &invocations,
@@ -605,14 +527,19 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_module(wasm(), 0, 47)
+        }
+        fn with_module(bytes: Vec<u8>, function: u32, site: u32) -> Self {
             let root = tempfile::tempdir().unwrap();
-            let bytes = wasm();
             let module = artifact(root.path(), 1, "wasm", &bytes, 0, 0);
+            let mut r = recipe(&module["sha256"]);
+            r["function_index"] = json!(function);
+            r["dispatch_module_offset"] = json!(site);
             let a = artifact(
                 root.path(),
                 2,
                 "wasm_guest_adapter",
-                &crate::vm::canonical(&recipe(&module["sha256"])).unwrap(),
+                &crate::vm::canonical(&r).unwrap(),
                 1,
                 1,
             );
@@ -620,13 +547,15 @@ mod tests {
             let sha = hex::decode(a["sha256"].as_str().unwrap()).unwrap();
             let mut inv = vec![0u8; 128];
             inv[..4].copy_from_slice(&[1, 0, 128, 0]);
+            put32(&mut inv, 4, function);
             put64(&mut inv, 8, 7);
             put64(&mut inv, 16, 8);
             put64(&mut inv, 24, 2);
             inv[32..64].copy_from_slice(&sha);
             let mut p = vec![0u8; 128];
             p[..4].copy_from_slice(&[1, 0, 128, 0]);
-            put32(&mut p, 8, 47);
+            put32(&mut p, 4, function);
+            put32(&mut p, 8, site);
             put32(&mut p, 12, u32::MAX);
             put32(&mut p, 16, 2);
             put64(&mut p, 24, 7);
@@ -654,6 +583,7 @@ mod tests {
                 self.root.path(),
                 &self.module,
                 &self.bytes,
+                Module::parse(&self.bytes).as_mut(),
                 &self.aux,
                 &self.events,
             )
@@ -762,6 +692,72 @@ mod tests {
         assert_eq!(f.read().count, 0);
     }
     #[test]
+    fn native_guest_large_module_keeps_exact_site_samples() {
+        let (bytes, site) = crate::vm_opcode::native_wasm::tests::padded_module(1_000_001);
+        let f = Fixture::with_module(bytes, 0, site);
+        let rows = f.read();
+        assert_eq!((rows.count, rows.invalid), (1, 0));
+        assert_eq!(rows.rows[0]["module_byte_offset"], site);
+    }
+    #[test]
+    fn native_guest_import_offsets_strictly_increase_over_real_calls() {
+        // Two `call 0` instructions to an imported function at 41 and 43.
+        let mut bytes = wasm();
+        bytes[24] += 4;
+        bytes[26] += 4;
+        bytes.splice(32..32, [0x10, 0, 0x10, 0]);
+        bytes.splice(14..14, [2, 7, 1, 1, b'h', 1, b'f', 0, 0]);
+        for (offsets, accepted) in [
+            (json!([]), true),
+            (json!([41, 43]), true),
+            (json!([43, 41]), false),
+            (json!([41, 41]), false),
+            (json!([41, 42]), false),
+            (json!([7]), false),
+        ] {
+            let mut f = Fixture::with_module(bytes.clone(), 1, 60);
+            let mut r = recipe(&f.module["sha256"]);
+            r["function_index"] = json!(1);
+            r["dispatch_module_offset"] = json!(60);
+            r["import_call_offsets"] = offsets.clone();
+            f.set_recipe(r);
+            assert_eq!(f.read().count, u64::from(accepted), "{offsets}");
+        }
+    }
+    #[test]
+    fn native_guest_limits_match_the_native_encoder() {
+        let header = include_str!(
+            "../../../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_wasm_guest.h"
+        );
+        assert!(header.contains(&format!("kNativeGuestAdapterLimit = {MAX_ADAPTER_BYTES};")));
+        assert!(header.contains(&format!(
+            "kNativeGuestSnapshotLimit = {MAX_SNAPSHOT_BYTES};"
+        )));
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/native-wasm-guest-adapter-v1.schema.json"
+        ))
+        .unwrap();
+        assert!(
+            schema["description"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("at most {MAX_ADAPTER_BYTES} UTF-8 bytes"))
+        );
+        // An oversized adapter is refused before it is parsed.
+        let mut f = Fixture::new();
+        let mut encoded = crate::vm::canonical(&recipe(&f.module["sha256"])).unwrap();
+        encoded.resize(MAX_ADAPTER_BYTES + 1, b' ');
+        f.aux[0] = artifact(f.root.path(), 2, "wasm_guest_adapter", &encoded, 1, 1);
+        assert!(evidence::content(f.root.path(), &f.aux[0], MAX_ADAPTER_BYTES).is_err());
+        assert_eq!(f.read().count, 0);
+    }
+    #[test]
+    fn native_guest_undecodable_module_is_counted_not_dropped() {
+        let f = Fixture::new();
+        let rows = collect(f.root.path(), &f.module, &f.bytes, None, &f.aux, &f.events);
+        assert_eq!((rows.count, rows.invalid, rows.undecodable), (0, 0, 1));
+    }
+    #[test]
     fn native_guest_exact_site_and_empty_import_policy() {
         let f = Fixture::new();
         let s = f.read();
@@ -864,7 +860,14 @@ mod tests {
         bytes[26] += 2;
         bytes.splice(32..32, [0x10, 0]);
         bytes.splice(14..14, [2, 7, 1, 1, b'h', 1, b'f', 0, 0]);
-        assert_eq!(global_import_sites(&bytes), Some(vec![41]));
+        assert_eq!(
+            Module::parse(&bytes).unwrap().function_at(41).map(|f| f
+                .import_calls
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()),
+            Some(vec![41])
+        );
         if quickjs {
             bytes =
                 fs::read(std::env::var("REB_QUICKJS_WASM").expect("pinned public QuickJS module"))
@@ -962,6 +965,7 @@ mod tests {
                 root.path(),
                 &module,
                 &bytes,
+                Module::parse(&bytes).as_mut(),
                 &[a.clone(), b.clone()],
                 &events,
             );

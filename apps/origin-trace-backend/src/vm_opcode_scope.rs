@@ -1,430 +1,559 @@
-//! Lexical bindings of JavaScript names inside one masked dispatch region.
+//! Conservative lexical resolution for the opcode claim gate.
 //!
-//! The opcode-claim gate ties a recovered handler table to the indexed calls
-//! that read the same binding, not merely the same spelling: a nested
-//! function that declares its own `ops` dispatches a different table. This is
-//! a syntactic, conservative resolver. Any binding it cannot resolve with
-//! certainty (block-scoped or destructured declarations, catch parameters,
-//! braceless arrow parameters, `with`, `eval`, a truncated declaration list)
-//! is ambiguous, and the gate withholds the table rather than guess.
-//!
-//! Work is linear in the region: one bracket pass, one declaration pass, and
-//! declarator scans that jump over nested brackets and stop at the next
-//! statement keyword, so no byte is rescanned per declaration.
-
+//! Tokens retain byte spans, never partial identifiers or copied source.
+//! Delimiters, scope extents and hoisted declarations are indexed once. A
+//! second sweep enters/leaves scopes with a binding stack per name, resolving
+//! all uses without walking their ancestors. Unsupported bindings poison only
+//! their lexical extent. In particular an arrow parameter cannot shadow a
+//! sibling expression. No parser dependency or executable page code is used.
+use crate::vm::dispatch_shape::{Memory, Meter};
 use regex::Regex;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::LazyLock,
-};
+use std::{collections::HashMap, sync::LazyLock};
 
-/// Depth-0 bytes one declaration list may span before its scope is opaque.
-const MAX_DECLARATOR_SCAN: usize = 4096;
-
-/// `function name(` or `name(`: a parameter list that may open a scope.
-static CALLABLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\bfunction\b\s*\*?\s*(?:[A-Za-z_$][\w$]*)?\s*\(|\b([A-Za-z_$][\w$]*)\s*\(")
-        .expect("callable")
+static UNICODE_IDENTIFIER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[$_\p{ID_Start}][$_\u{200c}\u{200d}\p{ID_Continue}]*$")
+        .expect("Unicode identifier")
 });
-static DECLARATION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:var|let|const)\b|\bfunction\s+([A-Za-z_$][\w$]*)").expect("declaration")
-});
-static IDENTIFIER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[A-Za-z_$][\w$]*").expect("identifier"));
-static TRAILING_IDENTIFIER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[A-Za-z_$][\w$]*\s*$").expect("trailing identifier"));
-static CATCH: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bcatch\s*\(([^()]{0,1024})\)").expect("catch"));
-static DYNAMIC_SCOPE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(?:with|eval)\s*\(").expect("dynamic scope"));
-/// Tokens that start a new statement and so end a declaration list.
-/// `function` is absent: a function expression is a common initializer.
-static STATEMENT_KEYWORDS: [&str; 11] = [
-    "var", "let", "const", "return", "if", "for", "while", "do", "switch", "throw", "try",
-];
-/// Keywords whose parenthesized head precedes a block, not a function body.
-static NOT_METHODS: [&str; 6] = ["if", "for", "while", "switch", "catch", "with"];
 
-/// Which declaration a name at one position reads.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+const NONE: u32 = u32::MAX;
+const AMBIGUOUS: u32 = u32::MAX - 1;
+const PROPERTY: u32 = u32::MAX - 2;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(super) enum Binding {
-    /// Declared nowhere in the region: one binding outside it.
     Root,
-    /// Declared by the function scope with this index.
     Scope(usize),
-    /// A property access such as `this.ops`; properties are not lexical.
     Property,
-    /// Not resolvable with certainty.
     Ambiguous,
 }
 
-struct Scope {
-    /// Signature start; parameters are in scope from here.
+#[derive(Clone, Copy)]
+struct Token {
+    start: u32,
+    end: u32,
+    mate: u32,
+    binding: u32,
+}
+
+struct Scope<'a> {
     start: usize,
-    closing: usize,
-    /// A declaration list ran past the scan bound, so this scope may declare
-    /// names that were never seen.
+    end: usize,
+    function: bool,
     opaque: bool,
+    declarations: Vec<(&'a str, bool)>,
 }
 
 pub(super) struct Scopes<'a> {
-    region: &'a [u8],
-    scopes: Vec<Scope>,
-    /// Name to (declaring scope, declaration is ambiguous).
-    declared: BTreeMap<String, Vec<(usize, bool)>>,
-    ambiguous: BTreeSet<String>,
-    dynamic: bool,
+    region: &'a str,
+    tokens: Vec<Token>,
+    complete: bool,
+    _memory: Memory,
+}
+
+fn word(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"_$\\".contains(&byte) || byte >= 128
 }
 
 impl<'a> Scopes<'a> {
-    /// `region` is masked JavaScript: literals and comments are blank.
-    pub(super) fn new(region: &'a str) -> Self {
-        let bytes = region.as_bytes();
-        let pairs = bracket_pairs(bytes);
-        let close = |opening: usize| {
-            pairs
-                .binary_search_by_key(&opening, |(open, _)| *open)
-                .ok()
-                .map(|index| pairs[index].1)
-        };
-        let open_of = {
-            let mut by_close = pairs
-                .iter()
-                .map(|(open, shut)| (*shut, *open))
-                .collect::<Vec<_>>();
-            by_close.sort_unstable();
-            by_close
-        };
-        let next_byte = |from: usize| {
-            (from..bytes.len())
-                .find(|index| !bytes[*index].is_ascii_whitespace())
-                .map(|index| (index, bytes[index]))
-        };
-        // Function scopes keyed by their opening brace, with parameter text.
-        // A parameter list is found by bracket matching, so destructured and
-        // defaulted parameters never hide a function.
-        let mut signatures = BTreeMap::<usize, (usize, String)>::new();
-        let mut braceless_parameters = Vec::new();
-        for captures in CALLABLE.captures_iter(region) {
-            let whole = captures.get(0).expect("callable");
-            if captures.get(1).is_some_and(|name| {
-                NOT_METHODS.contains(&name.as_str()) || name.as_str() == "function"
-            }) {
-                continue;
-            }
-            let Some(shut) = close(whole.end() - 1) else {
-                continue;
-            };
-            if let Some((opening, b'{')) = next_byte(shut + 1) {
-                signatures
-                    .entry(opening)
-                    .or_insert_with(|| (whole.start(), region[whole.end()..shut].to_owned()));
-            }
-        }
-        for arrow in region.match_indices("=>").map(|(at, _)| at) {
-            let before = bytes[..arrow]
-                .iter()
-                .rposition(|byte| !byte.is_ascii_whitespace());
-            let (start, params) = match before.map(|at| (at, bytes[at])) {
-                Some((shut, b')')) => {
-                    let Ok(index) = open_of.binary_search_by_key(&shut, |(close, _)| *close) else {
-                        continue;
-                    };
-                    let open = open_of[index].1;
-                    (open, region[open + 1..shut].to_owned())
-                }
-                Some((end, _)) => {
-                    let from = region.ceil_char_boundary(end.saturating_sub(255));
-                    let until = region.ceil_char_boundary(end + 1);
-                    match TRAILING_IDENTIFIER.find(&region[from..until]) {
-                        Some(name) => (from + name.start(), name.as_str().trim().to_owned()),
-                        None => continue,
-                    }
-                }
-                None => continue,
-            };
-            match next_byte(arrow + 2) {
-                Some((opening, b'{')) => {
-                    signatures.entry(opening).or_insert((start, params));
-                }
-                _ => braceless_parameters.push(params),
-            }
-        }
-        let mut scopes = Vec::new();
-        let mut scope_of = BTreeMap::new();
-        for (opening, (start, _)) in &signatures {
-            if let Some(closing) = close(*opening) {
-                scope_of.insert(*opening, scopes.len());
-                scopes.push(Scope {
-                    start: *start,
-                    closing,
-                    opaque: false,
-                });
-            }
-        }
+    pub(super) fn new(region: &'a str, meter: &Meter) -> Self {
+        let memory = Memory::new(meter);
         let mut this = Self {
-            region: bytes,
-            scopes,
-            declared: BTreeMap::new(),
-            ambiguous: BTreeSet::new(),
-            dynamic: DYNAMIC_SCOPE.is_match(region),
+            region,
+            tokens: Vec::new(),
+            complete: false,
+            _memory: memory,
         };
-        for (opening, (_, params)) in &signatures {
-            if let Some(&scope) = scope_of.get(opening) {
-                this.declare_list(params, scope, false);
-            }
+        if region.len() > u32::MAX as usize || !meter.charge(region.len() as u64) {
+            return this;
         }
-        for captures in CATCH.captures_iter(region) {
-            this.ambiguous_identifiers(&captures[1]);
-        }
-        // A braceless arrow body has no extent here, so its parameters may
-        // shadow any use.
-        for params in &braceless_parameters {
-            this.ambiguous_identifiers(params);
-        }
-        // One pass over the brackets: at each declaration, the innermost
-        // open function scope declares it, and any bracket opened inside
-        // that scope makes a block-scoped declaration ambiguous.
-        let mut stack: Vec<Option<usize>> = Vec::new();
-        let mut declarations = DECLARATION.captures_iter(region).peekable();
-        for (index, byte) in bytes.iter().enumerate() {
-            while let Some(captures) = declarations.peek() {
-                let found = captures.get(0).expect("declaration");
-                if found.start() != index {
-                    if found.start() < index {
-                        declarations.next();
-                        continue;
-                    }
-                    break;
-                }
-                let depth = stack.iter().rposition(Option::is_some);
-                let scope = depth.and_then(|depth| stack[depth]);
-                let nested = depth.map_or(!stack.is_empty(), |depth| depth + 1 < stack.len());
-                if let Some(name) = captures.get(1) {
-                    this.declare(scope, name.as_str(), nested);
-                } else {
-                    let block_scoped = !found.as_str().starts_with("var");
-                    this.declarators(found.end(), scope, block_scoped && nested, &close);
-                }
-                declarations.next();
-            }
-            match byte {
-                b'{' | b'(' | b'[' => stack.push(scope_of.get(&index).copied()),
-                b'}' | b')' | b']' => {
-                    stack.pop();
-                }
-                _ => (),
-            }
-        }
-        this
-    }
-
-    /// The declaration `name` at byte `at` of the region reads.
-    pub(super) fn binding(&self, name: &str, at: usize) -> Binding {
-        let before = self.region[..at.min(self.region.len())]
-            .iter()
-            .rev()
-            .find(|byte| !byte.is_ascii_whitespace());
-        if before == Some(&b'.') {
-            return Binding::Property;
-        }
-        if self.dynamic || self.ambiguous.contains(name) {
-            return Binding::Ambiguous;
-        }
-        let contains = |scope: &Scope| scope.start <= at && at <= scope.closing;
-        let declaring = self.declared.get(name).and_then(|declarations| {
-            declarations
-                .iter()
-                .filter(|(scope, _)| contains(&self.scopes[*scope]))
-                .max_by_key(|(scope, _)| self.scopes[*scope].start)
-                .copied()
-        });
-        let floor = declaring.map_or(0, |(scope, _)| self.scopes[scope].start);
-        let hidden = self
-            .scopes
-            .iter()
-            .any(|scope| scope.opaque && contains(scope) && scope.start >= floor);
-        match declaring {
-            _ if hidden => Binding::Ambiguous,
-            Some((_, true)) => Binding::Ambiguous,
-            Some((scope, false)) => Binding::Scope(scope),
-            None => Binding::Root,
-        }
-    }
-
-    fn declare(&mut self, scope: Option<usize>, name: &str, ambiguous: bool) {
-        match scope {
-            Some(scope) => self
-                .declared
-                .entry(name.to_owned())
-                .or_default()
-                .push((scope, ambiguous)),
-            // A declaration directly in the region binds the region-level
-            // name every free use reads; only a block-scoped one is unsure.
-            None if ambiguous => {
-                self.ambiguous.insert(name.to_owned());
-            }
-            None => (),
-        }
-    }
-
-    fn ambiguous_identifiers(&mut self, text: &str) {
-        for identifier in IDENTIFIER.find_iter(text) {
-            self.ambiguous.insert(identifier.as_str().to_owned());
-        }
-    }
-
-    /// Parameters: plain names declare, destructured names are ambiguous.
-    fn declare_list(&mut self, text: &str, scope: usize, ambiguous: bool) {
-        for parameter in split_top_level(text) {
-            let parameter = parameter.trim().trim_start_matches("...").trim_start();
-            if parameter.starts_with(['{', '[']) {
-                let pattern = parameter.split('=').next().unwrap_or("");
-                for identifier in IDENTIFIER.find_iter(pattern) {
-                    self.declare(Some(scope), identifier.as_str(), true);
-                }
-            } else if let Some(name) = IDENTIFIER.find(parameter).filter(|m| m.start() == 0) {
-                self.declare(Some(scope), name.as_str(), ambiguous);
-            }
-        }
-    }
-
-    /// The names one `var`, `let` or `const` list declares, from just after
-    /// the keyword. Nested brackets are jumped, not rescanned.
-    fn declarators(
-        &mut self,
-        mut at: usize,
-        scope: Option<usize>,
-        ambiguous: bool,
-        close: &impl Fn(usize) -> Option<usize>,
-    ) {
-        let bytes = self.region;
-        let mut expect_name = true;
-        let mut scanned = 0usize;
+        let bytes = region.as_bytes();
+        let mut brackets = Vec::<usize>::new();
+        let mut at = 0;
         while at < bytes.len() {
-            scanned += 1;
-            if scanned > MAX_DECLARATOR_SCAN {
-                match scope {
-                    Some(scope) => self.scopes[scope].opaque = true,
-                    None => self.dynamic = true,
-                }
-                return;
-            }
-            let byte = bytes[at];
-            if byte.is_ascii_whitespace() {
-                if byte == b'\n' && !expect_name && !continues(bytes, at) {
-                    return;
-                }
+            if bytes[at].is_ascii_whitespace() {
                 at += 1;
                 continue;
             }
-            if expect_name {
-                expect_name = false;
-                if matches!(byte, b'{' | b'[') {
-                    let Some(end) = close(at) else {
-                        return;
-                    };
-                    let pattern = String::from_utf8_lossy(&bytes[at..end]).into_owned();
-                    for identifier in IDENTIFIER.find_iter(&pattern) {
-                        self.declare(scope, identifier.as_str(), true);
-                    }
-                    at = end + 1;
-                    continue;
+            let start = at;
+            at += 1;
+            if word(bytes[start]) {
+                while at < bytes.len() && word(bytes[at]) {
+                    at += 1;
                 }
-                let tail = std::str::from_utf8(&bytes[at..(at + 256).min(bytes.len())])
-                    .unwrap_or_default();
-                if let Some(name) = IDENTIFIER.find(tail).filter(|m| m.start() == 0) {
-                    self.declare(scope, name.as_str(), ambiguous);
-                    at += name.end();
-                    continue;
+            } else if bytes[start..].starts_with(b"=>") {
+                at += 1;
+            }
+            let index = this.tokens.len();
+            if !this._memory.push(
+                &mut this.tokens,
+                Token {
+                    start: start as u32,
+                    end: at as u32,
+                    mate: NONE,
+                    binding: 0,
+                },
+            ) {
+                return this;
+            }
+            match bytes[start] {
+                b'(' | b'[' | b'{' => {
+                    if !this._memory.push(&mut brackets, index) {
+                        return this;
+                    }
+                }
+                b')' | b']' | b'}' => {
+                    let Some(open) = brackets.pop() else {
+                        return this;
+                    };
+                    let opening = bytes[this.tokens[open].start as usize];
+                    if !matches!(
+                        (opening, bytes[start]),
+                        (b'(', b')') | (b'[', b']') | (b'{', b'}')
+                    ) {
+                        return this;
+                    }
+                    this.tokens[open].mate = index as u32;
+                    this.tokens[index].mate = open as u32;
+                }
+                _ => (),
+            }
+        }
+        if !brackets.is_empty() {
+            return this;
+        }
+        this.complete = this.resolve(meter);
+        this
+    }
+
+    fn text(&self, i: usize) -> &'a str {
+        self.tokens
+            .get(i)
+            .map_or("", |t| &self.region[t.start as usize..t.end as usize])
+    }
+
+    fn identifier(&self, i: usize) -> bool {
+        let text = self.text(i);
+        let name = text.as_bytes();
+        if name.iter().any(|b| !b.is_ascii()) {
+            return UNICODE_IDENTIFIER.is_match(text);
+        }
+        name.first()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b"_$".contains(b))
+            && name
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || b"_$".contains(b))
+    }
+
+    fn close(&self, i: usize) -> Option<usize> {
+        let end = self.tokens.get(i)?.mate;
+        (end != NONE && end as usize > i).then_some(end as usize)
+    }
+
+    fn resolve(&mut self, meter: &Meter) -> bool {
+        let n = self.tokens.len();
+        // Expression ends are suffix facts. Even thousands of nested arrows
+        // share them instead of scanning the same bodies repeatedly.
+        if !self._memory.keep(((n + 1) * 8) as u64) {
+            return false;
+        }
+        let mut ends = vec![n; n + 1];
+        for i in (0..n).rev() {
+            if !meter.charge(1) {
+                return false;
+            }
+            ends[i] = match self.text(i) {
+                "," | ";" | ")" | "]" | "}" => i,
+                "(" | "[" | "{" => ends[self.close(i).unwrap_or(i) + 1],
+                _ => ends[i + 1],
+            };
+        }
+        // A scope descriptor keyed by its first token. Function/arrow
+        // signatures replace their body's ordinary block descriptor.
+        let mut ranges = HashMap::<usize, Scope<'a>>::new();
+        let mut bodies = HashMap::<usize, usize>::new();
+        for i in 0..n {
+            if !meter.charge(1) {
+                return false;
+            }
+            let text = self.text(i);
+            let mut descriptor = None;
+            if text == "function" {
+                let mut p = i + 1;
+                if self.text(p) == "*" {
+                    p += 1;
+                }
+                let name = self.identifier(p).then_some(p);
+                if name.is_some() {
+                    p += 1;
+                }
+                if self.text(p) == "("
+                    && let Some(shut) = self.close(p)
+                    && self.text(shut + 1) == "{"
+                    && let Some(end) = self.close(shut + 1)
+                {
+                    let mut scope = Scope {
+                        start: i,
+                        end: end + 1,
+                        function: true,
+                        opaque: false,
+                        declarations: vec![("arguments", true)],
+                    };
+                    self.parameters(p + 1, shut, &mut scope, meter);
+                    if let Some(name) = name {
+                        scope.declarations.push((self.text(name), true));
+                    }
+                    descriptor = Some((scope, shut + 1));
+                } else {
+                    return false;
+                }
+            } else if text == "=>" {
+                let Some(before) = i.checked_sub(1) else {
+                    return false;
+                };
+                let (start, from, until) = if self.text(before) == ")" {
+                    let open = self.tokens[before].mate as usize;
+                    (open, open + 1, before)
+                } else {
+                    (before, before, i)
+                };
+                let body = i + 1;
+                let end = if self.text(body) == "{" {
+                    self.close(body).map_or(n, |end| end + 1)
+                } else {
+                    ends[body.min(n)]
+                };
+                let mut scope = Scope {
+                    start,
+                    end,
+                    function: true,
+                    opaque: false,
+                    declarations: Vec::new(),
+                };
+                self.parameters(from, until, &mut scope, meter);
+                descriptor = Some((scope, if self.text(body) == "{" { body } else { n }));
+            } else if text == ")" && self.text(i + 1) == "{" {
+                let open = self.tokens[i].mate as usize;
+                let preceding = open.checked_sub(1).map(|p| self.text(p)).unwrap_or("");
+                if !["if", "for", "while", "switch", "with"].contains(&preceding)
+                    && !bodies.contains_key(&(i + 1))
+                    && let Some(end) = self.close(i + 1)
+                {
+                    let mut scope = Scope {
+                        start: open,
+                        end: end + 1,
+                        function: preceding != "catch",
+                        opaque: false,
+                        declarations: Vec::new(),
+                    };
+                    if scope.function {
+                        scope.declarations.push(("arguments", true));
+                    }
+                    self.parameters(open + 1, i, &mut scope, meter);
+                    if preceding == "catch" {
+                        for (_, uncertain) in &mut scope.declarations {
+                            *uncertain = true;
+                        }
+                    }
+                    descriptor = Some((scope, i + 1));
+                }
+            } else if text == "class" {
+                let name = self.identifier(i + 1).then_some(i + 1);
+                // Only a simple name/extends name is proved. Complex heritage
+                // syntax is opaque rather than searched with an unbounded walk.
+                let mut body = i + 1 + usize::from(name.is_some());
+                if self.text(body) == "extends" {
+                    body += 2;
+                }
+                if self.text(body) != "{" {
+                    return false;
+                }
+                let Some(end) = self.close(body) else {
+                    return false;
+                };
+                let mut scope = Scope {
+                    start: i,
+                    end: end + 1,
+                    function: false,
+                    opaque: false,
+                    declarations: Vec::new(),
+                };
+                if let Some(name) = name {
+                    scope.declarations.push((self.text(name), true));
+                }
+                descriptor = Some((scope, body));
+            } else if text == "for" && self.text(i + 1) == "(" {
+                let Some(shut) = self.close(i + 1) else {
+                    return false;
+                };
+                let body = shut + 1;
+                let end = self.close(body).filter(|_| self.text(body) == "{").map_or(
+                    ends[body.min(n)] + usize::from(ends[body.min(n)] < n),
+                    |end| end + 1,
+                );
+                descriptor = Some((
+                    Scope {
+                        start: i,
+                        end,
+                        function: false,
+                        opaque: false,
+                        declarations: Vec::new(),
+                    },
+                    if self.text(body) == "{" { body } else { n },
+                ));
+            }
+            if let Some((scope, body)) = descriptor {
+                if !self
+                    ._memory
+                    .keep(256 + (scope.declarations.capacity() * 24) as u64)
+                {
+                    return false;
+                }
+                bodies.insert(body, scope.start);
+                ranges.insert(scope.start, scope);
+            }
+        }
+        for i in 0..n {
+            if self.text(i) == "{" && self.close(i) != Some(i + 1) && !bodies.contains_key(&i) {
+                if !self._memory.keep(256) {
+                    return false;
+                }
+                ranges.entry(i).or_insert(Scope {
+                    start: i,
+                    end: self.close(i).unwrap_or(n) + 1,
+                    function: false,
+                    opaque: false,
+                    declarations: Vec::new(),
+                });
+            }
+        }
+        let mut scopes = vec![Scope {
+            start: 0,
+            end: n + 1,
+            function: true,
+            opaque: false,
+            declarations: Vec::new(),
+        }];
+        let mut stack = vec![0usize];
+        let mut functions = vec![0usize];
+        for i in 0..n {
+            if !meter.charge(1) {
+                return false;
+            }
+            while scopes[*stack.last().unwrap()].end <= i {
+                let scope = stack.pop().unwrap();
+                if scopes[scope].function {
+                    functions.pop();
                 }
             }
-            match byte {
-                b';' | b')' | b'}' | b']' => return,
-                b',' => expect_name = true,
-                b'{' | b'(' | b'[' => {
-                    let Some(end) = close(at) else {
-                        return;
-                    };
-                    at = end;
+            if let Some(scope) = ranges.remove(&i) {
+                let index = scopes.len();
+                if !self._memory.push(&mut stack, index) || !self._memory.push(&mut scopes, scope) {
+                    return false;
                 }
-                _ if starts_statement(bytes, at) => return,
-                _ => (),
+                if scopes[index].function && !self._memory.push(&mut functions, index) {
+                    return false;
+                }
+            }
+            let current = *stack.last().unwrap();
+            self.tokens[i].binding = current as u32;
+            let text = self.text(i);
+            if (text == "eval" || (text == "with" && self.text(i + 1) == "("))
+                && (i == 0 || self.text(i - 1) != ".")
+            {
+                scopes[*functions.last().unwrap()].opaque = true;
+            }
+            if ["var", "let", "const"].contains(&text) {
+                let scope = if text == "var" {
+                    *functions.last().unwrap()
+                } else {
+                    current
+                };
+                self.declarators(
+                    i + 1,
+                    &mut scopes[scope],
+                    text != "var" && scope != 0,
+                    meter,
+                );
+            }
+            if text == "function" || text == "class" {
+                let mut name = i + 1;
+                if self.text(name) == "*" {
+                    name += 1;
+                }
+                let declaration =
+                    i == 0 || matches!(self.text(i - 1), ";" | "{" | "}" | "export" | "default");
+                if self.identifier(name) && declaration {
+                    let outer = stack.iter().rev().nth(1).copied().unwrap_or(0);
+                    if !self._memory.push(
+                        &mut scopes[outer].declarations,
+                        (self.text(name), text == "class"),
+                    ) {
+                        return false;
+                    }
+                }
+            }
+        }
+        if meter.exhausted() {
+            return false;
+        }
+        // Hoisting is complete before any use is resolved. Scope enter/exit
+        // events update one active stack per spelling, including opacity.
+        let mut active = HashMap::<&str, Vec<u32>>::new();
+        let mut stack = Vec::<usize>::new();
+        let mut next = 0usize;
+        let mut opaque = 0usize;
+        for i in 0..n {
+            if !meter.charge(1) {
+                return false;
+            }
+            while stack.last().is_some_and(|s| scopes[*s].end <= i) {
+                let s = stack.pop().unwrap();
+                opaque -= usize::from(scopes[s].opaque);
+                for (name, _) in scopes[s].declarations.iter().rev() {
+                    active.get_mut(name).unwrap().pop();
+                }
+            }
+            while next < scopes.len() && (next == 0 || scopes[next].start == i) {
+                opaque += usize::from(scopes[next].opaque);
+                for (name, uncertain) in &scopes[next].declarations {
+                    if !meter.charge(name.len() as u64 + 1) || !self._memory.keep(96) {
+                        return false;
+                    }
+                    active.entry(name).or_default().push(if *uncertain {
+                        AMBIGUOUS
+                    } else {
+                        next as u32
+                    });
+                }
+                stack.push(next);
+                next += 1;
+            }
+            let name = self.text(i);
+            self.tokens[i].binding =
+                if opaque > 0 || (!self.identifier(i) && word(name.as_bytes()[0])) {
+                    AMBIGUOUS
+                } else if i > 0 && self.text(i - 1) == "." {
+                    PROPERTY
+                } else {
+                    active
+                        .get(name)
+                        .and_then(|stack| stack.last())
+                        .copied()
+                        .unwrap_or(0)
+                };
+        }
+        true
+    }
+
+    fn parameters(&self, mut at: usize, end: usize, scope: &mut Scope<'a>, meter: &Meter) {
+        while at < end {
+            if !meter.charge(1) {
+                scope.opaque = true;
+                return;
+            }
+            while self.text(at) == "." {
+                at += 1;
+            }
+            if self.identifier(at) {
+                if !self
+                    ._memory
+                    .push(&mut scope.declarations, (self.text(at), false))
+                {
+                    return;
+                }
+            } else {
+                scope.opaque = true;
+            }
+            at += 1;
+            while at < end && self.text(at) != "," {
+                if !meter.charge(1) {
+                    scope.opaque = true;
+                    return;
+                }
+                at = self.close(at).map_or(at + 1, |end| end + 1);
             }
             at += 1;
         }
     }
-}
 
-/// Every matched bracket pair, sorted by opening offset.
-fn bracket_pairs(bytes: &[u8]) -> Vec<(usize, usize)> {
-    let mut pairs = Vec::new();
-    let mut stack = Vec::new();
-    for (index, byte) in bytes.iter().enumerate() {
-        match byte {
-            b'{' | b'(' | b'[' => stack.push((*byte, index)),
-            b'}' | b')' | b']' => {
-                let open = match byte {
-                    b'}' => b'{',
-                    b')' => b'(',
-                    _ => b'[',
-                };
-                if stack.last().is_some_and(|(kind, _)| *kind == open) {
-                    let (_, opening) = stack.pop().expect("open bracket");
-                    pairs.push((opening, index));
-                } else {
-                    stack.clear();
+    fn declarators(&self, mut at: usize, scope: &mut Scope<'a>, ambiguous: bool, meter: &Meter) {
+        loop {
+            if !meter.charge(1) || !self.identifier(at) {
+                scope.opaque = true;
+                return;
+            }
+            if !self
+                ._memory
+                .push(&mut scope.declarations, (self.text(at), ambiguous))
+            {
+                return;
+            }
+            at += 1;
+            if self.text(at) == "=" {
+                at += 1;
+                while at < self.tokens.len() {
+                    if !meter.charge(1) {
+                        scope.opaque = true;
+                        return;
+                    }
+                    if matches!(
+                        self.text(at),
+                        "," | ";"
+                            | ")"
+                            | "]"
+                            | "}"
+                            | "in"
+                            | "of"
+                            | "var"
+                            | "let"
+                            | "const"
+                            | "return"
+                            | "if"
+                            | "for"
+                            | "while"
+                            | "do"
+                            | "switch"
+                            | "throw"
+                            | "try"
+                    ) {
+                        break;
+                    }
+                    let previous = self.tokens[at - 1].end as usize;
+                    if self.region.as_bytes()[previous..self.tokens[at].start as usize]
+                        .contains(&b'\n')
+                    {
+                        break;
+                    }
+                    at = self.close(at).map_or(at + 1, |end| end + 1);
                 }
             }
-            _ => (),
-        }
-    }
-    pairs.sort_unstable();
-    pairs
-}
-
-fn split_top_level(text: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut from = 0;
-    for (index, byte) in text.bytes().enumerate() {
-        match byte {
-            b'{' | b'(' | b'[' => depth += 1,
-            b'}' | b')' | b']' => depth = depth.saturating_sub(1),
-            b',' if depth == 0 => {
-                parts.push(&text[from..index]);
-                from = index + 1;
+            if self.text(at) != "," {
+                return;
             }
-            _ => (),
+            at += 1;
         }
     }
-    parts.push(&text[from..]);
-    parts
-}
 
-/// A line break inside a declaration list continues it only beside a comma.
-fn continues(bytes: &[u8], newline: usize) -> bool {
-    let previous = bytes[..newline]
-        .iter()
-        .rev()
-        .find(|byte| !byte.is_ascii_whitespace());
-    let next = bytes[newline..]
-        .iter()
-        .take(MAX_DECLARATOR_SCAN)
-        .find(|byte| !byte.is_ascii_whitespace());
-    previous == Some(&b',') || next == Some(&b',')
-}
-
-fn starts_statement(bytes: &[u8], at: usize) -> bool {
-    if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || b"_$.".contains(&bytes[at - 1])) {
-        return false;
+    pub(super) fn binding(&self, name: &str, at: usize) -> Binding {
+        if !self.complete {
+            return Binding::Ambiguous;
+        }
+        let Ok(index) = self
+            .tokens
+            .binary_search_by_key(&(at as u32), |token| token.start)
+        else {
+            return Binding::Ambiguous;
+        };
+        if self.text(index) != name {
+            return Binding::Ambiguous;
+        }
+        match self.tokens[index].binding {
+            0 => Binding::Root,
+            AMBIGUOUS => Binding::Ambiguous,
+            PROPERTY => Binding::Property,
+            scope => Binding::Scope(scope as usize - 1),
+        }
     }
-    STATEMENT_KEYWORDS.iter().any(|keyword| {
-        bytes[at..].starts_with(keyword.as_bytes())
-            && bytes
-                .get(at + keyword.len())
-                .is_none_or(|next| !(next.is_ascii_alphanumeric() || b"_$".contains(next)))
-    })
 }
 
 #[cfg(test)]
@@ -438,7 +567,7 @@ mod tests {
     #[test]
     fn nested_declarations_shadow_and_free_names_share_one_binding() {
         let region = "var pc=0,stack=[],ops={};function step(){var ops=[];ops[x]();}ops[y]();q[z]();function f(){q[w]();}";
-        let scopes = Scopes::new(region);
+        let scopes = Scopes::new(region, &Meter::new());
         let outer = scopes.binding("ops", at(region, "ops={", 0));
         assert_eq!(outer, scopes.binding("ops", at(region, "ops[y]", 0)));
         assert_ne!(outer, scopes.binding("ops", at(region, "ops[x]", 0)));
@@ -453,7 +582,7 @@ mod tests {
     #[test]
     fn parameters_and_methods_declare() {
         let region = "var ops={};function a(ops){ops[x]();}var o={m(ops){ops[y]();}};ops[z]();";
-        let scopes = Scopes::new(region);
+        let scopes = Scopes::new(region, &Meter::new());
         let outer = scopes.binding("ops", at(region, "ops[z]", 0));
         assert_eq!(outer, Binding::Root);
         assert!(matches!(
@@ -471,11 +600,10 @@ mod tests {
         for region in [
             "var ops={};if(a){let ops=[];ops[x]();}",
             "var ops={};try{}catch(ops){ops[x]();}",
-            "var ops={};list.map(ops=>ops[x]());",
             "var ops={};with(o){ops[x]();}",
             "var ops={};function f({ops}){ops[x]();}",
         ] {
-            let scopes = Scopes::new(region);
+            let scopes = Scopes::new(region, &Meter::new());
             assert_eq!(
                 scopes.binding("ops", at(region, "ops[x]", 0)),
                 Binding::Ambiguous,
@@ -487,7 +615,7 @@ mod tests {
     #[test]
     fn properties_are_not_lexical_bindings() {
         let region = "this.ops={};var ops=[];this.ops[x]();";
-        let scopes = Scopes::new(region);
+        let scopes = Scopes::new(region, &Meter::new());
         assert_eq!(
             scopes.binding("ops", at(region, "ops[x]", 0)),
             Binding::Property
@@ -501,7 +629,7 @@ mod tests {
     #[test]
     fn declaration_lists_end_at_the_next_statement() {
         let region = "function h(){var a=1\nops[x]()\nvar b=f(1,2),c=[3,4],d=function(){},e\nops[y]();c[z]();e[w]();}";
-        let scopes = Scopes::new(region);
+        let scopes = Scopes::new(region, &Meter::new());
         assert_eq!(
             scopes.binding("ops", at(region, "ops[x]", 0)),
             Binding::Root

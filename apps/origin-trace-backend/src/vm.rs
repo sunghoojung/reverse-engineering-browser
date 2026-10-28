@@ -497,9 +497,10 @@ pub(crate) fn wasm_classification_work(bytes: &[u8]) -> (Value, dispatch_shape::
 #[cfg(test)]
 pub(crate) fn dispatch_roles(runtime: &str, bytes: &[u8]) -> Option<dispatch_shape::Roles> {
     let meter = dispatch_shape::Meter::new();
-    Some(dispatch_shape::Roles::new(&classify_artifact(
-        runtime, bytes, &meter,
-    )?))
+    Some(dispatch_shape::Roles::new(
+        &classify_artifact(runtime, bytes, &meter)?,
+        &meter,
+    ))
 }
 
 /// The structural dispatch classification of one JavaScript source, as
@@ -1005,7 +1006,9 @@ fn analyze_with_roles(
     // own and never an input to the observations, score or tier above.
     let meter = dispatch_shape::Meter::new();
     let classified = classify_artifact(runtime, bytes, &meter);
-    let roles = classified.as_ref().map(dispatch_shape::Roles::new);
+    let roles = classified
+        .as_ref()
+        .map(|classified| dispatch_shape::Roles::new(classified, &meter));
     if let Some(classified) = classified {
         frontend["dispatch_classification"] = dispatch_shape::document(
             &artifact["artifact_id"],

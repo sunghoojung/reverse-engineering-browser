@@ -22,7 +22,7 @@ mod scope;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.9.0";
+const PRODUCER_VERSION: &str = "2.10.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -657,6 +657,16 @@ fn gate_handlers(
     roles: &vm::dispatch_shape::Roles,
 ) -> Gated {
     use vm::dispatch_shape::Role;
+    let memory = vm::dispatch_shape::Memory::new(&roles.meter);
+    if !roles.meter.charge((end.saturating_sub(start) as u64) * 8)
+        || !memory.keep((end.saturating_sub(start) as u64) * 3)
+    {
+        return Gated {
+            withheld: handlers.len(),
+            handlers: Vec::new(),
+            unknowns: vec![withheld_reason(roles, None)],
+        };
+    }
     let region = vm::mask(&source[start..end]);
     let outer = without_nested_functions(&region);
     // The switches recovery reads, found the same way it finds them.
@@ -686,7 +696,7 @@ fn gate_handlers(
     // included, as recovery collects table names from the whole region. Each
     // site is keyed by the binding its table name reads, so a table ties
     // only to the calls through that same declaration.
-    let scopes = scope::Scopes::new(&region);
+    let scopes = scope::Scopes::new(&region, &roles.meter);
     let mut table_sites = BTreeMap::<String, Vec<(scope::Binding, Option<Role>)>>::new();
     for captures in vm::dispatch_shape::javascript::INDEXED_CALL.captures_iter(&region) {
         let name = captures.get(1).expect("table name");
@@ -746,6 +756,11 @@ fn gate_handlers(
             withheld += 1;
             unknowns.push(withheld_reason(roles, verdict));
         }
+    }
+    if roles.meter.exhausted() {
+        withheld += kept.len();
+        kept.clear();
+        unknowns.push(withheld_reason(roles, None));
     }
     unknowns.sort();
     unknowns.dedup();
@@ -4264,6 +4279,92 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 }
             }
             assert!(exhausted_runs > 0, "{runtime}: no limit was reached");
+        }
+    }
+
+    #[test]
+    fn implicit_and_uncertain_bindings_withhold_only_in_their_scope() {
+        let prefix = "var ops={};";
+        for body in [
+            "function step(){arguments[x]();}",
+            "var step=function ops(){ops[x]();};",
+            "var C=class ops{m(){ops[x]();}};",
+            "try{}catch(ops){ops[x]();}",
+            "for(let ops of list){ops[x]();}",
+            "for(const ops of list)ops[x]();",
+            "function step(){eval(code);ops[x]();}",
+            "with(obj){ops[x]();}",
+            "function step({ops}){ops[x]();}",
+        ] {
+            let source = format!("{prefix}{body}ops[y]();");
+            let meter = vm::dispatch_shape::Meter::new();
+            let scopes = scope::Scopes::new(&source, &meter);
+            let name = if body.contains("arguments[x]") {
+                "arguments"
+            } else {
+                "ops"
+            };
+            let at = source.find(&format!("{name}[x]")).unwrap();
+            assert_eq!(
+                scopes.binding(name, at),
+                scope::Binding::Ambiguous,
+                "{source}"
+            );
+        }
+        for arrow in [
+            "var f=ops=>ops;",
+            "var f=ops=>{return ops;};",
+            "var f=(ops=1)=>ops;",
+            "ops: while(false){break ops;}",
+            "var o={ops};",
+        ] {
+            let source = format!("{prefix}{arrow}ops[x]();");
+            let scopes = scope::Scopes::new(&source, &vm::dispatch_shape::Meter::new());
+            assert_eq!(
+                scopes.binding("ops", source.find("ops[x]").unwrap()),
+                scope::Binding::Root,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_review_fixtures_resolve_only_proven_table_bindings() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-gate");
+        for (name, kept) in [
+            ("gate_arguments.js", false),
+            ("gate_namedexpr.js", false),
+            ("gate_longname.js", false),
+            ("gate_closure.js", true),
+            ("gate_objshorthand.js", true),
+            ("gate_correct.js", true),
+            ("gate_correct_irrelevant_arrow.js", true),
+            ("gate_unicode1.js", false),
+            ("gate_unicode2.js", false),
+        ] {
+            let source = std::fs::read_to_string(root.join(name)).unwrap();
+            let (_, _, document) = analyze(&source, &[]);
+            let workspace = &document["workspaces"][0];
+            assert_eq!(
+                workspace["handlers"].as_array().unwrap().len(),
+                if kept { 3 } else { 0 },
+                "{name}"
+            );
+            if !kept {
+                assert!(
+                    workspace["coverage"]["omissions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|o| o["reason"] == "handler-withheld"
+                            && o["detail"]
+                                .as_str()
+                                .unwrap()
+                                .contains("3 opcode candidates")),
+                    "{name}"
+                );
+            }
         }
     }
 

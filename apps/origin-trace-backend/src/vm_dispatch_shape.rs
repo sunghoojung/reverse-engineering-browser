@@ -317,18 +317,29 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
 /// dispatch byte offset. Built from the full classification, never from the
 /// bounded listed document, so the listing cap cannot hide a site.
 pub(crate) struct Roles {
-    roles: BTreeMap<usize, Role>,
+    roles: HashMap<usize, Role>,
+    _memory: Memory,
     limited: bool,
+    pub meter: Meter,
 }
 
 impl Roles {
-    pub fn new(classified: &Classified) -> Self {
+    pub fn new(classified: &Classified, meter: &Meter) -> Self {
+        let memory = Memory::new(meter);
+        let available = memory.keep(classified.sites.len() as u64 * 64)
+            && meter.charge(classified.sites.len() as u64 * 64);
         Self {
-            roles: classified
-                .sites
-                .iter()
-                .map(|site| (site.byte_offset, site.role()))
-                .collect(),
+            meter: meter.clone(),
+            _memory: memory,
+            roles: if available {
+                classified
+                    .sites
+                    .iter()
+                    .map(|site| (site.byte_offset, site.role()))
+                    .collect()
+            } else {
+                HashMap::new()
+            },
             limited: classified.omissions.iter().any(|omission| {
                 matches!(
                     omission["reason"].as_str(),
@@ -345,7 +356,7 @@ impl Roles {
 
     /// A work bound refused sites, so an absent site may be unclassified.
     pub fn limited(&self) -> bool {
-        self.limited
+        self.limited || self.meter.exhausted()
     }
 }
 
@@ -1757,7 +1768,17 @@ pub(crate) struct Classified {
 /// The meter is distinct from each query's logical step budget, which
 /// replays memoized cost so results never depend on query order. A memo hit
 /// charges the meter only for the lookup it performs.
-pub(crate) struct Meter {
+#[derive(Clone)]
+pub(crate) struct Meter(std::rc::Rc<MeterState>);
+
+impl std::ops::Deref for Meter {
+    type Target = MeterState;
+    fn deref(&self) -> &MeterState {
+        &self.0
+    }
+}
+
+pub(crate) struct MeterState {
     limit: u64,
     retained_limit: u64,
     used: Cell<u64>,
@@ -1767,6 +1788,49 @@ pub(crate) struct Meter {
     unclassified: Cell<u64>,
     unexamined: Cell<u64>,
     limited: Cell<u64>,
+}
+
+/// A reservation lives exactly as long as the allocation it covers. The
+/// shared meter follows the artifact into the claim gate and workspace.
+pub(crate) struct Memory {
+    meter: Meter,
+    bytes: Cell<u64>,
+}
+
+impl Memory {
+    pub fn new(meter: &Meter) -> Self {
+        Self {
+            meter: meter.clone(),
+            bytes: Cell::new(0),
+        }
+    }
+
+    pub fn keep(&self, bytes: u64) -> bool {
+        if !self.meter.retain(bytes) {
+            return false;
+        }
+        self.bytes.set(self.bytes.get() + bytes);
+        true
+    }
+
+    pub fn push<T>(&self, vector: &mut Vec<T>, item: T) -> bool {
+        if vector.len() == vector.capacity() {
+            let capacity = vector.capacity().max(4).saturating_mul(2);
+            let extra = capacity - vector.capacity();
+            if !self.keep((extra * std::mem::size_of::<T>()) as u64) {
+                return false;
+            }
+            vector.reserve_exact(capacity - vector.len());
+        }
+        vector.push(item);
+        true
+    }
+}
+
+impl Drop for Memory {
+    fn drop(&mut self) {
+        self.meter.release(self.bytes.get());
+    }
 }
 
 /// Work units per artifact. Each unit is a byte scanned, a write, store, slot
@@ -1781,7 +1845,7 @@ impl Meter {
     }
 
     pub fn with_limits(limit: u64, retained_limit: u64) -> Self {
-        Self {
+        Self(std::rc::Rc::new(MeterState {
             limit,
             retained_limit,
             used: Cell::new(0),
@@ -1791,7 +1855,7 @@ impl Meter {
             unclassified: Cell::new(0),
             unexamined: Cell::new(0),
             limited: Cell::new(0),
-        }
+        }))
     }
 
     /// Charge work actually done. False once the bound is reached.
@@ -1811,14 +1875,17 @@ impl Meter {
 
     /// Charge memory a structure keeps until it is released.
     pub fn retain(&self, bytes: u64) -> bool {
+        if self.exhausted.get() {
+            return false;
+        }
         let retained = self.retained.get().saturating_add(bytes);
-        self.retained.set(retained);
-        self.peak.set(self.peak.get().max(retained));
         if retained > self.retained_limit {
             self.exhausted.set(true);
             return false;
         }
-        !self.exhausted.get()
+        self.retained.set(retained);
+        self.peak.set(self.peak.get().max(retained));
+        true
     }
 
     pub fn release(&self, bytes: u64) {

@@ -294,6 +294,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  private func assertHandlerColumns(_ ui: Harness, _ context: String) async throws {
+    let columns = try await ui.json("""
+      (() => { const row = document.querySelector('.vm-workbench-listing .vm-handler-row');
+        const opcode = row.querySelector('.vm-handler-opcode');
+        const text = document.createRange(); text.selectNodeContents(opcode);
+        return {textRight: text.getBoundingClientRect().right,
+          labelLeft: row.querySelector('.vm-handler-label').getBoundingClientRect().left}; })()
+      """)
+    print("RENDERED_UI_HANDLER_COLUMNS \(context) \(columns)")
+    XCTAssertGreaterThanOrEqual((columns["labelLeft"] as? Double ?? 0) - (columns["textRight"] as? Double ?? .infinity), 5,
+      "\(context): opcode text keeps a readable gap before the operation label")
+  }
+
+  @MainActor
   private func assertVmDock(_ ui: Harness, _ size: (name: String, width: CGFloat, height: CGFloat)) async throws {
     let geometry = try await ui.json("""
       (() => { const box = __rebUiProbe.box; return {
@@ -409,6 +423,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
+      try await assertHandlerColumns(ui, size.name)
       try await ui.screenshot("vm-navigator-\(size.name)")
       try await ui.click("[data-vm-panel='native-wasm']")
       let panel = "[data-vm-panel-content='native-wasm']"
@@ -495,6 +510,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
       XCTAssertLessThanOrEqual(tree["height"] as? Double ?? .infinity, 141,
         "\(size.name): trees stay in a compact band above the evidence")
+      try await assertHandlerColumns(ui, size.name)
       try await ui.screenshot("vm-navigator-\(size.name)")
       try await ui.click("#vm-symbol-list .vm-symbol-row")
       try await ui.tab()

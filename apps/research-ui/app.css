@@ -3655,7 +3655,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-tool-import-card, #screen-vm .vm-tool-results { border-radius: 0; }
 @media (max-width: 1150px) {
   #screen-vm .vm-workbench-body { grid-template-columns: minmax(0, 1fr) 220px; }
-  #screen-vm .vm-handler-head, #screen-vm .vm-workbench-listing .vm-handler-row { grid-template-columns: 65px 36px minmax(55px, 1fr) 60px; }
+  #screen-vm .vm-handler-head, #screen-vm .vm-workbench-listing .vm-handler-row { grid-template-columns: 65px 42px minmax(55px, 1fr) 60px; }
 }
 @media (max-width: 900px), (max-height: 650px) {
   #screen-vm .vm-workbench-body { grid-template-columns: minmax(0, 1fr); }

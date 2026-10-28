@@ -46,7 +46,8 @@ tab-strip visibility, and an exact boundary between the analysis scroller and
 its tabs. Native observation screenshots deliberately reveal a complete row
 and its section heading after exercising the disclosure. Separate 1180x560
 and 760x790 cases exercise the height and width breakpoints, compact trees,
-keyboard focus, and the example disclosure independently.
+keyboard focus, and the example disclosure independently. Text bounds also
+verify that handler opcodes keep a readable gap before their operation labels.
 
 Environment passed to the hosted bundle through the `.xctestrun`:
 

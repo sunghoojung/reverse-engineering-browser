@@ -33,9 +33,11 @@ description. This is the documented format, not a private launch path.
 Inside the app, [`OriginTraceRenderedUITests.swift`](OriginTraceRenderedUITests.swift)
 reactivates the same instance through Launch Services, because `xcodebuild`
 starts the host in the background and WebKit ignores input to an inactive
-window. Clicks and keys are `NSEvent`s sent to the window. Option+Tab is used
-when Full Keyboard Access is off, matching Safari, so every control is a stop.
-[`probes.js`](probes.js) only reads the DOM and computed layout.
+window. Clicks and keys both reactivate the host before sending `NSEvent`s to
+the window and wait for WebKit's document focus notification. This keeps input
+out of the asynchronous gap after native activation. Option+Tab is used when Full Keyboard Access is off,
+matching Safari, so every control is a stop. [`probes.js`](probes.js) inspects
+the DOM and computed layout and scrolls targets into view.
 
 No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not
@@ -43,9 +45,10 @@ establish live browser capture.
 
 VM layout assertions check full-width compact evidence, complete footer and
 tab-strip visibility, and an exact boundary between the analysis scroller and
-its tabs. Native observation screenshots deliberately reveal a complete row
-and its section heading after exercising the disclosure. Separate 1180x560
-and 760x790 cases exercise the height and width breakpoints, compact trees,
+its tabs. Native observation checks reveal and photograph each section heading
+and retained row separately after exercising the disclosure. They do not require
+both targets to fit in one viewport. Separate 1180x560 and 760x790 cases exercise
+the height and width breakpoints, compact trees,
 keyboard focus, and the example disclosure independently. Text bounds also
 verify that handler opcodes keep a readable gap before their operation labels.
 At all four window sizes, every dock tab must leave either a useful analysis
@@ -55,8 +58,28 @@ navigate from the Symbol Tree to a complete handler row, and toggle it with
 Space. A separate geometry check rejects a blank band between the Opcode
 workspace header and its evidence notice.
 
+AppKit can clamp requested window sizes to the display. The harness logs the
+requested and actual CSS viewport sizes, and responsive assertions use the
+actual viewport's media query. Scrolling checks center the specific target and
+wait for it to settle before measuring it. Fixed chrome, the analysis pane at
+rest, and controls revealed by product navigation are checked without
+test-driven scrolling.
+
+To reproduce smaller CI displays locally, cap all requested heights without
+changing the display resolution:
+
+```sh
+REB_RENDERED_UI_MAX_HEIGHT=679 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make rendered-ui-check
+```
+
+The limit must be an integer of at least 560 CSS pixels. Normal and narrow-tall
+cases then request heights of 679; the 560-high cases stay unchanged. Use 686 to
+reproduce the other observed CI display size. Screenshot names keep their case
+names; their pixel dimensions and the viewport log show the actual size.
+
 Environment passed to the hosted bundle through the `.xctestrun`:
 
+- `REB_RENDERED_UI_MAX_HEIGHT`: optional maximum requested viewport height
 - `REB_RENDERED_UI_OUTPUT`: screenshot directory
 - `REB_RENDERED_UI_PROBES`: absolute path of `probes.js`
 - `REB_RENDERED_UI_EXPECT`: JSON with the fixture's hostile markers and counts

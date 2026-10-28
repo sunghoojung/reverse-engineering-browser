@@ -221,7 +221,12 @@ impl Tables {
                         let global = global.ok()?;
                         let value = (!global.ty.mutable)
                             .then(|| {
-                                evaluate(&global.init_expr, imported_globals, &constant_globals)
+                                evaluate(
+                                    &global.init_expr,
+                                    imported_globals,
+                                    &constant_globals,
+                                    meter,
+                                )
                             })
                             .flatten();
                         if !meter.charge(1) || !temporary.push(&mut constant_globals, value) {
@@ -249,6 +254,7 @@ impl Tables {
                                     &offset_expr,
                                     imported_globals,
                                     &constant_globals,
+                                    meter,
                                 ) {
                                     Some(Evaluated::Value(value)) => match u32::try_from(value) {
                                         Ok(offset) => match tables.minimums.get(table as usize) {
@@ -560,19 +566,32 @@ fn evaluate(
     expr: &ConstExpr<'_>,
     imported_globals: u32,
     constants: &[Option<Evaluated>],
+    meter: &Meter,
 ) -> Option<Evaluated> {
     let mut reader = expr.get_operators_reader();
+    let memory = Memory::new(meter);
     let mut stack: Vec<Evaluated> = Vec::new();
     while !reader.eof() {
+        if !meter.charge(1) {
+            return None;
+        }
         match reader.read().ok()? {
-            Operator::I32Const { value } => stack.push(Evaluated::Value(i64::from(value as u32))),
-            Operator::I64Const { value } => stack.push(Evaluated::Value(value)),
+            Operator::I32Const { value } => memory
+                .push(&mut stack, Evaluated::Value(i64::from(value as u32)))
+                .then_some(())?,
+            Operator::I64Const { value } => memory
+                .push(&mut stack, Evaluated::Value(value))
+                .then_some(())?,
             Operator::GlobalGet { global_index } => {
                 if global_index < imported_globals {
-                    stack.push(Evaluated::Imported(global_index));
+                    memory
+                        .push(&mut stack, Evaluated::Imported(global_index))
+                        .then_some(())?;
                 } else {
                     let defined = (global_index - imported_globals) as usize;
-                    stack.push((*constants.get(defined)?)?);
+                    memory
+                        .push(&mut stack, (*constants.get(defined)?)?)
+                        .then_some(())?;
                 }
             }
             op @ (Operator::I32Add
@@ -615,6 +634,24 @@ fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_expression_stack_reserves_before_growth() {
+        let source = format!(
+            "(module (global i32 {} {}))",
+            "i32.const 0 ".repeat(4096),
+            "i32.add ".repeat(4095)
+        );
+        let bytes = wat::parse_str(source).unwrap();
+        let bounded = Meter::with_limits(1_000_000, 4096);
+        assert!(Tables::parse_under(&bytes, &bounded).is_none());
+        assert!(bounded.exhausted());
+        assert!(bounded.peak() <= 4096);
+        let sufficient = Meter::new();
+        assert!(Tables::parse_under(&bytes, &sufficient).is_some());
+        assert!(!sufficient.exhausted());
+        assert!(sufficient.peak() >= (4096 * std::mem::size_of::<Evaluated>()) as u64);
+    }
 
     /// Review regression: a defined global's initializer is evaluated with
     /// the globals before it, so an offset through it is placed or relative.

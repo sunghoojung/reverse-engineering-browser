@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {mkdtemp,writeFile,readFile,rm,stat,symlink,mkdir,lstat,readdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {checkedSpawnSync as spawnSync} from './checked-spawn-sync.mjs';
 import vm from '../apps/research-ui/vm_semantics.js';
 
 const copy=value=>JSON.parse(JSON.stringify(value));
@@ -20,10 +20,7 @@ const left=fixture('left',7,state(3,[null,1],[null],[[4,null],[5,0]]),state(4,[n
 const right=fixture('right',91,state(3,[null,1,0],[],[[4,null]]),state(9,[null,2,0],[null],[[4,null],[8,0]]));
 const directory=await mkdtemp(join(tmpdir(),'reb-vm-compare-'));
 const cli=resolve('tools/vm-semantics.mjs');
-// No wall-clock timeout: every input is a bounded regular file or a FIFO the
-// CLI opens non-blocking, so a correct CLI always exits and the check waits for
-// that exit. A timer only turned machine stalls into failures. A regression to a
-// blocking FIFO open hangs this check, which the CI job timeout reports.
+// Bound a local child hang while allowing heavily loaded developer machines.
 const run=(...args)=>spawnSync(process.execPath,[cli,...args],{encoding:'utf8'});
 let serial=0;
 const fresh=label=>join(directory,`${serial++}-${label}`);

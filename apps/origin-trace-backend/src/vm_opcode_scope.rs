@@ -410,14 +410,36 @@ impl<'a> Scopes<'a> {
                 if self.text(name) == "*" {
                     name += 1;
                 }
-                let declaration =
-                    i == 0 || matches!(self.text(i - 1), ";" | "{" | "}" | "export" | "default");
-                if self.identifier(name) && declaration {
+                let previous = i.checked_sub(1).map_or("", |p| self.text(p));
+                let declaration = i == 0
+                    || matches!(previous, ";" | "{" | "}" | "export" | "default")
+                    || (i > 0 && asi[i - 1]);
+                // An expression prefix proves that a name stays internal.
+                // Other contexts (including Annex B conditional declarations)
+                // are uncertain and cannot prove a reference to an outer table.
+                let expression = matches!(previous, "=" | "(" | "[" | "," | "?" | "return");
+                if self.identifier(name) && (declaration || !expression) {
                     let outer = stack.iter().rev().nth(1).copied().unwrap_or(0);
                     if !self._memory.push(
                         &mut scopes[outer].declarations,
-                        (self.text(name), text == "class"),
+                        (self.text(name), text == "class" || !declaration),
                     ) {
+                        return false;
+                    }
+                    let function = if text == "function" {
+                        functions.iter().rev().nth(1).copied().unwrap_or(0)
+                    } else {
+                        *functions.last().unwrap()
+                    };
+                    // Sloppy block functions can also create a function-wide
+                    // var binding. Without proving strictness, neither binding
+                    // may be confused with the table in a surrounding closure.
+                    if text == "function"
+                        && outer != function
+                        && !self
+                            ._memory
+                            .push(&mut scopes[function].declarations, (self.text(name), true))
+                    {
                         return false;
                     }
                 }

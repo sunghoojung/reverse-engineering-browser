@@ -1,6 +1,8 @@
 # Dispatch claim-gate regressions
 
-These are authored synthetic JavaScript probes supplied by the fourth reviewer.
+These are authored synthetic JavaScript probes supplied by the fourth reviewer,
+plus local regressions for block-function hoisting and class declarations after
+automatic semicolon insertion.
 They contain no third-party captures or function-map data. The backend tests
 exercise them through the analysis and workspace path, checking exact retained
 handler counts and counted withholding. Unicode window alignments and scalable

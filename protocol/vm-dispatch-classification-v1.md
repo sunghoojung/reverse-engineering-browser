@@ -257,6 +257,9 @@ classification is never an input to handler recovery, tier or score:
   `arguments`, named function expression bindings, class-internal names,
   destructuring and unresolved syntax are ambiguous unless an explicit binding
   proves the reference. `eval` and `with` make their enclosing function opaque.
+  Automatic semicolon insertion does not hide declarations. Block-function
+  hoisting and uncertain declaration contexts also make the affected name
+  ambiguous in the enclosing function.
   An exhausted or incomplete scope pass withholds claims with a counted
   `handler-withheld` omission. A property such as `this.ops` matches only property
   sites. Operand-width guesses and owned-effect reachability walks use only

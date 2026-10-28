@@ -4346,6 +4346,8 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         for (name, kept) in [
             ("gate_arguments.js", false),
             ("gate_namedexpr.js", false),
+            ("gate_annexb.js", false),
+            ("gate_class_asi.js", false),
             ("gate_longname.js", false),
             ("gate_closure.js", true),
             ("gate_objshorthand.js", true),
@@ -4387,6 +4389,10 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         for body in [
             "function step(){arguments[x]();}",
             "var step=function ops(){ops[x]();};",
+            "function step(){if(false){function ops(){}}ops[x]();}",
+            "function step(){if(false)function ops(){}ops[x]();}",
+            "function step(){label: function ops(){}ops[x]();}",
+            "function step(){var q=1\nclass ops {}\nops[x]();}",
             "var C=class ops{m(){ops[x]();}};",
             "try{}catch(ops){ops[x]();}",
             "for(let ops of list){ops[x]();}",

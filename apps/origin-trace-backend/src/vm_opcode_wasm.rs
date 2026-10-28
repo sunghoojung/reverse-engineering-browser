@@ -568,18 +568,24 @@ fn attach_table_edges(
     elements: &BTreeMap<u32, Vec<u32>>,
     calls_truncated: &mut bool,
 ) {
+    // Element targets can name every function. Index once rather than
+    // searching all functions for each target (quadratic on unique entries).
+    let has_dispatch = functions
+        .iter()
+        .map(|function| (function.index, !function.sites.is_empty()))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut preferred: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for (table, targets) in elements {
         let mut dispatch = Vec::new();
         let mut other = Vec::new();
         for target in targets {
-            let Some(function) = functions.iter().find(|function| function.index == *target) else {
+            let Some(dispatches) = has_dispatch.get(target) else {
                 continue;
             };
             if dispatch.contains(target) || other.contains(target) {
                 continue;
             }
-            if function.sites.is_empty() {
+            if !dispatches {
                 if other.len() < MAX_TABLE_OTHER_TARGETS {
                     other.push(*target);
                 } else {

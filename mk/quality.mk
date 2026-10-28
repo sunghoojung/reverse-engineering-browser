@@ -242,6 +242,7 @@ javascript-check: capture-completeness-check
 	node tools/check-vm-linked-model.mjs
 	node tools/check-vm-observed-path.mjs
 	node tools/check-vm-compare-cli.mjs
+	node --experimental-vm-modules tools/check-dispatch-retention.mjs
 	node tools/check-python-client-project.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-launcher.mjs --cleanup-only

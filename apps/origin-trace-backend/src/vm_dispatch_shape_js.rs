@@ -1,96 +1,57 @@
-//! JavaScript dispatch-site classification over comment- and literal-masked
-//! function regions. Deliberately syntactic: bindings and writes are indexed
-//! by name inside one region, which is evidence of shape, not a data-flow
-//! proof. Anything outside the recognized forms stays `unknown`.
-//!
-//! Each region is indexed once: bracket pairs, loop and `if` header
-//! intervals, and every binding, write and arithmetic advance by name. Site
-//! classification then only looks names up, under a per-query step budget and
-//! the shared per-artifact budget, so work stays linear in the region size.
-use super::{
-    Brackets, Intervals, Kind, MAX_QUERY_STEPS, MIN_COMPARE_ARMS, Memory, Meter, Repeats, Site,
-    Source, priority,
-};
-use regex::Regex;
+//! One parsed JavaScript artifact supplies structural sites and lexical proof.
+//! Recovery remains independent; proof records can only remove its claims.
+use super::{Classified, Kind, Memory, Meter, Repeats, Role, Site, Source, priority};
+use oxc_allocator::Allocator;
+use oxc_ast::{AstKind, ast::*};
+use oxc_ast_visit::Visit;
+use oxc_parser::Parser;
+use oxc_semantic::{Semantic, SemanticBuilder};
+use oxc_span::{GetSpan, SourceType, Span};
+use oxc_syntax::{node::NodeId, scope::ScopeId, symbol::SymbolId};
+use serde_json::json;
 use std::{
-    cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet, HashMap},
-    sync::LazyLock,
+    collections::{HashMap, HashSet},
+    rc::Rc,
 };
 
-const MAX_TRACE_DEPTH: u8 = 8;
-/// Bindings of one buffer examined for `buffer_kind`; beyond, it is unknown.
-const MAX_BUFFER_DEFINITIONS: usize = 64;
-const MAX_VALUE_BYTES: usize = 200;
-const MAX_ALTERNATIVES: usize = 16;
-/// Classified sites per function region; further sites are counted as
-/// omitted. A generated region with thousands of indexed calls stays bounded.
-pub(crate) const MAX_REGION_SITES: u64 = 4096;
-/// Characters of a line counted exactly per column checkpoint.
 const COLUMN_CHECKPOINT: usize = 4096;
-/// Bytes one braceless statement body is scanned for its end. A body that
-/// runs on without `;`, a line break or a closing bracket ends here, so a run
-/// of such loops costs linear work.
-const MAX_STATEMENT_SCAN: usize = 4096;
+const MAX_SITES: usize = 4096;
+const PARSER_STACK: usize = 32 << 20;
+const PARSER_BYTES_PER_BYTE: u64 = 192;
+const PARSER_FIXED_BYTES: u64 = 256 << 10;
+const MAX_SYNTAX_DEPTH: usize = 8192;
 
-static LOOP_HEADER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(?:while|for)\s*\(|\bdo\b").expect("loop header"));
-static SWITCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bswitch\s*\(").expect("switch"));
-/// `table[selector](...)`, also through `.call(...)` or `.apply(...)`.
-pub(crate) static INDEXED_CALL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"\b([A-Za-z_$][\w$]*)\s*\[((?:[^\[\]]+|\[[^\[\]]*\])+)\]\s*(?:\.\s*(?:call|apply)\s*)?\(",
-    )
-    .expect("indexed call")
-});
-static IF_HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bif\s*\(").expect("if"));
-static COMPARE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*===?\s*(0x[0-9a-fA-F]+|\d+)\b|\b(0x[0-9a-fA-F]+|\d+)\s*===?\s*([A-Za-z_$][\w$]*)\b",
-    )
-    .expect("equality test")
-});
-static SELF_CALL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\(").expect("self call")
-});
-static WRITE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*(\+\+|--|<<=|>>>=|>>=|\*\*=|[-+*/%&|^]=|=)",
-    )
-    .expect("write")
-});
-static PREFIX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(\+\+|--)\s*([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)").expect("prefix")
-});
-static INTEGER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?:0x[0-9a-fA-F]+|\d+)$").expect("integer"));
-static IDENTIFIER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z_$][\w$]*$").expect("identifier"));
-static MEMBER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)+$").expect("member")
-});
-static INDEXED_READ: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([A-Za-z_$][\w$]*)\s*\[\s*(.+?)\s*\]$").expect("indexed read"));
-static ACCESSOR_READ: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^([A-Za-z_$][\w$]*)\s*\.\s*(charCodeAt|charAt|codePointAt|getUint8|getInt8|getUint16|getInt16|getUint32|at)\s*\(\s*([^,()]+?)\s*(?:,[^()]*)?\)$",
-    )
-    .expect("accessor read")
-});
-static CURSOR_INDEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^(?:\+\+|--)?\s*([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*(?:\+\+|--)?(?:\s*[+-]\s*(?:0x[0-9a-fA-F]+|\d+))?$",
-    )
-    .expect("cursor index")
-});
-static WRAPPER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(.+?)\s*(?:&|\||\^|>>>|>>|<<|-|\+)\s*(?:0x[0-9a-fA-F]+|\d+)$")
-        .expect("value wrapper")
-});
-static TYPED_ARRAY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^new\s+(?:Uint8|Int8|Uint8Clamped|Uint16|Int16|Uint32|Int32)Array\b")
-        .expect("typed array")
-});
+#[cfg(test)]
+thread_local! { static PARSER_ARENA: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(crate) fn parser_arena_bytes() -> usize {
+    PARSER_ARENA.get()
+}
+
+pub(crate) type Verdict = Result<Option<Role>, &'static str>;
+const AMBIGUOUS: &str = "A handler table has no unique, stable lexical binding to an interpreter dispatch. Its entries are not claimed as guest opcodes.";
+const PARSE_FAILED: &str = "parse-failed: JavaScript syntax or semantic analysis failed; recovered handlers have no binding proof.";
+
+pub(crate) struct Proofs {
+    // Exact original-byte starts of AST cases and object properties. No source
+    // rescan is needed when base recovery asks whether a claim is justified.
+    handlers: HashMap<(usize, bool), Verdict>,
+    failure: Option<&'static str>,
+    _memory: Memory,
+}
+impl Proofs {
+    pub(crate) fn verdict(&self, offset: usize, table: bool) -> Verdict {
+        self.failure.map_or_else(
+            || {
+                self.handlers
+                    .get(&(offset, table))
+                    .copied()
+                    .unwrap_or(Err(AMBIGUOUS))
+            },
+            Err,
+        )
+    }
+}
 
 /// One-based line and character column of a byte offset. Continuation-byte
 /// checkpoints keep a column lookup bounded even on one minified line.
@@ -128,6 +89,9 @@ impl Lines {
     }
 
     fn continuation_before(&self, source: &str, offset: usize) -> usize {
+        if self.continuation.last() == Some(&0) {
+            return 0;
+        }
         let checkpoint = offset / COLUMN_CHECKPOINT;
         self.continuation[checkpoint] as usize
             + source.as_bytes()[checkpoint * COLUMN_CHECKPOINT..offset]
@@ -144,1220 +108,1422 @@ impl Lines {
         let start = self.starts[line - 1] as usize;
         let characters = (offset - start)
             - (self.continuation_before(source, offset) - self.continuation_before(source, start));
-        let scanned = (offset % COLUMN_CHECKPOINT + start % COLUMN_CHECKPOINT) as u64 + 1;
+        let scanned = if self.continuation.last() == Some(&0) {
+            1
+        } else {
+            (offset % COLUMN_CHECKPOINT + start % COLUMN_CHECKPOINT) as u64 + 1
+        };
         (line, characters + 1, scanned)
     }
 }
 
-/// Parameter names from a function signature match.
-pub(crate) fn parameters(signature: &str, memory: &Memory, meter: &Meter) -> Vec<String> {
-    if !meter.charge(signature.len() as u64 * 2) {
-        return Vec::new();
-    }
-    let text = signature.trim_end_matches('{').trim_end();
-    let list = if let Some(open) = text.find('(') {
-        let Some(close) = text.rfind(')') else {
-            return Vec::new();
-        };
-        &text[open + 1..close.max(open + 1)]
-    } else {
-        text.trim_end_matches("=>").trim()
-    };
-    let mut parameters = Vec::new();
-    for part in list.split(',') {
-        let name = part
-            .split('=')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .trim_start_matches("...");
-        if IDENTIFIER.is_match(name)
-            && (!memory.keep(name.len() as u64) || !memory.push(&mut parameters, name.to_owned()))
-        {
-            break;
-        }
-    }
-    parameters
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Key<'a> {
+    Symbol(SymbolId),
+    Member(SymbolId, &'a str),
+    This(NodeId, &'a str),
+    Slot(SymbolId, u64),
 }
-
-fn normalized(name: &str) -> String {
-    name.split_whitespace().collect()
+#[derive(Clone, Copy, Default)]
+struct Context {
+    function: Option<NodeId>,
+    this: Option<NodeId>,
+    loop_id: Option<NodeId>,
+    parameter: bool,
 }
-
-fn identifier_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+#[derive(Clone, Copy)]
+struct Definition<'a> {
+    value: &'a Expression<'a>,
+    at: u32,
+    function: Option<NodeId>,
 }
-
-/// A standalone mention of `name` (an identifier or member path) in `text`.
-fn mentions(text: &str, name: &str) -> bool {
-    let text = normalized(text);
-    let bytes = text.as_bytes();
-    let mut from = 0;
-    while let Some(found) = text[from..].find(name) {
-        let start = from + found;
-        let end = start + name.len();
-        let before = start.checked_sub(1).map(|index| bytes[index]);
-        let after = bytes.get(end).copied();
-        if !before.is_some_and(|byte| identifier_byte(byte) || byte == b'.')
-            && !after.is_some_and(identifier_byte)
-        {
-            return true;
-        }
-        from = start + text[start..].chars().next().map_or(1, char::len_utf8);
-    }
-    false
+#[derive(Clone, Copy)]
+struct Write {
+    span: Span,
+    function: Option<NodeId>,
+    arithmetic: bool,
 }
-
-/// Bindings, writes and arithmetic advances of every name in one region.
-/// Entries are spans into the region text, never copies, so chained writes
-/// keep a fixed number of bytes per write.
-#[derive(Default)]
-struct Index {
-    /// Plain `=` writes: (name offset, value start, value end).
-    definitions: HashMap<String, Vec<Definition>>,
-    writes: HashMap<String, Vec<u32>>,
-    /// `++`, `--`, `+=`, `-=` and `name = name ± ...`.
-    advances: HashMap<String, Vec<u32>>,
-}
-
-type Definition = (u32, u32, u32);
-
-/// Bytes one index entry keeps, for retained-memory accounting.
-const DEFINITION_BYTES: u64 = 12;
-const OFFSET_BYTES: u64 = 4;
-const PAIR_BYTES: u64 = 24;
-
-fn any_within(offsets: Option<&Vec<u32>>, (start, end): (usize, usize)) -> bool {
-    offsets.is_some_and(|offsets| {
-        let first = offsets.partition_point(|offset| (*offset as usize) < start);
-        offsets
-            .get(first)
-            .is_some_and(|offset| (*offset as usize) < end)
-    })
-}
-
-/// Syntactic facts of one dispatch site before classification.
-struct Found {
+struct Candidate<'a> {
+    node: NodeId,
+    selector: &'a Expression<'a>,
+    table: Option<Key<'a>>,
     kind: Kind,
     instruction: &'static str,
-    at: usize,
-    size: usize,
-    selector: String,
-    expression: String,
-    arm_count: Option<u64>,
-    string_cases: bool,
+    arms: Option<u64>,
+    strings: bool,
 }
-
-struct Region<'a> {
-    meter: &'a Meter,
-    /// Bytes this region's index retains, released when it is dropped.
-    retained: Cell<u64>,
-    source: &'a str,
-    text: &'a str,
-    start: usize,
-    params: &'a [String],
-    pairs: Brackets,
-    loops: Intervals,
-    index: Index,
-    steps: Cell<u64>,
-    step_limit: Cell<u64>,
-    deepest: Cell<u8>,
-    /// A bound cut the current query short: its result is an honest unknown.
-    limited: Cell<bool>,
-    /// The depth bound cut the current computation; it is never memoized.
-    depth_cut: Cell<bool>,
-    identifier_memo: RefCell<HashMap<String, Memo>>,
-    buffer_memo: RefCell<HashMap<String, &'static str>>,
-}
-
-/// An identifier trace plus its fresh cost in steps and depth below itself.
-/// A hit replays both, so results never depend on query order. When the step
-/// budget cut the computation, `cost` is a lower bound: a hit that cannot
-/// afford it is limited, as recomputing would be, and any other recomputes.
-#[derive(Clone)]
-struct Memo {
-    traces: Vec<Trace>,
-    cost: u64,
-    height: u8,
-    exhausted: bool,
-}
-
-#[derive(Clone)]
-struct Trace {
+#[derive(Clone, Copy)]
+struct Trace<'a> {
     source: Source,
-    /// Identifier or member path whose writes re-derive the selector.
-    cursor: Option<String>,
-    /// Region offset of the binding that produced the selector, if any.
-    anchor: Option<usize>,
-    buffer: Option<String>,
-    accessor: Option<String>,
-    /// The selector is a table read keyed by a cursor-loaded value.
-    through_lookup: bool,
+    repeats: bool,
+    anchor: Option<u32>,
+    buffer: Option<Key<'a>>,
+    buffer_kind: Option<&'static str>,
+    lookup: bool,
 }
-
-impl Trace {
+impl Trace<'_> {
     fn new(source: Source) -> Self {
         Self {
             source,
-            cursor: None,
+            repeats: false,
             anchor: None,
             buffer: None,
-            accessor: None,
-            through_lookup: false,
+            buffer_kind: None,
+            lookup: false,
         }
     }
 }
-
-impl Drop for Region<'_> {
-    fn drop(&mut self) {
-        self.meter.release(self.retained.get());
-    }
+struct Query {
+    left: u32,
+    limited: bool,
 }
-
-impl<'a> Region<'a> {
-    fn new(
-        source: &'a str,
-        text: &'a str,
-        start: usize,
-        params: &'a [String],
-        meter: &'a Meter,
-    ) -> Self {
-        let mut region = Self {
-            meter,
-            retained: Cell::new(0),
-            source,
-            text,
-            start,
-            params,
-            pairs: Brackets::new("", meter),
-            loops: Intervals::new(Vec::new(), meter),
-            index: Index::default(),
-            steps: Cell::new(0),
-            step_limit: Cell::new(MAX_QUERY_STEPS),
-            deepest: Cell::new(0),
-            limited: Cell::new(false),
-            depth_cut: Cell::new(false),
-            identifier_memo: RefCell::new(HashMap::new()),
-            buffer_memo: RefCell::new(HashMap::new()),
-        };
-        meter.charge(text.len() as u64);
-        region.pairs = Brackets::new(text, meter);
-        region.loops = region.loop_intervals();
-        region.keep(region.loops.ranges.len() as u64 * PAIR_BYTES);
-        region.index = region.build_index();
-        region
-    }
-
-    /// Retain index memory against the meter's byte bound.
-    fn keep(&self, bytes: u64) -> bool {
-        if !self.meter.retain(bytes) {
+impl Query {
+    fn step(&mut self, meter: &Meter, depth: u8) -> bool {
+        if self.left == 0 || depth > 16 {
+            self.limited = true;
             return false;
         }
-        self.retained.set(self.retained.get() + bytes);
-        true
+        self.left -= 1;
+        meter.charge(1)
     }
-
-    fn close(&self, open: usize) -> Option<usize> {
-        self.pairs.close(open)
+}
+struct Facts<'s, 'a> {
+    semantic: &'s Semantic<'a>,
+    meter: &'s Meter,
+    contexts: Vec<Context>,
+    opaque: Vec<bool>,
+    definitions: HashMap<Key<'a>, Vec<Definition<'a>>>,
+    constant_definitions: HashSet<(Key<'a>, Option<NodeId>, Option<NodeId>, u8)>,
+    writes: HashMap<Key<'a>, Vec<Write>>,
+    parameters: HashSet<SymbolId>,
+    changed_symbols: HashSet<SymbolId>,
+    loop_tables: HashMap<NodeId, HashSet<Key<'a>>>,
+    invoked_loops: HashMap<NodeId, NodeId>,
+    table_functions: HashMap<NodeId, Key<'a>>,
+    property_writes: HashMap<&'a str, usize>,
+    unknown_property_write: bool,
+    objects: HashMap<NodeId, (Key<'a>, u32, ScopeId)>,
+    candidates: Vec<Candidate<'a>>,
+}
+impl<'s, 'a> Facts<'s, 'a> {
+    fn symbol(&self, id: &IdentifierReference<'a>) -> Option<SymbolId> {
+        self.semantic
+            .scoping()
+            .get_reference(id.reference_id.get()?)
+            .symbol_id()
     }
-
-    fn skip_space(&self, mut at: usize) -> usize {
-        let bytes = self.text.as_bytes();
-        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
-            at += 1;
-        }
-        at
-    }
-
-    fn keyword_at(&self, at: usize, keyword: &str) -> bool {
-        self.text.as_bytes()[at..].starts_with(keyword.as_bytes())
-            && !self
-                .text
-                .as_bytes()
-                .get(at + keyword.len())
-                .is_some_and(|byte| identifier_byte(*byte))
-    }
-
-    /// Inclusive end offset of the statement starting at `at`, covering
-    /// blocks, braceless bodies and statement-form `do ... while (...)`.
-    fn statement_end(&self, at: usize, depth: u8) -> Option<usize> {
-        let at = self.skip_space(at);
-        let bytes = self.text.as_bytes();
-        if at >= bytes.len() || depth > 16 {
-            return None;
-        }
-        if bytes[at] == b'{' {
-            return self.close(at);
-        }
-        for keyword in ["switch", "if", "for", "while", "with"] {
-            if !self.keyword_at(at, keyword) {
-                continue;
+    fn key(&self, expression: &'a Expression<'a>, context: Context) -> Option<Key<'a>> {
+        match expression.get_inner_expression() {
+            Expression::Identifier(id) => self.symbol(id).map(Key::Symbol),
+            Expression::StaticMemberExpression(member) => {
+                self.member(&member.object, member.property.name.as_str(), context)
             }
-            let open = self.skip_space(at + keyword.len());
-            if bytes.get(open) != Some(&b'(') {
-                break;
-            }
-            let close = self.close(open)?;
-            if keyword == "switch" {
-                let body = self.skip_space(close + 1);
-                return if bytes.get(body) == Some(&b'{') {
-                    self.close(body)
-                } else {
-                    Some(close)
-                };
-            }
-            return self.statement_end(close + 1, depth + 1);
-        }
-        if self.keyword_at(at, "do") {
-            let body = self.statement_end(at + 2, depth + 1)?;
-            let next = self.skip_space(body + 1);
-            if self.keyword_at(next, "while") {
-                let open = self.skip_space(next + 5);
-                if bytes.get(open) == Some(&b'(') {
-                    return self.close(open);
-                }
-            }
-            return Some(body);
-        }
-        // An expression statement ends at `;`, a line break (automatic
-        // semicolon insertion), an enclosing closer, or the scan bound.
-        let limit = (at + MAX_STATEMENT_SCAN).min(bytes.len());
-        let mut index = at;
-        while index < limit {
-            match bytes[index] {
-                b'(' | b'[' | b'{' => index = self.close(index)?,
-                b';' | b'\n' => break,
-                b')' | b']' | b'}' => {
-                    self.meter.charge((index - at) as u64 + 1);
-                    return Some(index.saturating_sub(1));
-                }
-                _ => (),
-            }
-            index += 1;
-        }
-        self.meter.charge((index.min(limit) - at) as u64 + 1);
-        Some(index.min(bytes.len() - 1))
-    }
-
-    fn loop_intervals(&self) -> Intervals {
-        let bytes = self.text.as_bytes();
-        self.meter.charge(self.text.len() as u64);
-        let ranges = LOOP_HEADER
-            .find_iter(self.text)
-            .take_while(|_| !self.meter.exhausted())
-            .filter_map(|header| {
-                if header.start() > 0 && bytes[header.start() - 1] == b'.' {
+            Expression::ComputedMemberExpression(member) => {
+                let Expression::Identifier(id) = member.object.get_inner_expression() else {
                     return None;
-                }
-                let end = if header.as_str() == "do" {
-                    self.statement_end(header.start(), 0)
-                } else {
-                    self.close(header.end() - 1)
-                        .and_then(|close| self.statement_end(close + 1, 0))
                 };
-                end.map(|end| (header.start(), end + 1))
-            });
-        Intervals::new(ranges, self.meter)
-    }
-
-    /// The value of an assignment: up to a top-level `;`, `,`, closing
-    /// bracket or line end, so comma declarations split per binding.
-    fn value_end(&self, from: usize) -> usize {
-        let bytes = self.text.as_bytes();
-        let limit = (from + MAX_VALUE_BYTES).min(bytes.len());
-        let mut index = from;
-        while index < limit {
-            match bytes[index] {
-                b'(' | b'[' | b'{' => match self.close(index) {
-                    Some(close) if close < limit => index = close,
-                    _ => break,
-                },
-                b';' | b',' | b')' | b']' | b'}' => break,
-                b'\n' if !self.text[from..index].trim().is_empty() => break,
-                _ => (),
-            }
-            index += 1;
-        }
-        let end = self.text.floor_char_boundary(index.min(limit));
-        self.meter.charge((end - from) as u64 + 1);
-        end
-    }
-
-    fn build_index(&self) -> Index {
-        let bytes = self.text.as_bytes();
-        let mut index = Index::default();
-        self.meter.charge(2 * self.text.len() as u64);
-        for captures in WRITE.captures_iter(self.text) {
-            if self.meter.exhausted() {
-                break;
-            }
-            let whole = captures.get(0).expect("write");
-            let name_match = captures.get(1).expect("written name");
-            if name_match
-                .start()
-                .checked_sub(1)
-                .is_some_and(|before| bytes[before] == b'.' || identifier_byte(bytes[before]))
-            {
-                continue;
-            }
-            let name = normalized(name_match.as_str());
-            if ["var", "let", "const", "return", "typeof", "case"].contains(&name.as_str()) {
-                continue;
-            }
-            if !index.writes.contains_key(&name) && !self.keep(384 + name.len() as u64 * 4) {
-                break;
-            }
-            let operator = &captures[2];
-            let at = name_match.start() as u32;
-            let mut kept = OFFSET_BYTES;
-            if operator == "=" {
-                if matches!(bytes.get(whole.end()), Some(b'=' | b'>')) {
-                    continue;
-                }
-                let value_start = self.skip_space(whole.end());
-                let value_end = self.value_end(value_start).max(value_start);
-                let value = self.text[value_start..value_end].trim();
-                if value.starts_with(&name)
-                    && value[name.len()..].trim_start().starts_with(['+', '-'])
-                {
-                    index.advances.entry(name.clone()).or_default().push(at);
-                    kept += OFFSET_BYTES;
-                }
-                index.definitions.entry(name.clone()).or_default().push((
-                    at,
-                    value_start as u32,
-                    value_end as u32,
-                ));
-                kept += DEFINITION_BYTES;
-            } else if ["++", "--", "+=", "-="].contains(&operator) {
-                index.advances.entry(name.clone()).or_default().push(at);
-                kept += OFFSET_BYTES;
-            }
-            index.writes.entry(name).or_default().push(at);
-            if !self.keep(kept * 2) {
-                break;
-            }
-        }
-        for captures in PREFIX.captures_iter(self.text) {
-            let operator = captures.get(1).expect("prefix operator");
-            if operator.start().checked_sub(1).is_some_and(|before| {
-                identifier_byte(bytes[before]) || matches!(bytes[before], b')' | b']')
-            }) {
-                continue;
-            }
-            let name = normalized(&captures[2]);
-            if !index.writes.contains_key(&name) && !self.keep(256 + name.len() as u64 * 3) {
-                break;
-            }
-            let at = operator.start() as u32;
-            index.advances.entry(name.clone()).or_default().push(at);
-            index.writes.entry(name).or_default().push(at);
-            if !self.keep(4 * OFFSET_BYTES) {
-                break;
-            }
-        }
-        for offsets in index.writes.values_mut().chain(index.advances.values_mut()) {
-            self.meter.charge(offsets.len() as u64);
-            offsets.sort_unstable();
-        }
-        index
-    }
-
-    fn definitions(&self, name: &str) -> &[Definition] {
-        self.index.definitions.get(name).map_or(&[], Vec::as_slice)
-    }
-
-    /// The text of one binding's value.
-    fn value(&self, definition: &Definition) -> &'a str {
-        self.text[definition.1 as usize..definition.2 as usize].trim()
-    }
-
-    fn innermost_loop(&self, at: usize) -> Option<(usize, usize)> {
-        self.meter.charge(32);
-        self.loops.innermost(at)
-    }
-
-    fn written_within(&self, name: &str, range: (usize, usize)) -> bool {
-        any_within(self.index.writes.get(name), range)
-    }
-
-    /// An arithmetic advance (`pc++`, `pc += n`, `pc = pc + n`), not a
-    /// rewrite such as `m.state = 3` or `id = queue.pop()`.
-    fn advanced_within(&self, name: &str, range: (usize, usize)) -> bool {
-        any_within(self.index.advances.get(name), range)
-    }
-
-    fn advanced(&self, name: &str) -> bool {
-        self.index
-            .advances
-            .get(name)
-            .is_some_and(|offsets| !offsets.is_empty())
-    }
-
-    /// One logical step of the query budget, and one unit of real work.
-    fn step(&self) -> bool {
-        let used = self.steps.get();
-        if used >= self.step_limit.get() || !self.meter.charge(1) {
-            self.limited.set(true);
-            return false;
-        }
-        self.steps.set(used + 1);
-        true
-    }
-
-    fn reach(&self, depth: u8) {
-        if depth > self.deepest.get() {
-            self.deepest.set(depth);
-        }
-    }
-
-    fn strip<'b>(&self, mut expression: &'b str) -> &'b str {
-        for _ in 0..8 {
-            let trimmed = expression.trim();
-            let inner =
-                if trimmed.starts_with('(') && trimmed.ends_with(')') && balanced_outer(trimmed) {
-                    &trimmed[1..trimmed.len() - 1]
-                } else if let Some(rest) = trimmed.strip_prefix('+').or(trimmed.strip_prefix('~')) {
-                    rest
-                } else if let Some(captures) = WRAPPER.captures(trimmed) {
-                    captures.get(1).expect("wrapped value").as_str()
-                } else {
-                    return trimmed;
+                let Expression::NumericLiteral(number) = member.expression.get_inner_expression()
+                else {
+                    return None;
                 };
-            expression = inner;
+                self.symbol(id)
+                    .map(|symbol| Key::Slot(symbol, number.value.to_bits()))
+            }
+            _ => None,
         }
-        expression.trim()
     }
-
-    /// Every source that can reach an expression, one per producing binding.
-    fn classify(&self, expression: &str, depth: u8) -> Vec<Trace> {
-        self.reach(depth);
-        if depth > MAX_TRACE_DEPTH {
-            self.limited.set(true);
-            self.depth_cut.set(true);
-            return vec![Trace::new(Source::Unknown)];
+    fn member(
+        &self,
+        receiver: &'a Expression<'a>,
+        name: &'a str,
+        context: Context,
+    ) -> Option<Key<'a>> {
+        match receiver.get_inner_expression() {
+            Expression::Identifier(id) => self.symbol(id).map(|symbol| Key::Member(symbol, name)),
+            Expression::ThisExpression(_) => context.this.map(|owner| Key::This(owner, name)),
+            _ => None,
         }
-        if !self.step() {
-            return vec![Trace::new(Source::Unknown)];
-        }
-        let expression = self.strip(expression);
-        if INTEGER.is_match(expression) {
-            return vec![Trace::new(Source::Constant)];
-        }
-        let read = INDEXED_READ
-            .captures(expression)
-            .map(|captures| (captures[1].to_owned(), captures[2].to_owned(), None))
-            .or_else(|| {
-                ACCESSOR_READ.captures(expression).map(|captures| {
-                    (
-                        captures[1].to_owned(),
-                        captures[3].to_owned(),
-                        Some(captures[2].to_owned()),
-                    )
-                })
-            });
-        if let Some((buffer, index, accessor)) = read {
-            let index = self.strip(&index);
-            let Some(cursor) = CURSOR_INDEX.captures(index) else {
-                return vec![Trace::new(Source::Unknown)];
-            };
-            let cursor = normalized(&cursor[1]);
-            let mut trace = Trace::new(Source::CursorIndex);
-            trace.buffer = Some(buffer);
-            trace.accessor = accessor;
-            if cursor.contains('.') {
-                // The position lives on a frame or state object.
-                trace.source = Source::FrameSlot;
-                trace.cursor = Some(cursor);
-                return vec![trace];
-            }
-            if let [definition] = self.definitions(&cursor)
-                && MEMBER.is_match(self.strip(self.value(definition)))
-            {
-                // A local copy of a saved frame position.
-                trace.source = Source::FrameSlot;
-                trace.anchor = Some(definition.0 as usize);
-                trace.cursor = Some(normalized(self.strip(self.value(definition))));
-                return vec![trace];
-            }
-            if self.advanced(&cursor) {
-                trace.cursor = Some(cursor);
-                return vec![trace];
-            }
-            // An index nothing advances is a lookup by value, not a cursor:
-            // the selector comes from wherever the index comes from. An index
-            // loaded at a cursor makes a second-level lookup.
-            let mut traces = self.identifier(&cursor, depth);
-            for trace in &mut traces {
-                trace.through_lookup |= trace.source.cursor_like();
-            }
-            return traces;
-        }
-        if MEMBER.is_match(expression) {
-            let mut trace = Trace::new(Source::FrameSlot);
-            trace.cursor = Some(normalized(expression));
-            return vec![trace];
-        }
-        if IDENTIFIER.is_match(expression) {
-            return self.identifier(expression, depth);
-        }
-        vec![Trace::new(Source::Unknown)]
     }
-
-    fn identifier(&self, name: &str, depth: u8) -> Vec<Trace> {
-        let memo = self.identifier_memo.borrow().get(name).cloned();
-        if let Some(memo) = memo {
-            // Replay what computing it fresh would cost here.
-            self.reach(depth.saturating_add(memo.height));
-            if depth.saturating_add(memo.height) > MAX_TRACE_DEPTH {
-                self.limited.set(true);
-                self.depth_cut.set(true);
-                return vec![Trace::new(Source::Unknown)];
+    fn target(&self, target: &'a AssignmentTarget<'a>, context: Context) -> Option<Key<'a>> {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(id) => self.symbol(id).map(Key::Symbol),
+            AssignmentTarget::StaticMemberExpression(m) => {
+                self.member(&m.object, m.property.name.as_str(), context)
             }
-            let used = self.steps.get();
-            if used.saturating_add(memo.cost) >= self.step_limit.get()
-                && (memo.exhausted || used.saturating_add(memo.cost) > self.step_limit.get())
-            {
-                self.steps.set(self.step_limit.get());
-                self.limited.set(true);
-                return vec![Trace::new(Source::Unknown)];
-            }
-            if !memo.exhausted {
-                // The meter sees only the lookup this hit performs.
-                self.meter.charge(1 + memo.traces.len() as u64);
-                self.steps.set(used + memo.cost);
-                return memo.traces;
-            }
+            _ => None,
         }
-        let outer_deepest = self.deepest.replace(depth);
-        let outer_limited = self.limited.replace(false);
-        let outer_depth_cut = self.depth_cut.replace(false);
-        let before = self.steps.get();
-        let traces = self.identifier_uncached(name, depth);
-        let limited = self.limited.get();
-        let depth_cut = self.depth_cut.get();
-        if !depth_cut
-            && self.keep(
-                128 + name.len() as u64
-                    + traces
-                        .iter()
-                        .map(|trace| {
-                            160 + trace.cursor.as_ref().map_or(0, String::len) as u64
-                                + trace.buffer.as_ref().map_or(0, String::len) as u64
-                                + trace.accessor.as_ref().map_or(0, String::len) as u64
-                        })
-                        .sum::<u64>(),
-            )
-        {
-            self.identifier_memo.borrow_mut().insert(
-                name.to_owned(),
-                Memo {
-                    traces: traces.clone(),
-                    cost: self.steps.get() - before,
-                    height: self.deepest.get() - depth,
-                    exhausted: limited,
-                },
-            );
-        }
-        self.deepest.set(outer_deepest.max(self.deepest.get()));
-        self.limited.set(outer_limited || limited);
-        self.depth_cut.set(outer_depth_cut || depth_cut);
-        traces
     }
-
-    fn identifier_uncached(&self, name: &str, depth: u8) -> Vec<Trace> {
-        let parameter = self.params.iter().any(|param| param == name);
-        let definitions = self.definitions(name);
-        let mut traces = Vec::new();
-        // The incoming argument reaches every use the function does not
-        // overwrite first; without flow order it is always an alternative.
-        if parameter {
-            traces.push(Trace::new(Source::CallArgument));
-        } else if definitions.is_empty() {
-            return vec![Trace::new(Source::Unknown)];
-        }
-        for definition in definitions {
-            if !self.step() {
-                break;
+    fn simple_target(
+        &self,
+        target: &'a SimpleAssignmentTarget<'a>,
+        context: Context,
+    ) -> Option<Key<'a>> {
+        match target {
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                self.symbol(id).map(Key::Symbol)
             }
-            let at = &(definition.0 as usize);
-            let value = self.value(definition);
-            self.meter.charge(value.len() as u64);
-            // An advance (`k + 1`), a normalization (`k | 0`) or another
-            // self-derived write adds no new value source.
-            if mentions(value, name) {
-                continue;
+            SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                self.member(&m.object, m.property.name.as_str(), context)
             }
-            let sources = if value.is_empty() {
-                vec![Trace::new(Source::Unknown)]
-            } else {
-                self.classify(value, depth + 1)
-            };
-            for mut trace in sources {
-                if trace.anchor.is_none() {
-                    trace.anchor = Some(*at);
-                }
-                if trace.source == Source::Constant {
-                    trace.cursor = Some(name.to_owned());
-                    trace.anchor = Some(*at);
-                }
-                // Constant writes differ only by where they land: one per
-                // enclosing loop explains every repeat decision.
-                let loop_of = |anchor: Option<usize>| anchor.and_then(|at| self.innermost_loop(at));
-                let duplicate = traces.iter().any(|known: &Trace| {
-                    known.source == trace.source
-                        && known.through_lookup == trace.through_lookup
-                        && if trace.source == Source::Constant {
-                            loop_of(known.anchor) == loop_of(trace.anchor)
-                        } else {
-                            known.anchor == trace.anchor
-                        }
-                });
-                if duplicate {
-                    continue;
-                }
-                if traces.len() >= MAX_ALTERNATIVES {
-                    self.limited.set(true);
-                    break;
-                }
-                traces.push(trace);
-            }
+            _ => None,
         }
-        // Constant writes inside a loop make the argument only the seed of a
-        // state machine. Outside loops they are guards or defaults.
-        if parameter
-            && traces.iter().any(|trace| {
-                trace.source == Source::Constant
-                    && trace
-                        .anchor
-                        .is_some_and(|at| self.innermost_loop(at).is_some())
-            })
-        {
-            traces.retain(|trace| trace.source != Source::CallArgument);
-        }
-        if traces.is_empty() {
-            traces.push(Trace::new(Source::Unknown));
-        }
-        traces
     }
-
-    fn repeats(&self, trace: &Trace, at: usize) -> (Repeats, Option<(usize, usize)>) {
-        self.meter.charge(32);
-        let Some(index) = self.loops.at(at) else {
-            return (Repeats::Once, None);
+    fn scope_opaque(&self, scope: ScopeId) -> bool {
+        self.opaque[scope.index()]
+    }
+    fn context(&self, node: NodeId) -> Context {
+        self.contexts[node.index()]
+    }
+    fn object_owner(&self, object: NodeId) -> Option<(Key<'a>, u32, ScopeId)> {
+        let nodes = self.semantic.nodes();
+        let parent = nodes.parent_node(object);
+        let context = self.context(parent.id());
+        let key = match parent.kind() {
+            AstKind::VariableDeclarator(d) => {
+                let BindingPattern::BindingIdentifier(id) = &d.id else {
+                    return None;
+                };
+                Key::Symbol(id.symbol_id.get()?)
+            }
+            AstKind::AssignmentExpression(a) => self.target(&a.left, context)?,
+            _ => return None,
         };
-        let innermost = self.loops.ranges[index];
-        let Some(cursor) = trace.cursor.as_ref().filter(|_| {
-            matches!(
-                trace.source,
-                Source::CursorIndex
-                    | Source::CursorPointer
-                    | Source::FrameSlot
-                    | Source::Constant
-                    | Source::HandlerAddress
-            )
-        }) else {
-            return (Repeats::Unknown, Some(innermost));
-        };
-        let matching = self.loops.matching(index, |range| {
-            self.meter.charge(32);
-            if trace
-                .anchor
-                .is_some_and(|anchor| !(range.0 <= anchor && anchor < range.1))
-            {
-                return false;
-            }
-            match trace.source {
-                Source::CursorIndex | Source::CursorPointer | Source::FrameSlot => {
-                    self.advanced_within(cursor, range)
-                }
-                _ => self.written_within(cursor, range),
-            }
-        });
-        matching.map_or((Repeats::Unknown, Some(innermost)), |range| {
-            (Repeats::Loop, Some(range))
+        Some((key, parent.span().start, parent.scope_id()))
+    }
+    fn loop_id(&self, node: NodeId) -> Option<NodeId> {
+        let context = self.context(node);
+        context.loop_id.or_else(|| {
+            context
+                .function
+                .and_then(|function| self.invoked_loops.get(&function).copied())
         })
     }
-
-    /// The reaching source that best explains a site, as for Wasm: one
-    /// re-derived in a loop with a cursor-like selector, then any loop, then
-    /// by source.
-    fn choose(&self, traces: Vec<Trace>, at: usize) -> (Trace, Repeats, Option<(usize, usize)>) {
-        let evaluated = traces
-            .into_iter()
-            .map(|trace| {
-                let (repeats, range) = self.repeats(&trace, at);
-                (trace, repeats, range)
+    fn loop_span(&self, node: NodeId) -> Option<Span> {
+        self.loop_id(node)
+            .map(|id| self.semantic.nodes().get_node(id).span())
+    }
+    fn executes_in_loop(
+        &self,
+        function: Option<NodeId>,
+        span: Span,
+        candidate: &Candidate<'a>,
+    ) -> bool {
+        self.loop_span(candidate.node)
+            .is_some_and(|range| range.start <= span.start && span.end <= range.end)
+            || function.is_some_and(|function| {
+                self.invoked_loops.get(&function).copied() == self.loop_id(candidate.node)
             })
-            .collect::<Vec<_>>();
-        let position = evaluated
-            .iter()
-            .position(|(trace, repeats, _)| *repeats == Repeats::Loop && trace.source.cursor_like())
-            .or_else(|| {
-                evaluated
-                    .iter()
-                    .position(|(_, repeats, _)| *repeats == Repeats::Loop)
-            })
-            .unwrap_or_else(|| {
-                let best = evaluated
-                    .iter()
-                    .map(|(trace, _, _)| priority(trace.source))
-                    .max()
-                    .unwrap_or(0);
-                evaluated
-                    .iter()
-                    .position(|(trace, _, _)| priority(trace.source) == best)
-                    .unwrap_or(0)
-            });
-        evaluated.into_iter().nth(position).unwrap_or((
-            Trace::new(Source::Unknown),
-            Repeats::Unknown,
-            None,
-        ))
     }
-
-    fn buffer_kind(&self, trace: &Trace, string_cases: bool) -> Option<&'static str> {
-        if !trace.source.cursor_like() {
-            return None;
-        }
-        if trace.buffer.as_deref() == Some("arguments") {
-            return Some("arguments");
-        }
-        if let Some(accessor) = &trace.accessor {
-            return Some(match accessor.as_str() {
-                "charCodeAt" | "charAt" | "codePointAt" => "string",
-                "at" => "unknown",
-                _ => "typed-array",
-            });
-        }
-        if string_cases {
-            return Some("string");
-        }
-        let Some(buffer) = &trace.buffer else {
-            return Some("unknown");
+    fn add_definition(
+        &mut self,
+        key: Key<'a>,
+        value: &'a Expression<'a>,
+        at: u32,
+        context: Context,
+    ) {
+        let literal = match value.get_inner_expression() {
+            Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_) => Some(0),
+            Expression::StringLiteral(_) => Some(1),
+            _ => None,
         };
-        // Once per buffer name, over a bounded prefix of its bindings.
-        if let Some(kind) = self.buffer_memo.borrow().get(buffer) {
-            self.meter.charge(1);
-            return Some(kind);
+        if let Some(kind) = literal
+            && !self
+                .constant_definitions
+                .insert((key, context.function, context.loop_id, kind))
+        {
+            return;
         }
-        let kind = self.binding_kind(buffer);
-        if self.keep(96 + buffer.len() as u64) {
-            self.buffer_memo.borrow_mut().insert(buffer.clone(), kind);
-        }
-        Some(kind)
-    }
-
-    fn binding_kind(&self, buffer: &str) -> &'static str {
-        let definitions = self.definitions(buffer);
-        if definitions.len() > MAX_BUFFER_DEFINITIONS {
-            self.meter.charge(1);
-            return "unknown";
-        }
-        for definition in definitions {
-            let (value_start, value) = (definition.1 as usize, self.value(definition));
-            self.meter.charge(1 + value.len() as u64);
-            if TYPED_ARRAY.is_match(value) {
-                return "typed-array";
-            }
-            if value.starts_with('[') {
-                return "array";
-            }
-            // String literals are masked; the original byte shows the quote.
-            if matches!(
-                self.source.as_bytes().get(self.start + value_start),
-                Some(b'"' | b'\'' | b'`')
-            ) || value.starts_with("String(")
-            {
-                return "string";
-            }
-        }
-        "unknown"
-    }
-
-    /// Classify one site under a fresh per-query step budget. A query a
-    /// bound cut short is an honest unknown, reported through the flag;
-    /// None when the artifact meter ran out, so the site is unclassified.
-    fn site(&self, lines: &Lines, found: Found, strength: u8) -> Option<(Site, bool)> {
-        let temporary = Memory::new(self.meter);
-        if !temporary.keep(128 << 10) {
-            return None;
-        }
-        self.steps.set(0);
-        self.step_limit.set(MAX_QUERY_STEPS);
-        self.deepest.set(0);
-        self.limited.set(false);
-        self.depth_cut.set(false);
-        let traces = match found.kind {
-            Kind::Threaded => {
-                let mut trace = Trace::new(Source::HandlerAddress);
-                trace.cursor = Some(found.selector.clone());
-                trace.anchor = Some(found.at);
-                vec![trace]
-            }
-            _ => self.classify(&found.selector, 0),
-        };
-        let limited = self.limited.get();
-        let (trace, repeats, loop_range) = if limited {
-            let trace = Trace::new(Source::Unknown);
-            let (repeats, range) = self.repeats(&trace, found.at);
-            (trace, repeats, range)
-        } else {
-            self.choose(traces, found.at)
-        };
-        let absolute = self.start + found.at;
-        let (line, column, scanned) = lines.locate(self.source, absolute);
-        self.meter.charge(scanned);
-        let buffer_kind = self.buffer_kind(&trace, found.string_cases);
-        if self.meter.exhausted() {
-            return None;
-        }
-        let site = Site {
-            strength,
-            kind: found.kind,
-            source: trace.source,
-            repeats,
-            instruction: found.instruction,
-            function_index: None,
-            function_body_offset: Some(self.start),
-            byte_offset: absolute,
-            byte_size: found.size,
-            line: Some(line),
-            column: Some(column),
-            selector_expression: found.expression,
-            selector_offset: trace.anchor.map(|anchor| self.start + anchor),
-            through_lookup: trace.through_lookup,
-            arm_count: found.arm_count,
-            loop_range: loop_range.map(|(start, end)| (self.start + start, self.start + end)),
-            buffer_kind,
-            table: None,
-        };
-        Some((site, limited))
-    }
-
-    /// Cheap dispatch strength for ordering: inside a loop, and a selector
-    /// that reads a buffer at an index, directly or through one binding.
-    fn strength(&self, found: &Found) -> u8 {
-        let looped = self.innermost_loop(found.at).is_some();
-        let selector = self.strip(&found.selector);
-        let reads = |text: &str| INDEXED_READ.is_match(text) || ACCESSOR_READ.is_match(text);
-        self.meter.charge(selector.len() as u64 + 1);
-        let fetched = reads(selector)
-            || (IDENTIFIER.is_match(selector)
-                && self.definitions(selector).iter().take(4).any(|definition| {
-                    let value = self.value(definition);
-                    self.meter.charge(value.len() as u64 + 1);
-                    reads(self.strip(value))
-                }));
-        let bounded = self.innermost_loop(found.at).is_some_and(|range| {
-            self.bounded_cursor(selector, range)
-                || (IDENTIFIER.is_match(selector)
-                    && self.definitions(selector).iter().take(4).any(|definition| {
-                        self.bounded_cursor(self.strip(self.value(definition)), range)
-                    }))
+        self.definitions.entry(key).or_default().push(Definition {
+            value,
+            at,
+            function: context.function,
         });
-        u8::from(bounded) * 4 + u8::from(looped) * 2 + u8::from(fetched)
     }
-
-    /// A stronger structural signal than nesting: the loop bounds the same
-    /// cursor against the length of the buffer read by the dispatch. This
-    /// only schedules classification; it changes no role, tier or score.
-    fn bounded_cursor(&self, selector: &str, range: (usize, usize)) -> bool {
-        self.meter.charge(selector.len() as u64 + 512);
-        let Some(read) = INDEXED_READ.captures(selector) else {
-            return false;
+    fn index(semantic: &'s Semantic<'a>, meter: &'s Meter) -> Self {
+        let nodes = semantic.nodes();
+        let scoping = semantic.scoping();
+        let mut facts = Self {
+            semantic,
+            meter,
+            contexts: vec![Context::default(); nodes.len()],
+            opaque: vec![false; scoping.scopes_len()],
+            definitions: HashMap::new(),
+            constant_definitions: HashSet::new(),
+            writes: HashMap::new(),
+            parameters: HashSet::new(),
+            changed_symbols: HashSet::new(),
+            loop_tables: HashMap::new(),
+            invoked_loops: HashMap::new(),
+            table_functions: HashMap::new(),
+            property_writes: HashMap::new(),
+            unknown_property_write: false,
+            objects: HashMap::new(),
+            candidates: Vec::new(),
         };
-        let Some(cursor) = CURSOR_INDEX.captures(read[2].trim()) else {
-            return false;
-        };
-        let end = self
-            .text
-            .floor_char_boundary((range.0 + 512).min(self.text.len()));
-        let header = &self.text[range.0..end];
-        let Some(open) = header.find('(').map(|open| range.0 + open) else {
-            return false;
-        };
-        let Some(close) = self.close(open).filter(|close| *close < end) else {
-            return false;
-        };
-        let condition = &self.text[open + 1..close];
-        let condition = if header.starts_with("for") {
-            condition.split(';').nth(1).unwrap_or("")
-        } else {
-            condition
-        };
-        let condition = normalized(condition);
-        let (cursor, buffer) = (normalized(&cursor[1]), &read[1]);
-        condition == format!("{cursor}<{buffer}.length")
-            || condition == format!("{buffer}.length>{cursor}")
-    }
-
-    fn keep_candidate(&self, text_bytes: usize) -> bool {
-        let kept = self.meter.charge(text_bytes as u64 + 1)
-            && self.keep((std::mem::size_of::<Found>() * 4 + text_bytes * 3) as u64);
-        if !kept {
-            self.meter.count_unclassified(1);
+        // Scope IDs and node IDs are preorder. Inherited facts take one lookup,
+        // including at thousands of nested functions, never an ancestor walk.
+        for scope in scoping.scope_descendants_from_root() {
+            let flags = scoping.scope_flags(scope);
+            facts.opaque[scope.index()] = flags.contains_direct_eval()
+                || flags.is_with()
+                || scoping
+                    .scope_parent_id(scope)
+                    .is_some_and(|parent| facts.opaque[parent.index()]);
         }
-        kept
-    }
-
-    fn switches(&self) -> Vec<Found> {
-        let bytes = self.text.as_bytes();
-        let mut found = Vec::new();
-        self.meter.charge(self.text.len() as u64);
-        for switch in SWITCH.find_iter(self.text) {
-            if self.meter.exhausted() {
+        for node in nodes.iter() {
+            let id = node.id();
+            let mut context = if id.index() == 0 {
+                Context::default()
+            } else {
+                facts.context(nodes.parent_id(id))
+            };
+            match node.kind() {
+                AstKind::Function(_) => {
+                    context.function = Some(id);
+                    context.this = Some(id);
+                    context.loop_id = None;
+                    context.parameter = false;
+                }
+                AstKind::ArrowFunctionExpression(_) => {
+                    context.function = Some(id);
+                    context.loop_id = None;
+                    context.parameter = false;
+                }
+                AstKind::Class(_) => {
+                    context.this = None;
+                    context.loop_id = None;
+                }
+                AstKind::FormalParameters(_) => context.parameter = true,
+                AstKind::WhileStatement(_)
+                | AstKind::ForStatement(_)
+                | AstKind::DoWhileStatement(_)
+                | AstKind::ForInStatement(_)
+                | AstKind::ForOfStatement(_) => context.loop_id = Some(id),
+                _ => (),
+            }
+            facts.contexts[id.index()] = context;
+            if !meter.charge(8) {
                 break;
             }
-            let open = switch.end() - 1;
-            let Some(close) = self.close(open) else {
-                continue;
-            };
-            let selector = &self.text[open + 1..close];
-            let body_open = self.skip_space(close + 1);
-            if bytes.get(body_open) != Some(&b'{') {
-                continue;
-            }
-            let body_close = self.close(body_open).unwrap_or(bytes.len());
-            let mut arms = 0u64;
-            let mut string_cases = false;
-            let mut index = body_open + 1;
-            // Only labels of this switch: nested blocks are skipped whole.
-            while index < body_close {
-                if !self.meter.charge(1) {
-                    break;
-                }
-                match bytes[index] {
-                    b'(' | b'[' | b'{' => {
-                        index = self.close(index).unwrap_or(body_close);
+            match node.kind() {
+                AstKind::IdentifierReference(reference) => {
+                    // Mutator functions can be extracted by destructuring or
+                    // passed through aliases. Member proof does not try to
+                    // model arbitrary Object/Reflect API data flow.
+                    if matches!(reference.name.as_str(), "Object" | "Reflect") {
+                        facts.unknown_property_write = true;
                     }
-                    b'c' if self.keyword_at(index, "case")
-                        && !index
-                            .checked_sub(1)
-                            .is_some_and(|before| identifier_byte(bytes[before])) =>
-                    {
-                        arms += 1;
-                        let after = self.start + index + 4;
-                        if self.source.as_bytes()[after..]
-                            .iter()
-                            .find(|byte| !byte.is_ascii_whitespace())
-                            .is_some_and(|byte| matches!(byte, b'"' | b'\'' | b'`'))
+                    if let Some(reference_id) = reference.reference_id.get() {
+                        let reference = scoping.get_reference(reference_id);
+                        if reference.is_write()
+                            && let Some(symbol) = reference.symbol_id()
                         {
-                            string_cases = true;
+                            facts.changed_symbols.insert(symbol);
                         }
-                        index += 3;
                     }
-                    _ => (),
                 }
-                index += 1;
+                AstKind::BindingIdentifier(binding) if context.parameter => {
+                    if let Some(symbol) = binding.symbol_id.get() {
+                        facts.parameters.insert(symbol);
+                    }
+                }
+                AstKind::VariableDeclarator(d) => {
+                    if let (BindingPattern::BindingIdentifier(binding), Some(value)) =
+                        (&d.id, &d.init)
+                        && let Some(symbol) = binding.symbol_id.get()
+                    {
+                        facts.add_definition(Key::Symbol(symbol), value, d.span.start, context);
+                    }
+                }
+                AstKind::AssignmentExpression(a) => {
+                    if let Some(key) = facts.target(&a.left, context) {
+                        let arithmetic = a.operator.as_str() != "="
+                            || matches!(a.right.get_inner_expression(), Expression::BinaryExpression(binary) if matches!(binary.operator.as_str(), "+" | "-") && facts.key(&binary.left, context) == Some(key));
+                        facts.writes.entry(key).or_default().push(Write {
+                            span: a.span,
+                            function: context.function,
+                            arithmetic,
+                        });
+                        if a.operator.as_str() == "=" {
+                            facts.add_definition(key, &a.right, a.span.start, context);
+                        }
+                    }
+                    match &a.left {
+                        AssignmentTarget::StaticMemberExpression(m) => {
+                            *facts
+                                .property_writes
+                                .entry(m.property.name.as_str())
+                                .or_default() += 1;
+                        }
+                        AssignmentTarget::AssignmentTargetIdentifier(_) => (),
+                        // Destructuring may write a member several levels deep.
+                        // No claim is made about arbitrary computed key values.
+                        _ => facts.unknown_property_write = true,
+                    }
+                }
+                AstKind::UpdateExpression(update) => {
+                    if let Some(key) = facts.simple_target(&update.argument, context) {
+                        facts.writes.entry(key).or_default().push(Write {
+                            span: update.span,
+                            function: context.function,
+                            arithmetic: true,
+                        });
+                    }
+                    match &update.argument {
+                        SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                            *facts
+                                .property_writes
+                                .entry(m.property.name.as_str())
+                                .or_default() += 1;
+                        }
+                        SimpleAssignmentTarget::AssignmentTargetIdentifier(_) => (),
+                        _ => facts.unknown_property_write = true,
+                    }
+                }
+                AstKind::UnaryExpression(unary) if unary.operator.as_str() == "delete" => {
+                    facts.unknown_property_write = true
+                }
+                AstKind::StaticMemberExpression(member)
+                    if matches!(
+                        member.property.name.as_str(),
+                        "assign" | "defineProperty" | "defineProperties" | "set"
+                    ) =>
+                {
+                    facts.unknown_property_write = true
+                }
+                AstKind::ComputedMemberExpression(member) if matches!(member.object.get_inner_expression(), Expression::Identifier(id) if matches!(id.name.as_str(), "Object" | "Reflect")) => {
+                    facts.unknown_property_write = true
+                }
+                AstKind::ObjectProperty(property) => {
+                    if property.computed {
+                        facts.unknown_property_write = true;
+                    } else if let PropertyKey::StaticIdentifier(id) = &property.key {
+                        *facts.property_writes.entry(id.name.as_str()).or_default() += 1;
+                    } else if let PropertyKey::StringLiteral(key) = &property.key
+                        && let Some(name) = key.value.as_str()
+                    {
+                        *facts.property_writes.entry(name).or_default() += 1;
+                    }
+                }
+                AstKind::PropertyDefinition(property) => {
+                    if property.computed {
+                        facts.unknown_property_write = true;
+                    } else if let PropertyKey::StaticIdentifier(id) = &property.key {
+                        *facts.property_writes.entry(id.name.as_str()).or_default() += 1;
+                    } else if let PropertyKey::StringLiteral(key) = &property.key
+                        && let Some(name) = key.value.as_str()
+                    {
+                        *facts.property_writes.entry(name).or_default() += 1;
+                    }
+                }
+                AstKind::MethodDefinition(method) => {
+                    if method.computed {
+                        facts.unknown_property_write = true;
+                    } else if let PropertyKey::StaticIdentifier(id) = &method.key {
+                        *facts.property_writes.entry(id.name.as_str()).or_default() += 1;
+                    } else if let PropertyKey::StringLiteral(key) = &method.key
+                        && let Some(name) = key.value.as_str()
+                    {
+                        *facts.property_writes.entry(name).or_default() += 1;
+                    }
+                }
+                AstKind::SpreadElement(_) => facts.unknown_property_write = true,
+                AstKind::ObjectExpression(object) => {
+                    if let Some(owner) = facts.object_owner(id) {
+                        facts.objects.insert(object.node_id.get(), owner);
+                    }
+                }
+                AstKind::CallExpression(call) => {
+                    if let Expression::StaticMemberExpression(member) =
+                        call.callee.get_inner_expression()
+                        && matches!(
+                            member.property.name.as_str(),
+                            "assign" | "defineProperty" | "defineProperties" | "set"
+                        )
+                    {
+                        facts.unknown_property_write = true;
+                    }
+                    let callee = match call.callee.get_inner_expression() {
+                        Expression::StaticMemberExpression(member)
+                            if matches!(member.property.name.as_str(), "call" | "apply") =>
+                        {
+                            member.object.get_inner_expression()
+                        }
+                        other => other,
+                    };
+                    if let Expression::ComputedMemberExpression(member) = callee {
+                        facts.candidates.push(Candidate {
+                            node: id,
+                            selector: &member.expression,
+                            table: facts.key(&member.object, context),
+                            kind: Kind::HandlerTable,
+                            instruction: "indexed call",
+                            arms: None,
+                            strings: false,
+                        });
+                    }
+                }
+                AstKind::SwitchStatement(switch) => {
+                    facts.candidates.push(Candidate {
+                        node: id,
+                        selector: &switch.discriminant,
+                        table: None,
+                        kind: Kind::SwitchOnValue,
+                        instruction: "switch",
+                        arms: Some(switch.cases.len() as u64),
+                        strings: switch
+                            .cases
+                            .iter()
+                            .any(|case| matches!(case.test, Some(Expression::StringLiteral(_)))),
+                    });
+                }
+                _ => (),
             }
-            if !self.keep_candidate(selector.len()) {
-                break;
-            }
-            found.push(Found {
-                kind: Kind::SwitchOnValue,
-                instruction: "switch",
-                at: switch.start(),
-                size: switch.as_str().len(),
-                selector: selector.to_owned(),
-                expression: format!("switch ({})", selector.trim()),
-                arm_count: Some(arms),
-                string_cases,
-            });
         }
-        found
-    }
-
-    fn indexed_calls(&self) -> Vec<Found> {
-        self.meter.charge(self.text.len() as u64);
-        INDEXED_CALL
-            .captures_iter(self.text)
-            .take_while(|_| !self.meter.exhausted())
-            .filter_map(|call| {
-                let whole = call.get(0).expect("indexed call");
-                if !self.keep_candidate(whole.len()) {
-                    return None;
-                }
-                Some(Found {
-                    kind: Kind::HandlerTable,
-                    instruction: "indexed call",
-                    at: whole.start(),
-                    size: whole.as_str().len(),
-                    selector: call[2].to_owned(),
-                    expression: format!("{}[{}](...)", &call[1], call[2].trim()),
-                    arm_count: None,
-                    string_cases: false,
-                })
-            })
-            .collect()
-    }
-
-    /// Equality ladders: tests inside an `if` header or before a ternary `?`.
-    fn ladders(&self) -> Vec<Found> {
-        self.meter.charge(2 * self.text.len() as u64);
-        let headers = Intervals::new(
-            IF_HEADER.find_iter(self.text).filter_map(|header| {
-                let close = self.close(header.end() - 1)?;
-                Some((header.start(), close))
-            }),
-            self.meter,
-        );
-        let mut ladders = BTreeMap::<String, Vec<(usize, usize, String)>>::new();
-        for captures in COMPARE.captures_iter(self.text) {
-            if self.meter.exhausted() {
+        let mut comparisons = HashMap::<
+            (Option<NodeId>, Option<NodeId>, SymbolId),
+            (NodeId, &Expression<'a>, HashSet<u64>),
+        >::new();
+        for node in nodes.iter() {
+            if !meter.charge(1) {
                 break;
             }
-            let whole = captures.get(0).expect("comparison");
-            let (name, constant, name_match) = match (captures.get(1), captures.get(2)) {
-                (Some(name), Some(constant)) => (name.as_str(), constant.as_str(), name),
-                _ => {
-                    let name = captures.get(4).expect("reversed comparison name");
-                    (name.as_str(), &captures[3], name)
+            match node.kind() {
+                AstKind::BinaryExpression(binary)
+                    if matches!(binary.operator.as_str(), "==" | "===") =>
+                {
+                    let pair = match (
+                        binary.left.get_inner_expression(),
+                        binary.right.get_inner_expression(),
+                    ) {
+                        (Expression::Identifier(id), Expression::NumericLiteral(value)) => {
+                            Some((id, &binary.left, value.value))
+                        }
+                        (Expression::NumericLiteral(value), Expression::Identifier(id)) => {
+                            Some((id, &binary.right, value.value))
+                        }
+                        _ => None,
+                    };
+                    if let Some((id, expression, value)) = pair
+                        && value.fract() == 0.0
+                        && let Some(symbol) = facts.symbol(id)
+                    {
+                        let context = facts.context(node.id());
+                        let group = comparisons
+                            .entry((context.function, context.loop_id, symbol))
+                            .or_insert_with(|| (node.id(), expression, HashSet::new()));
+                        group.2.insert(value.to_bits());
+                    }
                 }
-            };
-            let at = name_match.start().min(whole.end());
-            self.meter.charge(32);
-            let in_header = headers.at(at).is_some();
-            let ternary = self.text[whole.end()..]
-                .trim_start()
-                .trim_start_matches(')')
-                .trim_start()
-                .starts_with('?');
-            if !in_header && !ternary {
-                continue;
+                AstKind::AssignmentExpression(assignment)
+                    if assignment.operator.as_str() == "=" =>
+                {
+                    let context = facts.context(node.id());
+                    if let Expression::CallExpression(call) =
+                        assignment.right.get_inner_expression()
+                        && facts.target(&assignment.left, context).is_some()
+                        && facts.target(&assignment.left, context)
+                            == facts.key(&call.callee, context)
+                    {
+                        facts.candidates.push(Candidate {
+                            node: node.id(),
+                            selector: &call.callee,
+                            table: None,
+                            kind: Kind::Threaded,
+                            instruction: "self call",
+                            arms: None,
+                            strings: false,
+                        });
+                    }
+                }
+                _ => (),
             }
-            if !self.keep(192 + name.len() as u64 + constant.len() as u64) {
-                break;
-            }
-            ladders.entry(name.to_owned()).or_default().push((
-                at,
-                whole.end() - at,
-                constant.to_ascii_lowercase(),
-            ));
         }
-        ladders
-            .into_iter()
-            .filter(|(_, tests)| {
-                tests
-                    .iter()
-                    .map(|(_, _, constant)| constant.as_str())
-                    .collect::<BTreeSet<_>>()
-                    .len()
-                    >= MIN_COMPARE_ARMS
-            })
-            .filter_map(|(name, tests)| {
-                if !self.keep_candidate(name.len()) {
-                    return None;
-                }
-                let (at, size, _) = tests[0];
-                Some(Found {
+        for (_, (node, selector, constants)) in comparisons {
+            if constants.len() >= super::MIN_COMPARE_ARMS {
+                facts.candidates.push(Candidate {
+                    node,
+                    selector,
+                    table: None,
                     kind: Kind::CompareChain,
                     instruction: "if ladder",
-                    at,
-                    size,
-                    selector: name.clone(),
-                    expression: format!("{name} === constant ({} comparisons)", tests.len()),
-                    arm_count: Some(tests.len() as u64),
-                    string_cases: false,
-                })
-            })
-            .collect()
-    }
-
-    /// Threaded: a loop where the current handler returns the next handler.
-    fn threaded(&self) -> Vec<Found> {
-        self.meter.charge(self.text.len() as u64);
-        SELF_CALL
-            .captures_iter(self.text)
-            .take_while(|_| !self.meter.exhausted())
-            .filter(|captures| captures[1] == captures[2])
-            .filter_map(|captures| {
-                let name = captures.get(1).expect("handler name");
-                self.innermost_loop(name.start())?;
-                if !self.keep_candidate(name.len()) {
-                    return None;
+                    arms: Some(constants.len() as u64),
+                    strings: false,
+                });
+            }
+        }
+        // Annex B block functions can copy into an existing var binding at
+        // runtime. Oxc resolves the block and outer references correctly, but
+        // this implicit assignment has no IdentifierReference write node.
+        // The hoist preflight bounds all ancestor work in this pass.
+        for node in nodes.iter() {
+            let AstKind::Function(function) = node.kind() else {
+                continue;
+            };
+            if !function.is_declaration()
+                || function.r#async
+                || function.generator
+                || scoping.scope_flags(node.scope_id()).is_strict_mode()
+                || matches!(
+                    nodes.parent_kind(node.id()),
+                    AstKind::Program(_) | AstKind::FunctionBody(_)
+                )
+            {
+                continue;
+            }
+            let Some(id) = &function.id else { continue };
+            for scope in scoping.scope_ancestors(node.scope_id()) {
+                if !meter.charge(1) {
+                    break;
                 }
-                Some(Found {
-                    kind: Kind::Threaded,
-                    instruction: "self call",
-                    at: name.start(),
-                    size: name.as_str().len(),
-                    selector: name.as_str().to_owned(),
-                    expression: format!("{0} = {0}(...)", name.as_str()),
-                    arm_count: None,
-                    string_cases: false,
-                })
-            })
-            .collect()
-    }
-}
-
-/// Whether the outer parentheses of `text` enclose all of it.
-fn balanced_outer(text: &str) -> bool {
-    let mut depth = 0usize;
-    for (index, byte) in text.bytes().enumerate() {
-        match byte {
-            b'(' => depth += 1,
-            b')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return index == text.len() - 1;
+                if scoping.scope_flags(scope).is_var() {
+                    if let Some(symbol) = scoping.get_binding(scope, id.name)
+                        && scoping
+                            .symbol_flags(symbol)
+                            .is_function_scoped_declaration()
+                    {
+                        facts.changed_symbols.insert(symbol);
+                    }
+                    break;
+                }
+                // An intervening lexical declaration suppresses Annex B.
+                if scope != node.scope_id() && scoping.get_binding(scope, id.name).is_some() {
+                    break;
                 }
             }
-            _ => (),
+        }
+        // Each function stored directly in a table is associated once. Writes
+        // in these functions can advance that table's selector cursor.
+        for node in nodes.iter() {
+            if !meter.charge(1) {
+                break;
+            }
+            if matches!(
+                node.kind(),
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+            ) {
+                let parent = nodes.parent_id(node.id());
+                if matches!(nodes.kind(parent), AstKind::ObjectProperty(_))
+                    && let Some((key, _, _)) = facts.objects.get(&nodes.parent_id(parent))
+                {
+                    facts.table_functions.insert(node.id(), *key);
+                }
+            }
+        }
+        // Follow statically bound direct helper calls, at most 16 edges. This
+        // lets a step function's dispatch inherit the invoking loop without
+        // rewalking its body or following unknown call targets.
+        let mut functions = HashMap::new();
+        let mut calls = Vec::new();
+        for node in nodes.iter() {
+            match node.kind() {
+                AstKind::Function(function) => {
+                    if let Some(id) = &function.id
+                        && let Some(symbol) = id.symbol_id.get()
+                        && !facts.changed_symbols.contains(&symbol)
+                    {
+                        functions.insert(symbol, node.id());
+                    }
+                }
+                AstKind::CallExpression(call) => {
+                    if let Expression::Identifier(id) = call.callee.get_inner_expression()
+                        && let Some(symbol) = facts.symbol(id)
+                    {
+                        calls.push((node.id(), symbol));
+                    }
+                }
+                _ => (),
+            }
+        }
+        for _ in 0..16 {
+            let mut changed = false;
+            for &(call, symbol) in &calls {
+                if !meter.charge(1) {
+                    break;
+                }
+                if let (Some(&function), Some(loop_id)) =
+                    (functions.get(&symbol), facts.loop_id(call))
+                    && let std::collections::hash_map::Entry::Vacant(entry) =
+                        facts.invoked_loops.entry(function)
+                {
+                    entry.insert(loop_id);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for candidate in &facts.candidates {
+            if let (Some(loop_id), Some(table)) = (facts.loop_id(candidate.node), candidate.table) {
+                facts.loop_tables.entry(loop_id).or_default().insert(table);
+            }
+        }
+        facts
+    }
+    fn index_key(
+        &self,
+        expression: &'a Expression<'a>,
+        context: Context,
+        depth: u8,
+    ) -> Option<Key<'a>> {
+        if depth > 16 {
+            return None;
+        }
+        match expression.get_inner_expression() {
+            Expression::UpdateExpression(update) => self.simple_target(&update.argument, context),
+            Expression::BinaryExpression(binary)
+                if matches!(
+                    binary.right.get_inner_expression(),
+                    Expression::NumericLiteral(_)
+                ) =>
+            {
+                self.index_key(&binary.left, context, depth + 1)
+            }
+            expression => self.key(expression, context),
         }
     }
-    false
+    fn advances(
+        &self,
+        key: Key<'a>,
+        candidate: &Candidate<'a>,
+        arithmetic: bool,
+        query: &mut Query,
+    ) -> bool {
+        if self.loop_span(candidate.node).is_none() {
+            return false;
+        }
+        let context = self.context(candidate.node);
+        for write in self.writes.get(&key).into_iter().flatten() {
+            if !query.step(self.meter, 0) {
+                return false;
+            }
+            if arithmetic && !write.arithmetic {
+                continue;
+            }
+            if !write.arithmetic
+                && !self
+                    .definitions
+                    .get(&key)
+                    .into_iter()
+                    .flatten()
+                    .take(64)
+                    .any(|definition| {
+                        matches!(
+                            definition.value.get_inner_expression(),
+                            Expression::NumericLiteral(_)
+                        )
+                    })
+            {
+                continue;
+            }
+            if (write.function == context.function
+                || write.function.is_some_and(|function| {
+                    self.invoked_loops.get(&function).copied() == self.loop_id(candidate.node)
+                }))
+                && self.executes_in_loop(write.function, write.span, candidate)
+            {
+                return true;
+            }
+            if let Some(table) = write
+                .function
+                .and_then(|function| self.table_functions.get(&function))
+            {
+                if candidate.table == Some(*table) {
+                    return true;
+                }
+                // A switch's default/arms may dispatch the same table. The
+                // table index is precomputed per loop rather than rescanned.
+                if self
+                    .loop_tables
+                    .get(&self.loop_id(candidate.node).unwrap())
+                    .is_some_and(|tables| tables.contains(table))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    fn trace(
+        &self,
+        expression: &'a Expression<'a>,
+        candidate: &Candidate<'a>,
+        query: &mut Query,
+        depth: u8,
+    ) -> Trace<'a> {
+        if !query.step(self.meter, depth) {
+            return Trace::new(Source::Unknown);
+        }
+        let context = self.context(candidate.node);
+        let expression = expression.get_inner_expression();
+        match expression {
+            Expression::NumericLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_) => Trace::new(Source::Constant),
+            Expression::Identifier(identifier) => {
+                let Some(symbol) = self.symbol(identifier) else {
+                    return Trace::new(Source::Unknown);
+                };
+                let mut best = Trace::new(if self.parameters.contains(&symbol) {
+                    Source::CallArgument
+                } else {
+                    Source::Unknown
+                });
+                for definition in self
+                    .definitions
+                    .get(&Key::Symbol(symbol))
+                    .into_iter()
+                    .flatten()
+                {
+                    if !query.step(self.meter, depth) {
+                        break;
+                    }
+                    // An in-place coercion keeps the parameter's source. A
+                    // self reference is not another traversal of all writes.
+                    if let Expression::BinaryExpression(binary) =
+                        definition.value.get_inner_expression()
+                        && self.key(&binary.left, context) == Some(Key::Symbol(symbol))
+                    {
+                        continue;
+                    }
+                    let mut trace = self.trace(definition.value, candidate, query, depth + 1);
+                    trace.anchor = Some(definition.at);
+                    if !self.executes_in_loop(
+                        definition.function,
+                        definition.value.span(),
+                        candidate,
+                    ) || definition.function != context.function
+                    {
+                        trace.repeats = false;
+                    }
+                    if (trace.repeats, priority(trace.source))
+                        > (best.repeats, priority(best.source))
+                    {
+                        best = trace;
+                    }
+                }
+                best
+            }
+            Expression::ComputedMemberExpression(member) => self.read(
+                &member.object,
+                &member.expression,
+                expression.span(),
+                candidate,
+                query,
+                depth,
+                None,
+            ),
+            Expression::StaticMemberExpression(_) => {
+                let mut trace = Trace::new(Source::FrameSlot);
+                if let Some(key) = self.key(expression, context) {
+                    trace.repeats = self.advances(key, candidate, true, query);
+                }
+                trace.anchor = Some(expression.span().start);
+                trace
+            }
+            Expression::CallExpression(call) => {
+                if let Expression::StaticMemberExpression(member) =
+                    call.callee.get_inner_expression()
+                    && matches!(
+                        member.property.name.as_str(),
+                        "charCodeAt"
+                            | "charAt"
+                            | "codePointAt"
+                            | "getUint8"
+                            | "getInt8"
+                            | "getUint16"
+                            | "getInt16"
+                            | "getUint32"
+                            | "at"
+                    )
+                    && let Some(index) = call.arguments.first().and_then(Argument::as_expression)
+                {
+                    let text = matches!(
+                        member.property.name.as_str(),
+                        "charCodeAt" | "charAt" | "codePointAt"
+                    )
+                    .then_some("string");
+                    self.read(
+                        &member.object,
+                        index,
+                        call.span,
+                        candidate,
+                        query,
+                        depth,
+                        text,
+                    )
+                } else {
+                    Trace::new(Source::Unknown)
+                }
+            }
+            Expression::BinaryExpression(binary) => {
+                let left = self.trace(&binary.left, candidate, query, depth + 1);
+                let right = self.trace(&binary.right, candidate, query, depth + 1);
+                if (left.repeats, priority(left.source)) >= (right.repeats, priority(right.source))
+                {
+                    left
+                } else {
+                    right
+                }
+            }
+            Expression::UnaryExpression(unary) => {
+                self.trace(&unary.argument, candidate, query, depth + 1)
+            }
+            Expression::AssignmentExpression(a) => {
+                self.trace(&a.right, candidate, query, depth + 1)
+            }
+            Expression::SequenceExpression(sequence) => sequence.expressions.last().map_or_else(
+                || Trace::new(Source::Unknown),
+                |value| self.trace(value, candidate, query, depth + 1),
+            ),
+            Expression::UpdateExpression(update) => {
+                let mut trace = Trace::new(Source::Constant);
+                if let Some(key) = self.simple_target(&update.argument, context) {
+                    trace.repeats = self.advances(key, candidate, true, query);
+                }
+                trace
+            }
+            _ => Trace::new(Source::Unknown),
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn read(
+        &self,
+        buffer: &'a Expression<'a>,
+        index: &'a Expression<'a>,
+        span: Span,
+        candidate: &Candidate<'a>,
+        query: &mut Query,
+        depth: u8,
+        buffer_kind: Option<&'static str>,
+    ) -> Trace<'a> {
+        let context = self.context(candidate.node);
+        if let Some(key) = self.index_key(index, context, 0)
+            && self.advances(key, candidate, !matches!(key, Key::Symbol(_)), query)
+        {
+            let mut trace = Trace::new(if matches!(key, Key::Symbol(_)) {
+                Source::CursorIndex
+            } else {
+                Source::FrameSlot
+            });
+            trace.repeats = self.executes_in_loop(context.function, span, candidate);
+            trace.anchor = Some(span.start);
+            trace.buffer = self.key(buffer, context);
+            trace.buffer_kind = buffer_kind.or_else(|| self.buffer_kind(buffer, context));
+            return trace;
+        }
+        let mut trace = self.trace(index, candidate, query, depth + 1);
+        if trace.source.cursor_like() {
+            trace.lookup = true;
+        }
+        trace
+    }
+    fn buffer_kind(&self, buffer: &'a Expression<'a>, context: Context) -> Option<&'static str> {
+        if matches!(buffer.get_inner_expression(), Expression::Identifier(id) if id.name == "arguments")
+        {
+            return Some("arguments");
+        }
+        let kind = |value: &Expression<'a>| match value.get_inner_expression() {
+            Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => "string",
+            Expression::ArrayExpression(_) => "array",
+            Expression::NewExpression(new) if matches!(new.callee.get_inner_expression(), Expression::Identifier(id) if matches!(id.name.as_str(), "Uint8Array" | "Int8Array" | "Uint8ClampedArray" | "Uint16Array" | "Int16Array" | "Uint32Array" | "Int32Array")) => {
+                "typed-array"
+            }
+            _ => "unknown",
+        };
+        let direct = kind(buffer);
+        if direct != "unknown" {
+            return Some(direct);
+        }
+        let Some(key) = self.key(buffer, context) else {
+            return Some("unknown");
+        };
+        let Some(definitions) = self.definitions.get(&key) else {
+            return Some("unknown");
+        };
+        let mut value = None;
+        for definition in definitions.iter().take(64) {
+            self.meter.charge(1);
+            let current = kind(definition.value);
+            if value.is_some_and(|previous| previous != current) {
+                return Some("unknown");
+            }
+            value = Some(current);
+        }
+        if definitions.len() > 64 {
+            Some("unknown")
+        } else {
+            value.or(Some("unknown"))
+        }
+    }
+    fn stable(&self, key: Key<'a>, at: u32, scope: ScopeId) -> bool {
+        if self.scope_opaque(scope) {
+            return false;
+        }
+        match key {
+            Key::Symbol(symbol) => {
+                !self.changed_symbols.contains(&symbol)
+                    && self.definitions.get(&key).is_some_and(|definitions| {
+                        definitions.len() == 1 && definitions[0].at == at
+                    })
+            }
+            Key::Member(symbol, name) => {
+                !self.changed_symbols.contains(&symbol)
+                    && self
+                        .definitions
+                        .get(&Key::Symbol(symbol))
+                        .is_none_or(|definitions| definitions.len() <= 1)
+                    && !self.unknown_property_write
+                    && self.property_writes.get(name) == Some(&1)
+            }
+            Key::This(_, name) => {
+                !self.unknown_property_write && self.property_writes.get(name) == Some(&1)
+            }
+            Key::Slot(_, _) => false,
+        }
+    }
+    fn bounded(
+        &self,
+        expression: &'a Expression<'a>,
+        candidate: &Candidate<'a>,
+        depth: u8,
+    ) -> bool {
+        if depth > 8 || !self.meter.charge(1) {
+            return false;
+        }
+        let context = self.context(candidate.node);
+        let Some(loop_id) = self.loop_id(candidate.node) else {
+            return false;
+        };
+        let test = match self.semantic.nodes().kind(loop_id) {
+            AstKind::WhileStatement(node) => Some(&node.test),
+            AstKind::DoWhileStatement(node) => Some(&node.test),
+            AstKind::ForStatement(node) => node.test.as_ref(),
+            _ => None,
+        };
+        let Some(Expression::BinaryExpression(test)) = test.map(Expression::get_inner_expression)
+        else {
+            return false;
+        };
+        let (cursor, length) = match test.operator.as_str() {
+            "<" | "<=" => (&test.left, &test.right),
+            ">" | ">=" => (&test.right, &test.left),
+            _ => return false,
+        };
+        let Expression::StaticMemberExpression(length) = length.get_inner_expression() else {
+            return false;
+        };
+        if length.property.name != "length" {
+            return false;
+        }
+        let expression = expression.get_inner_expression();
+        if let Expression::ComputedMemberExpression(read) = expression {
+            return self.key(cursor, context).is_some()
+                && self.key(cursor, context) == self.index_key(&read.expression, context, 0)
+                && self.key(&read.object, context).is_some()
+                && self.key(&read.object, context) == self.key(&length.object, context);
+        }
+        if let Expression::Identifier(identifier) = expression
+            && let Some(key) = self.symbol(identifier).map(Key::Symbol)
+        {
+            return self
+                .definitions
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .take(4)
+                .any(|definition| self.bounded(definition.value, candidate, depth + 1));
+        }
+        false
+    }
 }
 
-/// Classify the dispatch sites of one masked function region. `text` has
-/// comments, literals and nested function bodies blanked with the original
-/// byte length, so region offsets map to `source` offsets. Candidates are
-/// ranked by dispatch strength before the per-region site bound applies, so a
-/// region full of trivial switches still classifies its interpreter first.
-/// Every site found is classified or counted on the meter as unclassified.
-pub(crate) fn classify_region(
+fn parsed(
     source: &str,
-    lines: &Lines,
-    text: &str,
-    start: usize,
-    params: &[String],
-    sites: &mut Vec<Site>,
     meter: &Meter,
-) {
-    let region = Region::new(source, text, start, params, meter);
-    if meter.exhausted() {
-        meter.count_unexamined(1);
-        return;
+    allocator: &Allocator,
+    source_type: SourceType,
+) -> Option<Classified> {
+    let parse = Parser::new(allocator, source, source_type).parse();
+    #[cfg(test)]
+    PARSER_ARENA.set(PARSER_ARENA.get().max(allocator.capacity()));
+    if !parse.diagnostics.is_empty() {
+        return None;
     }
-    let mut candidates = region.switches();
-    candidates.extend(region.indexed_calls());
-    candidates.extend(region.ladders());
-    candidates.extend(region.threaded());
-    let mut ranked = candidates
-        .into_iter()
-        .map(|candidate| (region.strength(&candidate), candidate))
+    // Oxc's binder expands a var declaration into each intervening block for
+    // redeclaration checks. Bound that expansion before semantic allocation.
+    // Functions reset the depth, so deeply nested functions remain admissible.
+    let mut hoists = HoistAdmission::default();
+    hoists.visit_program(&parse.program);
+    if hoists.expansion > source.len() as u64 * 2 {
+        return Some(unavailable(
+            meter,
+            "classification-work-limit",
+            "JavaScript block-hoisting admission limit reached.",
+        ));
+    }
+    // Scope/name hoist entries coexist with the ordinary AST and semantic
+    // vectors. Cover hash-table slack and replacement allocation separately
+    // rather than consuming the arena's per-source-byte allowance twice.
+    let hoist_memory = Memory::new(meter);
+    if !hoist_memory.keep(hoists.expansion * 64) {
+        return Some(unavailable(
+            meter,
+            "classification-work-limit",
+            "JavaScript block-hoisting memory admission limit reached.",
+        ));
+    }
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .with_check_syntax_error(true)
+        .build(&parse.program);
+    if !semantic.diagnostics.is_empty() {
+        return None;
+    }
+    #[cfg(test)]
+    PARSER_ARENA.set(PARSER_ARENA.get().max(allocator.capacity()));
+    let facts = Facts::index(&semantic.semantic, meter);
+    let lines = Lines::new(source, meter);
+    let strengths = facts
+        .candidates
+        .iter()
+        .map(|candidate| {
+            u8::from(facts.bounded(candidate.selector, candidate, 0)) * 4
+                + u8::from(facts.loop_id(candidate.node).is_some()) * 2
+                + u8::from(matches!(
+                    candidate.selector.get_inner_expression(),
+                    Expression::ComputedMemberExpression(_) | Expression::Identifier(_)
+                ))
+        })
         .collect::<Vec<_>>();
-    ranked
-        .sort_unstable_by_key(|(strength, candidate)| (std::cmp::Reverse(*strength), candidate.at));
-    if meter.exhausted() {
-        meter.count_unexamined(1);
+    // Eight structural buckets in AST order, including comparison groups
+    // collected through a hash map. Scheduling is linear and deterministic.
+    let mut by_node = vec![None; semantic.semantic.nodes().len()];
+    for (index, candidate) in facts.candidates.iter().enumerate() {
+        by_node[candidate.node.index()] = Some(index);
     }
-    for (position, (strength, candidate)) in ranked.into_iter().enumerate() {
-        if position as u64 >= MAX_REGION_SITES || meter.exhausted() {
+    let mut order = Vec::with_capacity(facts.candidates.len());
+    for strength in (0..8).rev() {
+        order.extend(
+            by_node
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|index| strengths[*index] == strength),
+        );
+    }
+    let mut sites = Vec::new();
+    let mut roles = HashMap::new();
+    let mut tables = HashMap::<Key<'_>, Vec<(NodeId, Role)>>::new();
+    for (ordinal, index) in order.iter().enumerate() {
+        if ordinal >= MAX_SITES || meter.exhausted() {
             meter.count_unclassified(1);
             continue;
         }
-        match region.site(lines, candidate, strength) {
-            Some((site, limited)) => {
-                meter.count_limited(limited);
-                if meter.retain(site.retained_bytes()) {
-                    sites.push(site);
+        let candidate = &facts.candidates[*index];
+        let mut query = Query {
+            left: 4096,
+            limited: false,
+        };
+        let trace = if candidate.kind == Kind::Threaded {
+            let mut trace = Trace::new(Source::HandlerAddress);
+            trace.repeats = facts.loop_id(candidate.node).is_some();
+            trace
+        } else {
+            facts.trace(candidate.selector, candidate, &mut query, 0)
+        };
+        let trace = if query.limited {
+            Trace::new(Source::Unknown)
+        } else {
+            trace
+        };
+        meter.count_limited(query.limited);
+        let node = semantic.semantic.nodes().get_node(candidate.node);
+        let span = node.span();
+        let (line, column, work) = lines.locate(source, span.start as usize);
+        if !meter.charge(work) {
+            meter.count_unclassified(1);
+            continue;
+        }
+        let mut selector_end = candidate
+            .selector
+            .span()
+            .end
+            .min(candidate.selector.span().start.saturating_add(160))
+            as usize;
+        selector_end = source.floor_char_boundary(selector_end);
+        let selector = &source[candidate.selector.span().start as usize..selector_end];
+        let function = facts.context(candidate.node).function;
+        let body_start = function
+            .map(|id| match semantic.semantic.nodes().kind(id) {
+                AstKind::Function(function) => function
+                    .body
+                    .as_ref()
+                    .map_or(function.span.start, |body| body.span.start + 1),
+                AstKind::ArrowFunctionExpression(function) => function.body.span().start + 1,
+                _ => 0,
+            })
+            .unwrap_or(0);
+        let site = Site {
+            strength: strengths[*index],
+            kind: candidate.kind,
+            source: trace.source,
+            repeats: if facts.loop_span(candidate.node).is_none() {
+                Repeats::Once
+            } else if trace.repeats {
+                Repeats::Loop
+            } else {
+                Repeats::Unknown
+            },
+            instruction: candidate.instruction,
+            function_index: None,
+            function_body_offset: Some(body_start as usize),
+            byte_offset: span.start as usize,
+            byte_size: (span.end - span.start) as usize,
+            line: Some(line),
+            column: Some(column),
+            selector_expression: selector.to_owned(),
+            selector_offset: trace.anchor.map(|at| at as usize),
+            through_lookup: trace.lookup,
+            arm_count: candidate.arms,
+            loop_range: facts
+                .loop_span(candidate.node)
+                .map(|span| (span.start as usize, span.end as usize)),
+            buffer_kind: if candidate.strings {
+                Some("string")
+            } else {
+                trace.buffer_kind
+            },
+            table: None,
+        };
+        if !meter.retain(site.retained_bytes()) {
+            meter.count_unclassified(1);
+            continue;
+        }
+        let role = site.role();
+        roles.insert(candidate.node, role);
+        if let Some(table) = candidate.table {
+            tables
+                .entry(table)
+                .or_default()
+                .push((candidate.node, role));
+        }
+        sites.push(site);
+    }
+    let memory = Memory::new(meter);
+    let mut handlers = HashMap::new();
+    let nodes = semantic.semantic.nodes();
+    // Prove each object once, not once per property times every dispatch.
+    // Stability permits only one definition for a key, so each dispatch is
+    // considered at most once across these object queries.
+    let mut object_verdicts = HashMap::new();
+    for (&object, &(key, at, scope)) in &facts.objects {
+        if !meter.charge(1) {
+            break;
+        }
+        let verdict = if !facts.stable(key, at, scope) {
+            Err(AMBIGUOUS)
+        } else {
+            let mut verdict = None;
+            for &(dispatch, role) in tables.get(&key).into_iter().flatten() {
+                if !meter.charge(1) {
+                    break;
+                }
+                let site = nodes.get_node(dispatch);
+                if facts.scope_opaque(site.scope_id()) {
+                    continue;
+                }
+                // This assignments must precede the whole dispatch loop.
+                let before = if matches!(key, Key::This(..)) {
+                    facts
+                        .loop_span(dispatch)
+                        .is_some_and(|range| at < range.start)
                 } else {
-                    meter.count_unclassified(1);
+                    at < site.span().start
+                };
+                if before && (verdict.is_none() || role == Role::InterpreterCandidate) {
+                    verdict = Some(role);
                 }
             }
-            None => meter.count_unclassified(1),
+            Ok(verdict)
+        };
+        object_verdicts.insert(object, verdict);
+    }
+    for node in nodes.iter() {
+        if !meter.charge(1) {
+            break;
+        }
+        let (offset, table, verdict) = match node.kind() {
+            AstKind::SwitchCase(case) => (
+                case.span.start as usize,
+                false,
+                Ok(roles.get(&nodes.parent_id(node.id())).copied()),
+            ),
+            AstKind::ObjectProperty(property) => {
+                let verdict = object_verdicts
+                    .get(&nodes.parent_id(node.id()))
+                    .copied()
+                    .unwrap_or(Err(AMBIGUOUS));
+                (property.span.start as usize, true, verdict)
+            }
+            _ => continue,
+        };
+        if !memory.keep(96) {
+            break;
+        }
+        handlers.insert((offset, table), verdict);
+    }
+    Some(Classified {
+        sites,
+        omissions: meter.omissions("JavaScript artifacts"),
+        javascript: Some(Rc::new(Proofs {
+            handlers,
+            failure: None,
+            _memory: memory,
+        })),
+    })
+}
+
+#[derive(Default)]
+struct HoistAdmission {
+    depth: u64,
+    functions: Vec<u64>,
+    expansion: u64,
+}
+impl<'a> Visit<'a> for HoistAdmission {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        match kind {
+            AstKind::Function(function) => {
+                if function.is_declaration() {
+                    self.expansion += self.depth;
+                }
+                self.functions.push(self.depth);
+                self.depth = 0;
+            }
+            AstKind::ArrowFunctionExpression(_) => {
+                self.functions.push(self.depth);
+                self.depth = 0;
+            }
+            AstKind::VariableDeclaration(declaration)
+                if declaration.kind == VariableDeclarationKind::Var =>
+            {
+                // Pattern bytes upper-bound its number of bound names, even
+                // for destructuring, without a second traversal of the pattern.
+                self.expansion += declaration
+                    .declarations
+                    .iter()
+                    .map(|d| u64::from(d.id.span().size()) * self.depth)
+                    .sum::<u64>();
+            }
+            AstKind::BlockStatement(_)
+            | AstKind::CatchClause(_)
+            | AstKind::ForStatement(_)
+            | AstKind::ForInStatement(_)
+            | AstKind::ForOfStatement(_)
+            | AstKind::SwitchStatement(_)
+            | AstKind::WithStatement(_)
+            | AstKind::StaticBlock(_) => self.depth += 1,
+            _ => (),
         }
     }
+    fn leave_node(&mut self, kind: AstKind<'a>) {
+        match kind {
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
+                self.depth = self.functions.pop().unwrap();
+            }
+            AstKind::BlockStatement(_)
+            | AstKind::CatchClause(_)
+            | AstKind::ForStatement(_)
+            | AstKind::ForInStatement(_)
+            | AstKind::ForOfStatement(_)
+            | AstKind::SwitchStatement(_)
+            | AstKind::WithStatement(_)
+            | AstKind::StaticBlock(_) => self.depth -= 1,
+            _ => (),
+        }
+    }
+}
+
+fn unavailable(meter: &Meter, reason: &str, detail: &'static str) -> Classified {
+    Classified {
+        sites: Vec::new(),
+        omissions: vec![json!({"reason": reason, "omitted_records": 1, "detail": detail})],
+        javascript: Some(Rc::new(Proofs {
+            handlers: HashMap::new(),
+            failure: Some(detail),
+            _memory: Memory::new(meter),
+        })),
+    }
+}
+
+pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
+    #[cfg(test)]
+    PARSER_ARENA.set(0);
+    let reservation = Memory::new(meter);
+    let mut failure = None;
+    // Oxc owns its arena and semantic vectors. Reserve a conservative input
+    // envelope BEFORE invoking it, including the isolated recursive stack.
+    // Source offsets remain original UTF-8 byte offsets, in script and module.
+    if !meter.charge(source.len() as u64 * 64) {
+        meter.count_unexamined(1);
+        failure = Some("JavaScript parser memory or work admission limit reached.");
+    }
+    // Conservative syntax-complexity admission, not a lexer or classifier.
+    // Counting raw punctuation may refuse a huge literal/comment, but never
+    // creates a claim from it. It bounds recursive parser/semantic stack use.
+    let mut depth = 0usize;
+    let mut chain = 0usize;
+    let mut stack = PARSER_STACK;
+    if failure.is_none() {
+        for byte in source.bytes() {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => (),
+            }
+            if b";{}".contains(&byte) {
+                chain = 0;
+            } else if b"=+-!~?&|*/%".contains(&byte) {
+                chain += 1;
+            }
+            if depth > MAX_SYNTAX_DEPTH || chain > MAX_SYNTAX_DEPTH {
+                failure = Some("JavaScript parser nesting or expression admission limit reached.");
+                break;
+            }
+            if depth > 1024 || chain > 1024 {
+                stack = PARSER_STACK * 2;
+            }
+        }
+    }
+    if failure.is_none()
+        && !reservation
+            .keep(source.len() as u64 * PARSER_BYTES_PER_BYTE + PARSER_FIXED_BYTES + stack as u64)
+    {
+        meter.count_unexamined(1);
+        failure = Some("JavaScript parser memory or work admission limit reached.");
+    }
+    if failure.is_none() {
+        let result = stacker::grow(stack, || {
+            for source_type in [SourceType::mjs().with_script(true), SourceType::mjs()] {
+                let allocator = Allocator::default();
+                if let Some(result) = parsed(source, meter, &allocator, source_type) {
+                    return Some(result);
+                }
+            }
+            None
+        });
+        if let Some(result) = result {
+            return result;
+        }
+    }
+    let reason = if failure.is_some() {
+        "classification-work-limit"
+    } else {
+        "parse-failed"
+    };
+    unavailable(meter, reason, failure.unwrap_or(PARSE_FAILED))
 }

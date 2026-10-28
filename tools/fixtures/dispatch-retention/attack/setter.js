@@ -1,0 +1,1 @@
+function vm(code,stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};var obj={set run(ops){while(pc<code.length){ops[code[pc++]]();}}};obj.run={};return stack;}

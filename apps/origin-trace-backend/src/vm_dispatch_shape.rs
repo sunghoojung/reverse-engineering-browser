@@ -326,6 +326,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
 /// dispatch byte offset. Built from the full classification, never from the
 /// bounded listed document, so the listing cap cannot hide a site.
 pub(crate) struct Roles {
+    pub javascript: Option<std::rc::Rc<javascript::Proofs>>,
     roles: HashMap<usize, Role>,
     _memory: Memory,
     limited: bool,
@@ -339,6 +340,7 @@ impl Roles {
             && meter.charge(classified.sites.len() as u64 * 64);
         Self {
             meter: meter.clone(),
+            javascript: classified.javascript.clone(),
             _memory: memory,
             roles: if available {
                 classified
@@ -477,80 +479,6 @@ struct Facts<'a> {
 type SlotAdvanceKey = (u32, SlotKey, Option<u32>);
 /// (slot, carrier local, loop range).
 type LoopStoreKey = (SlotKey, Option<u32>);
-
-/// Opening-bracket rank maps a byte offset to one u32 closing offset. Dense
-/// punctuation costs about 2.2 bytes per source byte, not a hash bucket per
-/// pair. The bitset is the only byte-position index; stacks hold pair ranks.
-pub(crate) struct Brackets {
-    openings: Vec<u64>,
-    ranks: Vec<u32>,
-    closing: Vec<u32>,
-    _memory: Memory,
-}
-
-impl Brackets {
-    pub fn new(text: &str, meter: &Meter) -> Self {
-        let memory = Memory::new(meter);
-        let mut this = Self {
-            openings: Vec::new(),
-            ranks: Vec::new(),
-            closing: Vec::new(),
-            _memory: memory,
-        };
-        if !meter.charge(text.len() as u64 * 2) || text.len() >= u32::MAX as usize {
-            return this;
-        }
-        let words = text.len().div_ceil(64);
-        let count = text.bytes().filter(|b| b"([{".contains(b)).count();
-        if !this._memory.keep((words * 12 + count * 4) as u64) {
-            return this;
-        }
-        this.openings = vec![0; words];
-        this.ranks = vec![0; words];
-        this.closing = Vec::with_capacity(count);
-        let mut stacks: [Vec<u32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (at, byte) in text.bytes().enumerate() {
-            let (kind, opening) = match byte {
-                b'(' => (0, true),
-                b'[' => (1, true),
-                b'{' => (2, true),
-                b')' => (0, false),
-                b']' => (1, false),
-                b'}' => (2, false),
-                _ => continue,
-            };
-            if opening {
-                this.openings[at / 64] |= 1 << (at % 64);
-                if !this
-                    ._memory
-                    .push(&mut stacks[kind], this.closing.len() as u32)
-                {
-                    return this;
-                }
-                this.closing.push(u32::MAX);
-            } else if let Some(index) = stacks[kind].pop() {
-                this.closing[index as usize] = at as u32;
-            }
-        }
-        let mut rank = 0;
-        for (bits, prefix) in this.openings.iter().zip(&mut this.ranks) {
-            *prefix = rank;
-            rank += bits.count_ones();
-        }
-        this
-    }
-
-    pub fn close(&self, at: usize) -> Option<usize> {
-        let bits = *self.openings.get(at / 64)?;
-        let bit = 1u64 << (at % 64);
-        if bits & bit == 0 {
-            return None;
-        }
-        let index = self.ranks[at / 64] + (bits & (bit - 1)).count_ones();
-        let close = *self.closing.get(index as usize)?;
-        (close != u32::MAX).then_some(close as usize)
-    }
-}
 
 /// Structured interval index. A sweep records the active innermost interval
 /// at every boundary. Binary lifting finds the first enclosing interval
@@ -2000,6 +1928,7 @@ impl<'a> Facts<'a> {
 
 /// Classified sites plus visible omissions for work the bounds refused.
 pub(crate) struct Classified {
+    pub javascript: Option<std::rc::Rc<javascript::Proofs>>,
     pub sites: Vec<Site>,
     pub omissions: Vec<Value>,
 }
@@ -2207,6 +2136,7 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
     if !meter.charge(bytes.len() as u64) || !auxiliary.keep(bytes.len() as u64 * 4) {
         meter.count_unexamined(1);
         return Some(Classified {
+            javascript: None,
             sites: Vec::new(),
             omissions: meter.omissions("functions"),
         });
@@ -2358,6 +2288,7 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
         });
     }
     Some(Classified {
+        javascript: None,
         sites,
         omissions: meter.omissions("functions"),
     })

@@ -112,40 +112,43 @@ written merge per enclosing loop, so a run of constant writes before a loop
 cannot crowd out the loop's own fetch. Every write of a local is examined,
 charged as a trace step; there is no silent prefix.
 
-JavaScript, per comment- and literal-masked function region, with nested
-function bodies excluded:
+JavaScript is parsed once per artifact with pinned Oxc crates. Script mode is
+tried first, then module mode on failure. The successful AST and Oxc semantic
+scope graph supply both classification and table-binding proofs. AST spans are
+original UTF-8 byte offsets; comments, regex literals, templates, automatic
+semicolon insertion and Unicode names do not require text-based guessing.
 
-- `switch (selector)` is `switch_on_value`; `name[selector](...)`, also through
-  `.call(...)` or `.apply(...)`, is `handler_table`.
-- `if (k === C)` tests or `k === C ?` ternaries on one name with at least three
-  distinct integer constants are `compare_chain`.
-- `h = h(...)` inside a loop is `threaded` with `handler_address`.
-- `buf[i]`, `buf[i++]`, and `charCodeAt`, `charAt`, `codePointAt`, `getUint8`
-  style accessors are cursor reads when the region advances `i` arithmetically
-  (`i++`, `i += n`, `i = i + n`). An index that is only assigned, such as
-  `id = queue.pop()`, is a lookup and takes the index's own source.
-- A position on an object (`code[f.pc++]`) or a local copy of one is
-  `frame_slot`; it repeats only when the loop advances it, not when it is
-  merely assigned.
-- An argument coerced in place (`k = k | 0`) stays `call_argument`.
-- Each region is indexed once: every binding, including each binding of a
-  comma declaration (`var op = code[pc++], a = code[pc]`), every write and
-  every arithmetic advance by name. Loop bodies include braceless and
-  statement-form bodies such as `do switch (...) {...} while (...)`.
-- `buffer_kind` flags a cursor buffer as `string` (string case labels, string
-  accessors or a string-literal binding), `arguments` (the `arguments` object),
-  `typed-array`, `array` or `unknown`. It reads at most 64 bindings of the
-  buffer, once per buffer name. A tokenizer loop over a string keeps
-  `switch_on_value` / `cursor_index` / `loop` and is role `other`.
-- Bracket pairing uses a bitset of opening positions and one `u32` closing
-  offset per opening, with a stack per bracket kind. An offset lookup uses
-  the opening rank. Dense `{}` input needs about 2.2 index bytes per source
-  byte; unmatched regex brackets add no rescans.
+- `switch (selector)` is `switch_on_value`; computed member calls, including
+  `.call` and `.apply`, are `handler_table`.
+- Equality tests on one resolved symbol with at least three distinct integer
+  constants are `compare_chain`. `h = h(...)` is `threaded`.
+- Indexed reads and byte/string accessors are cursor reads when the bound
+  index advances in the loop. A numerically initialized cursor also qualifies
+  when assigned a new position. Writes in functions stored in the dispatched
+  table count, including `pc++`, `pc += k` and `pc = code.length`. A switch arm
+  dispatching that table shares this evidence.
+- Direct calls to statically bound, unreassigned function declarations propagate
+  an invoking loop for at most 16 edges. This recognizes a loop calling a
+  `step()` helper without repeatedly traversing function bodies. Unknown call
+  targets and values returned by helpers are not inferred.
+- Object positions are `frame_slot`; a repeating frame slot requires an
+  arithmetic advance. A worklist index assigned from `queue.pop()` is unknown.
+- In-place parameter coercions preserve `call_argument`. Definitions and writes
+  are keyed by semantic symbols, never spelling alone.
+- String labels, string accessors, string bindings and `arguments` buffers
+  suppress interpreter roles. Array and typed-array initializers remain
+  explicit buffer refinements. A second lookup retains `through_lookup`.
 
-These are syntactic matches inside one region, not data-flow proof. Anything
-outside the recognized forms stays `unknown`. `dispatch_kind: "unknown"` is
-reserved for a selection mechanism the classifier cannot name; the current
-producer does not emit it, and `kind_counts` always counts it.
+Each AST node and scope is indexed once, inheriting its function and loop from
+its parent. No function body is copied or rescanned for each enclosing function.
+The pinned semantic dependency retains Oxc's binding rules and uses a single
+scope traversal to resolve JavaScript references against its completed bindings;
+see [the dependency maintenance note](../third_party/oxc_semantic/README.md).
+
+Outside these structural rules, selectors stay `unknown`. A parse or semantic
+error produces one counted `parse-failed` artifact omission and no site or table
+proof. The artifact's classification is unknown, not a guessed interpretation of
+a partial AST; recovered claims are withheld with that reason.
 
 ## Record evidence
 
@@ -184,9 +187,8 @@ site, and `omitted_site_count` names the classified sites that are not listed.
 
 Classification work is bounded so a generated script or module cannot stall
 analysis. One meter per artifact covers all classifier work, JavaScript and
-Wasm, and every classifier loop charges it for the work it actually does:
-bracket pairing, loop intervals, statement ends, the region index, if-ladder
-scans, Wasm table parsing and type-matching slot scans, symbolic simulation
+Wasm, using conservative admission charges and explicit query charges for:
+parser admission, AST/scope indexing, selector queries, Wasm table parsing and type-matching slot scans, symbolic simulation
 per operator, `repeats` and slot-advance walks, buffer scans and every trace
 step. The meter also bounds the bytes the index and symbolic traces retain at
 once (128 MiB). A memo hit charges the lookup and the copy it returns, never
@@ -202,9 +204,10 @@ membership are indexed by table during parsing, and canonical signature groups
 share matching-slot lists across all indirect sites.
 
 Producer 1.7.0 and workspace producer 2.10.0 share the same meter through
-classification, lexical claim resolution and workspace table extraction. Vector
-capacities, masks, token/scope indexes, table layouts, matching lists and
-symbolic indexes reserve their retained bytes before growing. Exhaustion in
+classification, semantic claim resolution and workspace table extraction. Vector
+capacities, parser/semantic storage, table layouts, matching lists and symbolic
+indexes reserve their retained bytes before growing. Wasm constant-expression
+operand stacks reserve capacity before each growth, including global initializers. Exhaustion in
 the downstream pass is also recorded on the analysis and any returned workspace.
 A scaling test runs this analysis-to-workspace path, including deep nested
 loops, many element tables, scope noise and dense punctuation. It is distinct
@@ -215,24 +218,40 @@ Each selector query also has a logical step budget of 4096 steps, replayed on
 memo hits so a site's result never depends on query order. It is a semantic
 bound, not a work charge.
 
-Work goes to the strongest dispatch evidence first, so noise cannot starve an
-interpreter. JavaScript regions are classified in pattern-rank order, and the
-sites inside a region in strength order (first a cursor fetch bounded by
-that same buffer's length, then other loop-enclosed cursor-like fetches) before the 4096-site region bound. Every Wasm function is simulated,
-then sites are classified module-wide in strength order.
+JavaScript parser admission pre-charges 64 work units and 192 retained bytes
+per source byte, plus 256 KiB for fixed storage and a 32 MiB recursive stack
+(64 MiB above 1024 nested delimiters or operators).
+The arena and semantic data are dropped after producing compact site/proof
+records. Sources whose reservation exceeds the remaining 128 MiB bound are
+omitted before parsing. A conservative raw-punctuation admission guard also
+refuses more than 8192 nested delimiters or operators in a statement; it may
+refuse an unusually large literal or comment but never produces a claim from it.
+An AST preflight also bounds Oxc's block-hoisting expansion to twice the source
+byte count before building semantic data. It counts intervening block scopes
+times binding-pattern bytes and resets at function boundaries. This bounds the
+upstream binder's redeclaration map without penalizing nested functions. Each
+potential hoist entry reserves another 64 bytes for that map and its growth,
+separately from the arena/semantic allowance.
+These are resource refusals, separate from syntax failure, and are counted.
+
+JavaScript sites are scheduled artifact-wide in structural strength order:
+first a cursor fetch bounded by that same buffer's length, then other
+loop-enclosed fetches, before the 4096-site artifact bound. Every Wasm function
+is simulated, then sites are classified module-wide in strength order.
 
 - When the meter is exhausted, classification stops. Every site found but not
   classified is counted as `classification-work-limit` with `omitted_records`,
-  and the detail counts the regions or functions never examined. The
+  including exhaustion partway through a site: the incomplete record is omitted,
+  not emitted as a literal unknown site. The detail counts artifacts or
+  functions never examined. The
   opcode-claim gate reports such a site as not classified because of the work
   limit, never as "not a cursor-advancing loop".
 - A site whose trace hit the depth, per-query step or alternatives bound, or
   whose Wasm function ran out of symbolic nodes, is classified `unknown` and
   counted as `classification-trace-limit`. A bound never yields a confident
   different source, and no bound cuts a list of writes or stores silently.
-- JavaScript regions beyond the detector's region work bound add
-  `classification-region-limit`. A module whose sections do not decode for
-  classification adds `classification-unavailable`.
+- JavaScript parser admission refusal is a counted `classification-work-limit`.
+  A module whose sections do not decode adds `classification-unavailable`.
 
 ## Downstream use
 
@@ -249,21 +268,33 @@ classification is never an input to handler recovery, tier or score:
   function of the region, at an interpreter-candidate site. A dispatch through
   a temporary (`h = t[op]; h()`) ties nothing, and a table with no such site
   is withheld as unclassified.
-- A table ties only to calls that read its own binding. A token pass over
-  masked source records function, arrow, block, loop-head, catch and class
-  scopes, then resolves uses after indexing hoisted declarations. An arrow's
-  parameters apply only to its own body. Identifiers are complete spans,
-  including long and Unicode names, never bounded prefixes. Implicit
-  `arguments`, named function expression bindings, class-internal names,
-  destructuring and unresolved syntax are ambiguous unless an explicit binding
-  proves the reference. `eval` and `with` make their enclosing function opaque.
-  Automatic semicolon insertion does not hide declarations. Block-function
-  hoisting and uncertain declaration contexts also make the affected name
-  ambiguous in the enclosing function.
-  An exhausted or incomplete scope pass withholds claims with a counted
-  `handler-withheld` omission. A property such as `this.ops` matches only property
-  sites. Operand-width guesses and owned-effect reachability walks use only
-  surviving handlers.
+- A table ties only to references resolving to its declaration's Oxc symbol,
+  with exactly one initializer and no other write that could replace it.
+  Block `let`/`const`, hoisting, Annex B, catch parameters, named functions,
+  parameter defaults, classes and shorthand use Oxc's semantic rules. Unresolved
+  globals and implicit non-arrow `arguments` have no provable table symbol.
+  Direct `eval` or `with` in an enclosing scope makes the proof ambiguous,
+  including executable template interpolations. A failed/incomplete analysis
+  always withholds claims.
+  An Annex B block function's implicit replacement of an existing `var` table
+  also counts as a write, although it has no ordinary reference-write AST node.
+- `obj.ops` requires the same resolved receiver symbol and the same static,
+  non-computed property name. Private `#ops` never matches ordinary `ops`.
+- `this.ops` requires the assignment and dispatch to share the same non-arrow
+  function's `this` binding. Intervening arrows preserve it; a nested non-arrow
+  function, method or class boundary breaks it. The property must be assigned
+  exactly once, before the dispatch loop. Any other write anywhere in the
+  artifact to that property name through any receiver withholds the claim.
+  Computed writes with unknown keys, destructuring targets, `Object.assign`,
+  `defineProperty`/`defineProperties`, `Reflect.set`, and references to those
+  mutator methods are conservatively ambiguous. This includes computed calls
+  through `Object` or `Reflect`, extracted/destructured mutators, object spreads,
+  and other object/class definitions of the property. A write to a different
+  static property is safe.
+  The same conservative property-write check applies to identifier receivers.
+- Operand-width guesses and owned-effect reachability use only surviving
+  handlers. Exact AST case/property spans connect proof records to unchanged
+  recovery; workspace extraction never parses the artifact a second time.
 - The gate reads the roles of every classified site from the same metered
   classification run that produced the analysis, never the bounded listed
   document and never a second classification pass.
@@ -281,7 +312,8 @@ classification is never an input to handler recovery, tier or score:
   structurally an interpreter candidate. `buffer_kind` flags JavaScript string
   buffers; Wasm has no equivalent signal.
 - An opcode fetched through a helper call (`op = next(state)`) is `unknown`.
-  The classifier does not follow calls.
+  Only a statically bound direct helper invocation can propagate loop context;
+  returned values are not followed.
 - Without flow order, an argument that is unconditionally overwritten before
   dispatch still counts as a reaching `call_argument` alternative.
 - A JavaScript rotated loop (`op = code[pc++]` before the loop and at its end)
@@ -292,12 +324,9 @@ classification is never an input to handler recovery, tier or score:
 - On the pinned public QuickJS debug build, 13 of 384 sites are interpreter
   candidates, including the opcode dispatch at function 414; 7 sites are
   trace-limited unknowns, among them byte-cursor format-string parsers.
-- Selector bindings inside the classifier are matched by name inside one
-  region. Shadowed names, destructuring and cross-region aliases are not
-  resolved there; only the opcode-claim gate resolves table scopes. A handler
-  table used through a temporary supplies no opcodes.
+- A table used through a temporary supplies no opcode claims.
 - Structural scheduling is not semantic proof. More than 4096 equally strong
-  sites in one region can still omit a later interpreter. The omitted site count
+  sites in one artifact can still omit a later interpreter. The omitted site count
   is explicit; neither strength ordering nor withholding changes VM ranking.
 - The declared minimum is a lower bound for an imported table, so an imported
   table's out-of-range segment may still fit at instantiation. It is reported,

@@ -1,0 +1,1 @@
+function vm(code, stack){var pc=0;var arguments={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};function step(){var i=0;while(i<code.length){arguments[code[i++]]();}}while(pc<code.length){switch(code[pc]){default:arguments[code[pc]]();}}return stack;}

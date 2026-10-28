@@ -356,6 +356,29 @@ pub(crate) type Generator = (&'static str, &'static str, fn(usize) -> Vec<u8>);
 /// retained bytes may grow at most linearly with the input.
 pub(crate) fn scaling_generators() -> Vec<Generator> {
     vec![
+        ("deep_functions", "javascript", |n| {
+            format!("{}{}{}", "function nest(){".repeat(n), VM, "}".repeat(n)).into_bytes()
+        }),
+        ("scopes_times_identifiers", "javascript", |n| {
+            // Independent scopes with repeated references plus deep scopes
+            // sharing the same outer bindings challenge semantic resolution.
+            format!(
+                "let shared=1;{}{}{}",
+                "function nest(){shared;".repeat(n),
+                "shared;".repeat(n),
+                "}".repeat(n)
+            )
+            .into_bytes()
+        }),
+        ("block_hoists", "javascript", |n| {
+            format!(
+                "function f(){{{}{}{}}}",
+                "{".repeat(n),
+                (0..n).map(|i| format!("var v{i}=0;")).collect::<String>(),
+                "}".repeat(n)
+            )
+            .into_bytes()
+        }),
         ("deep_loops", "javascript", |n| {
             format!("function vm(code,stack){{var pc=0;{}{}while(pc<code.length){{switch(code[pc++]){{case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}}}}}", "while(x){".repeat(n), "switch(code[i++]){case 1:break;}}".repeat(n)).into_bytes()
         }),

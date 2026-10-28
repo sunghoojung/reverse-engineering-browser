@@ -324,145 +324,6 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
     }
     Ok((best, omissions))
 }
-/// Structural dispatch classification of one JavaScript source, run as its
-/// own metered pass after the unchanged scoring pass. It recomputes the same
-/// function regions, then classifies them strongest pattern rank first so
-/// large noise regions cannot starve a real interpreter of the meter.
-fn classify_javascript(source: &str, meter: &dispatch_shape::Meter) -> dispatch_shape::Classified {
-    static SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
-            r"(?:\bfunction\b[^{}]{0,1024}|\([^(){}]{0,1024}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)\s*\{",
-        )
-        .unwrap()
-    });
-    static LOOP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:while|for)\s*\(").unwrap());
-    static DISPATCH: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\bswitch\s*\(|\b[A-Za-z_$][\w$]*\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(")
-            .unwrap()
-    });
-    let mut omissions = Vec::new();
-    let memory = dispatch_shape::Memory::new(meter);
-    if !meter.charge(3 * source.len() as u64) || !memory.keep(source.len() as u64) {
-        meter.count_unexamined(1);
-        return dispatch_shape::Classified {
-            sites: Vec::new(),
-            omissions: meter.omissions("function regions"),
-        };
-    }
-    let masked = mask(source);
-    let mut openings = BTreeMap::new();
-    for m in SIGNATURE.find_iter(&masked) {
-        if openings.len() >= 4096 {
-            break;
-        }
-        if !memory.keep(256) {
-            break;
-        }
-        openings.insert(m.end() - 1, m.start());
-    }
-    let mut stack = Vec::new();
-    let mut regions = vec![(0, source.len())];
-    let mut parameters = BTreeMap::<usize, Vec<String>>::new();
-    for (i, c) in masked.bytes().enumerate() {
-        if c == b'{' {
-            if !memory.push(&mut stack, i as u32) {
-                break;
-            }
-        } else if c == b'}'
-            && let Some(start) = stack.pop().map(|offset| offset as usize)
-            && let Some(signature) = openings.remove(&start)
-        {
-            regions.push((start + 1, i));
-            parameters.insert(
-                start + 1,
-                dispatch_shape::javascript::parameters(&masked[signature..=start], &memory, meter),
-            );
-        }
-    }
-    regions.sort_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
-    let mut children = BTreeMap::<(usize, usize), Vec<(usize, usize)>>::new();
-    let mut parents = Vec::<(usize, usize)>::new();
-    for region in &regions {
-        while parents.last().is_some_and(|p| region.0 >= p.1) {
-            parents.pop();
-        }
-        if let Some(parent) = parents.last().filter(|p| region.1 <= p.1) {
-            children.entry(*parent).or_default().push(*region);
-        }
-        parents.push(*region);
-    }
-    let region_text = |start: usize, end: usize| {
-        let mut bytes = masked.as_bytes()[start..end].to_vec();
-        for (a, b) in children.get(&(start, end)).into_iter().flatten() {
-            bytes[a - start..b - start].fill(b' ');
-        }
-        String::from_utf8(bytes).expect("masked nested source")
-    };
-    // The same structural rank the scoring pass gives each region, so the
-    // strongest dispatch evidence is classified first.
-    let mut ranked = Vec::new();
-    let mut work = 0usize;
-    for (start, end) in regions {
-        if work + end - start > 64 * 1024 * 1024 {
-            omissions.push(json!({"reason":"classification-region-limit","detail":"Function regions past the JavaScript region work bound were not searched for dispatch sites."}));
-            break;
-        }
-        work += end - start;
-        if !meter.charge((1 + JS_RULES.len() as u64) * (end - start) as u64) {
-            meter.count_unexamined(1);
-            continue;
-        }
-        let temporary = dispatch_shape::Memory::new(meter);
-        if !temporary.keep((end - start) as u64) {
-            meter.count_unexamined(1);
-            continue;
-        }
-        let region = region_text(start, end);
-        let mut observations = Vec::new();
-        if let (Some(a), Some(b)) = (LOOP.find(&region), DISPATCH.find(&region)) {
-            observations.push(observation("js.dispatch-loop", a.start(), b.end(), ""));
-        }
-        for (id, _, patterns) in JS_RULES.iter() {
-            if patterns.iter().any(|pattern| pattern.is_match(&region)) {
-                observations.push(observation(id, 0, 1, ""));
-            }
-        }
-        ranked.push((rank(&observations), start, end));
-    }
-    ranked.sort_by_key(|((score, families), start, _)| {
-        (
-            std::cmp::Reverse(*score),
-            std::cmp::Reverse(*families),
-            *start,
-        )
-    });
-    let lines = dispatch_shape::javascript::Lines::new(source, meter);
-    let mut sites = Vec::new();
-    for (_, start, end) in ranked {
-        if meter.exhausted() {
-            meter.count_unexamined(1);
-            continue;
-        }
-        if !meter.retain((end - start) as u64) {
-            meter.count_unexamined(1);
-            continue;
-        }
-        let region = region_text(start, end);
-        dispatch_shape::javascript::classify_region(
-            source,
-            &lines,
-            &region,
-            start,
-            parameters.get(&start).map_or(&[], Vec::as_slice),
-            &mut sites,
-            meter,
-        );
-        meter.release(region.len() as u64);
-    }
-    omissions.extend(meter.omissions("function regions"));
-    dispatch_shape::Classified { sites, omissions }
-}
-
 /// Classify an artifact's dispatch sites under one fresh meter.
 fn classify_artifact(
     runtime: &str,
@@ -470,9 +331,10 @@ fn classify_artifact(
     meter: &dispatch_shape::Meter,
 ) -> Option<dispatch_shape::Classified> {
     match runtime {
-        "javascript" => Some(classify_javascript(std::str::from_utf8(bytes).ok()?, meter)),
+        "javascript" => Some(dispatch_shape::javascript::classify(std::str::from_utf8(bytes).ok()?, meter)),
         "webassembly" => Some(dispatch_shape::wasm(bytes, meter).unwrap_or(
             dispatch_shape::Classified {
+                javascript: None,
                 sites: Vec::new(),
                 omissions: vec![json!({"reason":"classification-unavailable","detail":"The module sections did not decode for dispatch classification."})],
             },
@@ -1666,7 +1528,7 @@ mod dispatch_shape_tests {
                 }
                 assert_eq!(site["confidence"], "structural");
                 assert_eq!(site["artifact_id"], "7");
-                assert!(site["selector"]["expression"].as_str().unwrap().len() > 1);
+                assert!(!site["selector"]["expression"].as_str().unwrap().is_empty());
             }
             if failed {
                 let summary = sites

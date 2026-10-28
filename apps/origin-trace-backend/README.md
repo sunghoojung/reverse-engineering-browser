@@ -56,9 +56,16 @@ retains its historical provenance; a current native session never relabels it.
 ## Dispatch classification and opcode claims
 
 Classification and workspace extraction share one per-artifact work and memory
-budget. The lexical gate only removes recovered opcode claims and reports their
+budget. The parsed semantic gate only removes recovered opcode claims and reports their
 count; it never changes the detector tier, score, finding ID or dispatch
 inventory. See the [classification contract](../../protocol/vm-dispatch-classification-v1.md).
 The scaling test exercises analysis plus workspace extraction, and the ignored
 `vm_opcode::tests::measure_classifier_pipeline` test accepts a newline-separated
 input list through `REB_CLASSIFIER_MEASURE_INPUTS` for local measurements.
+
+JavaScript classification uses exact Oxc 0.155.0 dependencies and a narrow
+[pinned semantic resolver patch](../../third_party/oxc_semantic/README.md).
+The successful parse is shared by classification and binding proof; parser
+admission and arena/stack storage are charged before allocation. The
+[owned retention ledger](../../tools/fixtures/dispatch-retention/README.md)
+checks emitted claims and separately verifies runtime ground truth with Node.

@@ -1,0 +1,1056 @@
+{
+  "format": "owned-dispatch-retention-v1",
+  "cases": [
+    {
+      "file": "owned/array_table.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "vm([0,42,2],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/arrow_handlers.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/asi_minified.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/assigned_table.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/async_wrapper.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/block_const.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/block_let.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/block_var.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/class_vm.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "new VM().run([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/const_table.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/control.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/do_while.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/enclosing_iife.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "\"IIFE completed\"",
+        "value": "\"IIFE completed\""
+      }
+    },
+    {
+      "file": "owned/for_forever.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/generator_wrapper.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[]).next().value",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/handler_pc.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[1]"
+      }
+    },
+    {
+      "file": "owned/let_table.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/map_table.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/module_table.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "(run(),stack)",
+        "value": "[4]"
+      }
+    },
+    {
+      "file": "owned/parameter_table.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "vm([1,42,3],[],{})",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/passed_table.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "owned/this_table.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/annexb.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "withhold: hoisted inner Annex B binding shadows outer ops, even in an unexecuted block",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "Cannot read properties of undefined (reading '1')"
+      }
+    },
+    {
+      "file": "attack/catch_binding.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: catch parameter shadows the recovered table",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "attack/comments.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/computed_key.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/destructure_default.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: destructured default parameter shadows the recovered table",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "attack/different_receivers.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: dispatch resolves second, while the table assignment resolves first",
+      "runtime": {
+        "call": "vm([1],[],{},{ops:{1(){throw new Error(\"SECOND_TABLE\")}}})",
+        "error": "Error",
+        "message": "SECOND_TABLE"
+      }
+    },
+    {
+      "file": "attack/eval.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: direct eval replaces the table",
+      "runtime": {
+        "call": "vm([1],[],{1(){throw new Error(\"REPLACEMENT_TABLE\")}})",
+        "error": "Error",
+        "message": "REPLACEMENT_TABLE"
+      }
+    },
+    {
+      "file": "attack/export_const.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "withhold: handler functions cannot access the VM function locals; base emits no claims",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "ReferenceError",
+        "message": "stack is not defined"
+      }
+    },
+    {
+      "file": "attack/getter.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "(globalThis.stack=[],vm([1,42,3],stack),stack)",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/import_shadow.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/initializer_control.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: uninvoked step dispatches through its own initialized ops; outer loop never uses recovered ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[1,1,1]"
+      }
+    },
+    {
+      "file": "attack/label.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/multiline_initializer.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: newline does not end the initializer; step has its own ops symbol and is never invoked",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[1,1,1]"
+      }
+    },
+    {
+      "file": "attack/nested_arrows.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "withhold: arrow parameter shadows the recovered table",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "attack/optional.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/private_field.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: dispatch uses private #ops, not local ops",
+      "runtime": {
+        "call": "new VM().run([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this[#ops][code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "attack/reassigned.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: assignment replaces the recovered table",
+      "runtime": {
+        "call": "vm([1],[],{1(){throw new Error(\"REPLACEMENT_TABLE\")}})",
+        "error": "Error",
+        "message": "REPLACEMENT_TABLE"
+      }
+    },
+    {
+      "file": "attack/regex_braces.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "genuine interpreter; unchanged base recovery emits no handlers",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/regex_fake_function.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/setter.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: setter parameter shadows the recovered table",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "attack/tdz.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: block let binding shadows the table before initialization",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "ReferenceError",
+        "message": "Cannot access 'ops' before initialization"
+      }
+    },
+    {
+      "file": "attack/template_braces.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/template_eval.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: template interpolation executes direct eval and replaces the table",
+      "runtime": {
+        "call": "vm([1],[],{1(){throw new Error(\"REPLACEMENT_TABLE\")}})",
+        "error": "Error",
+        "message": "REPLACEMENT_TABLE"
+      }
+    },
+    {
+      "file": "attack/template_shadow.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "withhold: template expression replaces the outer table",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "attack/var_hoist.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "withhold: hoisted inner var shadows the recovered table before initialization",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "Cannot read properties of undefined (reading '1')"
+      }
+    },
+    {
+      "file": "attack/with.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: with environment shadows the recovered table",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "corpus-losses/f2-007a28f4.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: one-shot argument multiplexer",
+      "runtime": {
+        "call": "route(1,[1,42,3],[])",
+        "value": "undefined"
+      }
+    },
+    {
+      "file": "corpus-losses/f2-cedd5da0.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: one-shot argument multiplexer",
+      "runtime": {
+        "call": "route(1,[1,42,3],[])",
+        "value": "undefined"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_annexb-c7443be8.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_arguments-68090272.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_arguments-ede409e4.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_class_asi-7d372f50.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_control-58be5a73.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_default-c6a2fc77.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_function-99873afa.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_hoist-22687121.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_longname-5c4f3a6a.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_longname-d71fafd9.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_namedexpr-180f3bd5.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_namedexpr-424502e6.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_unicode0-c9360e2b.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_unicode1-481825c7.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_unicode1-555bf222.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_unicode2-a469dbb4.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_unicode2-eb644300.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/gate_varblock-d738115f.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/j_regex_loop-1a7ccc84.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: regex loop precedes a separate one-shot switch",
+      "runtime": {
+        "call": "run([1,42,3])",
+        "error": "ReferenceError",
+        "message": "s is not defined"
+      }
+    },
+    {
+      "file": "corpus-losses/j_regex_loop-c8abf429.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: regex loop precedes a separate one-shot switch",
+      "runtime": {
+        "call": "run([1,42,3])",
+        "error": "ReferenceError",
+        "message": "s is not defined"
+      }
+    },
+    {
+      "file": "corpus-losses/j_shadow2-18c74058.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/j_shadow2-95f53959.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/j_shadow2_ctl-070349ae.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/j_shadow2_ctl-c88d6447.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,1,3],[])",
+        "value": "[1,1]"
+      }
+    },
+    {
+      "file": "corpus-losses/t1_nested_ops-2e59b45c.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "corpus-losses/t1_nested_ops-3d3cd858.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/arrow_preserves_this.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/assignment_after_loop.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: assignment does not precede dispatch loop",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "Cannot read properties of undefined (reading '1')"
+      }
+    },
+    {
+      "file": "this/assignment_inside_loop.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: assignment is inside the loop, not before it",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/class_breaks_this.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: class introduces a different this binding",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "Cannot read properties of undefined (reading '1')"
+      }
+    },
+    {
+      "file": "this/computed_known_write.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: computed key writes ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/computed_mutator.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: computed Object mutator replaces ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/computed_unknown_write.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: computed key can write ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/define_property.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: defineProperty replaces ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/destructuring_target.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: destructuring assignment replaces this.ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/method_breaks_this.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: method introduces a different this binding",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "Cannot read properties of undefined (reading '1')"
+      }
+    },
+    {
+      "file": "this/mutator_alias.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: extracted mutator can replace ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/nested_function_breaks_this.js",
+      "base_handlers": 0,
+      "expected_handlers": 0,
+      "judgment": "withhold: nested non-arrow function introduces a different this binding",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/object_assign.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: Object.assign replaces ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/other_receiver_write.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: another receiver writes the same property name",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/reflect_set.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: Reflect.set replaces ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/same_function.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/second_assignment.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: a second assignment replaces this.ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "this.ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "this/unrelated_property.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "genuine interpreter",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/other_literal_write.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: another object literal initializes ops",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/quoted_literal_write.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: another object literal initializes quoted ops",
+      "runtime": {
+        "call": "vm.call({},[1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/destructured_mutator.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: destructured mutator can replace ops",
+      "runtime": {
+        "call": "vm.call({},[1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/class_method_write.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: another class defines an ops property",
+      "runtime": {
+        "call": "vm.call({},[1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "this/spread_write.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "withhold: spread can copy an ops property",
+      "runtime": {
+        "call": "vm.call({},[1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/annexb_overwrite.js",
+      "base_handlers": 3,
+      "expected_handlers": 0,
+      "judgment": "Annex B runtime replacement",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "error": "TypeError",
+        "message": "ops[code[(pc++)]] is not a function"
+      }
+    },
+    {
+      "file": "attack/annexb_lexical_block.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "positive control; lexical or strict scope suppresses Annex B replacement",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    },
+    {
+      "file": "attack/annexb_strict.js",
+      "base_handlers": 3,
+      "expected_handlers": 3,
+      "judgment": "positive control; lexical or strict scope suppresses Annex B replacement",
+      "runtime": {
+        "call": "vm([1,42,3],[])",
+        "value": "[42]"
+      }
+    }
+  ]
+}

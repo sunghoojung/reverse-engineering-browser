@@ -170,6 +170,8 @@ pub(crate) fn role(
 }
 
 pub(crate) struct Site {
+    /// Structural scheduling strength, never a ranking score.
+    pub strength: u8,
     pub kind: Kind,
     pub source: Source,
     pub repeats: Repeats,
@@ -219,7 +221,7 @@ impl Site {
     /// Bytes this record keeps until the document is written, charged to
     /// the artifact meter so a module of millions of sites stays bounded.
     pub fn retained_bytes(&self) -> u64 {
-        (std::mem::size_of::<Self>() + self.selector_expression.capacity()) as u64
+        (std::mem::size_of::<Self>() * 2 + self.selector_expression.capacity()) as u64
     }
 
     pub fn role(&self) -> Role {
@@ -266,7 +268,13 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
         *kind_counts.get_mut(site.kind.label()).expect("kind") += 1;
     }
     let total = sites.len();
-    sites.sort_by_key(|site| (site.role(), site.byte_offset));
+    sites.sort_by_key(|site| {
+        (
+            site.role(),
+            std::cmp::Reverse(site.strength),
+            site.byte_offset,
+        )
+    });
     sites.truncate(MAX_LISTED_SITES);
     sites.sort_by_key(|site| site.byte_offset);
     let listed = sites
@@ -428,6 +436,7 @@ struct Frame {
 /// right number of unknown values instead of wiping the stack.
 struct Facts<'a> {
     meter: &'a Meter,
+    memory: Memory,
     params: u32,
     nodes: Vec<Node>,
     defs: BTreeMap<u32, Vec<(usize, NodeId)>>,
@@ -458,22 +467,190 @@ struct Facts<'a> {
     slot_advance_memo: RefCell<HashMap<SlotAdvanceKey, bool>>,
     /// Whether a loop stores an advance of a slot back, keyed by (slot,
     /// carrier, loop): every site reading that slot shares one walk.
-    loop_store_memo: RefCell<HashMap<LoopStoreKey, bool>>,
+    loop_store_memo: RefCell<HashMap<LoopStoreKey, Vec<usize>>>,
     /// Loops sorted by start with each one's enclosing loop, built once, so
     /// a containment query walks only the nesting chain.
-    loop_tree: OnceCell<LoopTree>,
+    loop_tree: OnceCell<Intervals>,
 }
 
 /// (followed local, slot, carrier local).
 type SlotAdvanceKey = (u32, SlotKey, Option<u32>);
 /// (slot, carrier local, loop range).
-type LoopStoreKey = (SlotKey, Option<u32>, (usize, usize));
+type LoopStoreKey = (SlotKey, Option<u32>);
 
-struct LoopTree {
-    /// Loop ranges by start, outer before inner at the same start.
-    sorted: Vec<(usize, usize)>,
-    /// Index of each loop's innermost enclosing loop.
-    parents: Vec<Option<usize>>,
+/// Opening-bracket rank maps a byte offset to one u32 closing offset. Dense
+/// punctuation costs about 2.2 bytes per source byte, not a hash bucket per
+/// pair. The bitset is the only byte-position index; stacks hold pair ranks.
+pub(crate) struct Brackets {
+    openings: Vec<u64>,
+    ranks: Vec<u32>,
+    closing: Vec<u32>,
+    _memory: Memory,
+}
+
+impl Brackets {
+    pub fn new(text: &str, meter: &Meter) -> Self {
+        let memory = Memory::new(meter);
+        let mut this = Self {
+            openings: Vec::new(),
+            ranks: Vec::new(),
+            closing: Vec::new(),
+            _memory: memory,
+        };
+        if !meter.charge(text.len() as u64 * 2) || text.len() >= u32::MAX as usize {
+            return this;
+        }
+        let words = text.len().div_ceil(64);
+        let count = text.bytes().filter(|b| b"([{".contains(b)).count();
+        if !this._memory.keep((words * 12 + count * 4) as u64) {
+            return this;
+        }
+        this.openings = vec![0; words];
+        this.ranks = vec![0; words];
+        this.closing = Vec::with_capacity(count);
+        let mut stacks: [Vec<u32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (at, byte) in text.bytes().enumerate() {
+            let (kind, opening) = match byte {
+                b'(' => (0, true),
+                b'[' => (1, true),
+                b'{' => (2, true),
+                b')' => (0, false),
+                b']' => (1, false),
+                b'}' => (2, false),
+                _ => continue,
+            };
+            if opening {
+                this.openings[at / 64] |= 1 << (at % 64);
+                if !this
+                    ._memory
+                    .push(&mut stacks[kind], this.closing.len() as u32)
+                {
+                    return this;
+                }
+                this.closing.push(u32::MAX);
+            } else if let Some(index) = stacks[kind].pop() {
+                this.closing[index as usize] = at as u32;
+            }
+        }
+        let mut rank = 0;
+        for (bits, prefix) in this.openings.iter().zip(&mut this.ranks) {
+            *prefix = rank;
+            rank += bits.count_ones();
+        }
+        this
+    }
+
+    pub fn close(&self, at: usize) -> Option<usize> {
+        let bits = *self.openings.get(at / 64)?;
+        let bit = 1u64 << (at % 64);
+        if bits & bit == 0 {
+            return None;
+        }
+        let index = self.ranks[at / 64] + (bits & (bit - 1)).count_ones();
+        let close = *self.closing.get(index as usize)?;
+        (close != u32::MAX).then_some(close as usize)
+    }
+}
+
+/// Structured interval index. A sweep records the active innermost interval
+/// at every boundary. Binary lifting finds the first enclosing interval
+/// satisfying a monotone predicate in at most 32 probes, independent of
+/// nesting depth. Offsets and interval identities are bounded by u32.
+pub(crate) struct Intervals {
+    pub ranges: Vec<(usize, usize)>,
+    jumps: Vec<[u32; 32]>,
+    roots: Vec<u32>,
+    points: Vec<(usize, u32)>,
+    _memory: Memory,
+}
+
+impl Intervals {
+    pub fn new(mut ranges: Vec<(usize, usize)>, meter: &Meter) -> Self {
+        let memory = Memory::new(meter);
+        let mut this = Self {
+            ranges: Vec::new(),
+            jumps: Vec::new(),
+            roots: Vec::new(),
+            points: Vec::new(),
+            _memory: memory,
+        };
+        // Covers capacity, sorting and sweep temporaries as well as the index.
+        if !meter.charge(ranges.len() as u64 * 64)
+            || !this._memory.keep(ranges.len() as u64 * 256)
+            || ranges.len() >= u32::MAX as usize
+        {
+            return this;
+        }
+        ranges.sort_unstable_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
+        ranges.dedup();
+        this.jumps = Vec::with_capacity(ranges.len());
+        this.roots = Vec::with_capacity(ranges.len());
+        this.points = Vec::with_capacity(ranges.len() * 2);
+        let mut open = Vec::<usize>::with_capacity(ranges.len());
+        for (index, &(start, end)) in ranges.iter().enumerate() {
+            while let Some(&top) = open.last() {
+                if ranges[top].1 > start && ranges[top].1 >= end {
+                    break;
+                }
+                let closing = ranges[open.pop().unwrap()].1.min(start);
+                this.points
+                    .push((closing, open.last().map_or(u32::MAX, |s| *s as u32)));
+            }
+            let mut jump = [u32::MAX; 32];
+            jump[0] = open.last().map_or(u32::MAX, |s| *s as u32);
+            for level in 1..32 {
+                if jump[level - 1] != u32::MAX {
+                    jump[level] = this.jumps[jump[level - 1] as usize][level - 1];
+                }
+            }
+            this.roots
+                .push(open.last().map_or(index as u32, |s| this.roots[*s]));
+            this.jumps.push(jump);
+            this.points.push((start, index as u32));
+            open.push(index);
+        }
+        while let Some(top) = open.pop() {
+            this.points
+                .push((ranges[top].1, open.last().map_or(u32::MAX, |s| *s as u32)));
+        }
+        this.ranges = ranges;
+        this
+    }
+
+    pub fn at(&self, at: usize) -> Option<usize> {
+        let i = self
+            .points
+            .partition_point(|(offset, _)| *offset <= at)
+            .checked_sub(1)?;
+        let index = self.points[i].1;
+        (index != u32::MAX).then_some(index as usize)
+    }
+
+    pub fn innermost(&self, at: usize) -> Option<(usize, usize)> {
+        self.at(at).map(|i| self.ranges[i])
+    }
+
+    pub fn matching(
+        &self,
+        mut index: usize,
+        mut matches: impl FnMut((usize, usize)) -> bool,
+    ) -> Option<(usize, usize)> {
+        let root = self.roots[index] as usize;
+        if !matches(self.ranges[root]) {
+            return None;
+        }
+        if matches(self.ranges[index]) {
+            return Some(self.ranges[index]);
+        }
+        for level in (0..32).rev() {
+            let parent = self.jumps[index][level];
+            if parent != u32::MAX && !matches(self.ranges[parent as usize]) {
+                index = parent as usize;
+            }
+        }
+        let parent = self.jumps[index][0];
+        (parent != u32::MAX).then(|| self.ranges[parent as usize])
+    }
 }
 
 /// A local trace plus what computing it fresh costs: the steps it consumes
@@ -630,20 +807,15 @@ fn ends_flow(op: &Operator<'_>) -> bool {
 }
 
 impl<'a> Facts<'a> {
-    /// Estimated bytes this function's symbolic facts keep.
-    fn retained_bytes(&self) -> u64 {
-        (self.nodes.len() * std::mem::size_of::<Node>()
-            + self.defs.values().map(Vec::len).sum::<usize>() * 16
-            + self.stores.len() * 32
-            + (self.loops.len() + self.dispatch.len() + self.compares.len()) * 32) as u64
-    }
-
     fn node(&mut self, node: Node) -> NodeId {
         if self.nodes.len() >= MAX_NODES {
             self.nodes_exhausted = true;
             return UNKNOWN;
         }
-        self.nodes.push(node);
+        if !self.memory.push(&mut self.nodes, node) {
+            self.nodes_exhausted = true;
+            return UNKNOWN;
+        }
         self.nodes.len() - 1
     }
 
@@ -656,6 +828,7 @@ impl<'a> Facts<'a> {
     ) -> Option<Self> {
         let mut facts = Facts {
             meter,
+            memory: Memory::new(meter),
             params,
             nodes: vec![Node::Unknown],
             defs: BTreeMap::new(),
@@ -678,6 +851,12 @@ impl<'a> Facts<'a> {
             loop_store_memo: RefCell::new(HashMap::new()),
             loop_tree: OnceCell::new(),
         };
+        if !facts
+            .memory
+            .keep((std::mem::size_of::<Node>() + 128) as u64)
+        {
+            return None;
+        }
         if let Some(v) = validator.as_mut() {
             let mut locals = body.get_locals_reader().ok()?;
             for _ in 0..locals.get_count() {
@@ -689,6 +868,7 @@ impl<'a> Facts<'a> {
                 }
             }
         }
+        let temporary = Memory::new(meter);
         let mut reader = body.get_operators_reader().ok()?;
         let mut stack: Vec<NodeId> = Vec::new();
         let mut frames: Vec<Frame> = Vec::new();
@@ -723,56 +903,72 @@ impl<'a> Facts<'a> {
                     for _ in 0..carried {
                         pop(&mut stack);
                     }
-                    frames.push(Frame {
-                        height: stack.len(),
-                        is_loop: matches!(op, Operator::Loop { .. }),
-                        start,
-                    });
-                    stack.extend(std::iter::repeat_n(UNKNOWN, carried));
+                    temporary.push(
+                        &mut frames,
+                        Frame {
+                            height: stack.len(),
+                            is_loop: matches!(op, Operator::Loop { .. }),
+                            start,
+                        },
+                    );
+                    for _ in 0..carried {
+                        if !meter.charge(1) || !temporary.push(&mut stack, UNKNOWN) {
+                            return None;
+                        }
+                    }
                 }
                 Operator::Else => {
                     if let Some(frame) = frames.last() {
                         stack.truncate(frame.height);
                     }
                     let carried = arity.map_or(0, |(_, params)| params as usize);
-                    stack.extend(std::iter::repeat_n(UNKNOWN, carried));
+                    for _ in 0..carried {
+                        if !meter.charge(1) || !temporary.push(&mut stack, UNKNOWN) {
+                            return None;
+                        }
+                    }
                 }
                 Operator::End => {
                     if let Some(frame) = frames.pop() {
                         stack.truncate(frame.height);
                         if frame.is_loop {
-                            facts.loops.push((frame.start, end));
+                            facts.memory.push(&mut facts.loops, (frame.start, end));
                         }
                         let results = arity.map_or(0, |(_, results)| results as usize);
-                        stack.extend(std::iter::repeat_n(UNKNOWN, results));
+                        for _ in 0..results {
+                            if !meter.charge(1) || !temporary.push(&mut stack, UNKNOWN) {
+                                return None;
+                            }
+                        }
                     }
                 }
                 Operator::LocalGet { local_index } => {
                     let id = facts.node(Node::Local(*local_index));
-                    stack.push(id);
+                    temporary.push(&mut stack, id);
                 }
                 Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
                     let value = pop(&mut stack);
+                    if !facts.defs.contains_key(local_index) && !facts.memory.keep(96) {
+                        return None;
+                    }
                     facts
-                        .defs
-                        .entry(*local_index)
-                        .or_default()
-                        .push((start, value));
+                        .memory
+                        .push(facts.defs.entry(*local_index).or_default(), (start, value));
                     if matches!(op, Operator::LocalTee { .. }) {
-                        stack.push(value);
+                        temporary.push(&mut stack, value);
                     }
                 }
                 Operator::GlobalGet { global_index } => {
                     let id = facts.node(Node::Global(*global_index));
-                    stack.push(id);
+                    temporary.push(&mut stack, id);
                 }
                 Operator::I32Const { value } => {
                     let id = facts.node(Node::Const(i64::from(*value)));
-                    stack.push(id);
+                    temporary.push(&mut stack, id);
                 }
                 Operator::I64Const { value } => {
                     let id = facts.node(Node::Const(*value));
-                    stack.push(id);
+                    temporary.push(&mut stack, id);
                 }
                 Operator::BrIf { .. } => {
                     let condition = pop(&mut stack);
@@ -780,14 +976,17 @@ impl<'a> Facts<'a> {
                 }
                 Operator::BrTable { targets } => {
                     let selector = pop(&mut stack);
-                    facts.dispatch.push(Dispatch {
-                        op: DispatchOp::BrTable {
-                            arms: targets.len(),
+                    facts.memory.push(
+                        &mut facts.dispatch,
+                        Dispatch {
+                            op: DispatchOp::BrTable {
+                                arms: targets.len(),
+                            },
+                            offset: start,
+                            size: end - start,
+                            selector,
                         },
-                        offset: start,
-                        size: end - start,
-                        selector,
-                    });
+                    );
                     if let Some(frame) = frames.last() {
                         stack.truncate(frame.height);
                     } else {
@@ -803,16 +1002,19 @@ impl<'a> Facts<'a> {
                     table_index,
                 } => {
                     let selector = pop(&mut stack);
-                    facts.dispatch.push(Dispatch {
-                        op: DispatchOp::CallIndirect {
-                            table: *table_index,
-                            ty: *type_index,
-                            tail: matches!(op, Operator::ReturnCallIndirect { .. }),
+                    facts.memory.push(
+                        &mut facts.dispatch,
+                        Dispatch {
+                            op: DispatchOp::CallIndirect {
+                                table: *table_index,
+                                ty: *type_index,
+                                tail: matches!(op, Operator::ReturnCallIndirect { .. }),
+                            },
+                            offset: start,
+                            size: end - start,
+                            selector,
                         },
-                        offset: start,
-                        size: end - start,
-                        selector,
-                    });
+                    );
                     let Some((params, results)) = arity else {
                         // Without arity the call's operands and results are
                         // unknown: drop to the frame floor, never guess.
@@ -834,7 +1036,7 @@ impl<'a> Facts<'a> {
                             } else {
                                 UNKNOWN
                             };
-                            stack.push(id);
+                            temporary.push(&mut stack, id);
                         }
                     }
                 }
@@ -855,7 +1057,7 @@ impl<'a> Facts<'a> {
                         } else {
                             UNKNOWN
                         };
-                        stack.push(id);
+                        temporary.push(&mut stack, id);
                     }
                 }
                 other => {
@@ -867,25 +1069,31 @@ impl<'a> Facts<'a> {
                             offset,
                             at: start,
                         });
-                        stack.push(id);
+                        temporary.push(&mut stack, id);
                     } else if let Some(offset) = store_offset(other) {
                         let value = pop(&mut stack);
                         let addr = pop(&mut stack);
-                        facts.stores.push((start, addr, offset, value));
+                        facts
+                            .memory
+                            .push(&mut facts.stores, (start, addr, offset, value));
                     } else if let Some(name) = binary_op(other) {
                         let b = pop(&mut stack);
                         let a = pop(&mut stack);
                         let id = facts.node(Node::Bin { op: name, a, b });
-                        stack.push(id);
+                        temporary.push(&mut stack, id);
                     } else if let Some(name) = unary_op(other) {
                         let a = pop(&mut stack);
                         let id = facts.node(Node::Un { op: name, a });
-                        stack.push(id);
+                        temporary.push(&mut stack, id);
                     } else if let Some((params, results)) = arity {
                         for _ in 0..params {
                             pop(&mut stack);
                         }
-                        stack.extend(std::iter::repeat_n(UNKNOWN, results as usize));
+                        for _ in 0..results {
+                            if !meter.charge(1) || !temporary.push(&mut stack, UNKNOWN) {
+                                return None;
+                            }
+                        }
                     } else {
                         // Without validator arity the effect is unknown; drop
                         // to the frame floor so no stale value becomes a selector.
@@ -897,7 +1105,7 @@ impl<'a> Facts<'a> {
                 }
             }
         }
-        Some(facts)
+        (!meter.exhausted()).then_some(facts)
     }
 
     fn compare(&mut self, condition: NodeId, offset: usize, size: usize) {
@@ -918,12 +1126,15 @@ impl<'a> Facts<'a> {
             _ => None,
         };
         if let Some((subject, constant)) = pair {
-            self.compares.push(Compare {
-                subject,
-                constant,
-                offset,
-                size,
-            });
+            self.memory.push(
+                &mut self.compares,
+                Compare {
+                    subject,
+                    constant,
+                    offset,
+                    size,
+                },
+            );
         }
     }
 
@@ -1043,51 +1254,25 @@ impl<'a> Facts<'a> {
         let advanced = defs
             .iter()
             .any(|(_, def)| self.advances_itself(*def, local));
-        self.advanced_memo.borrow_mut().insert(local, advanced);
+        if self.memory.keep(64) {
+            self.advanced_memo.borrow_mut().insert(local, advanced);
+        }
         advanced
     }
 
-    /// The loops strictly containing an offset, innermost first. Wasm
-    /// control is structured, so loops nest and the innermost one that
-    /// starts before the offset leads up the chain to every container.
-    fn enclosing_loops(&self, offset: usize) -> Vec<(usize, usize)> {
-        let LoopTree { sorted, parents } = self.loop_tree.get_or_init(|| {
-            self.meter.charge(self.loops.len() as u64 * 2);
-            let mut sorted = self.loops.clone();
-            sorted.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
-            let mut parents = Vec::with_capacity(sorted.len());
-            let mut open = Vec::<usize>::new();
-            for (index, (start, _)) in sorted.iter().enumerate() {
-                while open.last().is_some_and(|top| sorted[*top].1 <= *start) {
-                    open.pop();
-                }
-                parents.push(open.last().copied());
-                open.push(index);
-            }
-            LoopTree { sorted, parents }
-        });
-        let mut found = Vec::new();
-        let mut at = sorted
-            .partition_point(|(start, _)| *start < offset)
-            .checked_sub(1);
-        while let Some(index) = at {
-            self.meter.charge(1);
-            let (start, end) = sorted[index];
-            if start < offset && offset < end {
-                found.push((start, end));
-            }
-            at = parents[index];
-        }
-        found
+    fn loop_index(&self) -> &Intervals {
+        self.loop_tree
+            .get_or_init(|| Intervals::new(self.loops.clone(), self.meter))
     }
 
     fn in_any_loop(&self, offset: usize) -> bool {
-        !self.enclosing_loops(offset).is_empty()
+        self.meter.charge(32);
+        self.loop_index().at(offset).is_some()
     }
 
-    /// The innermost loop containing an offset, as a merge key.
     fn innermost_loop(&self, offset: Option<usize>) -> Option<(usize, usize)> {
-        self.enclosing_loops(offset?).first().copied()
+        self.meter.charge(32);
+        self.loop_index().innermost(offset?)
     }
 
     /// One logical trace step against the query's budget, and one unit of
@@ -1130,10 +1315,16 @@ impl<'a> Facts<'a> {
             self.meter.charge(self.stores.len() as u64);
             let mut groups = HashMap::<SlotKey, Vec<(usize, NodeId)>>::new();
             for (offset, addr, store_offset, value) in &self.stores {
-                groups
-                    .entry(self.slot_key(*addr, *store_offset))
-                    .or_default()
-                    .push((*offset, *value));
+                let key = self.slot_key(*addr, *store_offset);
+                if !groups.contains_key(&key) && !self.memory.keep(128 + key.0.len() as u64) {
+                    break;
+                }
+                if !self
+                    .memory
+                    .push(groups.entry(key).or_default(), (*offset, *value))
+                {
+                    break;
+                }
             }
             groups
         });
@@ -1166,7 +1357,12 @@ impl<'a> Facts<'a> {
             };
             stable.then(|| self.slot_key(addr, offset))
         });
-        self.reloaded_memo.borrow_mut().insert(local, slot.clone());
+        if self
+            .memory
+            .keep(96 + slot.as_ref().map_or(0, |slot| slot.0.len()) as u64)
+        {
+            self.reloaded_memo.borrow_mut().insert(local, slot.clone());
+        }
         slot
     }
 
@@ -1244,7 +1440,22 @@ impl<'a> Facts<'a> {
         let depth_cut = self.depth_cut.get();
         // A cycle or the depth bound depends on where the query started, so
         // only budget-independent outcomes and budget exhaustion are kept.
-        if !depth_cut && (!provisional || limited) {
+        if !depth_cut
+            && (!provisional || limited)
+            && self.memory.keep(
+                128 + traces
+                    .iter()
+                    .map(|trace| {
+                        256 + trace.advancing.capacity() as u64 * 4
+                            + trace
+                                .slots
+                                .iter()
+                                .map(|(_, slot)| 64 + slot.0.len() as u64)
+                                .sum::<u64>()
+                    })
+                    .sum::<u64>(),
+            )
+        {
             self.local_memo.borrow_mut().insert(
                 local,
                 Memo {
@@ -1490,7 +1701,9 @@ impl<'a> Facts<'a> {
                 let advances = defs
                     .iter()
                     .any(|(_, def)| self.slot_advance(*def, slot, carrier, depth + 1));
-                self.slot_advance_memo.borrow_mut().insert(key, advances);
+                if self.memory.keep(128 + slot.0.len() as u64) {
+                    self.slot_advance_memo.borrow_mut().insert(key, advances);
+                }
                 advances
             }
             _ => false,
@@ -1505,22 +1718,32 @@ impl<'a> Facts<'a> {
         carrier: Option<u32>,
         (start, end): (usize, usize),
     ) -> bool {
-        let key = (slot.clone(), carrier, (start, end));
-        self.meter.charge(1);
-        if let Some(stores) = self.loop_store_memo.borrow().get(&key) {
-            return *stores;
+        let key = (slot.clone(), carrier);
+        if !self.loop_store_memo.borrow().contains_key(&key) {
+            let mut advanced = Vec::new();
+            for (offset, value) in self.stores_for(slot) {
+                if !self.meter.charge(1) {
+                    break;
+                }
+                if self.slot_advance(*value, slot, carrier, 0) {
+                    advanced.push(*offset);
+                }
+            }
+            if !self
+                .memory
+                .keep((advanced.capacity() * 8 + 96 + slot.0.len()) as u64)
+            {
+                return false;
+            }
+            self.loop_store_memo
+                .borrow_mut()
+                .insert(key.clone(), advanced);
         }
-        let stores = self.stores_for(slot);
-        let first = stores.partition_point(|(offset, _)| *offset <= start);
-        let stored = stores[first..]
-            .iter()
-            .take_while(|(offset, _)| *offset < end)
-            .any(|(_, value)| {
-                self.meter.charge(1);
-                self.slot_advance(*value, slot, carrier, 0)
-            });
-        self.loop_store_memo.borrow_mut().insert(key, stored);
-        stored
+        let memo = self.loop_store_memo.borrow();
+        let offsets = &memo[&key];
+        self.meter.charge(32);
+        let first = offsets.partition_point(|offset| *offset <= start);
+        offsets.get(first).is_some_and(|offset| *offset < end)
     }
 
     fn slot_read(&self, value: NodeId, slot: &SlotKey, carrier: Option<u32>) -> bool {
@@ -1542,40 +1765,49 @@ impl<'a> Facts<'a> {
     }
 
     fn repeats(&self, trace: &Trace, site: usize) -> (Repeats, Option<(usize, usize)>) {
-        let loops = self.enclosing_loops(site);
-        let Some(innermost) = loops.first().copied() else {
+        self.meter.charge(32);
+        let loops = self.loop_index();
+        let Some(index) = loops.at(site) else {
             return (Repeats::Once, None);
         };
-        for (start, end) in loops {
-            self.meter.charge(1);
-            let inside = |offset: usize| start < offset && offset < end;
-            // The selector must be produced inside the loop body, not once
-            // before it, to be re-derived per iteration.
-            if trace.anchor.is_some_and(|anchor| !inside(anchor)) {
-                continue;
+        let innermost = loops.ranges[index];
+        if !matches!(
+            trace.source,
+            Source::CursorIndex
+                | Source::CursorPointer
+                | Source::FrameSlot
+                | Source::Constant
+                | Source::HandlerAddress
+        ) {
+            return (Repeats::Unknown, Some(innermost));
+        }
+        if (trace.source == Source::FrameSlot && trace.slots.is_empty())
+            || (trace.source != Source::FrameSlot && trace.advancing.is_empty())
+        {
+            return (Repeats::Unknown, Some(innermost));
+        }
+        let matching = loops.matching(index, |(start, end)| {
+            self.meter.charge(32);
+            if trace
+                .anchor
+                .is_some_and(|anchor| !(start < anchor && anchor < end))
+            {
+                return false;
             }
-            let written = trace
-                .advancing
-                .iter()
-                .any(|local| self.written_inside(*local, (start, end)));
-            let advances = match trace.source {
-                Source::CursorIndex | Source::CursorPointer => written,
-                // The slot is reloaded in this loop (when a local carries it)
-                // and this loop stores back arithmetic over its own prior
-                // value (`pc + n`). A constant state write or a linked-list
-                // step is not an advancing position.
+            match trace.source {
                 Source::FrameSlot => trace.slots.iter().any(|(local, slot)| {
                     local.is_none_or(|local| self.written_inside(local, (start, end)))
                         && self.stores_back(slot, *local, (start, end))
                 }),
-                Source::Constant | Source::HandlerAddress => written,
-                _ => false,
-            };
-            if advances {
-                return (Repeats::Loop, Some((start, end)));
+                _ => trace
+                    .advancing
+                    .iter()
+                    .any(|local| self.written_inside(*local, (start, end))),
             }
-        }
-        (Repeats::Unknown, Some(innermost))
+        });
+        matching.map_or((Repeats::Unknown, Some(innermost)), |range| {
+            (Repeats::Loop, Some(range))
+        })
     }
 
     /// The reaching source that best explains a site: one re-derived in a
@@ -1620,6 +1852,10 @@ impl<'a> Facts<'a> {
     /// None when the artifact meter ran out during the query: the site is
     /// then unclassified, not unknown.
     fn query(&self, selector: NodeId, site: usize) -> Option<Query> {
+        let temporary = Memory::new(self.meter);
+        if !temporary.keep(1 << 20) {
+            return None;
+        }
         self.steps.set(0);
         self.step_limit.set(MAX_QUERY_STEPS);
         self.deepest.set(0);
@@ -1956,6 +2192,16 @@ impl Meter {
 /// selector first, and classified in that order, so trivial noise elsewhere
 /// cannot exhaust the meter before a real interpreter is reached.
 pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
+    let auxiliary = Memory::new(meter);
+    // Validator metadata and parser-owned vectors are bounded by the encoded
+    // module, separate from the explicitly reserved table and symbolic indexes.
+    if !meter.charge(bytes.len() as u64) || !auxiliary.keep(bytes.len() as u64 * 4) {
+        meter.count_unexamined(1);
+        return Some(Classified {
+            sites: Vec::new(),
+            omissions: meter.omissions("functions"),
+        });
+    }
     let tables = crate::vm::wasm_tables::Tables::parse_under(bytes, meter);
     let tables = tables.as_ref();
     let mut validator = Some(Validator::new_with_features(WasmFeatures::all()));
@@ -1964,7 +2210,6 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
     let mut functions = Vec::new();
     let mut exports = BTreeSet::new();
     let mut export_offset = None;
-    let mut retained = 0u64;
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.ok()?;
         let function = match validator.as_mut().map(|v| v.payload(&payload)) {
@@ -2014,10 +2259,11 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
                 let range = body.range();
                 match Facts::simulate(&body, function, params, meter) {
                     Some(facts) => {
-                        let bytes = facts.retained_bytes();
-                        retained += bytes;
-                        meter.retain(bytes);
-                        functions.push((index, range.start, facts));
+                        let pending = facts.dispatch.len() as u64;
+                        if !auxiliary.push(&mut functions, (index, range.start, facts)) {
+                            meter.count_unclassified(pending);
+                            meter.count_unexamined(1);
+                        }
                     }
                     None if meter.exhausted() => meter.count_unexamined(1),
                     None => (),
@@ -2030,25 +2276,35 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
     for (position, (_, _, facts)) in functions.iter().enumerate() {
         for (dispatch, entry) in facts.dispatch.iter().enumerate() {
             let strength = facts.strength(entry.selector, entry.offset);
-            candidates.push((
-                strength,
-                position,
-                entry.offset,
-                Candidate::Dispatch(dispatch),
-            ));
+            if !auxiliary.push(
+                &mut candidates,
+                (
+                    strength,
+                    position,
+                    entry.offset,
+                    Candidate::Dispatch(dispatch),
+                ),
+            ) {
+                meter.count_unclassified(1);
+            }
         }
         for (subject, compares) in facts.ladders() {
             let first = &facts.compares[compares[0]];
             let strength = facts.strength(first.subject, first.offset);
-            candidates.push((
-                strength,
-                position,
-                first.offset,
-                Candidate::Ladder(subject, compares),
-            ));
+            if !auxiliary.push(
+                &mut candidates,
+                (
+                    strength,
+                    position,
+                    first.offset,
+                    Candidate::Ladder(subject, compares),
+                ),
+            ) {
+                meter.count_unclassified(1);
+            }
         }
     }
-    candidates.sort_by_key(|(strength, position, offset, _)| {
+    candidates.sort_unstable_by_key(|(strength, position, offset, _)| {
         (std::cmp::Reverse(*strength), *position, *offset)
     });
     let mut sites = Vec::new();
@@ -2060,15 +2316,18 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
         }
         match classify_candidate(facts, *index, *body_offset, tables, candidate, meter) {
             Some(site) => {
-                meter.retain(site.retained_bytes());
-                sites.push(site);
+                if meter.retain(site.retained_bytes()) {
+                    sites.push(site);
+                } else {
+                    meter.count_unclassified(1);
+                }
             }
             None => meter.count_unclassified(1),
         }
     }
-    meter.release(retained);
     if sites.is_empty() && !meter.exhausted() && exports.len() >= 2 {
         sites.push(Site {
+            strength: 0,
             kind: Kind::ExportPerRole,
             source: Source::Unknown,
             repeats: Repeats::Unknown,
@@ -2197,6 +2456,7 @@ fn classify_candidate(
                 }
             };
             Some(Site {
+                strength: 0,
                 kind,
                 source: trace.source,
                 repeats,
@@ -2226,6 +2486,7 @@ fn classify_candidate(
             } = facts.query(first.subject, first.offset)?;
             meter.count_limited(limited);
             Some(Site {
+                strength: 0,
                 kind: Kind::CompareChain,
                 source: trace.source,
                 repeats,

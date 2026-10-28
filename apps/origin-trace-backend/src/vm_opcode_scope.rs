@@ -70,15 +70,20 @@ impl<'a> Scopes<'a> {
         let mut brackets = Vec::<usize>::new();
         let mut at = 0;
         while at < bytes.len() {
-            if bytes[at].is_ascii_whitespace() {
-                at += 1;
+            let character = region[at..].chars().next().expect("token boundary");
+            if character.is_whitespace() {
+                at += character.len_utf8();
                 continue;
             }
             let start = at;
-            at += 1;
+            at += character.len_utf8();
             if word(bytes[start]) {
                 while at < bytes.len() && word(bytes[at]) {
-                    at += 1;
+                    let next = region[at..].chars().next().expect("identifier boundary");
+                    if next.is_whitespace() {
+                        break;
+                    }
+                    at += next.len_utf8();
                 }
             } else if bytes[start..].starts_with(b"=>") {
                 at += 1;
@@ -153,9 +158,20 @@ impl<'a> Scopes<'a> {
         let n = self.tokens.len();
         // Expression ends are suffix facts. Even thousands of nested arrows
         // share them instead of scanning the same bodies repeatedly.
-        if !self._memory.keep(((n + 1) * 8) as u64) {
+        if !self._memory.keep(((n + 1) * 9) as u64) {
             return false;
         }
+        let asi = (0..n)
+            .map(|i| {
+                i + 1 < n
+                    && self.region.as_bytes()
+                        [self.tokens[i].end as usize..self.tokens[i + 1].start as usize]
+                        .contains(&b'\n')
+                    && (self.identifier(i) || matches!(self.text(i), ")" | "]"))
+                    && self.identifier(i + 1)
+                    && !matches!(self.text(i + 1), "in" | "instanceof")
+            })
+            .collect::<Vec<_>>();
         let mut ends = vec![n; n + 1];
         for i in (0..n).rev() {
             if !meter.charge(1) {
@@ -163,7 +179,15 @@ impl<'a> Scopes<'a> {
             }
             ends[i] = match self.text(i) {
                 "," | ";" | ")" | "]" | "}" => i,
-                "(" | "[" | "{" => ends[self.close(i).unwrap_or(i) + 1],
+                "(" | "[" | "{" => {
+                    let close = self.close(i).unwrap_or(i);
+                    if asi[close] {
+                        close + 1
+                    } else {
+                        ends[close + 1]
+                    }
+                }
+                _ if asi[i] => i + 1,
                 _ => ends[i + 1],
             };
         }
@@ -320,8 +344,8 @@ impl<'a> Scopes<'a> {
                 ranges.entry(i).or_insert(Scope {
                     start: i,
                     end: self.close(i).unwrap_or(n) + 1,
-                    function: false,
-                    opaque: false,
+                    function: i > 0 && self.text(i - 1) == "static",
+                    opaque: i > 0 && self.text(i - 1) == "static",
                     declarations: Vec::new(),
                 });
             }
@@ -357,6 +381,12 @@ impl<'a> Scopes<'a> {
             let current = *stack.last().unwrap();
             self.tokens[i].binding = current as u32;
             let text = self.text(i);
+            if word(text.as_bytes()[0])
+                && !self.identifier(i)
+                && (text.contains('\\') || !text.is_ascii())
+            {
+                scopes[*functions.last().unwrap()].opaque = true;
+            }
             if (text == "eval" || (text == "with" && self.text(i + 1) == "("))
                 && (i == 0 || self.text(i - 1) != ".")
             {

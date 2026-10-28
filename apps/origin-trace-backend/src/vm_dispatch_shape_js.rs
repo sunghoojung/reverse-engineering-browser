@@ -7,7 +7,10 @@
 //! intervals, and every binding, write and arithmetic advance by name. Site
 //! classification then only looks names up, under a per-query step budget and
 //! the shared per-artifact budget, so work stays linear in the region size.
-use super::{Kind, MAX_QUERY_STEPS, MIN_COMPARE_ARMS, Meter, Repeats, Site, Source, priority};
+use super::{
+    Brackets, Intervals, Kind, MAX_QUERY_STEPS, MIN_COMPARE_ARMS, Memory, Meter, Repeats, Site,
+    Source, priority,
+};
 use regex::Regex;
 use std::{
     cell::{Cell, RefCell},
@@ -92,35 +95,41 @@ static TYPED_ARRAY: LazyLock<Regex> = LazyLock::new(|| {
 /// One-based line and character column of a byte offset. Continuation-byte
 /// checkpoints keep a column lookup bounded even on one minified line.
 pub(crate) struct Lines {
-    starts: Vec<usize>,
-    continuation: Vec<usize>,
+    starts: Vec<u32>,
+    continuation: Vec<u32>,
+    _memory: Memory,
 }
 
 impl Lines {
-    pub fn new(source: &str) -> Self {
-        let mut starts = vec![0];
-        starts.extend(
-            source
-                .bytes()
-                .enumerate()
-                .filter(|(_, byte)| *byte == b'\n')
-                .map(|(index, _)| index + 1),
-        );
-        let mut continuation = vec![0];
-        let mut count = 0;
+    pub fn new(source: &str, meter: &Meter) -> Self {
+        let memory = Memory::new(meter);
+        let mut starts = Vec::new();
+        memory.push(&mut starts, 0);
+        meter.charge(source.len() as u64 * 2);
+        for (index, byte) in source.bytes().enumerate() {
+            if byte == b'\n' && !memory.push(&mut starts, (index + 1) as u32) {
+                break;
+            }
+        }
+        let mut continuation = Vec::new();
+        memory.push(&mut continuation, 0);
+        let mut count = 0u32;
         for chunk in source.as_bytes().chunks(COLUMN_CHECKPOINT) {
-            count += chunk.iter().filter(|byte| (**byte & 0xc0) == 0x80).count();
-            continuation.push(count);
+            count += chunk.iter().filter(|byte| (**byte & 0xc0) == 0x80).count() as u32;
+            if !memory.push(&mut continuation, count) {
+                break;
+            }
         }
         Self {
             starts,
             continuation,
+            _memory: memory,
         }
     }
 
     fn continuation_before(&self, source: &str, offset: usize) -> usize {
         let checkpoint = offset / COLUMN_CHECKPOINT;
-        self.continuation[checkpoint]
+        self.continuation[checkpoint] as usize
             + source.as_bytes()[checkpoint * COLUMN_CHECKPOINT..offset]
                 .iter()
                 .filter(|byte| (**byte & 0xc0) == 0x80)
@@ -129,8 +138,10 @@ impl Lines {
 
     /// Line, column, and the bytes counted to find them.
     fn locate(&self, source: &str, offset: usize) -> (usize, usize, u64) {
-        let line = self.starts.partition_point(|start| *start <= offset);
-        let start = self.starts[line - 1];
+        let line = self
+            .starts
+            .partition_point(|start| *start as usize <= offset);
+        let start = self.starts[line - 1] as usize;
         let characters = (offset - start)
             - (self.continuation_before(source, offset) - self.continuation_before(source, start));
         let scanned = (offset % COLUMN_CHECKPOINT + start % COLUMN_CHECKPOINT) as u64 + 1;
@@ -190,58 +201,6 @@ fn mentions(text: &str, name: &str) -> bool {
     false
 }
 
-/// Nested intervals with parent links: the enclosing intervals of an offset
-/// are found by walking up from the last one starting at or before it.
-#[derive(Default)]
-struct Intervals {
-    ranges: Vec<(usize, usize)>,
-    parents: Vec<Option<usize>>,
-}
-
-impl Intervals {
-    fn new(mut ranges: Vec<(usize, usize)>) -> Self {
-        ranges.sort_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
-        ranges.dedup();
-        let mut parents = Vec::with_capacity(ranges.len());
-        let mut stack: Vec<usize> = Vec::new();
-        for (index, (start, end)) in ranges.iter().enumerate() {
-            while let Some(top) = stack.last() {
-                if ranges[*top].1 <= *start || ranges[*top].1 < *end {
-                    stack.pop();
-                } else {
-                    break;
-                }
-            }
-            parents.push(stack.last().copied());
-            stack.push(index);
-        }
-        Self { ranges, parents }
-    }
-
-    /// Enclosing intervals, innermost first. `inclusive_start` decides
-    /// whether an interval starting at `at` contains it.
-    fn enclosing(&self, at: usize, inclusive_start: bool) -> Vec<(usize, usize)> {
-        let upper = self.ranges.partition_point(|(start, _)| {
-            if inclusive_start {
-                *start <= at
-            } else {
-                *start < at
-            }
-        });
-        let mut found = Vec::new();
-        let mut candidate = upper.checked_sub(1);
-        // Siblings before `at` are skipped by climbing to their parents.
-        while let Some(index) = candidate {
-            let (_, end) = self.ranges[index];
-            if at < end {
-                found.push(self.ranges[index]);
-            }
-            candidate = self.parents[index];
-        }
-        found
-    }
-}
-
 /// Bindings, writes and arithmetic advances of every name in one region.
 /// Entries are spans into the region text, never copies, so chained writes
 /// keep a fixed number of bytes per write.
@@ -290,7 +249,7 @@ struct Region<'a> {
     text: &'a str,
     start: usize,
     params: &'a [String],
-    pairs: HashMap<usize, usize>,
+    pairs: Brackets,
     loops: Intervals,
     index: Index,
     steps: Cell<u64>,
@@ -363,8 +322,8 @@ impl<'a> Region<'a> {
             text,
             start,
             params,
-            pairs: HashMap::new(),
-            loops: Intervals::default(),
+            pairs: Brackets::new("", meter),
+            loops: Intervals::new(Vec::new(), meter),
             index: Index::default(),
             steps: Cell::new(0),
             step_limit: Cell::new(MAX_QUERY_STEPS),
@@ -375,8 +334,7 @@ impl<'a> Region<'a> {
             buffer_memo: RefCell::new(HashMap::new()),
         };
         meter.charge(text.len() as u64);
-        region.pairs = Self::pairs(text);
-        region.keep(region.pairs.len() as u64 * PAIR_BYTES);
+        region.pairs = Brackets::new(text, meter);
         region.loops = region.loop_intervals();
         region.keep(region.loops.ranges.len() as u64 * PAIR_BYTES);
         region.index = region.build_index();
@@ -385,37 +343,15 @@ impl<'a> Region<'a> {
 
     /// Retain index memory against the meter's byte bound.
     fn keep(&self, bytes: u64) -> bool {
-        self.retained.set(self.retained.get() + bytes);
-        self.meter.retain(bytes)
-    }
-
-    /// Every bracket pair in one linear pass, one stack per bracket kind.
-    /// Unmatched brackets, such as ones inside regex literals the masker
-    /// keeps, pair with nothing and cost nothing extra.
-    fn pairs(text: &str) -> HashMap<usize, usize> {
-        let mut pairs = HashMap::new();
-        let mut stacks: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (index, byte) in text.bytes().enumerate() {
-            let (kind, opening) = match byte {
-                b'(' => (0, true),
-                b'[' => (1, true),
-                b'{' => (2, true),
-                b')' => (0, false),
-                b']' => (1, false),
-                b'}' => (2, false),
-                _ => continue,
-            };
-            if opening {
-                stacks[kind].push(index);
-            } else if let Some(start) = stacks[kind].pop() {
-                pairs.insert(start, index);
-            }
+        if !self.meter.retain(bytes) {
+            return false;
         }
-        pairs
+        self.retained.set(self.retained.get() + bytes);
+        true
     }
 
     fn close(&self, open: usize) -> Option<usize> {
-        self.pairs.get(&open).copied()
+        self.pairs.close(open)
     }
 
     fn skip_space(&self, mut at: usize) -> usize {
@@ -517,7 +453,7 @@ impl<'a> Region<'a> {
                 ranges.push((header.start(), end + 1));
             }
         }
-        Intervals::new(ranges)
+        Intervals::new(ranges, self.meter)
     }
 
     /// The value of an assignment: up to a top-level `;`, `,`, closing
@@ -564,6 +500,9 @@ impl<'a> Region<'a> {
             if ["var", "let", "const", "return", "typeof", "case"].contains(&name.as_str()) {
                 continue;
             }
+            if !index.writes.contains_key(&name) && !self.keep(384 + name.len() as u64 * 4) {
+                break;
+            }
             let operator = &captures[2];
             let at = name_match.start() as u32;
             let mut kept = OFFSET_BYTES;
@@ -591,7 +530,7 @@ impl<'a> Region<'a> {
                 kept += OFFSET_BYTES;
             }
             index.writes.entry(name).or_default().push(at);
-            if !self.keep(kept) {
+            if !self.keep(kept * 2) {
                 break;
             }
         }
@@ -603,10 +542,13 @@ impl<'a> Region<'a> {
                 continue;
             }
             let name = normalized(&captures[2]);
+            if !index.writes.contains_key(&name) && !self.keep(256 + name.len() as u64 * 3) {
+                break;
+            }
             let at = operator.start() as u32;
             index.advances.entry(name.clone()).or_default().push(at);
             index.writes.entry(name).or_default().push(at);
-            if !self.keep(2 * OFFSET_BYTES) {
+            if !self.keep(4 * OFFSET_BYTES) {
                 break;
             }
         }
@@ -626,11 +568,9 @@ impl<'a> Region<'a> {
         self.text[definition.1 as usize..definition.2 as usize].trim()
     }
 
-    /// Enclosing loops, innermost first, charged by how many it walks.
-    fn enclosing_loops(&self, at: usize) -> Vec<(usize, usize)> {
-        let loops = self.loops.enclosing(at, true);
-        self.meter.charge(loops.len() as u64 + 1);
-        loops
+    fn innermost_loop(&self, at: usize) -> Option<(usize, usize)> {
+        self.meter.charge(32);
+        self.loops.innermost(at)
     }
 
     fn written_within(&self, name: &str, range: (usize, usize)) -> bool {
@@ -792,7 +732,19 @@ impl<'a> Region<'a> {
         let traces = self.identifier_uncached(name, depth);
         let limited = self.limited.get();
         let depth_cut = self.depth_cut.get();
-        if !depth_cut {
+        if !depth_cut
+            && self.keep(
+                128 + name.len() as u64
+                    + traces
+                        .iter()
+                        .map(|trace| {
+                            160 + trace.cursor.as_ref().map_or(0, String::len) as u64
+                                + trace.buffer.as_ref().map_or(0, String::len) as u64
+                                + trace.accessor.as_ref().map_or(0, String::len) as u64
+                        })
+                        .sum::<u64>(),
+            )
+        {
             self.identifier_memo.borrow_mut().insert(
                 name.to_owned(),
                 Memo {
@@ -847,9 +799,7 @@ impl<'a> Region<'a> {
                 }
                 // Constant writes differ only by where they land: one per
                 // enclosing loop explains every repeat decision.
-                let loop_of = |anchor: Option<usize>| {
-                    anchor.and_then(|at| self.enclosing_loops(at).first().copied())
-                };
+                let loop_of = |anchor: Option<usize>| anchor.and_then(|at| self.innermost_loop(at));
                 let duplicate = traces.iter().any(|known: &Trace| {
                     known.source == trace.source
                         && known.through_lookup == trace.through_lookup
@@ -876,7 +826,7 @@ impl<'a> Region<'a> {
                 trace.source == Source::Constant
                     && trace
                         .anchor
-                        .is_some_and(|at| !self.enclosing_loops(at).is_empty())
+                        .is_some_and(|at| self.innermost_loop(at).is_some())
             })
         {
             traces.retain(|trace| trace.source != Source::CallArgument);
@@ -888,31 +838,41 @@ impl<'a> Region<'a> {
     }
 
     fn repeats(&self, trace: &Trace, at: usize) -> (Repeats, Option<(usize, usize)>) {
-        let loops = self.enclosing_loops(at);
-        let Some(innermost) = loops.first().copied() else {
+        self.meter.charge(32);
+        let Some(index) = self.loops.at(at) else {
             return (Repeats::Once, None);
         };
-        for range in loops {
-            let inside = |offset: usize| range.0 <= offset && offset < range.1;
-            if trace.anchor.is_some_and(|anchor| !inside(anchor)) {
-                continue;
+        let innermost = self.loops.ranges[index];
+        let Some(cursor) = trace.cursor.as_ref().filter(|_| {
+            matches!(
+                trace.source,
+                Source::CursorIndex
+                    | Source::CursorPointer
+                    | Source::FrameSlot
+                    | Source::Constant
+                    | Source::HandlerAddress
+            )
+        }) else {
+            return (Repeats::Unknown, Some(innermost));
+        };
+        let matching = self.loops.matching(index, |range| {
+            self.meter.charge(32);
+            if trace
+                .anchor
+                .is_some_and(|anchor| !(range.0 <= anchor && anchor < range.1))
+            {
+                return false;
             }
-            let advances = trace
-                .cursor
-                .as_ref()
-                .is_some_and(|cursor| match trace.source {
-                    // A position must advance, not merely be rewritten.
-                    Source::CursorIndex | Source::CursorPointer | Source::FrameSlot => {
-                        self.advanced_within(cursor, range)
-                    }
-                    Source::Constant | Source::HandlerAddress => self.written_within(cursor, range),
-                    _ => false,
-                });
-            if advances {
-                return (Repeats::Loop, Some(range));
+            match trace.source {
+                Source::CursorIndex | Source::CursorPointer | Source::FrameSlot => {
+                    self.advanced_within(cursor, range)
+                }
+                _ => self.written_within(cursor, range),
             }
-        }
-        (Repeats::Unknown, Some(innermost))
+        });
+        matching.map_or((Repeats::Unknown, Some(innermost)), |range| {
+            (Repeats::Loop, Some(range))
+        })
     }
 
     /// The reaching source that best explains a site, as for Wasm: one
@@ -978,7 +938,9 @@ impl<'a> Region<'a> {
             return Some(kind);
         }
         let kind = self.binding_kind(buffer);
-        self.buffer_memo.borrow_mut().insert(buffer.clone(), kind);
+        if self.keep(96 + buffer.len() as u64) {
+            self.buffer_memo.borrow_mut().insert(buffer.clone(), kind);
+        }
         Some(kind)
     }
 
@@ -1012,7 +974,11 @@ impl<'a> Region<'a> {
     /// Classify one site under a fresh per-query step budget. A query a
     /// bound cut short is an honest unknown, reported through the flag;
     /// None when the artifact meter ran out, so the site is unclassified.
-    fn site(&self, lines: &Lines, found: Found) -> Option<(Site, bool)> {
+    fn site(&self, lines: &Lines, found: Found, strength: u8) -> Option<(Site, bool)> {
+        let temporary = Memory::new(self.meter);
+        if !temporary.keep(128 << 10) {
+            return None;
+        }
         self.steps.set(0);
         self.step_limit.set(MAX_QUERY_STEPS);
         self.deepest.set(0);
@@ -1043,6 +1009,7 @@ impl<'a> Region<'a> {
             return None;
         }
         let site = Site {
+            strength,
             kind: found.kind,
             source: trace.source,
             repeats,
@@ -1067,7 +1034,7 @@ impl<'a> Region<'a> {
     /// Cheap dispatch strength for ordering: inside a loop, and a selector
     /// that reads a buffer at an index, directly or through one binding.
     fn strength(&self, found: &Found) -> u8 {
-        let looped = !self.enclosing_loops(found.at).is_empty();
+        let looped = self.innermost_loop(found.at).is_some();
         let selector = self.strip(&found.selector);
         let reads = |text: &str| INDEXED_READ.is_match(text) || ACCESSOR_READ.is_match(text);
         self.meter.charge(selector.len() as u64 + 1);
@@ -1078,7 +1045,56 @@ impl<'a> Region<'a> {
                     self.meter.charge(value.len() as u64 + 1);
                     reads(self.strip(value))
                 }));
-        u8::from(looped) * 2 + u8::from(fetched)
+        let bounded = self.innermost_loop(found.at).is_some_and(|range| {
+            self.bounded_cursor(selector, range)
+                || (IDENTIFIER.is_match(selector)
+                    && self.definitions(selector).iter().take(4).any(|definition| {
+                        self.bounded_cursor(self.strip(self.value(definition)), range)
+                    }))
+        });
+        u8::from(bounded) * 4 + u8::from(looped) * 2 + u8::from(fetched)
+    }
+
+    /// A stronger structural signal than nesting: the loop bounds the same
+    /// cursor against the length of the buffer read by the dispatch. This
+    /// only schedules classification; it changes no role, tier or score.
+    fn bounded_cursor(&self, selector: &str, range: (usize, usize)) -> bool {
+        self.meter.charge(selector.len() as u64 + 512);
+        let Some(read) = INDEXED_READ.captures(selector) else {
+            return false;
+        };
+        let Some(cursor) = CURSOR_INDEX.captures(read[2].trim()) else {
+            return false;
+        };
+        let end = self
+            .text
+            .floor_char_boundary((range.0 + 512).min(self.text.len()));
+        let header = &self.text[range.0..end];
+        let Some(open) = header.find('(').map(|open| range.0 + open) else {
+            return false;
+        };
+        let Some(close) = self.close(open).filter(|close| *close < end) else {
+            return false;
+        };
+        let condition = &self.text[open + 1..close];
+        let condition = if header.starts_with("for") {
+            condition.split(';').nth(1).unwrap_or("")
+        } else {
+            condition
+        };
+        let condition = normalized(condition);
+        let (cursor, buffer) = (normalized(&cursor[1]), &read[1]);
+        condition == format!("{cursor}<{buffer}.length")
+            || condition == format!("{buffer}.length>{cursor}")
+    }
+
+    fn keep_candidate(&self, text_bytes: usize) -> bool {
+        let kept = self.meter.charge(text_bytes as u64 + 1)
+            && self.keep((std::mem::size_of::<Found>() * 4 + text_bytes * 3) as u64);
+        if !kept {
+            self.meter.count_unclassified(1);
+        }
+        kept
     }
 
     fn switches(&self) -> Vec<Found> {
@@ -1104,6 +1120,9 @@ impl<'a> Region<'a> {
             let mut index = body_open + 1;
             // Only labels of this switch: nested blocks are skipped whole.
             while index < body_close {
+                if !self.meter.charge(1) {
+                    break;
+                }
                 match bytes[index] {
                     b'(' | b'[' | b'{' => {
                         index = self.close(index).unwrap_or(body_close);
@@ -1128,7 +1147,9 @@ impl<'a> Region<'a> {
                 }
                 index += 1;
             }
-            self.meter.charge((body_close - body_open) as u64);
+            if !self.keep_candidate(selector.len()) {
+                break;
+            }
             found.push(Found {
                 kind: Kind::SwitchOnValue,
                 instruction: "switch",
@@ -1147,9 +1168,13 @@ impl<'a> Region<'a> {
         self.meter.charge(self.text.len() as u64);
         INDEXED_CALL
             .captures_iter(self.text)
-            .map(|call| {
+            .take_while(|_| !self.meter.exhausted())
+            .filter_map(|call| {
                 let whole = call.get(0).expect("indexed call");
-                Found {
+                if !self.keep_candidate(whole.len()) {
+                    return None;
+                }
+                Some(Found {
                     kind: Kind::HandlerTable,
                     instruction: "indexed call",
                     at: whole.start(),
@@ -1158,7 +1183,7 @@ impl<'a> Region<'a> {
                     expression: format!("{}[{}](...)", &call[1], call[2].trim()),
                     arm_count: None,
                     string_cases: false,
-                }
+                })
             })
             .collect()
     }
@@ -1174,9 +1199,13 @@ impl<'a> Region<'a> {
                     Some((header.start(), close))
                 })
                 .collect(),
+            self.meter,
         );
         let mut ladders = BTreeMap::<String, Vec<(usize, usize, String)>>::new();
         for captures in COMPARE.captures_iter(self.text) {
+            if self.meter.exhausted() {
+                break;
+            }
             let whole = captures.get(0).expect("comparison");
             let (name, constant, name_match) = match (captures.get(1), captures.get(2)) {
                 (Some(name), Some(constant)) => (name.as_str(), constant.as_str(), name),
@@ -1186,9 +1215,8 @@ impl<'a> Region<'a> {
                 }
             };
             let at = name_match.start().min(whole.end());
-            let enclosing = headers.enclosing(at, false);
-            self.meter.charge(enclosing.len() as u64 + 1);
-            let in_header = !enclosing.is_empty();
+            self.meter.charge(32);
+            let in_header = headers.at(at).is_some();
             let ternary = self.text[whole.end()..]
                 .trim_start()
                 .trim_start_matches(')')
@@ -1196,6 +1224,9 @@ impl<'a> Region<'a> {
                 .starts_with('?');
             if !in_header && !ternary {
                 continue;
+            }
+            if !self.keep(192 + name.len() as u64 + constant.len() as u64) {
+                break;
             }
             ladders.entry(name.to_owned()).or_default().push((
                 at,
@@ -1213,9 +1244,12 @@ impl<'a> Region<'a> {
                     .len()
                     >= MIN_COMPARE_ARMS
             })
-            .map(|(name, tests)| {
+            .filter_map(|(name, tests)| {
+                if !self.keep_candidate(name.len()) {
+                    return None;
+                }
                 let (at, size, _) = tests[0];
-                Found {
+                Some(Found {
                     kind: Kind::CompareChain,
                     instruction: "if ladder",
                     at,
@@ -1224,7 +1258,7 @@ impl<'a> Region<'a> {
                     expression: format!("{name} === constant ({} comparisons)", tests.len()),
                     arm_count: Some(tests.len() as u64),
                     string_cases: false,
-                }
+                })
             })
             .collect()
     }
@@ -1234,10 +1268,12 @@ impl<'a> Region<'a> {
         self.meter.charge(self.text.len() as u64);
         SELF_CALL
             .captures_iter(self.text)
+            .take_while(|_| !self.meter.exhausted())
             .filter(|captures| captures[1] == captures[2])
             .filter_map(|captures| {
                 let name = captures.get(1).expect("handler name");
-                if self.enclosing_loops(name.start()).is_empty() {
+                self.innermost_loop(name.start())?;
+                if !self.keep_candidate(name.len()) {
                     return None;
                 }
                 Some(Found {
@@ -1289,6 +1325,10 @@ pub(crate) fn classify_region(
     meter: &Meter,
 ) {
     let region = Region::new(source, text, start, params, meter);
+    if meter.exhausted() {
+        meter.count_unexamined(1);
+        return;
+    }
     let mut candidates = region.switches();
     candidates.extend(region.indexed_calls());
     candidates.extend(region.ladders());
@@ -1297,17 +1337,24 @@ pub(crate) fn classify_region(
         .into_iter()
         .map(|candidate| (region.strength(&candidate), candidate))
         .collect::<Vec<_>>();
-    ranked.sort_by_key(|(strength, candidate)| (std::cmp::Reverse(*strength), candidate.at));
-    for (position, (_, candidate)) in ranked.into_iter().enumerate() {
+    ranked
+        .sort_unstable_by_key(|(strength, candidate)| (std::cmp::Reverse(*strength), candidate.at));
+    if meter.exhausted() {
+        meter.count_unexamined(1);
+    }
+    for (position, (strength, candidate)) in ranked.into_iter().enumerate() {
         if position as u64 >= MAX_REGION_SITES || meter.exhausted() {
             meter.count_unclassified(1);
             continue;
         }
-        match region.site(lines, candidate) {
+        match region.site(lines, candidate, strength) {
             Some((site, limited)) => {
                 meter.count_limited(limited);
-                meter.retain(site.retained_bytes());
-                sites.push(site);
+                if meter.retain(site.retained_bytes()) {
+                    sites.push(site);
+                } else {
+                    meter.count_unclassified(1);
+                }
             }
             None => meter.count_unclassified(1),
         }

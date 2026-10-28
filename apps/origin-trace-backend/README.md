@@ -52,3 +52,13 @@ fallback. Native artifact/source coverage can be narrower than previous CDP
 capture. Workers, arbitrary interpreter guest PCs and host causality require
 additional native implementation and verification. Saved legacy CDP metadata
 retains its historical provenance; a current native session never relabels it.
+
+## Dispatch classification and opcode claims
+
+Classification and workspace extraction share one per-artifact work and memory
+budget. The lexical gate only removes recovered opcode claims and reports their
+count; it never changes the detector tier, score, finding ID or dispatch
+inventory. See the [classification contract](../../protocol/vm-dispatch-classification-v1.md).
+The scaling test exercises analysis plus workspace extraction, and the ignored
+`vm_opcode::tests::measure_classifier_pipeline` test accepts a newline-separated
+input list through `REB_CLASSIFIER_MEASURE_INPUTS` for local measurements.

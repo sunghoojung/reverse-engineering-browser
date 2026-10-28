@@ -356,6 +356,29 @@ pub(crate) type Generator = (&'static str, &'static str, fn(usize) -> Vec<u8>);
 /// retained bytes may grow at most linearly with the input.
 pub(crate) fn scaling_generators() -> Vec<Generator> {
     vec![
+        ("deep_loops", "javascript", |n| {
+            format!("function vm(code,stack){{var pc=0;{}{}while(pc<code.length){{switch(code[pc++]){{case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}}}}}", "while(x){".repeat(n), "switch(code[i++]){case 1:break;}}".repeat(n)).into_bytes()
+        }),
+        ("wasm_deep", "webassembly", |n| {
+            wat::parse_str(format!(
+                "(module (memory 1)(func (param $p i32) {}{}))",
+                "loop ".repeat(n),
+                "local.get $p i32.load8_u br_table 0 0 end ".repeat(n)
+            ))
+            .expect("deep loops")
+        }),
+        ("many_tables", "webassembly", |n| {
+            wat::parse_str(format!("(module (memory 1)(func $h){}(func (param $p i32)(loop (br_table 0 0 (i32.load8_u (local.get $p))))))", (0..n).map(|i| format!("(table 1 funcref)(elem(table {i})(i32.const 0) func $h)")).collect::<String>())).expect("many tables")
+        }),
+        ("gate_scopes", "javascript", |n| {
+            format!("function vm(code,stack){{var pc=0,ops={{1:function(){{stack.push(code[pc++])}},2:function(){{stack.pop()}},3:function(){{pc=code.length}}}};{}while(pc<code.length){{{}}}}}", (0..n).map(|i| format!("function f{i}(){{return 1;}}")).collect::<String>(), "ops[code[pc++]]();".repeat(n)).into_bytes()
+        }),
+        ("bracket_memory", "javascript", |n| {
+            "{}".repeat(n * 128).into_bytes()
+        }),
+        ("huge_element", "webassembly", |n| {
+            wat::parse_str(format!("(module (table {} funcref)(elem(i32.const 0) func {})(memory 1)(func $h)(func (param $p i32)(loop (br_table 0 0 (i32.load8_u (local.get $p))))))", n, "$h ".repeat(n))).expect("large element")
+        }),
         ("loops_braceless", "javascript", |n| {
             loops(n, "while(x)x\n").into_bytes()
         }),

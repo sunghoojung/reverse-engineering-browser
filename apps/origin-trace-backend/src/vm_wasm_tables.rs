@@ -391,6 +391,9 @@ impl Tables {
                 }
             }
         }
+        for table in &tables.oversized {
+            tables.slots.remove(table);
+        }
         let mut signatures = HashMap::new();
         for signature in &tables.signatures {
             let id = if let Some(signature) = signature {

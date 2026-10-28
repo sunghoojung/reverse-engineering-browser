@@ -10,7 +10,7 @@ definition. A Rust test fails if a copy, including the OpenAPI components,
 drifts from the standalone schema.
 
 This contract lands as one unit with the commits that introduce and then
-correct it (526178a, 7258370, f4092e3 and their follow-up). No document was
+correct it (526178a, 7258370, f4092e3 and their follow-ups). No document was
 released against an earlier draft, so it keeps version 1; do not treat any of
 those commits alone as a released contract.
 
@@ -137,9 +137,10 @@ function bodies excluded:
   `typed-array`, `array` or `unknown`. It reads at most 64 bindings of the
   buffer, once per buffer name. A tokenizer loop over a string keeps
   `switch_on_value` / `cursor_index` / `loop` and is role `other`.
-- Bracket pairing is one linear pass with a stack per bracket kind, so
-  unmatched brackets inside regex literals, which the masker keeps, cost
-  nothing extra.
+- Bracket pairing uses a bitset of opening positions and one `u32` closing
+  offset per opening, with a stack per bracket kind. An offset lookup uses
+  the opening rank. Dense `{}` input needs about 2.2 index bytes per source
+  byte; unmatched regex brackets add no rescans.
 
 These are syntactic matches inside one region, not data-flow proof. Anything
 outside the recognized forms stays `unknown`. `dispatch_kind: "unknown"` is
@@ -174,8 +175,9 @@ sums segment entries, so classification never moves a tier or score. A ranking
 change needs its own ranking version.
 
 The object lists at most 256 sites. Interpreter candidates and multiplexers
-are listed before other sites, so the bound never hides them behind ordinary
-branching. `site_count`, `role_counts` and `kind_counts` cover every classified
+are listed before other sites. Within a role, structural scheduling strength
+breaks ties before source order. A JavaScript loop bounding the selector cursor
+against the fetched buffer's length precedes otherwise similar cursor sites. `site_count`, `role_counts` and `kind_counts` cover every classified
 site, and `omitted_site_count` names the classified sites that are not listed.
 
 ## Work bounds
@@ -190,13 +192,24 @@ step. The meter also bounds the bytes the index and symbolic traces retain at
 once (128 MiB). A memo hit charges the lookup and the copy it returns, never
 the work it saved.
 
-Each walk that many sites share is done once: the region index stores spans,
-not copies; a braceless loop body's statement end scans at most 4096 bytes and
-stops at a line break; slot-advance walks are memoized per (local, slot,
-carrier) and store-back walks per (slot, carrier, loop); loop containment walks
-only the nesting chain; and a table's matching slots are one shared list. A
-test quadruples every adversarial input of the four reviews and requires total
-work and peak retained bytes to grow at most linearly.
+Each walk that many sites share is done once. A boundary sweep indexes the
+innermost loop and a fixed 32-level ancestor index finds the closest loop
+satisfying a monotone containment/advance predicate without materializing a
+nesting chain. Store-back offsets are indexed once per slot and carrier.
+Element placement uses compact slot vectors and stable four-pass radix sorting,
+retaining the last segment assignment at each slot. Active functions and segment
+membership are indexed by table during parsing, and canonical signature groups
+share matching-slot lists across all indirect sites.
+
+Producer 1.7.0 and workspace producer 2.10.0 share the same meter through
+classification, lexical claim resolution and workspace table extraction. Vector
+capacities, masks, token/scope indexes, table layouts, matching lists and
+symbolic indexes reserve their retained bytes before growing. Exhaustion in
+the downstream pass is also recorded on the analysis and any returned workspace.
+A scaling test runs this analysis-to-workspace path, including deep nested
+loops, many element tables, scope noise and dense punctuation. It is distinct
+from process RSS, which also includes unchanged recovery, artifact storage,
+serialization, the runtime and allocator overhead.
 
 Each selector query also has a logical step budget of 4096 steps, replayed on
 memo hits so a site's result never depends on query order. It is a semantic
@@ -204,8 +217,8 @@ bound, not a work charge.
 
 Work goes to the strongest dispatch evidence first, so noise cannot starve an
 interpreter. JavaScript regions are classified in pattern-rank order, and the
-sites inside a region in strength order (a loop-enclosed, cursor-like fetch
-first) before the 4096-site region bound. Every Wasm function is simulated,
+sites inside a region in strength order (first a cursor fetch bounded by
+that same buffer's length, then other loop-enclosed cursor-like fetches) before the 4096-site region bound. Every Wasm function is simulated,
 then sites are classified module-wide in strength order.
 
 - When the meter is exhausted, classification stops. Every site found but not
@@ -236,15 +249,18 @@ classification is never an input to handler recovery, tier or score:
   function of the region, at an interpreter-candidate site. A dispatch through
   a temporary (`h = t[op]; h()`) ties nothing, and a table with no such site
   is withheld as unclassified.
-- A table ties only to calls that read its own binding. The gate resolves each
-  table name to its declaring function scope (parameters, `var`, `let`,
-  `const` and function declarations; a free name binds outside the region), so
-  a nested function that declares its own `ops` dispatches a different table.
-  A binding it cannot resolve with certainty (block-scoped, destructured or
-  catch bindings, braceless arrow parameters, `with` or `eval`) withholds the
-  table. A property such as `this.ops` matches only property sites. Operand-width guesses and
-  owned-effect reachability walks use only surviving handlers, so they never
-  start from a router.
+- A table ties only to calls that read its own binding. A token pass over
+  masked source records function, arrow, block, loop-head, catch and class
+  scopes, then resolves uses after indexing hoisted declarations. An arrow's
+  parameters apply only to its own body. Identifiers are complete spans,
+  including long and Unicode names, never bounded prefixes. Implicit
+  `arguments`, named function expression bindings, class-internal names,
+  destructuring and unresolved syntax are ambiguous unless an explicit binding
+  proves the reference. `eval` and `with` make their enclosing function opaque.
+  An exhausted or incomplete scope pass withholds claims with a counted
+  `handler-withheld` omission. A property such as `this.ops` matches only property
+  sites. Operand-width guesses and owned-effect reachability walks use only
+  surviving handlers.
 - The gate reads the roles of every classified site from the same metered
   classification run that produced the analysis, never the bounded listed
   document and never a second classification pass.
@@ -277,6 +293,9 @@ classification is never an input to handler recovery, tier or score:
   region. Shadowed names, destructuring and cross-region aliases are not
   resolved there; only the opcode-claim gate resolves table scopes. A handler
   table used through a temporary supplies no opcodes.
+- Structural scheduling is not semantic proof. More than 4096 equally strong
+  sites in one region can still omit a later interpreter. The omitted site count
+  is explicit; neither strength ordering nor withholding changes VM ranking.
 - The declared minimum is a lower bound for an imported table, so an imported
   table's out-of-range segment may still fit at instantiation. It is reported,
   not placed.

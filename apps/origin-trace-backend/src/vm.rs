@@ -88,7 +88,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.6.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.7.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -341,11 +341,21 @@ fn classify_javascript(source: &str, meter: &dispatch_shape::Meter) -> dispatch_
             .unwrap()
     });
     let mut omissions = Vec::new();
-    meter.charge(3 * source.len() as u64);
+    let memory = dispatch_shape::Memory::new(meter);
+    if !meter.charge(3 * source.len() as u64) || !memory.keep(source.len() as u64) {
+        meter.count_unexamined(1);
+        return dispatch_shape::Classified {
+            sites: Vec::new(),
+            omissions: meter.omissions("function regions"),
+        };
+    }
     let masked = mask(source);
     let mut openings = BTreeMap::new();
     for m in SIGNATURE.find_iter(&masked) {
         if openings.len() >= 4096 {
+            break;
+        }
+        if !memory.keep(256) {
             break;
         }
         openings.insert(m.end() - 1, m.start());
@@ -355,9 +365,11 @@ fn classify_javascript(source: &str, meter: &dispatch_shape::Meter) -> dispatch_
     let mut parameters = BTreeMap::<usize, Vec<String>>::new();
     for (i, c) in masked.bytes().enumerate() {
         if c == b'{' {
-            stack.push(i);
+            if !memory.push(&mut stack, i as u32) {
+                break;
+            }
         } else if c == b'}'
-            && let Some(start) = stack.pop()
+            && let Some(start) = stack.pop().map(|offset| offset as usize)
             && let Some(signature) = openings.remove(&start)
         {
             regions.push((start + 1, i));
@@ -400,6 +412,11 @@ fn classify_javascript(source: &str, meter: &dispatch_shape::Meter) -> dispatch_
             meter.count_unexamined(1);
             continue;
         }
+        let temporary = dispatch_shape::Memory::new(meter);
+        if !temporary.keep((end - start) as u64) {
+            meter.count_unexamined(1);
+            continue;
+        }
         let region = region_text(start, end);
         let mut observations = Vec::new();
         if let (Some(a), Some(b)) = (LOOP.find(&region), DISPATCH.find(&region)) {
@@ -419,19 +436,18 @@ fn classify_javascript(source: &str, meter: &dispatch_shape::Meter) -> dispatch_
             *start,
         )
     });
-    let lines = dispatch_shape::javascript::Lines::new(source);
+    let lines = dispatch_shape::javascript::Lines::new(source, meter);
     let mut sites = Vec::new();
     for (_, start, end) in ranked {
         if meter.exhausted() {
             meter.count_unexamined(1);
             continue;
         }
-        let region = region_text(start, end);
-        if !meter.retain(region.len() as u64) {
-            meter.release(region.len() as u64);
+        if !meter.retain((end - start) as u64) {
             meter.count_unexamined(1);
             continue;
         }
+        let region = region_text(start, end);
         dispatch_shape::javascript::classify_region(
             source,
             &lines,
@@ -481,14 +497,6 @@ pub(crate) fn classification_under(
 pub(crate) fn javascript_classification_work(source: &str) -> (Value, dispatch_shape::Meter) {
     let meter = dispatch_shape::Meter::new();
     let document = classification_under("javascript", source.as_bytes(), &meter);
-    (document, meter)
-}
-
-/// Classification of one Wasm module and the meter that bounded it.
-#[cfg(test)]
-pub(crate) fn wasm_classification_work(bytes: &[u8]) -> (Value, dispatch_shape::Meter) {
-    let meter = dispatch_shape::Meter::new();
-    let document = classification_under("webassembly", bytes, &meter);
     (document, meter)
 }
 
@@ -979,10 +987,19 @@ pub(crate) fn finish_classification(
 
 /// The analysis result and the roles of every classified dispatch site, which
 /// the opcode-claim gate reads without classifying the artifact again.
-fn analyze_with_roles(
+pub(crate) fn analyze_with_roles(
     artifact: &Value,
     bytes: &[u8],
     events: &[Value],
+) -> (Value, Option<dispatch_shape::Roles>) {
+    analyze_with_meter(artifact, bytes, events, &dispatch_shape::Meter::new())
+}
+
+pub(crate) fn analyze_with_meter(
+    artifact: &Value,
+    bytes: &[u8],
+    events: &[Value],
+    meter: &dispatch_shape::Meter,
 ) -> (Value, Option<dispatch_shape::Roles>) {
     let runtime = if artifact["kind"] == "javascript" {
         "javascript"
@@ -1029,11 +1046,10 @@ fn analyze_with_roles(
     };
     // Classification is interpretation over the same bytes, metered on its
     // own and never an input to the observations, score or tier above.
-    let meter = dispatch_shape::Meter::new();
-    let classified = classify_artifact(runtime, bytes, &meter);
+    let classified = classify_artifact(runtime, bytes, meter);
     let roles = classified
         .as_ref()
-        .map(|classified| dispatch_shape::Roles::new(classified, &meter));
+        .map(|classified| dispatch_shape::Roles::new(classified, meter));
     if let Some(classified) = classified {
         frontend["dispatch_classification"] = dispatch_shape::document(
             &artifact["artifact_id"],
@@ -1518,7 +1534,7 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.6.0");
+        assert_eq!(current_producer()["version"], "1.7.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical

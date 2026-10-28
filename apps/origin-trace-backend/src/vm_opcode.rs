@@ -6,7 +6,7 @@ use crate::{
 use regex::Regex;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
     sync::LazyLock,
 };
@@ -611,30 +611,28 @@ static INDEXED_TABLE: LazyLock<Regex> =
 /// The role a handler table is dispatched under: the sites whose table name
 /// reads the table's own binding. No such site is no classification. A
 /// binding that cannot be resolved with certainty withholds the table.
+type TableSites = HashMap<scope::Binding, Option<vm::dispatch_shape::Role>>;
+
 fn table_verdict(
     binding: scope::Binding,
-    sites: Option<&Vec<(scope::Binding, Option<vm::dispatch_shape::Role>)>>,
+    sites: Option<&TableSites>,
 ) -> std::result::Result<Option<vm::dispatch_shape::Role>, &'static str> {
     use vm::dispatch_shape::Role;
     const AMBIGUOUS: &str = "A handler table name has more than one possible binding, so no dispatch site is tied to it. Its entries are not claimed as guest opcodes.";
-    let sites = sites.map_or(&[][..], Vec::as_slice);
-    if binding == scope::Binding::Ambiguous
-        || sites
-            .iter()
-            .any(|(site, _)| *site == scope::Binding::Ambiguous)
-    {
+    if binding == scope::Binding::Ambiguous {
         return Err(AMBIGUOUS);
     }
-    let roles = sites
-        .iter()
-        .filter(|(site, _)| *site == binding)
-        .map(|(_, role)| *role)
-        .collect::<Vec<_>>();
-    Ok(if roles.contains(&Some(Role::InterpreterCandidate)) {
-        Some(Role::InterpreterCandidate)
-    } else {
-        roles.into_iter().find(Option::is_some).flatten()
-    })
+    let verdict = sites
+        .and_then(|sites| sites.get(&binding))
+        .copied()
+        .flatten();
+    if verdict == Some(Role::InterpreterCandidate) {
+        return Ok(verdict);
+    }
+    if sites.is_some_and(|sites| sites.contains_key(&scope::Binding::Ambiguous)) {
+        return Err(AMBIGUOUS);
+    }
+    Ok(verdict)
 }
 
 /// Handlers `static_handlers` recovered, after the opcode-claim gate.
@@ -658,6 +656,13 @@ fn gate_handlers(
 ) -> Gated {
     use vm::dispatch_shape::Role;
     let memory = vm::dispatch_shape::Memory::new(&roles.meter);
+    if handlers.is_empty() {
+        return Gated {
+            handlers,
+            withheld: 0,
+            unknowns: Vec::new(),
+        };
+    }
     if !roles.meter.charge((end.saturating_sub(start) as u64) * 8)
         || !memory.keep((end.saturating_sub(start) as u64) * 3)
     {
@@ -667,8 +672,28 @@ fn gate_handlers(
             unknowns: vec![withheld_reason(roles, None)],
         };
     }
-    let region = vm::mask(&source[start..end]);
-    let outer = without_nested_functions(&region);
+    let Some(source_region) = source.get(start..end) else {
+        return Gated {
+            withheld: handlers.len(),
+            handlers: Vec::new(),
+            unknowns: vec!["The recovered source range is not a complete UTF-8 region.".into()],
+        };
+    };
+    let region = vm::mask(source_region);
+    let pairs = vm::dispatch_shape::Brackets::new(&region, &roles.meter);
+    let mut outer = region.as_bytes().to_vec();
+    let mut masked_through = 0;
+    for signature in FUNCTION_SIGNATURE.find_iter(&region) {
+        if signature.start() < masked_through {
+            continue;
+        }
+        let open = signature.end() - 1;
+        if let Some(close) = pairs.close(open) {
+            outer[open + 1..close].fill(b' ');
+            masked_through = close;
+        }
+    }
+    let outer = String::from_utf8(outer).expect("whole function spans");
     // The switches recovery reads, found the same way it finds them.
     let mut switches = Vec::new();
     let mut previous_switch_end = 0;
@@ -677,48 +702,78 @@ fn gate_handlers(
             continue;
         }
         let opening_paren = switch_match.end() - 1;
-        let Some(closing_paren) = matching(region.as_bytes(), opening_paren, b'(', b')') else {
+        let Some(closing_paren) = pairs.close(opening_paren) else {
             continue;
         };
-        let Some(opening_brace) = region[closing_paren + 1..]
-            .find('{')
-            .map(|offset| closing_paren + 1 + offset)
-        else {
+        let mut opening_brace = closing_paren + 1;
+        while region
+            .as_bytes()
+            .get(opening_brace)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            opening_brace += 1;
+        }
+        if region.as_bytes().get(opening_brace) != Some(&b'{') {
             continue;
-        };
-        let Some(closing_brace) = matching(region.as_bytes(), opening_brace, b'{', b'}') else {
+        }
+        let Some(closing_brace) = pairs.close(opening_brace) else {
             continue;
         };
         previous_switch_end = closing_brace + 1;
-        switches.push((switch_match.start(), opening_brace, closing_brace));
+        if !memory.push(
+            &mut switches,
+            (switch_match.start(), opening_brace, closing_brace),
+        ) {
+            break;
+        }
     }
     // Every site that dispatches through a named table, nested functions
     // included, as recovery collects table names from the whole region. Each
     // site is keyed by the binding its table name reads, so a table ties
     // only to the calls through that same declaration.
     let scopes = scope::Scopes::new(&region, &roles.meter);
-    let mut table_sites = BTreeMap::<String, Vec<(scope::Binding, Option<Role>)>>::new();
+    let mut table_sites = BTreeMap::<&str, TableSites>::new();
     for captures in vm::dispatch_shape::javascript::INDEXED_CALL.captures_iter(&region) {
+        if !roles.meter.charge(32) {
+            break;
+        }
         let name = captures.get(1).expect("table name");
         let at = start + captures.get(0).expect("indexed call").start();
-        table_sites
-            .entry(name.as_str().to_owned())
-            .or_default()
-            .push((scopes.binding(name.as_str(), name.start()), roles.get(at)));
+        let binding = scopes.binding(name.as_str(), name.start());
+        if !table_sites.contains_key(name.as_str()) && !memory.keep(128) {
+            break;
+        }
+        let sites = table_sites.entry(name.as_str()).or_default();
+        if !sites.contains_key(&binding) && !memory.keep(96) {
+            break;
+        }
+        let role = roles.get(at);
+        let verdict = sites.entry(binding).or_default();
+        if verdict.is_none() || role == Some(Role::InterpreterCandidate) {
+            *verdict = role;
+        }
     }
-    let objects = OBJECT_ASSIGNMENT
-        .captures_iter(&region)
-        .filter_map(|captures| {
-            let opening = captures.get(0)?.end() - 1;
-            let closing = matching(region.as_bytes(), opening, b'{', b'}')?;
-            let name = captures.get(1)?;
-            Some((opening, closing, name.as_str().to_owned(), name.start()))
-        })
-        .collect::<Vec<_>>();
+    let mut objects = Vec::new();
+    for captures in OBJECT_ASSIGNMENT.captures_iter(&region) {
+        let opening = captures.get(0).expect("object").end() - 1;
+        let Some(closing) = pairs.close(opening) else {
+            continue;
+        };
+        let name = captures.get(1).expect("object name");
+        if !memory.push(
+            &mut objects,
+            (opening, closing, name.as_str(), name.start()),
+        ) {
+            break;
+        }
+    }
     let mut kept = Vec::new();
     let mut unknowns = Vec::new();
     let mut withheld = 0usize;
     for handler in handlers {
+        roles
+            .meter
+            .charge((objects.len() + switches.len()) as u64 + 32);
         let at = handler["source"]["byte_offset"].as_u64().unwrap_or(0) as usize;
         let relative = at.saturating_sub(start);
         let verdict = if handler.get("handler_index").is_none() {
@@ -729,17 +784,17 @@ fn gate_handlers(
                 .unwrap_or(None))
         } else {
             INDEXED_TABLE
-                .captures(&region[relative.min(region.len())..])
+                .captures(region.get(relative..).unwrap_or(""))
                 .map(|captures| (captures[1].to_owned(), relative))
                 .or_else(|| {
                     objects
                         .iter()
                         .filter(|(open, close, _, _)| *open < relative && relative < *close)
                         .max_by_key(|(open, _, _, _)| *open)
-                        .map(|(_, _, name, at)| (name.clone(), *at))
+                        .map(|(_, _, name, at)| (name.to_string(), *at))
                 })
                 .map_or(Ok(None), |(name, at)| {
-                    table_verdict(scopes.binding(&name, at), table_sites.get(&name))
+                    table_verdict(scopes.binding(&name, at), table_sites.get(name.as_str()))
                 })
         };
         let verdict = match verdict {
@@ -4285,6 +4340,48 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     }
 
     #[test]
+    fn gate_review_fixtures_resolve_only_proven_table_bindings() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-gate");
+        for (name, kept) in [
+            ("gate_arguments.js", false),
+            ("gate_namedexpr.js", false),
+            ("gate_longname.js", false),
+            ("gate_closure.js", true),
+            ("gate_objshorthand.js", true),
+            ("gate_correct.js", true),
+            ("gate_correct_irrelevant_arrow.js", true),
+            ("gate_unicode1.js", false),
+            ("gate_unicode2.js", false),
+        ] {
+            let source = std::fs::read(root.join(name)).unwrap();
+            let (_, workspace, meter) = pipeline_work("javascript", &source);
+            let workspace = workspace.expect(name);
+            let handlers = workspace["handlers"].as_array().unwrap();
+            assert_eq!(
+                handlers.len(),
+                if kept { 3 } else { 0 },
+                "{name}: {workspace}"
+            );
+            if !kept {
+                assert!(
+                    workspace["coverage"]["omissions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|o| o["reason"] == "handler-withheld"
+                            && o["detail"]
+                                .as_str()
+                                .unwrap()
+                                .contains("3 opcode candidates")),
+                    "{name}"
+                );
+            }
+            assert!(!meter.exhausted(), "{name}");
+        }
+    }
+
+    #[test]
     fn implicit_and_uncertain_bindings_withhold_only_in_their_scope() {
         let prefix = "var ops={};";
         for body in [
@@ -4331,42 +4428,33 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     }
 
     #[test]
-    fn gate_review_fixtures_resolve_only_proven_table_bindings() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-gate");
-        for (name, kept) in [
-            ("gate_arguments.js", false),
-            ("gate_namedexpr.js", false),
-            ("gate_longname.js", false),
-            ("gate_closure.js", true),
-            ("gate_objshorthand.js", true),
-            ("gate_correct.js", true),
-            ("gate_correct_irrelevant_arrow.js", true),
-            ("gate_unicode1.js", false),
-            ("gate_unicode2.js", false),
-        ] {
-            let source = std::fs::read_to_string(root.join(name)).unwrap();
-            let (_, _, document) = analyze(&source, &[]);
-            let workspace = &document["workspaces"][0];
-            assert_eq!(
-                workspace["handlers"].as_array().unwrap().len(),
-                if kept { 3 } else { 0 },
+    fn bounded_cursor_dispatch_precedes_near_candidate_decoys() {
+        for (name, _, generate) in vm::review_inputs::scaling_generators()
+            .into_iter()
+            .filter(|(name, _, _)| *name == "deep_loops")
+        {
+            let bytes = generate(4096);
+            let (analysis, workspace, _) = pipeline_work("javascript", &bytes);
+            let classification = &analysis["frontend"]["dispatch_classification"];
+            let real = std::str::from_utf8(&bytes)
+                .unwrap()
+                .find("switch(code[pc++]")
+                .unwrap();
+            assert!(
+                classification["sites"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|site| site["location"]["byte_offset"] == real),
                 "{name}"
             );
-            if !kept {
-                assert!(
-                    workspace["coverage"]["omissions"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|o| o["reason"] == "handler-withheld"
-                            && o["detail"]
-                                .as_str()
-                                .unwrap()
-                                .contains("3 opcode candidates")),
-                    "{name}"
-                );
-            }
+            assert!(
+                !workspace.unwrap()["handlers"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "{name}"
+            );
         }
     }
 
@@ -4392,6 +4480,107 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         }
     }
 
+    #[test]
+    fn downstream_budget_exhaustion_withholds_claims_and_is_counted() {
+        let source = include_bytes!("../../../tools/fixtures/dispatch-gate/gate_correct.js");
+        let artifact = json!({"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","kind":"javascript","sha256":hex::encode(Sha256::digest(source)),"url":"fixture://budget/source"});
+        let (full, roles) = vm::analyze_with_roles(&artifact, source, &[]);
+        let work = roles.unwrap().meter.used();
+        for meter in [
+            vm::dispatch_shape::Meter::with_limits(work + 1, 128 << 20),
+            vm::dispatch_shape::Meter::with_limits(1_000_000_000, 256),
+        ] {
+            let (mut result, roles) = vm::analyze_with_meter(&artifact, source, &[], &meter);
+            let root = tempfile::tempdir().unwrap();
+            let mut workspace = workspace(
+                root.path(),
+                &artifact,
+                source,
+                Analysis {
+                    result: &result,
+                    roles: roles.as_ref(),
+                },
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
+            vm::finish_classification(&mut result, Some(&mut workspace), &meter);
+            assert_eq!(workspace["handlers"], json!([]));
+            assert!(
+                workspace["coverage"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| o["reason"] == "handler-withheld"
+                        && o["detail"]
+                            .as_str()
+                            .unwrap()
+                            .contains("3 opcode candidates"))
+            );
+            assert!(
+                result["frontend"]["dispatch_classification"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| o["reason"] == "classification-work-limit")
+            );
+            for field in ["tier", "vm_score", "finding_id"] {
+                assert_eq!(result[field], full[field]);
+            }
+            assert!(meter.exhausted());
+            assert!(meter.peak() <= 128 << 20);
+        }
+    }
+
+    /// The exact analysis-to-workspace path used by origin-trace-vm. The
+    /// returned meter is the same allocation shared by both stages.
+    fn pipeline_work(
+        runtime: &str,
+        bytes: &[u8],
+    ) -> (Value, Option<Value>, vm::dispatch_shape::Meter) {
+        let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":if runtime == "javascript" {"dynamic_javascript"} else {"webassembly_compile"},"kind":if runtime == "javascript" {"javascript"} else {"wasm"},"url":"fixture://meter/source","mime_type":if runtime == "javascript" {"text/javascript"} else {"application/wasm"},"sha256":hex::encode(Sha256::digest(bytes)),"byte_size":bytes.len(),"sensitive":false});
+        let (mut result, roles) = vm::analyze_with_roles(&artifact, bytes, &[]);
+        let roles = roles.expect("classification roles");
+        let root = tempfile::tempdir().unwrap();
+        let mut workspace = workspace(
+            root.path(),
+            &artifact,
+            bytes,
+            Analysis {
+                result: &result,
+                roles: Some(&roles),
+            },
+            &[],
+            &[],
+            &[],
+        );
+        vm::finish_classification(&mut result, workspace.as_mut(), &roles.meter);
+        (result, workspace, roles.meter)
+    }
+
+    #[test]
+    #[ignore = "measurement driver; requires REB_CLASSIFIER_MEASURE_INPUTS"]
+    fn measure_classifier_pipeline() {
+        let paths =
+            std::fs::read_to_string(std::env::var("REB_CLASSIFIER_MEASURE_INPUTS").unwrap())
+                .unwrap();
+        for path in paths.lines() {
+            let bytes = std::fs::read(path).unwrap();
+            let runtime = if bytes.starts_with(b"\0asm") {
+                "webassembly"
+            } else {
+                "javascript"
+            };
+            let start = std::time::Instant::now();
+            let (result, workspace, meter) = pipeline_work(runtime, &bytes);
+            println!(
+                "MEASURE {}",
+                json!({"path":path,"bytes":bytes.len(),"units":meter.used(),"peak":meter.peak(),"exhausted":meter.exhausted(),"seconds":start.elapsed().as_secs_f64(),"handlers":workspace.as_ref().and_then(|w| w["handlers"].as_array()).map(|a| a.len()),"classification":result["frontend"]["dispatch_classification"]})
+            );
+        }
+    }
+
     /// Fourth review, root cause: one meter charges every classifier loop,
     /// JavaScript and Wasm. On every adversarial shape of all four reviews,
     /// quadrupling the input at most quadruples total work and peak retained
@@ -4401,12 +4590,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     fn classifier_work_and_memory_scale_linearly() {
         const N: usize = 1024;
         let measure = |runtime: &str, bytes: &[u8]| {
-            let (_, meter) = match runtime {
-                "javascript" => {
-                    vm::javascript_classification_work(std::str::from_utf8(bytes).unwrap())
-                }
-                _ => vm::wasm_classification_work(bytes),
-            };
+            let (_, _, meter) = pipeline_work(runtime, bytes);
             (meter.used(), meter.peak(), meter.exhausted())
         };
         let mut failures = Vec::new();

@@ -451,6 +451,35 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  func test8VmHostLinksSpacing() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "vm")
+      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await ui.click("#vm-list .vm-row", containing: "artifact 107")
+      try await ui.click("[data-vm-panel='host-links']")
+      let spacing = try await ui.json("""
+        (() => { const panel = document.querySelector('[data-vm-panel-content="host-links"]');
+          const empty = getComputedStyle(panel.querySelector('.vm-workspace-empty'));
+          const paragraph = getComputedStyle(panel.querySelector('p'));
+          return {emptyTop: parseFloat(empty.paddingTop), emptyBottom: parseFloat(empty.paddingBottom),
+            paragraphTop: parseFloat(paragraph.paddingTop), paragraphBottom: parseFloat(paragraph.paddingBottom)}; })()
+        """)
+      XCTAssertEqual(spacing["emptyTop"] as? Double, spacing["paragraphTop"] as? Double,
+        "\(size.name): empty paragraphs use the panel's paragraph spacing")
+      XCTAssertEqual(spacing["emptyBottom"] as? Double, spacing["paragraphBottom"] as? Double,
+        "\(size.name): empty paragraphs do not add a second vertical inset")
+      _ = try await ui.json("__rebUiProbe.center('.vm-workbench-tabs') || {}")
+      _ = try await ui.json("__rebUiProbe.center(\"[data-vm-panel-content='host-links'] details.vm-effect-row summary\") || {}")
+      try await ui.settle()
+      try await assertFullyVisible(ui, "[data-vm-panel-content='host-links'] details.vm-effect-row summary", "\(size.name) host link")
+      try await assertVmDock(ui, size)
+      try await assertLayout(ui, "#screen-vm", "\(size.name) host links")
+      try await ui.screenshot("vm-host-links-\(size.name)")
+    }
+  }
+
+  @MainActor
   func test9VmCompactTreesAndExample() async throws {
     // Exercise both sides of the responsive rule independently of the
     // minimum window, where width and height breakpoints apply together.

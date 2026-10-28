@@ -3424,6 +3424,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-workbench-panels > [hidden] { display: none !important; }
 .vm-workbench-panels > .vm-workspace-card { border: 0; }
 .vm-workbench-panels > .vm-workspace-card > :is(h4,p) { margin: 10px; }
+/* Empty paragraphs already have the same margins as the panel's other copy. */
+.vm-workbench-panels > .vm-workspace-card > p.vm-workspace-empty { padding-block: 0; }
 .vm-workbench-panels .vm-experiment-form { padding: 0 10px 10px; }
 @media (max-width: 1100px) { .vm-workbench-body { grid-template-columns: minmax(0, 1fr); } .vm-workbench-listing { max-height: 360px; } }
 

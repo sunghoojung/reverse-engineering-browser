@@ -116,7 +116,14 @@ final class Harness {
       if (try? await value(expression)) as? Bool == true { return }
       try await Task.sleep(nanoseconds: 100_000_000)
     }
-    throw HarnessError("Timed out: \(message)")
+    // Say whether input was lost or the app refused it (for example a stale
+    // history entry), so an intermittent timeout is diagnosable from the log.
+    let context = (try? await json(
+      "({screens: [...document.querySelectorAll('.screen')].filter(screen => !screen.hidden).map(screen => screen.id).join(','), " +
+      "focus: __rebUiProbe.describe(document.activeElement), notice: document.querySelector('#investigation-notice')?.textContent ?? '', " +
+      "back: document.querySelector('#investigation-back')?.innerText ?? '', forward: document.querySelector('#investigation-forward')?.innerText ?? ''})"
+    )).map { "\($0)" } ?? "state unavailable"
+    throw HarnessError("Timed out: \(message) [\(context)]")
   }
 
   // The outgoing document satisfies the same readiness condition as the new

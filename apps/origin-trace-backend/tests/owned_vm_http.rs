@@ -502,3 +502,5 @@ async fn owned_vm_real_helper_http_cli_lifecycle() {
     }
     server.stop_gracefully().await;
 }
+
+origin_trace_backend::javascript_worker_test_entry!();

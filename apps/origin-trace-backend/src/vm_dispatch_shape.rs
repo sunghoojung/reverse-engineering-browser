@@ -11,6 +11,21 @@
 //! Only `repeats=loop` with a cursor-like selector is an interpreter
 //! candidate. A `once` dispatch on a call argument is a multiplexer: its
 //! arms or constants route one call to one function and are not opcodes.
+// Contract registry exercised against every embedded schema and the real UI.
+#[cfg(test)]
+pub(crate) const OMISSION_REASONS: &[&str] = &[
+    "classification-work-limit",
+    "classification-trace-limit",
+    "classification-region-limit",
+    "classification-unavailable",
+    "parse-failed",
+    "analysis-worker-failed",
+    "handler-binding-unproven",
+    "global-binding-unstable",
+    "receiver-binding-unstable",
+    "initialization-not-dominating",
+];
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{

@@ -695,6 +695,16 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let dispatchInset = try await ui.vmCardInsetOffenders(dispatch)
       XCTAssertEqual(dispatchInset, [], "\(size.name) vm dispatch structure: card content shares the 12px inset")
       try await ui.screenshot("vm-dispatch-structure-\(size.name)")
+
+      try await ui.click("#vm-list .vm-row", containing: "artifact 311")
+      try await ui.click("[data-vm-panel='dispatch']")
+      try await ui.waitUntil("document.querySelector(\"\(dispatch)\").innerText.includes('parse-failed')", "parse failure omission did not render")
+      let omitted = try await ui.value("document.querySelector(\"\(dispatch)\").innerText") as? String ?? ""
+      XCTAssertTrue(omitted.contains("1 record omitted."), "\(size.name): parse failure remains counted: \(omitted)")
+      try await assertInert(ui, "\(size.name) vm parse failure")
+      try await ui.revealVmHeading(dispatch, "Dispatch structure")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) vm parse failure")
+      try await ui.screenshot("vm-parse-failed-\(size.name)")
     }
   }
 

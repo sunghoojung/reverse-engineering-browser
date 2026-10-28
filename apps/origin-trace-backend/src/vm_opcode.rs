@@ -4047,15 +4047,21 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         if let Some(workspace) = document["workspaces"].as_array().unwrap().first() {
             assert_eq!(workspace["handlers"], json!([]));
         }
-        // The same table tied to a cursor-loop dispatch keeps its handlers,
-        // including a dispatch loop in a nested function of the region.
-        for source in [
-            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}",
-            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};function inner(){while(pc<code.length){handlers[code[pc++]](stack);}}return inner;}",
+        // Proof also requires same-function dominance, including when a
+        // nested function's loop is structurally an interpreter candidate.
+        for (source, expected) in [
+            (
+                "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}",
+                2,
+            ),
+            (
+                "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};function inner(){while(pc<code.length){handlers[code[pc++]](stack);}}return inner;}",
+                0,
+            ),
         ] {
             let start = source.find('{').unwrap() + 1;
             let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
-            assert_eq!(handlers.len(), 2, "{source}");
+            assert_eq!(handlers.len(), expected, "{source}");
         }
     }
 
@@ -4173,10 +4179,25 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             .join("../../tools/fixtures/dispatch-retention");
         let ledger: Value =
             serde_json::from_slice(&fs::read(root.join("ledger.json")).unwrap()).unwrap();
-        for row in ledger["cases"].as_array().unwrap() {
+        for row in ledger["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(ledger["review_cases"].as_array().into_iter().flatten())
+        {
             let name = row["file"].as_str().unwrap();
-            let bytes = fs::read(root.join(name)).unwrap();
-            let (_, workspace, meter) = pipeline_work("javascript", &bytes);
+            let bytes = vm::review_inputs::retention_source(&root, row);
+            if let Some(expected) = row["sha256"].as_str() {
+                assert_eq!(hex::encode(Sha256::digest(&bytes)), expected, "{name}");
+            }
+            let (analysis, workspace, meter) = pipeline_work(
+                if bytes.starts_with(b"\0asm") {
+                    "webassembly"
+                } else {
+                    "javascript"
+                },
+                &bytes,
+            );
             let count = workspace
                 .as_ref()
                 .and_then(|w| w["handlers"].as_array())
@@ -4186,8 +4207,17 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 row["expected_handlers"].as_u64().unwrap(),
                 "{name}: {workspace:?}"
             );
-            assert!(!meter.exhausted(), "{name}");
-            if row["base_handlers"].as_u64().unwrap() > count as u64 {
+            assert!(
+                !meter.exhausted()
+                    || analysis["frontend"]["dispatch_classification"]["omissions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|o| o["reason"] == "classification-work-limit"),
+                "{name}"
+            );
+            if !bytes.starts_with(b"\0asm") && row["base_handlers"].as_u64().unwrap() > count as u64
+            {
                 assert!(
                     workspace.as_ref().unwrap()["coverage"]["omissions"]
                         .as_array()

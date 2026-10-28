@@ -1,7 +1,7 @@
 use clap::Parser;
 use origin_trace_backend::{App, Options, PublishedEndpoint};
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let options = Options::parse().resolve()?;
     let listener = tokio::net::TcpListener::bind(options.address()?).await?;
     let address = listener.local_addr()?;
@@ -35,3 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?;
     Ok(())
 }
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    origin_trace_backend::javascript_worker_entry();
+    run_main()
+}
+
+#[cfg(test)]
+origin_trace_backend::javascript_worker_test_entry!();

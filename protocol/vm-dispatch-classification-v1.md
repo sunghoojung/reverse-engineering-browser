@@ -221,15 +221,27 @@ bound, not a work charge.
 
 JavaScript accepts sources up to 8 MiB. Parser admission pre-charges 64 work
 units per byte; pipe transfer adds two units per source byte and one per reply byte. The unmodified Oxc parser
-and semantic builder run inside the existing analyzer executable in an internal
-worker mode. Its allocator checks every allocation, reallocation overlap and
+and semantic builder run by re-executing the calling binary (`current_exe`) in
+an internal worker mode. The CLI, backend, API executable and Cargo test harnesses
+share the same entry point; there is no sibling discovery or version-skew path. Its allocator checks every allocation, reallocation overlap and
 32 bytes of per-allocation overhead against 64 MiB + 80 times source bytes,
 bounded to 704 MiB. No worst-case arena is reserved. The arena, semantic vectors,
 classifier indexes and serialized reply all count; the measured peak returns to
 the artifact meter. On refusal the allocator writes fixed-size telemetry and
 exits the disposable worker before calling the system allocator. It never
 unwinds inside GlobalAlloc. The caller records an omission and withholds proof.
-Missing, failed or 30-second-deadline workers likewise produce counted omissions.
+An operational failure instead produces `analysis-worker-failed` with one counted
+artifact and a `timeout`, `crash`, `spawn` or `protocol` detail. No analysis,
+workspace or host-link document is persisted, and the backend never caches that
+failure. The CLI exits nonzero; the API returns HTTP 503 with
+`dependency_unavailable`, the counted reason, and a retry instruction. The next
+request retries unchanged inputs. A successful earlier document remains intact.
+The wall-clock deadline is only a hang backstop: five minutes plus one minute per
+started MiB, up to thirteen minutes. Deterministic work and allocation meters
+still own resource refusal. The worker starts with an empty environment (only
+test-entry flags in libtest), closes descriptors beyond its three pipes, and
+refuses startup if its network containment cannot be installed. macOS also denies
+file reads and writes after startup; Linux denies network socket operations.
 Source and compact results travel through bounded anonymous pipes, never disk.
 Only compact site/proof records survive under the separate 128 MiB retained cap.
 A parser reservation cannot consume that cap. Reserved 32 MiB recursive stacks
@@ -237,9 +249,10 @@ A parser reservation cannot consume that cap. Reserved 32 MiB recursive stacks
 resident stack pages, allocator slack, both processes and unchanged recovery;
 the measured 8 MiB target is approximately 1 GiB or less on a local workstation.
 
-A conservative punctuation and unary-keyword guard refuses more than 8192 nested delimiters or
-operators in a statement; it can refuse unusual literals/comments but cannot
-create claims. A linear AST prepass bounds hoisting by intervening block scopes
+An iterative lexical guard refuses more than 8192 nested delimiters or operators
+in a statement. Strings, template text, comments and regexp bodies are atomic
+for this guard; template substitutions re-enter syntax. Literal bytes never count
+as nesting. This admission pass cannot create claims; Oxc owns syntax and binding. A linear AST prepass bounds hoisting by intervening block scopes
 times binding-pattern bytes (at most twice source bytes). It also pre-charges
 twice the sum of AST node depths, an upper bound on scope-resolution and syntax
 ancestor walks, plus redeclaration and private-name suggestion work. Semantic
@@ -267,6 +280,13 @@ is simulated, then sites are classified module-wide in strength order.
   different source, and no bound cuts a list of writes or stores silently.
 - JavaScript parser admission refusal is a counted `classification-work-limit`.
   A module whose sections do not decode adds `classification-unavailable`.
+- `parse-failed` counts syntax or semantic failures. `analysis-worker-failed`
+  counts retryable execution failures. `handler-binding-unproven`,
+  `global-binding-unstable`, `receiver-binding-unstable`, and
+  `initialization-not-dominating` count unproven numeric function entries under
+  their respective binding rules. `classification-region-limit` counts bounded
+  region omissions. All producer reasons are accepted by every embedded schema
+  and the real UI validator and displayed as inert text.
 
 ## Downstream use
 
@@ -284,7 +304,8 @@ classification is never an input to handler recovery, tier or score:
   a temporary (`h = t[op]; h()`) ties nothing, and a table with no such site
   is withheld as unclassified.
 - A table ties only to references resolving to its declaration's Oxc symbol,
-  with exactly one initializer and no other write that could replace it.
+  with exactly one initializer and no other write that could replace it. A
+  declaration without an initializer followed by its only assignment qualifies.
   Block `let`/`const`, hoisting, Annex B, catch parameters, named functions,
   parameter defaults, classes and shorthand use Oxc's semantic rules. Unresolved
   globals and implicit non-arrow `arguments` have no provable table symbol.
@@ -293,20 +314,35 @@ classification is never an input to handler recovery, tier or score:
   always withholds claims.
   An Annex B block function's implicit replacement of an existing `var` table
   also counts as a write, although it has no ordinary reference-write AST node.
-- `obj.ops` requires the same resolved receiver symbol and the same static,
-  non-computed property name. Private `#ops` never matches ordinary `ops`.
-- `this.ops` requires the assignment and dispatch to share the same non-arrow
-  function's `this` binding. Intervening arrows preserve it; a nested non-arrow
-  function, method or class boundary breaks it. The property must be assigned
-  exactly once, before the dispatch loop. Any other write anywhere in the
-  artifact to that property name through any receiver withholds the claim.
-  Computed writes with unknown keys, destructuring targets, `Object.assign`,
-  `defineProperty`/`defineProperties`, `Reflect.set`, and references to those
-  mutator methods are conservatively ambiguous. This includes computed calls
-  through `Object` or `Reflect`, extracted/destructured mutators, object spreads,
-  and other object/class definitions of the property. A write to a different
-  static property is safe.
-  The same conservative property-write check applies to identifier receivers.
+- A top-level classic-script binding belongs to the global object or global
+  lexical environment. `global-binding-unstable` withholds it if this artifact
+  contains dynamic code evaluation (direct/indirect `eval`, `Function`, string
+  timers or `import()`), or a write/define/delete through `globalThis`, `window`,
+  `self`, `global`, `frames`, `top`, `parent`, top-level `this`, or their tracked
+  aliases whose key could equal the binding. Unknown keys are conservative.
+  Per-artifact analysis cannot see other scripts sharing that global object or
+  lexical environment. Stability is conditional on this explicit scope limit;
+  it is not a whole-page proof. Module, IIFE and function-local bindings do not
+  use the classic-script global rule.
+- `obj.ops` requires the same resolved receiver symbol and static, non-computed
+  property name. Private `#ops` never matches ordinary `ops`. `this.ops` also
+  requires the same non-arrow `this` owner. Reflective receivers are withheld
+  under `receiver-binding-unstable`: `Proxy`, mutating `Reflect` operations,
+  `Object.defineProperty`/`defineProperties`/`setPrototypeOf`/`assign`, extracted
+  mutator aliases, legacy getter/setter APIs, prototype writes, and ambiguous
+  writes/accessor definitions with a matching or unknown key. Receiver alias
+  analysis is deliberately conservative across the artifact, including unknown
+  computed API names, destructuring and spreads. A non-fresh `.call`, `.apply`,
+  `.bind` or `Reflect.apply` receiver also withholds `this` proof. Harmless
+  `Object.keys` and other known read APIs do not themselves invalidate a table.
+- Every identifier, member and `this` table initializer must be an unconditional
+  statement in the dispatch loop's function body that completes before the
+  loop. Plain statement blocks are allowed. `if`, loops, `try`/`catch`, `switch`,
+  logical/conditional expressions, callbacks and nested functions do not prove
+  dominance. An arrow preserves lexical `this` but does not prove execution.
+  Cross-function initialization is conservatively withheld even when a runtime
+  witness calls that function. These entries count as
+  `initialization-not-dominating`; source order alone is insufficient.
 - Operand-width guesses and owned-effect reachability use only surviving
   handlers. Exact AST case/property spans connect proof records to unchanged
   recovery; workspace extraction never parses the artifact a second time.

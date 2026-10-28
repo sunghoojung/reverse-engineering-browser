@@ -1288,3 +1288,5 @@ fn session_context_reports_actual_mcp_admission_and_action_guidance() {
         }
     }
 }
+
+origin_trace_backend::javascript_worker_test_entry!();

@@ -402,8 +402,24 @@ bounded.workspaces[0].dispatch_classification.omissions = [{reason: 'classificat
 bounded.workspaces[0].handler_tables[2].segments.push({segment_index: 2, placement: 'out-of-range', offset: 7, global_index: null, entry_count: 3});
 assert(validateModule(bounded), 'counted classification omissions and out-of-range segments are valid');
 const boundedText = renderApi.renderVmDispatchSites(bounded.workspaces[0]).textContent;
-assert(boundedText.includes('classification-work-limit: The artifact classification work bound was reached. 5 sites not classified.'), boundedText);
+assert(boundedText.includes('classification-work-limit: The artifact classification work bound was reached. 5 records omitted.'), boundedText);
 assert(renderApi.renderVmHandlerTables(bounded.workspaces[0]).textContent.includes('segment 2 at slot 7 ends past the declared table size · 3 entries, not placed'));
+// Exercise every producer omission through the actual document validator and
+// renderer, including parse and retryable worker errors. Captured detail is text.
+const producer = await readFile(join(root, 'apps/origin-trace-backend/src/vm_dispatch_shape.rs'), 'utf8');
+const reasonRegistry = producer.match(/const OMISSION_REASONS: &[\s\S]*?= &\[([\s\S]*?)\];/)[1];
+const producerReasons = [...reasonRegistry.matchAll(/"([^"\n]+)"/g)].map(match => match[1]);
+const classificationSchema = JSON.parse(await readFile(join(root, 'protocol/vm-dispatch-classification-v1.schema.json'), 'utf8'));
+assert.deepEqual(producerReasons, classificationSchema.properties.omissions.items.properties.reason.enum);
+for (const reason of producerReasons) {
+  const document = structuredClone(shapedDocument);
+  const detail = '<img src=x onerror="globalThis.compromised=true">';
+  document.workspaces[0].dispatch_classification.omissions = [{reason, detail, omitted_records: 3}];
+  assert(validateModule(document), `producer omission must validate: ${reason}`);
+  const rendered = renderApi.renderVmDispatchSites(document.workspaces[0]);
+  assert(rendered.textContent.includes(`${reason}: ${detail}`), `producer omission must render: ${reason}`);
+  assert(!descendants(rendered).some(node => node.tagName === 'img'), 'omission detail must remain inert text');
+}
 // A text scan or second-level lookup is never an interpreter candidate.
 for (const [field, value, text] of [['buffer_kind', 'string', 'string scan, no guest opcodes claimed'],
   ['buffer_kind', 'arguments', 'arguments scan, no guest opcodes claimed'], ['through_lookup', true, 'second-level lookup, no guest opcodes claimed']]) {

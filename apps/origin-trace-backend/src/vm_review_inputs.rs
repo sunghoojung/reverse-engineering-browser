@@ -8,6 +8,43 @@
 const VM_TAIL: &str = "while(pc<program.length){switch(program[pc++]){case 0:stack.push(1);break;case 1:stack.pop();break;case 2:return stack;}}}";
 const VM_HEAD: &str = "function run(program){var pc=0,stack=[];";
 
+/// Compact, byte-exact owned review sources. Repeated bundles/literals stay
+/// recipes in the retention ledger; hashes prevent generators drifting apart.
+pub(crate) fn retention_source(root: &std::path::Path, row: &serde_json::Value) -> Vec<u8> {
+    if let Some(hex) = row["hex"].as_str() {
+        return hex::decode(hex).unwrap();
+    }
+    if let Some(source) = row["source"].as_str() {
+        return source.as_bytes().to_vec();
+    }
+    if let Some(parts) = row["parts"].as_array() {
+        let mut source = String::new();
+        for part in parts {
+            if let Some(template) = part["template"].as_str() {
+                let start = part["start"].as_u64().unwrap();
+                let count = part["count"].as_u64().unwrap();
+                let modulus = part["modulus"].as_u64().unwrap();
+                for i in start..start + count {
+                    source.push_str(
+                        &template
+                            .replace("%i%", &i.to_string())
+                            .replace("%mod%", &(i % modulus).to_string()),
+                    );
+                }
+            } else {
+                source.push_str(
+                    &part["text"]
+                        .as_str()
+                        .unwrap()
+                        .repeat(part["repeat"].as_u64().unwrap() as usize),
+                );
+            }
+        }
+        return source.into_bytes();
+    }
+    std::fs::read(root.join(row["file"].as_str().unwrap())).unwrap()
+}
+
 /// `count` copies of one loop statement, one per line.
 pub(crate) fn loops(count: usize, body: &str) -> String {
     format!("function f(x){{\n{}}}\n", body.repeat(count))

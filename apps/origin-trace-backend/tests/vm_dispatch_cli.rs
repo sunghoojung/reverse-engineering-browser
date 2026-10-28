@@ -157,3 +157,5 @@ fn cli_rejects_duplicate_fields_and_symlinks_without_output() {
         );
     }
 }
+
+origin_trace_backend::javascript_worker_test_entry!();

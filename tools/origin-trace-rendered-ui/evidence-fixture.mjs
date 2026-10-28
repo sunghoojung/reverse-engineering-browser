@@ -98,11 +98,16 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore})
     parent_artifact_id: '303', creator_event_id: '1', capture_origin: 'native_wasm_guest', kind: 'bytecode_buffer',
     url: 'fixture://native-guest-hostile'},
   Buffer.concat([Buffer.from(HOSTILE_BYTECODE_MARKUP, 'utf8'), Buffer.from([0xff, 0xfe, 0x00, 0x80]), Buffer.from(Array.from({length: 32}, (_, index) => index))]));
+  // The real analyzer must retain a displayable parse omission without making
+  // the entire workspace response invalid or inventing handler proof.
+  const parseFailure = await artifact(artifacts, {artifact_id: '311', session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'dynamic_javascript', kind: 'javascript', mime_type: 'text/javascript', url: 'fixture://parse-failed.js'},
+  Buffer.from('function vm(code,stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};while(pc<code.length){ops[code[pc++]]();}return stack;}\nlet broken=;'));
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
   assert(physical.events.some(event => event.type === 'wasm_dispatch_observation'), 'dispatch golden store holds an observation');
-  const manifest = [...demoArtifacts, source, bytecode, ...guest.artifacts, ...physical.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, ...guest.artifacts, ...physical.artifacts];
   const events = [...demoEvents, ...requests, ...guest.events, ...physical.events];
   await writeFile(join(artifacts, 'manifest.jsonl'), manifest.map(record => JSON.stringify(record) + '\n').join(''));
   await writeFile(join(root, 'events.jsonl'), events.map(event => JSON.stringify(event) + '\n').join(''));

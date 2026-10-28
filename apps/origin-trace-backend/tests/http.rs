@@ -7036,3 +7036,5 @@ async fn disconnected_capture_stop_is_not_reported_as_success() {
     assert_eq!(context["capture_mode"], "live");
     assert_eq!(context["live_admission"], "native_capture_unavailable");
 }
+
+origin_trace_backend::javascript_worker_test_entry!();

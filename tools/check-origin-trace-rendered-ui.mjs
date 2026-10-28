@@ -41,7 +41,7 @@ for (const required of [app, join(root, 'build/sessions/demo.jsonl'), ...Object.
 // the selected developer directory or the standard Xcode location without
 // changing the global selection.
 function developerDirectory() {
-  const candidates = [process.env.DEVELOPER_DIR, execFileSync('xcode-select', ['-p'], {encoding: 'utf8'}).trim(),
+  const candidates = [process.env.DEVELOPER_DIR, process.env.DEVELOPER_DIR ? null : execFileSync('xcode-select', ['-p'], {encoding: 'utf8'}).trim(),
     '/Applications/Xcode.app/Contents/Developer'].filter(Boolean);
   const found = candidates.find(path => existsSync(join(path, 'usr/bin/xcodebuild')));
   assert(found, 'Rendered UI acceptance requires full Xcode (XCTest); Command Line Tools alone are insufficient');

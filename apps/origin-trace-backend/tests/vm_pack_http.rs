@@ -181,3 +181,5 @@ async fn vm_pack_http_cli_parity_and_rejections() {
         assert!(String::from_utf8_lossy(&description.stdout).contains(operation));
     }
 }
+
+origin_trace_backend::javascript_worker_test_entry!();

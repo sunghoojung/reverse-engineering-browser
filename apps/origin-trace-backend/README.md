@@ -66,17 +66,21 @@ input list through `REB_CLASSIFIER_MEASURE_INPUTS` for local measurements.
 JavaScript classification uses unmodified Oxc 0.155.0. The successful parse is
 shared by classification and binding proof. A linear AST prepass admits the
 upstream semantic ancestor walks and block-hoisting expansion before they run.
-The existing `origin-trace-vm` executable (bundled as `OriginTraceVMAnalyzer`)
-also hosts an internal, non-executing analysis worker. Keep it beside the backend
-when distributing binaries; a missing worker is a counted omission.
-
+Every classification caller re-executes itself through a shared hidden worker
+entry, including the CLI, backend, API executable and Cargo harnesses. Packaged
+names do not change worker selection; no sibling analyzer is discovered.
+The standalone `OriginTraceVMAnalyzer` remains the live-session batch CLI.
 Artifacts up to 8 MiB are analyzed in full within a separate temporary heap
 ceiling of 64 MiB + 80 times source bytes (704 MiB at 8 MiB). The worker allocator
 checks every allocation before calling the system allocator, including arena,
 semantic, indexing and serialization storage. Refusal exits only that worker,
 with fixed-size allocation/work telemetry. The caller keeps the same artifact
-work ledger and the existing 128 MiB retained-record cap. A 30-second worker
-deadline is a final containment boundary. Source crosses anonymous pipes only;
+work ledger and the existing 128 MiB retained-record cap. A five-minute deadline
+plus one minute per started MiB is only a hang backstop. Worker timeout, crash,
+spawn and protocol failures are distinct counted `analysis-worker-failed`
+omissions, never saved or cached. The CLI fails and the API returns 503; an
+unchanged-input retry runs again. Workers clear inherited environment variables,
+close extra descriptors and deny network access. Source crosses anonymous pipes only;
 it is never executed or written to a temporary source file.
 
 Reserved 32/64 MiB recursive stacks are separate from heap accounting. Actual
@@ -88,3 +92,10 @@ RSS on a local workstation, not a guarantee about unrelated concurrent work.
 Oversize, dense, excessively nested and unavailable-worker inputs have counted
 omissions. The [owned retention ledger](../../tools/fixtures/dispatch-retention/README.md)
 checks emitted claims and separately verifies runtime ground truth with Node.
+
+Classic-script global tables require no artifact-local dynamic evaluation or
+potential replacement through global aliases. Other scripts sharing the global
+object remain outside this per-artifact proof. Reflective receivers and
+non-dominating initializations have distinct counted omissions. A unique separate
+assignment is accepted; harmless Object read APIs and literal contents do not
+erase a proof. See the contract for conservative receiver and dominance limits.

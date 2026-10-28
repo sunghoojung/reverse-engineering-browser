@@ -1521,7 +1521,9 @@
           !Array.isArray(classification.omissions) || classification.omissions.length > 16 ||
           !classification.omissions.every(omission => isPlainObject(omission) &&
             hasOnlyKeys(omission, new Set(['reason', 'detail', 'omitted_records'])) &&
-            ['classification-work-limit', 'classification-trace-limit', 'classification-region-limit', 'classification-unavailable'].includes(omission.reason) &&
+            ['classification-work-limit', 'classification-trace-limit', 'classification-region-limit', 'classification-unavailable',
+              'parse-failed', 'analysis-worker-failed', 'handler-binding-unproven', 'global-binding-unstable',
+              'receiver-binding-unstable', 'initialization-not-dominating'].includes(omission.reason) &&
             typeof omission.detail === 'string' && omission.detail.length > 0 && isBoundedText(omission.detail, 240) &&
             (omission.omitted_records === undefined || isSafeIntegerInRange(omission.omitted_records, 1, Number.MAX_SAFE_INTEGER))) ||
           classification.classification_version !== 1 ||

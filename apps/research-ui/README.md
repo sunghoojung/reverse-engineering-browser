@@ -862,8 +862,10 @@ The **Dispatch sites** panel shows each site's structural
 rows, and lists every classified site, including JavaScript workspaces. A
 one-shot router reads `router, no guest opcodes claimed`. Element handler
 tables list each segment's evaluated slot placement.
-Workspace failures retain the last valid workspace and never remove detection
-findings.
+Parse failures and binding refusals remain counted, visible text in the
+Dispatch sites panel. Worker execution failures return a retryable API error and
+are never persisted or cached as an analysis. Workspace failures retain the last
+valid workspace and never remove detection findings.
 
 Traffic remains grouped by captured browser tab with an All tabs scope and a
 domain selector. Protocol v3 carries the stable top-level tab identifier; older

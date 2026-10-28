@@ -26,9 +26,41 @@ pub(crate) fn parser_arena_bytes() -> usize {
     PARSER_ARENA.get()
 }
 
-pub(crate) type Verdict = Result<Option<Role>, &'static str>;
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+enum Refusal {
+    Binding,
+    Global,
+    Receiver,
+    Dominance,
+}
+impl Refusal {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Binding => "handler-binding-unproven",
+            Self::Global => "global-binding-unstable",
+            Self::Receiver => "receiver-binding-unstable",
+            Self::Dominance => "initialization-not-dominating",
+        }
+    }
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Binding => AMBIGUOUS,
+            Self::Global => {
+                "Global table binding may be replaced by dynamic code or a write through a global alias in this artifact."
+            }
+            Self::Receiver => {
+                "Table receiver may be reflective, aliased or replaced; its property identity is not proven."
+            }
+            Self::Dominance => {
+                "Table initialization is not an unconditional statement in the dispatch loop's function body before that loop."
+            }
+        }
+    }
+}
+type Verdict = Result<Option<Role>, Refusal>;
 const AMBIGUOUS: &str = "A handler table has no unique, stable lexical binding to an interpreter dispatch. Its entries are not claimed as guest opcodes.";
-const PARSE_FAILED: &str = "parse-failed: JavaScript syntax or semantic analysis failed; recovered handlers have no binding proof.";
+const PARSE_FAILED: &str =
+    "JavaScript syntax or semantic analysis failed; recovered handlers have no binding proof.";
 
 pub(crate) struct Proofs {
     // Exact original-byte starts of AST cases and object properties. No source
@@ -44,7 +76,8 @@ impl Proofs {
                 self.handlers
                     .get(&(offset, table))
                     .copied()
-                    .unwrap_or(Err(AMBIGUOUS))
+                    .unwrap_or(Err(Refusal::Binding))
+                    .map_err(Refusal::detail)
             },
             Err,
         )
@@ -195,11 +228,18 @@ struct Facts<'s, 'a> {
     writes: HashMap<Key<'a>, Vec<Write>>,
     parameters: HashSet<SymbolId>,
     changed_symbols: HashSet<SymbolId>,
+    symbol_write_counts: HashMap<SymbolId, usize>,
     loop_tables: HashMap<NodeId, HashSet<Key<'a>>>,
     invoked_loops: HashMap<NodeId, NodeId>,
     table_functions: HashMap<NodeId, Key<'a>>,
     property_writes: HashMap<&'a str, usize>,
     unknown_property_write: bool,
+    reflective_receiver: bool,
+    non_fresh_this: HashSet<NodeId>,
+    unknown_this_call: bool,
+    dynamic_code: bool,
+    global_writes: HashSet<&'a str>,
+    unknown_global_write: bool,
     objects: HashMap<NodeId, (Key<'a>, u32, ScopeId)>,
     candidates: Vec<Candidate<'a>>,
 }
@@ -352,11 +392,18 @@ impl<'s, 'a> Facts<'s, 'a> {
             writes: HashMap::new(),
             parameters: HashSet::new(),
             changed_symbols: HashSet::new(),
+            symbol_write_counts: HashMap::new(),
             loop_tables: HashMap::new(),
             invoked_loops: HashMap::new(),
             table_functions: HashMap::new(),
             property_writes: HashMap::new(),
             unknown_property_write: false,
+            reflective_receiver: false,
+            non_fresh_this: HashSet::new(),
+            unknown_this_call: false,
+            dynamic_code: false,
+            global_writes: HashSet::new(),
+            unknown_global_write: false,
             objects: HashMap::new(),
             candidates: Vec::new(),
         };
@@ -407,11 +454,13 @@ impl<'s, 'a> Facts<'s, 'a> {
             }
             match node.kind() {
                 AstKind::IdentifierReference(reference) => {
-                    // Mutator functions can be extracted by destructuring or
-                    // passed through aliases. Member proof does not try to
-                    // model arbitrary Object/Reflect API data flow.
-                    if matches!(reference.name.as_str(), "Object" | "Reflect") {
-                        facts.unknown_property_write = true;
+                    // References include extracted aliases and indirect eval.
+                    // Harmless Object/Reflect reads are not mutators.
+                    if reference.name == "Proxy" {
+                        facts.reflective_receiver = true;
+                    }
+                    if matches!(reference.name.as_str(), "eval" | "Function") {
+                        facts.dynamic_code = true;
                     }
                     if let Some(reference_id) = reference.reference_id.get() {
                         let reference = scoping.get_reference(reference_id);
@@ -419,6 +468,7 @@ impl<'s, 'a> Facts<'s, 'a> {
                             && let Some(symbol) = reference.symbol_id()
                         {
                             facts.changed_symbols.insert(symbol);
+                            *facts.symbol_write_counts.entry(symbol).or_default() += 1;
                         }
                     }
                 }
@@ -428,6 +478,31 @@ impl<'s, 'a> Facts<'s, 'a> {
                     }
                 }
                 AstKind::VariableDeclarator(d) => {
+                    if let BindingPattern::ObjectPattern(pattern) = &d.id {
+                        for property in &pattern.properties {
+                            if property.computed
+                                || property.key.static_name().is_some_and(|key| {
+                                    key.as_str().is_some_and(|name| {
+                                        matches!(
+                                            name,
+                                            "defineProperty"
+                                                | "defineProperties"
+                                                | "setPrototypeOf"
+                                                | "assign"
+                                                | "set"
+                                                | "deleteProperty"
+                                                | "Proxy"
+                                        )
+                                    })
+                                })
+                            {
+                                facts.reflective_receiver = true;
+                            }
+                        }
+                        if pattern.rest.is_some() {
+                            facts.reflective_receiver = true;
+                        }
+                    }
                     if let (BindingPattern::BindingIdentifier(binding), Some(value)) =
                         (&d.id, &d.init)
                         && let Some(symbol) = binding.symbol_id.get()
@@ -483,17 +558,54 @@ impl<'s, 'a> Facts<'s, 'a> {
                 AstKind::UnaryExpression(unary) if unary.operator.as_str() == "delete" => {
                     facts.unknown_property_write = true
                 }
-                AstKind::StaticMemberExpression(member)
+                AstKind::StaticMemberExpression(member) => {
+                    let name = member.property.name.as_str();
+                    if name == "Proxy" {
+                        facts.reflective_receiver = true;
+                    }
+                    if matches!(name, "eval" | "Function") {
+                        facts.dynamic_code = true;
+                    }
                     if matches!(
-                        member.property.name.as_str(),
-                        "assign" | "defineProperty" | "defineProperties" | "set"
-                    ) =>
+                        name,
+                        "__defineGetter__"
+                            | "__defineSetter__"
+                            | "defineProperty"
+                            | "defineProperties"
+                            | "setPrototypeOf"
+                            | "assign"
+                            | "set"
+                            | "deleteProperty"
+                    ) {
+                        facts.reflective_receiver = true;
+                    }
+                }
+                AstKind::ComputedMemberExpression(member) if matches!(member.object.get_inner_expression(), Expression::Identifier(id) if matches!(id.name.as_str(), "Object" | "Reflect")) =>
                 {
-                    facts.unknown_property_write = true
+                    // Unknown API extraction may name a mutator. Static harmless
+                    // keys are permitted just like their dot notation form.
+                    if !matches!(member.expression.get_inner_expression(), Expression::StringLiteral(key)
+                        if key.value.as_str().is_some_and(|name| matches!(name, "keys" | "values" | "entries" | "getOwnPropertyNames" | "getOwnPropertyDescriptor" | "getPrototypeOf" | "is" | "has" | "get")))
+                    {
+                        facts.reflective_receiver = true;
+                    }
                 }
-                AstKind::ComputedMemberExpression(member) if matches!(member.object.get_inner_expression(), Expression::Identifier(id) if matches!(id.name.as_str(), "Object" | "Reflect")) => {
-                    facts.unknown_property_write = true
+                AstKind::ComputedMemberExpression(member) => {
+                    if let Expression::StringLiteral(name) =
+                        member.expression.get_inner_expression()
+                    {
+                        match name.value.as_str() {
+                            Some("eval" | "Function") => facts.dynamic_code = true,
+                            Some(
+                                "Proxy" | "defineProperty" | "defineProperties" | "setPrototypeOf"
+                                | "assign" | "set" | "deleteProperty" | "__defineGetter__"
+                                | "__defineSetter__",
+                            ) => facts.reflective_receiver = true,
+                            _ => (),
+                        }
+                    }
                 }
+                AstKind::ImportExpression(_) => facts.dynamic_code = true,
                 AstKind::ObjectProperty(property) => {
                     if property.computed {
                         facts.unknown_property_write = true;
@@ -534,14 +646,23 @@ impl<'s, 'a> Facts<'s, 'a> {
                     }
                 }
                 AstKind::CallExpression(call) => {
-                    if let Expression::StaticMemberExpression(member) =
-                        call.callee.get_inner_expression()
-                        && matches!(
-                            member.property.name.as_str(),
-                            "assign" | "defineProperty" | "defineProperties" | "set"
-                        )
+                    let name = match call.callee.get_inner_expression() {
+                        Expression::Identifier(id) => Some(id.name.as_str()),
+                        Expression::StaticMemberExpression(member) => {
+                            Some(member.property.name.as_str())
+                        }
+                        _ => None,
+                    };
+                    if matches!(name, Some("setTimeout" | "setInterval"))
+                        && call.arguments.first().is_some_and(|arg| {
+                            !matches!(
+                                arg,
+                                Argument::FunctionExpression(_)
+                                    | Argument::ArrowFunctionExpression(_)
+                            )
+                        })
                     {
-                        facts.unknown_property_write = true;
+                        facts.dynamic_code = true;
                     }
                     let callee = match call.callee.get_inner_expression() {
                         Expression::StaticMemberExpression(member)
@@ -578,6 +699,122 @@ impl<'s, 'a> Facts<'s, 'a> {
                     });
                 }
                 _ => (),
+            }
+        }
+        for node in nodes.iter() {
+            if !meter.charge(1) {
+                break;
+            }
+            let context = facts.context(node.id());
+            let target = match node.kind() {
+                AstKind::StaticMemberExpression(member)
+                    if matches!(
+                        nodes.parent_kind(node.id()),
+                        AstKind::AssignmentExpression(_)
+                            | AstKind::UpdateExpression(_)
+                            | AstKind::UnaryExpression(_)
+                            | AstKind::ArrayAssignmentTarget(_)
+                            | AstKind::AssignmentTargetRest(_)
+                            | AstKind::AssignmentTargetWithDefault(_)
+                            | AstKind::AssignmentTargetPropertyProperty(_)
+                            | AstKind::ForInStatement(_)
+                            | AstKind::ForOfStatement(_)
+                    ) =>
+                {
+                    Some((&member.object, Some(member.property.name.as_str())))
+                }
+                AstKind::ComputedMemberExpression(member)
+                    if matches!(
+                        nodes.parent_kind(node.id()),
+                        AstKind::AssignmentExpression(_)
+                            | AstKind::UpdateExpression(_)
+                            | AstKind::UnaryExpression(_)
+                            | AstKind::ArrayAssignmentTarget(_)
+                            | AstKind::AssignmentTargetRest(_)
+                            | AstKind::AssignmentTargetWithDefault(_)
+                            | AstKind::AssignmentTargetPropertyProperty(_)
+                            | AstKind::ForInStatement(_)
+                            | AstKind::ForOfStatement(_)
+                    ) =>
+                {
+                    Some((
+                        &member.object,
+                        match member.expression.get_inner_expression() {
+                            Expression::StringLiteral(key) => key.value.as_str(),
+                            _ => None,
+                        },
+                    ))
+                }
+                _ => None,
+            };
+            if let Some((receiver, name)) = target {
+                if name == Some("__proto__") {
+                    facts.reflective_receiver = true;
+                }
+                if facts.global_alias(receiver, context, 0) {
+                    if let Some(name) = name {
+                        facts.global_writes.insert(name);
+                    } else {
+                        facts.unknown_global_write = true;
+                    }
+                }
+            }
+            if let AstKind::CallExpression(call) = node.kind() {
+                if let Expression::StaticMemberExpression(member) =
+                    call.callee.get_inner_expression()
+                    && matches!(member.property.name.as_str(), "call" | "apply" | "bind")
+                {
+                    let reflect_apply = matches!(member.object.get_inner_expression(), Expression::Identifier(id) if id.name == "Reflect");
+                    let target = if reflect_apply {
+                        call.arguments.first().and_then(Argument::as_expression)
+                    } else {
+                        Some(&member.object)
+                    };
+                    let receiver = call.arguments.get(usize::from(reflect_apply));
+                    // An indexed handler call changes the handler's receiver,
+                    // not the function owning this table's initialization.
+                    let handler = matches!(
+                        target.map(Expression::get_inner_expression),
+                        Some(Expression::ComputedMemberExpression(_))
+                    );
+                    if !handler && !matches!(receiver, Some(Argument::ObjectExpression(_))) {
+                        if let Some(function) =
+                            target.and_then(|target| facts.called_function(target, 0))
+                        {
+                            facts.non_fresh_this.insert(function);
+                        } else {
+                            facts.unknown_this_call = true;
+                        }
+                    }
+                }
+                let mutator = match call.callee.get_inner_expression() {
+                    Expression::StaticMemberExpression(m) => matches!(
+                        m.property.name.as_str(),
+                        "defineProperty"
+                            | "defineProperties"
+                            | "set"
+                            | "deleteProperty"
+                            | "assign"
+                            | "setPrototypeOf"
+                    ),
+                    // API aliases cannot prove the destination is different.
+                    Expression::Identifier(_) | Expression::ComputedMemberExpression(_) => true,
+                    _ => false,
+                };
+                if mutator
+                    && call
+                        .arguments
+                        .first()
+                        .and_then(Argument::as_expression)
+                        .is_some_and(|target| facts.global_alias(target, context, 0))
+                {
+                    match call.arguments.get(1) {
+                        Some(Argument::StringLiteral(key)) if key.value.as_str().is_some() => {
+                            facts.global_writes.insert(key.value.as_str().unwrap());
+                        }
+                        _ => facts.unknown_global_write = true,
+                    }
+                }
             }
         }
         let mut comparisons = HashMap::<
@@ -683,6 +920,7 @@ impl<'s, 'a> Facts<'s, 'a> {
                             .is_function_scoped_declaration()
                     {
                         facts.changed_symbols.insert(symbol);
+                        *facts.symbol_write_counts.entry(symbol).or_default() += 1;
                     }
                     break;
                 }
@@ -1058,30 +1296,151 @@ impl<'s, 'a> Facts<'s, 'a> {
             value.or(Some("unknown"))
         }
     }
-    fn stable(&self, key: Key<'a>, at: u32, scope: ScopeId) -> bool {
-        if self.scope_opaque(scope) {
-            return false;
+    fn called_function(&self, value: &'a Expression<'a>, depth: u8) -> Option<NodeId> {
+        if depth > 16 || !self.meter.charge(1) {
+            return None;
         }
-        match key {
-            Key::Symbol(symbol) => {
-                !self.changed_symbols.contains(&symbol)
-                    && self.definitions.get(&key).is_some_and(|definitions| {
-                        definitions.len() == 1 && definitions[0].at == at
+        match value.get_inner_expression() {
+            Expression::FunctionExpression(function) => Some(function.node_id.get()),
+            Expression::Identifier(id) => {
+                let symbol = self.symbol(id)?;
+                let declaration = self.semantic.scoping().symbol_declaration(symbol);
+                if matches!(
+                    self.semantic.nodes().kind(declaration),
+                    AstKind::Function(_)
+                ) {
+                    return Some(declaration);
+                }
+                let definitions = self.definitions.get(&Key::Symbol(symbol))?;
+                if definitions.len() != 1 {
+                    return None;
+                }
+                self.called_function(definitions[0].value, depth + 1)
+            }
+            _ => None,
+        }
+    }
+    fn global_alias(&self, value: &'a Expression<'a>, context: Context, depth: u8) -> bool {
+        if depth > 16 || !self.meter.charge(1) {
+            return true;
+        }
+        match value.get_inner_expression() {
+            Expression::ThisExpression(_) => context.this.is_none(),
+            Expression::Identifier(id) => {
+                if matches!(
+                    id.name.as_str(),
+                    "globalThis" | "window" | "self" | "global" | "frames" | "top" | "parent"
+                ) {
+                    return true;
+                }
+                self.symbol(id)
+                    .and_then(|symbol| self.definitions.get(&Key::Symbol(symbol)))
+                    .is_some_and(|definitions| {
+                        definitions.len() > 16
+                            || definitions.iter().any(|definition| {
+                                self.global_alias(
+                                    definition.value,
+                                    Context {
+                                        this: definition.function,
+                                        ..context
+                                    },
+                                    depth + 1,
+                                )
+                            })
                     })
             }
+            _ => false,
+        }
+    }
+    fn stable(&self, key: Key<'a>, at: u32, scope: ScopeId) -> Result<(), Refusal> {
+        match key {
+            Key::Symbol(symbol) => {
+                let scoping = self.semantic.scoping();
+                if self.semantic.source_type().is_script()
+                    && scoping.symbol_scope_id(symbol) == scoping.root_scope_id()
+                    && (self.dynamic_code
+                        || self.unknown_global_write
+                        || self.global_writes.contains(scoping.symbol_name(symbol)))
+                {
+                    return Err(Refusal::Global);
+                }
+                if self.scope_opaque(scope) {
+                    return Err(Refusal::Binding);
+                }
+                let single_initialization = self
+                    .definitions
+                    .get(&key)
+                    .is_some_and(|definitions| definitions.len() == 1 && definitions[0].at == at);
+                let single_assignment = self.writes.get(&key).is_some_and(|writes| {
+                    writes.len() == 1 && writes[0].span.start == at && !writes[0].arithmetic
+                }) && self.symbol_write_counts.get(&symbol) == Some(&1);
+                if single_initialization
+                    && (!self.changed_symbols.contains(&symbol) || single_assignment)
+                {
+                    Ok(())
+                } else {
+                    Err(Refusal::Binding)
+                }
+            }
             Key::Member(symbol, name) => {
-                !self.changed_symbols.contains(&symbol)
+                if !self.scope_opaque(scope)
+                    && !self.changed_symbols.contains(&symbol)
                     && self
                         .definitions
                         .get(&Key::Symbol(symbol))
                         .is_none_or(|definitions| definitions.len() <= 1)
                     && !self.unknown_property_write
+                    && !self.reflective_receiver
                     && self.property_writes.get(name) == Some(&1)
+                {
+                    Ok(())
+                } else {
+                    Err(Refusal::Receiver)
+                }
             }
-            Key::This(_, name) => {
-                !self.unknown_property_write && self.property_writes.get(name) == Some(&1)
+            Key::This(owner, name) => {
+                if !self.non_fresh_this.contains(&owner)
+                    && !self.unknown_this_call
+                    && !self.scope_opaque(scope)
+                    && !self.unknown_property_write
+                    && !self.reflective_receiver
+                    && self.property_writes.get(name) == Some(&1)
+                {
+                    Ok(())
+                } else {
+                    Err(Refusal::Receiver)
+                }
             }
-            Key::Slot(_, _) => false,
+            Key::Slot(_, _) => Err(Refusal::Binding),
+        }
+    }
+    fn dominates(&self, object: NodeId, dispatch: NodeId) -> bool {
+        let nodes = self.semantic.nodes();
+        let initializer = nodes.parent_id(object);
+        let target = self.loop_id(dispatch).unwrap_or(dispatch);
+        if self.context(initializer).function != self.context(target).function
+            || nodes.get_node(initializer).span().end > nodes.get_node(target).span().start
+        {
+            return false;
+        }
+        // A direct statement can be wrapped in plain blocks or an export, but
+        // cannot acquire conditional execution or cross a deferred function.
+        let mut current = initializer;
+        loop {
+            if !self.meter.charge(1) {
+                return false;
+            }
+            match nodes.kind(current) {
+                AstKind::FunctionBody(_) | AstKind::Program(_) => return true,
+                AstKind::VariableDeclarator(_)
+                | AstKind::VariableDeclaration(_)
+                | AstKind::AssignmentExpression(_)
+                | AstKind::ExpressionStatement(_)
+                | AstKind::BlockStatement(_)
+                | AstKind::ExportNamedDeclaration(_) => (),
+                _ => return false,
+            }
+            current = nodes.parent_id(current);
         }
     }
     fn bounded(
@@ -1318,6 +1677,7 @@ fn parsed(
     }
     let memory = Memory::new(meter);
     let mut handlers = HashMap::new();
+    let mut refusals = std::collections::BTreeMap::<&str, (u64, &str)>::new();
     let nodes = semantic.semantic.nodes();
     // Prove each object once, not once per property times every dispatch.
     // Stability permits only one definition for a key, so each dispatch is
@@ -1327,8 +1687,8 @@ fn parsed(
         if !meter.charge(1) {
             break;
         }
-        let verdict = if !facts.stable(key, at, scope) {
-            Err(AMBIGUOUS)
+        let verdict = if let Err(reason) = facts.stable(key, at, scope) {
+            Err(reason)
         } else {
             let mut verdict = None;
             for &(dispatch, role) in tables.get(&key).into_iter().flatten() {
@@ -1339,19 +1699,16 @@ fn parsed(
                 if facts.scope_opaque(site.scope_id()) {
                     continue;
                 }
-                // This assignments must precede the whole dispatch loop.
-                let before = if matches!(key, Key::This(..)) {
-                    facts
-                        .loop_span(dispatch)
-                        .is_some_and(|range| at < range.start)
-                } else {
-                    at < site.span().start
-                };
+                let before = facts.dominates(object, dispatch);
                 if before && (verdict.is_none() || role == Role::InterpreterCandidate) {
                     verdict = Some(role);
                 }
             }
-            Ok(verdict)
+            if verdict.is_none() && tables.contains_key(&key) {
+                Err(Refusal::Dominance)
+            } else {
+                Ok(verdict)
+            }
         };
         object_verdicts.insert(object, verdict);
     }
@@ -1369,7 +1726,7 @@ fn parsed(
                 let verdict = object_verdicts
                     .get(&nodes.parent_id(node.id()))
                     .copied()
-                    .unwrap_or(Err(AMBIGUOUS));
+                    .unwrap_or(Err(Refusal::Binding));
                 (property.span.start as usize, true, verdict)
             }
             _ => continue,
@@ -1377,11 +1734,24 @@ fn parsed(
         if !memory.keep(96) {
             break;
         }
+        if let Err(reason) = verdict
+            && matches!(node.kind(), AstKind::ObjectProperty(property)
+                if matches!(property.value.get_inner_expression(), Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_))
+                && property.key.static_name().is_some_and(|name| name.as_str().is_some_and(|name| name.parse::<u32>().is_ok())))
+        {
+            let entry = refusals
+                .entry(reason.reason())
+                .or_insert((0, reason.detail()));
+            entry.0 += 1;
+        }
         handlers.insert((offset, table), verdict);
     }
+    let mut omissions = meter.omissions("JavaScript artifacts");
+    omissions.extend(refusals.into_iter().map(|(reason, (count, detail))|
+        json!({"reason": reason, "omitted_records": count, "detail": detail})));
     Some(Classified {
         sites,
-        omissions: meter.omissions("JavaScript artifacts"),
+        omissions,
         javascript: Some(Rc::new(Proofs {
             handlers,
             failure: None,
@@ -1519,6 +1889,168 @@ fn unavailable(meter: &Meter, reason: &str, detail: &'static str) -> Classified 
     }
 }
 
+/// Iterative lexical admission. Literals/comments are single tokens; template
+/// substitutions re-enter code. This pass only limits parser stack growth and
+/// cannot authorize a site. Oxc still owns parsing and all semantic decisions.
+fn syntax_stack(source: &str) -> Option<usize> {
+    #[derive(Clone, Copy)]
+    enum Delimiter {
+        Plain,
+        Control,
+        Template,
+    }
+    let bytes = source.as_bytes();
+    let mut delimiters = Vec::new();
+    let mut index = 0;
+    let mut chain = 0;
+    let mut stack = PARSER_STACK;
+    let mut operand = true;
+    let mut control = false;
+    let mut template = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if template {
+            match byte {
+                b'\\' => index = (index + 2).min(bytes.len()),
+                b'`' => {
+                    index += 1;
+                    template = false;
+                    operand = false;
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'{') => {
+                    delimiters.push(Delimiter::Template);
+                    index += 2;
+                    template = false;
+                    operand = true;
+                }
+                _ => index += 1,
+            }
+        } else if byte.is_ascii_whitespace() {
+            index += 1;
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                index += 1;
+            }
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index < bytes.len() {
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    index += 2;
+                    break;
+                }
+                index += 1;
+            }
+        } else if matches!(byte, b'\'' | b'"') {
+            index += 1;
+            while index < bytes.len() {
+                let current = bytes[index];
+                index += 1;
+                if current == b'\\' {
+                    index = (index + 1).min(bytes.len());
+                } else if current == byte {
+                    break;
+                }
+            }
+            operand = false;
+            control = false;
+        } else if byte == b'`' {
+            index += 1;
+            template = true;
+            control = false;
+        } else if byte == b'/' && operand {
+            // A regexp token ends at its unescaped slash outside a class.
+            // Unterminated regexps are left for Oxc's syntax diagnostics.
+            index += 1;
+            let mut class = false;
+            while index < bytes.len() {
+                let current = bytes[index];
+                index += 1;
+                match current {
+                    b'\\' => index = (index + 1).min(bytes.len()),
+                    b'[' => class = true,
+                    b']' => class = false,
+                    b'/' if !class => break,
+                    b'\n' | b'\r' => break,
+                    _ => (),
+                }
+            }
+            while index < bytes.len() && bytes[index].is_ascii_alphabetic() {
+                index += 1;
+            }
+            operand = false;
+            control = false;
+        } else if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$') || byte >= 128 {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric()
+                    || matches!(bytes[index], b'_' | b'$')
+                    || bytes[index] >= 128)
+            {
+                index += 1;
+            }
+            let word = &bytes[start..index];
+            control = matches!(
+                word,
+                b"if" | b"while" | b"for" | b"with" | b"switch" | b"catch"
+            );
+            operand = control
+                || matches!(
+                    word,
+                    b"return"
+                        | b"throw"
+                        | b"case"
+                        | b"else"
+                        | b"new"
+                        | b"typeof"
+                        | b"void"
+                        | b"delete"
+                        | b"await"
+                        | b"yield"
+                        | b"in"
+                        | b"instanceof"
+                );
+            if matches!(
+                word,
+                b"new" | b"typeof" | b"void" | b"delete" | b"await" | b"yield"
+            ) {
+                chain += 1;
+            }
+        } else {
+            index += 1;
+            match byte {
+                b'(' | b'[' | b'{' => {
+                    delimiters.push(if byte == b'(' && control {
+                        Delimiter::Control
+                    } else {
+                        Delimiter::Plain
+                    });
+                    operand = true;
+                }
+                b')' | b']' | b'}' => {
+                    let kind = delimiters.pop();
+                    template = byte == b'}' && matches!(kind, Some(Delimiter::Template));
+                    operand = byte == b'}' || matches!(kind, Some(Delimiter::Control));
+                }
+                _ => operand = true,
+            }
+            control = false;
+            if matches!(byte, b';' | b'{' | b'}') {
+                chain = 0;
+            } else if b"=+-!~?&|*/%<>^:.()[]".contains(&byte) {
+                chain += 1;
+            }
+        }
+        if delimiters.len() > MAX_SYNTAX_DEPTH || chain > MAX_SYNTAX_DEPTH {
+            return None;
+        }
+        if delimiters.len() > 1024 || chain > 1024 {
+            stack = PARSER_STACK * 2;
+        }
+    }
+    Some(stack)
+}
+
 fn classify_local(source: &str, meter: &Meter) -> Classified {
     #[cfg(test)]
     PARSER_ARENA.set(0);
@@ -1529,43 +2061,13 @@ fn classify_local(source: &str, meter: &Meter) -> Classified {
         meter.count_unexamined(1);
         failure = Some("JavaScript parser memory or work admission limit reached.");
     }
-    // Conservative syntax-complexity admission, not a lexer or classifier.
-    // Counting raw punctuation may refuse a huge literal/comment, but never
-    // creates a claim from it. It bounds recursive parser/semantic stack use.
-    let mut depth = 0usize;
-    let mut chain = 0usize;
-    let mut stack = PARSER_STACK;
-    if failure.is_none() {
-        let mut word_start = 0;
-        for (index, byte) in source.bytes().enumerate() {
-            if !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')) {
-                if matches!(
-                    &source.as_bytes()[word_start..index],
-                    b"new" | b"typeof" | b"void" | b"delete" | b"await" | b"yield"
-                ) {
-                    chain += 1;
-                }
-                word_start = index + 1;
-            }
-            match byte {
-                b'(' | b'[' | b'{' => depth += 1,
-                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-                _ => (),
-            }
-            if b";{}".contains(&byte) {
-                chain = 0;
-            } else if b"=+-!~?&|*/%<>^:.()[]".contains(&byte) {
-                chain += 1;
-            }
-            if depth > MAX_SYNTAX_DEPTH || chain > MAX_SYNTAX_DEPTH {
-                failure = Some("JavaScript parser nesting or expression admission limit reached.");
-                break;
-            }
-            if depth > 1024 || chain > 1024 {
-                stack = PARSER_STACK * 2;
-            }
+    let stack = match syntax_stack(source) {
+        Some(stack) => stack,
+        None => {
+            failure = Some("JavaScript parser nesting or expression admission limit reached.");
+            PARSER_STACK
         }
-    }
+    };
     if failure.is_none() {
         let result = stacker::grow(stack, || {
             for source_type in [SourceType::mjs().with_script(true), SourceType::mjs()] {
@@ -1603,10 +2105,11 @@ const REPLY_MAGIC: &[u8; 8] = b"REBJS001";
 const WORKER_FAILED: &str = "JavaScript analysis worker unavailable or refused its resource boundary; recovered handlers have no binding proof.";
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkerReply {
     sites: Vec<Site>,
     omissions: Vec<serde_json::Value>,
-    handlers: Vec<(usize, bool, Option<Role>, bool)>,
+    handlers: Vec<(usize, bool, Option<Role>, Option<Refusal>)>,
     failure: Option<String>,
     work: u64,
     retained_peak: u64,
@@ -1652,7 +2155,7 @@ pub fn worker_main() -> std::io::Result<()> {
             .handlers
             .iter()
             .map(|(&(offset, table), verdict)| {
-                (offset, table, verdict.ok().flatten(), verdict.is_err())
+                (offset, table, verdict.ok().flatten(), verdict.err())
             })
             .collect(),
         failure: proofs.failure.clone(),
@@ -1690,45 +2193,107 @@ pub fn worker_main() -> std::io::Result<()> {
     output.flush()
 }
 
+/// Enter before an application runtime or libtest worker starts analysis.
+#[doc(hidden)]
+pub fn worker_entry() {
+    if std::env::args().nth(1).as_deref() != Some("--classify-javascript-worker")
+        && std::env::var_os("REB_JS_TEST_WORKER").is_none()
+    {
+        return;
+    }
+    let result = crate::js_worker_alloc::contain().and_then(|()| {
+        #[cfg(test)]
+        match std::env::var("REB_JS_TEST_FAULT").as_deref() {
+            Ok("timeout") => {
+                unsafe { libc::raise(libc::SIGSTOP) };
+            }
+            Ok("crash") => {
+                unsafe { libc::raise(libc::SIGKILL) };
+            }
+            Ok("protocol") => {
+                print!("invalid worker reply");
+                std::process::exit(0);
+            }
+            Ok("capabilities") => {
+                assert!(
+                    std::env::vars_os()
+                        .all(|(key, _)| key == "REB_JS_TEST_WORKER" || key == "REB_JS_TEST_FAULT")
+                );
+                assert_eq!(unsafe { libc::fcntl(198, libc::F_GETFD) }, -1);
+                assert_eq!(
+                    std::net::TcpStream::connect("127.0.0.1:9")
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+            _ => (),
+        }
+        worker_main()
+    });
+    std::process::exit(if result.is_ok() { 0 } else { 74 });
+}
+
 fn worker_command() -> std::io::Result<tokio::process::Command> {
     let current = std::env::current_exe()?;
+    let harness = current
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .is_some_and(|name| name == "deps");
+    let mut command = tokio::process::Command::new(current);
+    command.env_clear();
     #[cfg(test)]
-    {
-        let mut command = tokio::process::Command::new(current);
+    if let Some(fault) = WORKER_FAULT.get() {
+        if fault == "spawn" {
+            return Err(std::io::Error::other("fixture spawn failure"));
+        }
+        command.env("REB_JS_TEST_FAULT", fault);
+        if fault == "capabilities" {
+            // SAFETY: this fixture hook uses only async-signal-safe syscalls.
+            unsafe {
+                command.pre_exec(|| {
+                    let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
+                    if fd < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let copied = libc::dup2(fd, 198);
+                    libc::close(fd);
+                    if copied < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+    if harness {
         command
             .args([
                 "--ignored",
                 "--exact",
-                "vm::dispatch_shape::javascript::worker_process",
+                "__reb_javascript_worker",
                 "--nocapture",
             ])
             .env("REB_JS_TEST_WORKER", "1");
-        Ok(command)
-    }
-    #[cfg(not(test))]
-    {
-        let directory = current
-            .parent()
-            .ok_or_else(|| std::io::Error::other("No executable directory"))?;
-        let mut candidates = vec![
-            directory.join("origin-trace-vm"),
-            directory.join("OriginTraceVMAnalyzer"),
-        ];
-        // Cargo integration tests and examples live one directory below bins.
-        if directory
-            .file_name()
-            .is_some_and(|name| name == "deps" || name == "examples")
-        {
-            candidates.push(directory.parent().unwrap().join("origin-trace-vm"));
-        }
-        let path = candidates
-            .into_iter()
-            .find(|path| crate::worker::executable(path))
-            .ok_or_else(|| std::io::Error::other("JavaScript analyzer executable unavailable"))?;
-        let mut command = tokio::process::Command::new(path);
+    } else {
         command.arg("--classify-javascript-worker");
-        Ok(command)
     }
+    Ok(command)
+}
+
+fn worker_deadline(source_bytes: usize) -> std::time::Duration {
+    #[cfg(test)]
+    if WORKER_FAULT.get() == Some("timeout") {
+        return std::time::Duration::from_millis(100);
+    }
+    // Deterministic metering owns admission. This is only a generous hang
+    // backstop: five minutes plus one minute per started MiB (13 at the cap).
+    std::time::Duration::from_secs(300 + 60 * source_bytes.div_ceil(1 << 20) as u64)
+}
+
+fn worker_failure(meter: &Meter, work: u64, detail: &'static str) -> Classified {
+    meter.charge(work);
+    unavailable(meter, "analysis-worker-failed", detail)
 }
 
 pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
@@ -1755,14 +2320,18 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
     }
     let work = meter.remaining_work().min(super::MAX_ARTIFACT_WORK);
     let retained = meter.remaining_memory().min(super::MAX_RETAINED_BYTES);
+    #[cfg(test)]
+    let fault = WORKER_FAULT.get();
     let output = std::thread::scope(|scope| {
         std::thread::Builder::new()
             .spawn_scoped(scope, || {
+                #[cfg(test)]
+                WORKER_FAULT.set(fault);
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .ok()?;
-                let mut command = worker_command().ok()?;
+                    .map_err(|_| "spawn")?;
+                let mut command = worker_command().map_err(|_| "spawn")?;
                 let mut input = Vec::with_capacity(40 + source.len());
                 input.extend_from_slice(REPLY_MAGIC);
                 for number in [work, retained, heap, source.len() as u64] {
@@ -1774,30 +2343,38 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
                         &mut command,
                         &input,
                         MAX_REPLY,
-                        std::time::Duration::from_secs(30),
+                        worker_deadline(source.len()),
                     ))
-                    .ok()
+                    .map_err(|error| match error.reason.code {
+                        crate::error::Code::Timeout => "timeout",
+                        crate::error::Code::DependencyUnavailable => "spawn",
+                        crate::error::Code::ResourceLimit | crate::error::Code::ProtocolError => {
+                            "protocol"
+                        }
+                        _ => "crash",
+                    })
             })
-            .ok()?
+            .map_err(|_| "spawn")?
             .join()
-            .ok()
-            .flatten()
+            .map_err(|_| "crash")?
     });
-    let Some(output) = output else {
-        // With no telemetry, charge the remaining work allowance. A killed or
-        // unavailable worker never leaves uncharged work or permits claims.
-        meter.charge(work);
-        meter.count_unexamined(1);
-        return unavailable(meter, "classification-work-limit", WORKER_FAILED);
+    let output = match output {
+        Ok(output) => output,
+        Err(detail) => return worker_failure(meter, work, detail),
     };
     if !meter.charge(output.bytes.len() as u64) {
         meter.count_unexamined(1);
         return unavailable(meter, "classification-work-limit", WORKER_FAILED);
     }
-    let marker = output
-        .bytes
-        .windows(8)
-        .position(|bytes| bytes == REPLY_MAGIC || bytes == crate::js_worker_alloc::REFUSED);
+    let marker = if output.bytes.starts_with(REPLY_MAGIC)
+        || output.bytes.starts_with(crate::js_worker_alloc::REFUSED)
+    {
+        Some(0)
+    } else if output.bytes.starts_with(b"\nrunning 1 test\n") {
+        Some(b"\nrunning 1 test\n".len())
+    } else {
+        None
+    };
     if let Some(at) = marker {
         let bytes = &output.bytes[at..];
         if bytes.len() >= 16 {
@@ -1807,6 +2384,14 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
             && output.success
             && bytes.len() >= 16
             && let Ok(reply) = serde_json::from_slice::<WorkerReply>(&bytes[16..])
+            && reply.work <= work
+            && reply.retained_peak <= retained
+            && u64::from_le_bytes(bytes[8..16].try_into().unwrap()) <= heap
+            && reply
+                .handlers
+                .iter()
+                .all(|handler| handler.0 < source.len())
+            && reply.sites.len() <= MAX_SITES
         {
             meter.charge(reply.work);
             meter.peak.set(
@@ -1840,10 +2425,7 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
                         .handlers
                         .into_iter()
                         .map(|(at, table, role, ambiguous)| {
-                            (
-                                (at, table),
-                                if ambiguous { Err(AMBIGUOUS) } else { Ok(role) },
-                            )
+                            ((at, table), ambiguous.map_or(Ok(role), Err))
                         })
                         .collect(),
                     failure: reply.failure,
@@ -1851,7 +2433,12 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
                 })),
             };
         }
-        if bytes.starts_with(crate::js_worker_alloc::REFUSED) && bytes.len() >= 24 {
+        if bytes.starts_with(crate::js_worker_alloc::REFUSED)
+            && bytes.len() == 24
+            && output.exit_code == Some(75)
+            && u64::from_le_bytes(bytes[8..16].try_into().unwrap()) <= heap
+            && u64::from_le_bytes(bytes[16..24].try_into().unwrap()) <= work
+        {
             meter.charge(u64::from_le_bytes(bytes[16..24].try_into().unwrap()));
             meter.count_unexamined(1);
             return unavailable(
@@ -1861,21 +2448,11 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
             );
         }
     }
-    meter.charge(work);
-    meter.count_unexamined(1);
-    unavailable(meter, "classification-work-limit", WORKER_FAILED)
-}
-
-// Unit tests use their own executable, so `cargo test --lib` exercises the
-// identical isolation/allocator boundary without a stale or unbuilt helper.
-#[cfg(test)]
-#[test]
-#[ignore]
-fn worker_process() {
-    if std::env::var_os("REB_JS_TEST_WORKER").is_some() {
-        let code = if worker_main().is_ok() { 0 } else { 74 };
-        std::process::exit(code);
-    }
+    worker_failure(
+        meter,
+        work,
+        if output.success { "protocol" } else { "crash" },
+    )
 }
 
 #[cfg(test)]
@@ -1913,4 +2490,72 @@ fn oversized_source_is_refused_before_worker_allocation() {
     assert_eq!(result.omissions[0]["omitted_records"], 1);
     assert_eq!(result.omissions[0]["reason"], "classification-work-limit");
     assert_eq!(meter.parser_peak(), 0);
+}
+
+#[cfg(test)]
+thread_local! { static WORKER_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+
+#[cfg(test)]
+#[test]
+fn worker_failures_are_counted_not_saved_and_retry_without_input_changes() {
+    use std::fs;
+    let root = tempfile::tempdir().unwrap();
+    let source = include_bytes!("../../../tools/fixtures/dispatch-retention/owned/control.js");
+    let hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(source))
+    };
+    fs::create_dir(root.path().join("blobs")).unwrap();
+    fs::write(root.path().join(format!("blobs/{hash}.bin")), source).unwrap();
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":"dynamic_javascript","kind":"javascript","url":"fixture://worker-control.js","mime_type":"text/javascript","byte_size":source.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    fs::write(root.path().join("manifest.jsonl"), format!("{artifact}\n")).unwrap();
+    let events = root.path().join("events.jsonl");
+    fs::write(&events, "").unwrap();
+    for fault in ["timeout", "crash", "spawn", "protocol"] {
+        WORKER_FAULT.set(Some(fault));
+        let classified = classify(std::str::from_utf8(source).unwrap(), &Meter::new());
+        assert_eq!(
+            classified.omissions[0],
+            json!({"reason":"analysis-worker-failed","omitted_records":1,"detail":fault})
+        );
+        let error = crate::vm::store(root.path(), &events).unwrap_err();
+        assert_eq!(error.status, 503);
+        assert!(error.message.contains(fault), "{error:?}");
+        assert!(
+            !root.path().join("analysis").exists(),
+            "failed worker persisted evidence"
+        );
+        WORKER_FAULT.set(None);
+        crate::vm::store(root.path(), &events).unwrap();
+        let workspace: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.path().join("analysis/vm-opcode-workspace-v2.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            workspace["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        fs::remove_dir_all(root.path().join("analysis")).unwrap();
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn worker_drops_inherited_environment_descriptors_and_network() {
+    WORKER_FAULT.set(Some("capabilities"));
+    let result = classify(
+        include_str!("../../../tools/fixtures/dispatch-retention/owned/control.js"),
+        &Meter::new(),
+    );
+    WORKER_FAULT.set(None);
+    assert!(result.omissions.is_empty(), "{:?}", result.omissions);
+    assert!(
+        result
+            .sites
+            .iter()
+            .any(|site| site.role() == Role::InterpreterCandidate)
+    );
 }

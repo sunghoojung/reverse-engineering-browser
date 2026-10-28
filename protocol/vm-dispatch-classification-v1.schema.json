@@ -115,7 +115,13 @@
               "classification-work-limit",
               "classification-trace-limit",
               "classification-region-limit",
-              "classification-unavailable"
+              "classification-unavailable",
+              "parse-failed",
+              "analysis-worker-failed",
+              "handler-binding-unproven",
+              "global-binding-unstable",
+              "receiver-binding-unstable",
+              "initialization-not-dominating"
             ]
           },
           "detail": {

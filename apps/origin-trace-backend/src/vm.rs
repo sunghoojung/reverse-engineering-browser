@@ -1339,6 +1339,39 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
         }
         results.push(result);
     }
+    // An operational worker failure is retryable, never derived evidence.
+    // Return before writing any document; App only caches successful calls.
+    let mut worker_failures = BTreeMap::<&str, u64>::new();
+    for result in &results {
+        for omission in result["frontend"]["dispatch_classification"]["omissions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if omission["reason"] == "analysis-worker-failed" {
+                *worker_failures
+                    .entry(omission["detail"].as_str().unwrap_or("protocol"))
+                    .or_default() += omission["omitted_records"].as_u64().unwrap_or(1);
+            }
+        }
+    }
+    if !worker_failures.is_empty() {
+        return Err(crate::error::Error::new(
+            503,
+            format!(
+                "analysis-worker-failed: {}. Analysis was not saved; retry the request.",
+                worker_failures
+                    .iter()
+                    .map(|(detail, count)| format!("{detail} ({count} omitted artifacts)"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .with_reason(crate::error::Reason::at(
+            crate::error::Code::DependencyUnavailable,
+            crate::error::Phase::Worker,
+        )));
+    }
     let mut mixed = Vec::new();
     for wasm in results.iter().filter(|r| {
         r["runtime"] == "webassembly"
@@ -1569,6 +1602,10 @@ mod dispatch_shape_tests {
             "../../../protocol/vm-dispatch-classification-v1.schema.json"
         ))
         .unwrap();
+        assert_eq!(
+            standalone["properties"]["omissions"]["items"]["properties"]["reason"]["enum"],
+            json!(dispatch_shape::OMISSION_REASONS)
+        );
         let copy = |prefix: &str| {
             let mut body = standalone.clone();
             for key in ["$schema", "$id", "title", "$defs"] {

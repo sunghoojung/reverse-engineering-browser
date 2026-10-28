@@ -565,7 +565,7 @@ pub(crate) struct Intervals {
 }
 
 impl Intervals {
-    pub fn new(mut ranges: Vec<(usize, usize)>, meter: &Meter) -> Self {
+    pub fn new(ranges: impl IntoIterator<Item = (usize, usize)>, meter: &Meter) -> Self {
         let memory = Memory::new(meter);
         let mut this = Self {
             ranges: Vec::new(),
@@ -574,6 +574,15 @@ impl Intervals {
             points: Vec::new(),
             _memory: memory,
         };
+        // Collect under the reservation, rather than accepting an unchecked
+        // allocation from a regex iterator or a cloned Wasm loop vector.
+        let mut collected = Vec::new();
+        for range in ranges {
+            if !meter.charge(1) || !this._memory.push(&mut collected, range) {
+                return this;
+            }
+        }
+        let mut ranges = collected;
         // Covers capacity, sorting and sweep temporaries as well as the index.
         if !meter.charge(ranges.len() as u64 * 64)
             || !this._memory.keep(ranges.len() as u64 * 256)
@@ -1262,7 +1271,7 @@ impl<'a> Facts<'a> {
 
     fn loop_index(&self) -> &Intervals {
         self.loop_tree
-            .get_or_init(|| Intervals::new(self.loops.clone(), self.meter))
+            .get_or_init(|| Intervals::new(self.loops.iter().copied(), self.meter))
     }
 
     fn in_any_loop(&self, offset: usize) -> bool {

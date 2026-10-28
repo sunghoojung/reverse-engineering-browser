@@ -4468,7 +4468,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     /// identifiers and literals through the same classifier and claim gate.
     #[test]
     fn unicode_window_boundaries_do_not_panic() {
-        for cap in [200usize, 255, 256, 1024, 4096] {
+        for cap in [200usize, 255, 256, 512, 1024, 4096] {
             for offset in cap.saturating_sub(8)..=cap + 8 {
                 for value in ["雪", "é", "𐐀"] {
                     let source = format!(
@@ -4537,6 +4537,23 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             assert!(meter.exhausted());
             assert!(meter.peak() <= 128 << 20);
         }
+    }
+
+    #[test]
+    fn parameter_and_interval_growth_reserves_before_allocating() {
+        let meter = vm::dispatch_shape::Meter::with_limits(1_000_000_000, 1024);
+        let memory = vm::dispatch_shape::Memory::new(&meter);
+        let signature = format!("{}=>{{", "a".repeat(2048));
+        assert!(vm::dispatch_shape::javascript::parameters(&signature, &memory, &meter).is_empty());
+        assert!(meter.exhausted());
+        assert!(meter.peak() <= 1024);
+
+        let meter = vm::dispatch_shape::Meter::with_limits(1_000_000_000, 1024);
+        let intervals =
+            vm::dispatch_shape::Intervals::new((0..10_000).map(|at| (at, 20_000 - at)), &meter);
+        assert!(intervals.ranges.is_empty());
+        assert!(meter.exhausted());
+        assert!(meter.peak() <= 1024);
     }
 
     /// The exact analysis-to-workspace path used by origin-trace-vm. The

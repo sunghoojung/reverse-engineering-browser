@@ -375,7 +375,7 @@ fn classify_javascript(source: &str, meter: &dispatch_shape::Meter) -> dispatch_
             regions.push((start + 1, i));
             parameters.insert(
                 start + 1,
-                dispatch_shape::javascript::parameters(&masked[signature..=start]),
+                dispatch_shape::javascript::parameters(&masked[signature..=start], &memory, meter),
             );
         }
     }

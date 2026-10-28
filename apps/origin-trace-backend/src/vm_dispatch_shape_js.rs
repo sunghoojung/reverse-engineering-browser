@@ -150,7 +150,10 @@ impl Lines {
 }
 
 /// Parameter names from a function signature match.
-pub(crate) fn parameters(signature: &str) -> Vec<String> {
+pub(crate) fn parameters(signature: &str, memory: &Memory, meter: &Meter) -> Vec<String> {
+    if !meter.charge(signature.len() as u64 * 2) {
+        return Vec::new();
+    }
     let text = signature.trim_end_matches('{').trim_end();
     let list = if let Some(open) = text.find('(') {
         let Some(close) = text.rfind(')') else {
@@ -160,17 +163,21 @@ pub(crate) fn parameters(signature: &str) -> Vec<String> {
     } else {
         text.trim_end_matches("=>").trim()
     };
-    list.split(',')
-        .filter_map(|part| {
-            let name = part
-                .split('=')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .trim_start_matches("...");
-            IDENTIFIER.is_match(name).then(|| name.to_owned())
-        })
-        .collect()
+    let mut parameters = Vec::new();
+    for part in list.split(',') {
+        let name = part
+            .split('=')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches("...");
+        if IDENTIFIER.is_match(name)
+            && (!memory.keep(name.len() as u64) || !memory.push(&mut parameters, name.to_owned()))
+        {
+            break;
+        }
+    }
+    parameters
 }
 
 fn normalized(name: &str) -> String {
@@ -434,25 +441,22 @@ impl<'a> Region<'a> {
 
     fn loop_intervals(&self) -> Intervals {
         let bytes = self.text.as_bytes();
-        let mut ranges = Vec::new();
         self.meter.charge(self.text.len() as u64);
-        for header in LOOP_HEADER.find_iter(self.text) {
-            if self.meter.exhausted() {
-                break;
-            }
-            if header.start() > 0 && bytes[header.start() - 1] == b'.' {
-                continue;
-            }
-            let end = if header.as_str() == "do" {
-                self.statement_end(header.start(), 0)
-            } else {
-                self.close(header.end() - 1)
-                    .and_then(|close| self.statement_end(close + 1, 0))
-            };
-            if let Some(end) = end {
-                ranges.push((header.start(), end + 1));
-            }
-        }
+        let ranges = LOOP_HEADER
+            .find_iter(self.text)
+            .take_while(|_| !self.meter.exhausted())
+            .filter_map(|header| {
+                if header.start() > 0 && bytes[header.start() - 1] == b'.' {
+                    return None;
+                }
+                let end = if header.as_str() == "do" {
+                    self.statement_end(header.start(), 0)
+                } else {
+                    self.close(header.end() - 1)
+                        .and_then(|close| self.statement_end(close + 1, 0))
+                };
+                end.map(|end| (header.start(), end + 1))
+            });
         Intervals::new(ranges, self.meter)
     }
 
@@ -1192,13 +1196,10 @@ impl<'a> Region<'a> {
     fn ladders(&self) -> Vec<Found> {
         self.meter.charge(2 * self.text.len() as u64);
         let headers = Intervals::new(
-            IF_HEADER
-                .find_iter(self.text)
-                .filter_map(|header| {
-                    let close = self.close(header.end() - 1)?;
-                    Some((header.start(), close))
-                })
-                .collect(),
+            IF_HEADER.find_iter(self.text).filter_map(|header| {
+                let close = self.close(header.end() - 1)?;
+                Some((header.start(), close))
+            }),
             self.meter,
         );
         let mut ladders = BTreeMap::<String, Vec<(usize, usize, String)>>::new();

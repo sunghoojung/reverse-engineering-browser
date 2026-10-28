@@ -185,7 +185,7 @@ fn mentions(text: &str, name: &str) -> bool {
         {
             return true;
         }
-        from = start + 1;
+        from = start + text[start..].chars().next().map_or(1, char::len_utf8);
     }
     false
 }
@@ -427,7 +427,7 @@ impl<'a> Region<'a> {
     }
 
     fn keyword_at(&self, at: usize, keyword: &str) -> bool {
-        self.text[at..].starts_with(keyword)
+        self.text.as_bytes()[at..].starts_with(keyword.as_bytes())
             && !self
                 .text
                 .as_bytes()
@@ -538,7 +538,7 @@ impl<'a> Region<'a> {
             }
             index += 1;
         }
-        let end = index.min(limit);
+        let end = self.text.floor_char_boundary(index.min(limit));
         self.meter.charge((end - from) as u64 + 1);
         end
     }

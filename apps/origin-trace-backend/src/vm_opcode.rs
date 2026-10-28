@@ -4267,6 +4267,28 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         }
     }
 
+    /// Every alignment around the fixed byte windows must accept multibyte
+    /// identifiers and literals through the same classifier and claim gate.
+    #[test]
+    fn unicode_window_boundaries_do_not_panic() {
+        for cap in [200usize, 255, 256, 1024, 4096] {
+            for offset in cap.saturating_sub(8)..=cap + 8 {
+                for value in ["雪", "é", "𐐀"] {
+                    let source = format!(
+                        "var pc=0,ops={{1:function(){{stack.push(code[pc++])}},2:function(){{stack.pop()}},3:function(){{pc=code.length}}}};var a{}{}=1;var q={}{};var s='{}{}';var z=x=>x;while(pc<code.length){{ops[code[pc++]]()}}",
+                        "a".repeat(offset),
+                        value,
+                        "a".repeat(offset),
+                        value,
+                        "a".repeat(offset),
+                        value,
+                    );
+                    let _ = classified_handlers(&source, 0, source.len());
+                }
+            }
+        }
+    }
+
     /// Fourth review, root cause: one meter charges every classifier loop,
     /// JavaScript and Wasm. On every adversarial shape of all four reviews,
     /// quadrupling the input at most quadruples total work and peak retained

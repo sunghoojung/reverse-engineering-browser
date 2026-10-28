@@ -134,11 +134,10 @@ impl<'a> Scopes<'a> {
                     (open, region[open + 1..shut].to_owned())
                 }
                 Some((end, _)) => {
-                    match TRAILING_IDENTIFIER.find(&region[end.saturating_sub(255)..=end]) {
-                        Some(name) => (
-                            end.saturating_sub(255) + name.start(),
-                            name.as_str().trim().to_owned(),
-                        ),
+                    let from = region.ceil_char_boundary(end.saturating_sub(255));
+                    let until = region.ceil_char_boundary(end + 1);
+                    match TRAILING_IDENTIFIER.find(&region[from..until]) {
+                        Some(name) => (from + name.start(), name.as_str().trim().to_owned()),
                         None => continue,
                     }
                 }

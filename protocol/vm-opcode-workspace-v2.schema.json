@@ -439,7 +439,7 @@
         "segments": {
           "type": "array",
           "maxItems": 64,
-          "description": "Producer 2.9.0 and later, element rows only: each active segment for this table with its evaluated placement. placed segments fill real slots at offset; relative segments read an imported global, directly or through a defined global, and fill no listed slot; out-of-range segments end past the table's declared minimum and are not placed; unresolved offsets are outside the evaluated constant subset.",
+          "description": "Producer 2.9.0 and later, element rows only: each active segment for this table with its evaluated placement, at most 64; omitted_segment_count counts the rest. placed segments fill real slots at offset; relative segments read an imported global, directly or through a defined global, and fill no listed slot; out-of-range segments end past the table's declared minimum and are not placed; unreached segments follow an out-of-range segment, so instantiation traps before applying them; unresolved offsets are outside the evaluated constant subset.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -461,6 +461,7 @@
                   "placed",
                   "relative",
                   "out-of-range",
+                  "unreached",
                   "unresolved"
                 ]
               },
@@ -487,6 +488,12 @@
               }
             }
           }
+        },
+        "omitted_segment_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Element rows only: active segments of this table beyond the 64 listed in segments."
         }
       }
     },
@@ -2146,7 +2153,7 @@
       }
     },
     "dispatchClassification": {
-      "description": "Analyzer interpretation of stored artifact bytes. Each site states how control picks the next handler, where the selector value comes from, and whether the dispatch repeats in a selector-advancing loop. confidence is always structural. It never rewrites captured evidence and never raises a VM tier.",
+      "description": "Analyzer interpretation of stored artifact bytes. Each site states how control picks the next handler, where the selector value comes from, and whether the dispatch repeats in a selector-advancing loop. confidence is always structural. It never rewrites captured evidence and never raises a VM tier. Lands as one unit with its first two producer commits; no released document predates it, so it keeps version 1.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2257,6 +2264,7 @@
               "reason": {
                 "enum": [
                   "classification-work-limit",
+                  "classification-trace-limit",
                   "classification-region-limit",
                   "classification-unavailable"
                 ]
@@ -2333,7 +2341,7 @@
             "multiplexer",
             "other"
           ],
-          "description": "Derived from the three axes. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table or compare_chain. multiplexer: repeats=once with call_argument on the same kinds; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
+          "description": "Derived from the record. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table or compare_chain, unless buffer_kind is string or arguments, and unless the selector is a second-level lookup (through_lookup) on a switch or ladder; a handler table reads its handler through one lookup by design. multiplexer: repeats=once with call_argument on the same kinds; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
         },
         "confidence": {
           "const": "structural"
@@ -2412,7 +2420,8 @@
           "additionalProperties": false,
           "required": [
             "expression",
-            "byte_offset"
+            "byte_offset",
+            "through_lookup"
           ],
           "properties": {
             "expression": {
@@ -2428,6 +2437,10 @@
               ],
               "minimum": 0,
               "description": "Offset of the closest producing write or load, when it is not the dispatch itself."
+            },
+            "through_lookup": {
+              "type": "boolean",
+              "description": "The selector is a table read keyed by a value loaded at a cursor, such as types[q[head++]], rather than the fetched value itself."
             }
           }
         },
@@ -2471,10 +2484,11 @@
             "string",
             "typed-array",
             "array",
+            "arguments",
             "unknown",
             null
           ],
-          "description": "JavaScript cursor buffers only. string flags a tokenizer-shaped loop; it adds no other claim."
+          "description": "JavaScript cursor buffers only. string or arguments marks a cursor loop over text or call arguments, which reads characters or argument values rather than opcodes."
         },
         "table": {
           "anyOf": [

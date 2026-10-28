@@ -6,9 +6,11 @@
 //! through a defined global, is only known at instantiation; those segments
 //! stay relative and never receive a slot. A segment that ends past the
 //! table's declared minimum is out of range and is not placed, because
-//! instantiation is only guaranteed to have that many slots. Passive and
-//! declared segments initialize no table and are kept apart. Nothing here
-//! instantiates the module.
+//! instantiation is only guaranteed to have that many slots. Instantiation
+//! applies active segments in order and traps at the first one that does not
+//! fit, so every later active segment is unreached: it never writes a slot.
+//! Passive and declared segments initialize no table and are kept apart.
+//! Nothing here instantiates the module.
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -29,6 +31,9 @@ pub(crate) enum Placement {
     Relative(u32),
     /// The segment at this offset ends past the table's declared minimum.
     OutOfRange(u32),
+    /// An earlier active segment is out of range, so instantiation traps
+    /// before this segment at this offset is applied.
+    Unreached(u32),
     /// The offset expression is outside the evaluated constant subset.
     Unresolved,
     Passive,
@@ -41,6 +46,7 @@ impl Placement {
             Self::Placed(_) => "placed",
             Self::Relative(_) => "relative",
             Self::OutOfRange(_) => "out-of-range",
+            Self::Unreached(_) => "unreached",
             Self::Unresolved => "unresolved",
             Self::Passive => "passive",
             Self::Declared => "declared",
@@ -109,6 +115,7 @@ impl Tables {
         // Defined global index to its evaluated initializer when immutable.
         let mut constant_globals: Vec<Option<Evaluated>> = Vec::new();
         let mut segment_index = 0u32;
+        let mut trapped = false;
         for payload in Parser::new(0).parse_all(bytes) {
             match payload.ok()? {
                 Payload::TypeSection(reader) => {
@@ -221,6 +228,15 @@ impl Tables {
                                     }
                                     None => Placement::Unresolved,
                                 };
+                                let placement = match placement {
+                                    Placement::Placed(offset) | Placement::OutOfRange(offset)
+                                        if trapped =>
+                                    {
+                                        Placement::Unreached(offset)
+                                    }
+                                    other => other,
+                                };
+                                trapped |= matches!(placement, Placement::OutOfRange(_));
                                 (Some(table), placement)
                             }
                             ElementKind::Passive => (None, Placement::Passive),
@@ -504,6 +520,26 @@ mod tests {
             assert_eq!(tables.matching_slots(0, 0), Some((vec![0, 1], 2)));
         }
         assert_eq!(tables.matching_scans(), 1);
+    }
+
+    /// Review regression: instantiation stops at the first segment that does
+    /// not fit, so later segments never place a slot.
+    #[test]
+    fn segments_after_an_out_of_range_segment_are_not_placed() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (table 4 funcref)
+              (func $a) (func $b)
+              (elem (i32.const 0) func $a)
+              (elem (i32.const 3) func $a $b)
+              (elem (i32.const 1) func $b))"#,
+        )
+        .unwrap();
+        let tables = Tables::parse(&bytes).unwrap();
+        assert_eq!(tables.segments[0].placement, Placement::Placed(0));
+        assert_eq!(tables.segments[1].placement, Placement::OutOfRange(3));
+        assert_eq!(tables.segments[2].placement, Placement::Unreached(1));
+        assert!(!tables.slots[&0].contains_key(&1));
     }
 
     #[test]

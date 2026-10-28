@@ -1,0 +1,1 @@
+function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){switch(v.kind){case 1:log(v);break;}}return handlers[k].call(null,x);}

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://origin-trace.local/protocol/vm-dispatch-classification-v1.schema.json",
   "title": "Structural VM dispatch classification v1",
-  "description": "Analyzer interpretation of stored artifact bytes. Each site states how control picks the next handler, where the selector value comes from, and whether the dispatch repeats in a selector-advancing loop. confidence is always structural. It never rewrites captured evidence and never raises a VM tier.",
+  "description": "Analyzer interpretation of stored artifact bytes. Each site states how control picks the next handler, where the selector value comes from, and whether the dispatch repeats in a selector-advancing loop. confidence is always structural. It never rewrites captured evidence and never raises a VM tier. Lands as one unit with its first two producer commits; no released document predates it, so it keeps version 1.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -113,6 +113,7 @@
           "reason": {
             "enum": [
               "classification-work-limit",
+              "classification-trace-limit",
               "classification-region-limit",
               "classification-unavailable"
             ]
@@ -189,7 +190,7 @@
             "multiplexer",
             "other"
           ],
-          "description": "Derived from the three axes. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table or compare_chain. multiplexer: repeats=once with call_argument on the same kinds; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
+          "description": "Derived from the record. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table or compare_chain, unless buffer_kind is string or arguments, and unless the selector is a second-level lookup (through_lookup) on a switch or ladder; a handler table reads its handler through one lookup by design. multiplexer: repeats=once with call_argument on the same kinds; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
         },
         "confidence": {
           "const": "structural"
@@ -268,7 +269,8 @@
           "additionalProperties": false,
           "required": [
             "expression",
-            "byte_offset"
+            "byte_offset",
+            "through_lookup"
           ],
           "properties": {
             "expression": {
@@ -284,6 +286,10 @@
               ],
               "minimum": 0,
               "description": "Offset of the closest producing write or load, when it is not the dispatch itself."
+            },
+            "through_lookup": {
+              "type": "boolean",
+              "description": "The selector is a table read keyed by a value loaded at a cursor, such as types[q[head++]], rather than the fetched value itself."
             }
           }
         },
@@ -327,10 +333,11 @@
             "string",
             "typed-array",
             "array",
+            "arguments",
             "unknown",
             null
           ],
-          "description": "JavaScript cursor buffers only. string flags a tokenizer-shaped loop; it adds no other claim."
+          "description": "JavaScript cursor buffers only. string or arguments marks a cursor loop over text or call arguments, which reads characters or argument values rather than opcodes."
         },
         "table": {
           "anyOf": [

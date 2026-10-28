@@ -346,7 +346,7 @@ const shape = (offset, kind, source, repeats, role, extra = {}) => ({artifact_id
   dispatch_kind: kind, selector_source: source, repeats, role, confidence: 'structural',
   instruction: kind === 'handler_table' ? 'call_indirect' : kind === 'compare_chain' ? 'i32.eq ladder' : 'br_table',
   location: {function_index: 0, function_body_offset: 40, byte_offset: offset, byte_size: 5, line: null, column: null},
-  selector: {expression: 'local4 = i32.load8_u[(param0 + local2)]', byte_offset: offset - 4}, arm_count: 200,
+  selector: {expression: 'local4 = i32.load8_u[(param0 + local2)]', byte_offset: offset - 4, through_lookup: false}, arm_count: 200,
   loop: repeats === 'once' ? null : {byte_offset: 41, byte_size: 300}, buffer_kind: null, table: null, ...extra});
 const classification = {classification_version: 1, site_count: 4, omitted_site_count: 0, omissions: [],
   role_counts: {'interpreter-candidate': 2, multiplexer: 1, other: 1},
@@ -357,7 +357,7 @@ const classification = {classification_version: 1, site_count: 4, omitted_site_c
       {table: {table_index: 0, type_index: 0, populated_slot_count: 5, matching_slot_count: 4, matching_slots: [1, 2, 3, 5]}, arm_count: 4}),
     shape(70, 'switch_on_value', 'call_argument', 'unknown', 'other'),
     shape(90, 'compare_chain', 'call_argument', 'once', 'multiplexer',
-      {selector: {expression: '<img src=x onerror=alert(1)> == constant (4 comparisons)', byte_offset: null}, arm_count: 4})]};
+      {selector: {expression: '<img src=x onerror=alert(1)> == constant (4 comparisons)', byte_offset: null, through_lookup: false}, arm_count: 4})]};
 const shapedWorkspace = {...tableWorkspace, dispatch_classification: classification};
 shapedWorkspace.handler_tables = [...tables, {kind: 'element', evidence_class: 'call-indirect-table', function_index: null,
   byte_offset: null, byte_size: null, table_index: 0, arm_count: null, entry_count: 5, unique_target_count: 5, default_target: null,
@@ -404,6 +404,26 @@ assert(validateModule(bounded), 'counted classification omissions and out-of-ran
 const boundedText = renderApi.renderVmDispatchSites(bounded.workspaces[0]).textContent;
 assert(boundedText.includes('classification-work-limit: The artifact classification work bound was reached. 5 sites not classified.'), boundedText);
 assert(renderApi.renderVmHandlerTables(bounded.workspaces[0]).textContent.includes('segment 2 at slot 7 ends past the declared table size · 3 entries, not placed'));
+// A text scan or second-level lookup is never an interpreter candidate.
+for (const [field, value, text] of [['buffer_kind', 'string', 'string scan, no guest opcodes claimed'],
+  ['buffer_kind', 'arguments', 'arguments scan, no guest opcodes claimed'], ['through_lookup', true, 'second-level lookup, no guest opcodes claimed']]) {
+  const refined = structuredClone(bounded);
+  const site = refined.workspaces[0].dispatch_classification.sites[0];
+  if (field === 'buffer_kind') site.buffer_kind = value; else site.selector.through_lookup = value;
+  assert(!validateModule(refined), `${field} ${value} cannot keep an interpreter role`);
+  site.role = 'other';
+  const counts = refined.workspaces[0].dispatch_classification.role_counts;
+  counts['interpreter-candidate'] -= 1; counts.other += 1;
+  assert(validateModule(refined), `${field} ${value} makes the site other`);
+  assert(renderApi.renderVmDispatchSites(refined.workspaces[0]).textContent.includes(text), text);
+}
+const unreached = structuredClone(bounded);
+unreached.workspaces[0].handler_tables[2].segments.push({segment_index: 3, placement: 'unreached', offset: 1, global_index: null, entry_count: 2});
+unreached.workspaces[0].handler_tables[2].omitted_segment_count = 0;
+assert(validateModule(unreached), 'unreached segments are valid');
+assert(renderApi.renderVmHandlerTables(unreached.workspaces[0]).textContent.includes('segment 3 at slot 1 follows an out-of-range segment · 2 entries, never applied'));
+const tooMany = structuredClone(unreached); tooMany.workspaces[0].handler_tables[2].omitted_segment_count = 2;
+assert(!validateModule(tooMany), 'omitted segments require a full listed page');
 for (const mutate of [
   value => { value.dispatch_classification.omissions[0].reason = 'silently-dropped'; },
   value => { value.dispatch_classification.omissions[0].omitted_records = 0; },

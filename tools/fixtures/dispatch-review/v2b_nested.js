@@ -1,0 +1,1 @@
+function route(k,code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){stack.push(code[pc++]);}function go(){return handlers[k](stack);}return go();}

@@ -1429,6 +1429,8 @@ const capturedExportPanel = installCapturedExportDialog({
         const axes = `${site.dispatch_kind} / ${site.selector_source} / ${site.repeats}`;
         if (site.role === 'multiplexer') return `${axes} · router, no guest opcodes claimed`;
         if (site.role === 'interpreter-candidate') return `${axes} · cursor-loop interpreter candidate`;
+        if (['string', 'arguments'].includes(site.buffer_kind)) return `${axes} · ${site.buffer_kind} scan, no guest opcodes claimed`;
+        if (site.selector.through_lookup) return `${axes} · second-level lookup, no guest opcodes claimed`;
         return `${axes} · not an interpreter loop`;
       }
 
@@ -1499,7 +1501,10 @@ const capturedExportPanel = installCapturedExportDialog({
                 ? `segment ${segment.segment_index} relative to imported global ${segment.global_index} · ${segment.entry_count} entries, slots unknown`
                 : segment.placement === 'out-of-range'
                   ? `segment ${segment.segment_index} at slot ${segment.offset} ends past the declared table size · ${segment.entry_count} entries, not placed`
-                  : `segment ${segment.segment_index} offset unresolved · ${segment.entry_count} entries, slots unknown`).join('; ')));
+                  : segment.placement === 'unreached'
+                    ? `segment ${segment.segment_index} at slot ${segment.offset} follows an out-of-range segment · ${segment.entry_count} entries, never applied`
+                    : `segment ${segment.segment_index} offset unresolved · ${segment.entry_count} entries, slots unknown`).join('; ') +
+              (table.omitted_segment_count ? `; ${vmCountText(table.omitted_segment_count, 'more segment')} not listed` : '')));
           }
           return row;
         });

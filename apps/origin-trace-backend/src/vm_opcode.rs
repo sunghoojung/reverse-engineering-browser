@@ -360,12 +360,21 @@ fn shallow_braces(region: &str) -> String {
 fn object_handlers(
     region: &str,
     base: usize,
-    names: BTreeSet<String>,
     blocked_tables: &BTreeSet<String>,
     handlers: &mut BTreeMap<u32, Value>,
     unknowns: &mut Vec<String>,
     handler_limit_hit: &mut bool,
 ) {
+    let mut names = BTreeSet::new();
+    for captures in INDEXED_DISPATCH.captures_iter(region) {
+        names.insert(captures[1].to_owned());
+    }
+    names.extend([
+        "handler".into(),
+        "handlers".into(),
+        "opcode".into(),
+        "opcodes".into(),
+    ]);
     for name in names {
         if blocked_tables.contains(&name) {
             continue;
@@ -412,57 +421,10 @@ fn object_handlers(
     }
 }
 
-/// Why a dispatch site that is not a cursor-loop interpreter yields no
-/// opcode handlers. Its arms or constants are not guest opcodes.
-fn not_interpreter_unknown(role: vm::dispatch_shape::Role) -> String {
-    if role == vm::dispatch_shape::Role::Multiplexer {
-        "A one-shot router dispatches on a call argument. Its case values route one call and are not claimed as guest opcodes.".into()
-    } else {
-        "A dispatch site is not a cursor-advancing loop. Its case values are not claimed as guest opcodes.".into()
-    }
-}
-
-/// Static handler recovery for one JavaScript dispatch region.
-///
-/// Opcode handlers come only from a switch, or a numeric handler table,
-/// tied to a site the structural classification calls an interpreter
-/// candidate: a cursor-like selector re-derived in a loop. No such site
-/// means no handlers. `withheld` counts the candidates the same recovery
-/// finds without that requirement, so a caller can keep the tier, which is
-/// decided by recovery alone, and name what the classification withheld.
-struct Recovery {
-    handlers: Vec<Value>,
-    model: String,
-    unknowns: Vec<String>,
-    omissions: Vec<Value>,
-    withheld: usize,
-}
-
 fn static_handlers(
     source: &str,
     start: usize,
     end: usize,
-    classification: Option<&Value>,
-) -> Recovery {
-    let (handlers, model, unknowns, omissions) =
-        recover_handlers(source, start, end, Some(classification));
-    let (ungated, _, _, _) = recover_handlers(source, start, end, None);
-    Recovery {
-        withheld: ungated.len().saturating_sub(handlers.len()),
-        handlers,
-        model,
-        unknowns,
-        omissions,
-    }
-}
-
-/// `gate` is `Some(classification)` to require interpreter-candidate sites,
-/// or `None` for recovery alone, which decides the tier.
-fn recover_handlers(
-    source: &str,
-    start: usize,
-    end: usize,
-    gate: Option<Option<&Value>>,
 ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
     let region = vm::mask(&source[start..end]);
     let outer = without_nested_functions(&region);
@@ -471,45 +433,16 @@ fn recover_handlers(
     let mut omissions = Vec::new();
     let mut handler_limit_hit = false;
     let mut blocked_tables = BTreeSet::new();
-    let role = |at: usize| {
-        gate.map(|classification| vm::dispatch_shape::role_at(classification, (start + at) as u64))
-    };
     for captures in INDEXED_DISPATCH.captures_iter(&outer) {
-        let at = captures.get(0).expect("dispatch match").start();
-        if role(at) != Some(vm::dispatch_shape::Role::Multiplexer)
-            && !direct_selector(&captures[2], &outer[..at], 0)
-        {
+        if !direct_selector(
+            &captures[2],
+            &outer[..captures.get(0).expect("dispatch match").start()],
+            0,
+        ) {
             blocked_tables.insert(captures[1].to_owned());
             unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
         }
     }
-    // Tables whose own dispatch in this region is an interpreter candidate,
-    // including `table[op].call(...)`. Ungated recovery keeps the historical
-    // names: any indexed callee plus the conventional table names.
-    let tables = match gate {
-        Some(_) => {
-            let mut allowed = BTreeSet::new();
-            for captures in vm::dispatch_shape::javascript::INDEXED_CALL.captures_iter(&outer) {
-                let at = captures.get(0).expect("indexed call").start();
-                match role(at) {
-                    Some(vm::dispatch_shape::Role::InterpreterCandidate) => {
-                        allowed.insert(captures[1].to_owned());
-                    }
-                    Some(other) => unknowns.push(not_interpreter_unknown(other)),
-                    None => (),
-                }
-            }
-            allowed
-        }
-        None => {
-            let mut names = INDEXED_DISPATCH
-                .captures_iter(&outer)
-                .map(|captures| captures[1].to_owned())
-                .collect::<BTreeSet<_>>();
-            names.extend(["handler", "handlers", "opcode", "opcodes"].map(String::from));
-            names
-        }
-    };
     let mut previous_switch_end = 0;
     for switch_match in SWITCH.find_iter(&outer) {
         if switch_match.start() < previous_switch_end {
@@ -529,21 +462,12 @@ fn recover_handlers(
             continue;
         };
         previous_switch_end = closing_brace + 1;
-        let site_role = role(switch_match.start());
-        if site_role != Some(vm::dispatch_shape::Role::Multiplexer)
-            && !direct_selector(
-                &region[opening_paren + 1..closing_paren],
-                &outer[..switch_match.start()],
-                0,
-            )
-        {
+        if !direct_selector(
+            &region[opening_paren + 1..closing_paren],
+            &outer[..switch_match.start()],
+            0,
+        ) {
             unknowns.push("A computed, position-dependent, or saved-state switch selector has no proven fixed opcode mapping.".into());
-            continue;
-        }
-        if let Some(site_role) = site_role
-            && site_role != vm::dispatch_shape::Role::InterpreterCandidate
-        {
-            unknowns.push(not_interpreter_unknown(site_role));
             continue;
         }
         let body = &region[opening_brace + 1..closing_brace];
@@ -597,9 +521,7 @@ fn recover_handlers(
         }
     }
     for captures in INDEXED_HANDLER.captures_iter(&region) {
-        if blocked_tables.contains(&captures[1])
-            || (gate.is_some() && !tables.contains(&captures[1]))
-        {
+        if blocked_tables.contains(&captures[1]) {
             continue;
         }
         let Some(opcode) = integer(&captures[2]) else {
@@ -628,7 +550,6 @@ fn recover_handlers(
     object_handlers(
         &region,
         start,
-        tables,
         &blocked_tables,
         &mut handlers,
         &mut unknowns,
@@ -662,6 +583,157 @@ fn recover_handlers(
         unknowns,
         omissions,
     )
+}
+
+/// Why a dispatch site yields no opcode claims. Its arms or constants are
+/// not guest opcodes.
+fn withheld_reason(
+    roles: &vm::dispatch_shape::Roles,
+    role: Option<vm::dispatch_shape::Role>,
+) -> String {
+    use vm::dispatch_shape::Role;
+    match role {
+        Some(Role::InterpreterCandidate) => String::new(),
+        Some(Role::Multiplexer) => "A one-shot router dispatches on a call argument. Its case values route one call and are not claimed as guest opcodes.".into(),
+        Some(Role::Other) => "A dispatch site is not a cursor-advancing loop. Its case values are not claimed as guest opcodes.".into(),
+        None if roles.limited() => "A dispatch site was not classified: the classification work limit was reached. Its case values are not claimed as guest opcodes.".into(),
+        None => "A dispatch site has no structural classification. Its case values are not claimed as guest opcodes.".into(),
+    }
+}
+
+static OBJECT_ASSIGNMENT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b([A-Za-z_$][\w$]*)\s*=\s*\{").expect("object assignment"));
+static INDEXED_TABLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([A-Za-z_$][\w$]*)\s*\[").expect("indexed table"));
+
+/// Handlers `static_handlers` recovered, after the opcode-claim gate.
+struct Gated {
+    handlers: Vec<Value>,
+    withheld: usize,
+    unknowns: Vec<String>,
+}
+
+/// The opcode-claim gate: a pure post-filter on recovered handlers. It keeps
+/// a switch case only when that switch is a classified interpreter-candidate
+/// site, and a table entry only when the region dispatches through that
+/// table (`t[op](...)`, `t[op].call(...)`) at an interpreter-candidate site.
+/// It never adds a handler and never feeds recovery, tier or score.
+fn gate_handlers(
+    source: &str,
+    start: usize,
+    end: usize,
+    handlers: Vec<Value>,
+    roles: &vm::dispatch_shape::Roles,
+) -> Gated {
+    use vm::dispatch_shape::Role;
+    let region = vm::mask(&source[start..end]);
+    let outer = without_nested_functions(&region);
+    // The switches recovery reads, found the same way it finds them.
+    let mut switches = Vec::new();
+    let mut previous_switch_end = 0;
+    for switch_match in SWITCH.find_iter(&outer) {
+        if switch_match.start() < previous_switch_end {
+            continue;
+        }
+        let opening_paren = switch_match.end() - 1;
+        let Some(closing_paren) = matching(region.as_bytes(), opening_paren, b'(', b')') else {
+            continue;
+        };
+        let Some(opening_brace) = region[closing_paren + 1..]
+            .find('{')
+            .map(|offset| closing_paren + 1 + offset)
+        else {
+            continue;
+        };
+        let Some(closing_brace) = matching(region.as_bytes(), opening_brace, b'{', b'}') else {
+            continue;
+        };
+        previous_switch_end = closing_brace + 1;
+        switches.push((switch_match.start(), opening_brace, closing_brace));
+    }
+    // Every site that dispatches through a named table, nested functions
+    // included, as recovery collects table names from the whole region.
+    let mut table_roles = BTreeMap::<String, Vec<Option<Role>>>::new();
+    for captures in vm::dispatch_shape::javascript::INDEXED_CALL.captures_iter(&region) {
+        let at = start + captures.get(0).expect("indexed call").start();
+        table_roles
+            .entry(captures[1].to_owned())
+            .or_default()
+            .push(roles.get(at));
+    }
+    let objects = OBJECT_ASSIGNMENT
+        .captures_iter(&region)
+        .filter_map(|captures| {
+            let opening = captures.get(0)?.end() - 1;
+            let closing = matching(region.as_bytes(), opening, b'{', b'}')?;
+            Some((opening, closing, captures[1].to_owned()))
+        })
+        .collect::<Vec<_>>();
+    let mut kept = Vec::new();
+    let mut unknowns = Vec::new();
+    let mut withheld = 0usize;
+    for handler in handlers {
+        let at = handler["source"]["byte_offset"].as_u64().unwrap_or(0) as usize;
+        let relative = at.saturating_sub(start);
+        let verdict = if handler.get("handler_index").is_none() {
+            switches
+                .iter()
+                .find(|(_, open, close)| *open < relative && relative < *close)
+                .map(|(keyword, _, _)| roles.get(start + keyword))
+                .unwrap_or(None)
+        } else {
+            let table = INDEXED_TABLE
+                .captures(&region[relative.min(region.len())..])
+                .map(|captures| captures[1].to_owned())
+                .or_else(|| {
+                    objects
+                        .iter()
+                        .filter(|(open, close, _)| *open < relative && relative < *close)
+                        .max_by_key(|(open, _, _)| *open)
+                        .map(|(_, _, name)| name.clone())
+                });
+            table
+                .and_then(|name| table_roles.get(&name))
+                .map(|sites| {
+                    if sites.contains(&Some(Role::InterpreterCandidate)) {
+                        Some(Role::InterpreterCandidate)
+                    } else {
+                        sites.iter().copied().find(Option::is_some).flatten()
+                    }
+                })
+                .unwrap_or(Some(Role::Other))
+        };
+        if verdict == Some(Role::InterpreterCandidate) {
+            kept.push(handler);
+        } else {
+            withheld += 1;
+            unknowns.push(withheld_reason(roles, verdict));
+        }
+    }
+    unknowns.sort();
+    unknowns.dedup();
+    Gated {
+        handlers: kept,
+        withheld,
+        unknowns,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Differential tests run the workspace without the opcode-claim gate.
+    static GATE_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn gate_enabled() -> bool {
+    #[cfg(test)]
+    {
+        !GATE_DISABLED.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
 }
 
 fn event_identity(event: &Value) -> Option<(String, u32, String)> {
@@ -962,17 +1034,17 @@ fn guest_opcode_isa_proven(
     samples: &[Value],
     handlers: &[Value],
     owned: Option<&Value>,
-    module_classification: Option<&Value>,
+    module_roles: Option<&vm::dispatch_shape::Roles>,
 ) -> bool {
     // A Wasm arm proves a guest opcode only at an interpreter-candidate site.
     // Router and ordinary branch arms stay selectors whatever a sample says.
     let interpreter_arm = |handler: &Value| {
-        module_classification.is_none_or(|classification| {
+        module_roles.is_none_or(|roles| {
             handler["source"]["byte_offset"]
                 .as_u64()
                 .is_some_and(|offset| {
-                    vm::dispatch_shape::role_at(Some(classification), offset)
-                        == vm::dispatch_shape::Role::InterpreterCandidate
+                    roles.get(offset as usize)
+                        == Some(vm::dispatch_shape::Role::InterpreterCandidate)
                 })
         })
     };
@@ -1077,9 +1149,9 @@ fn workspace_evidence_class(
     handlers: &[Value],
     owned: Option<&Value>,
     inventory: Option<&Value>,
-    module_classification: Option<&Value>,
+    module_roles: Option<&vm::dispatch_shape::Roles>,
 ) -> Option<&'static str> {
-    if guest_opcode_isa_proven(samples, handlers, owned, module_classification) {
+    if guest_opcode_isa_proven(samples, handlers, owned, module_roles) {
         return Some("guest-opcode-isa");
     }
     if let Some(candidates) = inventory
@@ -1121,6 +1193,11 @@ pub(crate) fn workspace(
         return None;
     }
     let runtime = result["runtime"].as_str()?;
+    // Roles of every classified site, recomputed in full from the artifact
+    // bytes: the gate never reads the bounded listed document.
+    let roles = gate_enabled()
+        .then(|| vm::dispatch_roles(runtime, bytes))
+        .flatten();
     let (mut handlers, model, mut unknowns, mut omissions, module_dispatch, handler_tables) =
         match runtime {
             "javascript" => {
@@ -1141,27 +1218,25 @@ pub(crate) fn workspace(
                 {
                     return None;
                 }
-                let recovery = static_handlers(
-                    source,
-                    region.0,
-                    end,
-                    result["frontend"].get("dispatch_classification"),
-                );
-                let mut omissions = recovery.omissions;
-                if recovery.withheld > 0 {
-                    omissions.push(json!({"reason":"handler-withheld","detail":format!(
-                        "Static recovery found {} that no switch or table tied to a cursor-loop interpreter-candidate site supports, so they are not claimed as guest opcodes. The tier is unchanged.",
-                        count_label(recovery.withheld as u32, "opcode candidate")
-                    )}));
-                }
-                (
-                    recovery.handlers,
-                    recovery.model,
-                    recovery.unknowns,
-                    omissions,
-                    None,
-                    Vec::new(),
-                )
+                // Recovery is the unchanged path that also decides the tier.
+                // The gate only removes claims from its output afterwards.
+                let (handlers, model, mut unknowns, mut omissions) =
+                    static_handlers(source, region.0, end);
+                let handlers = match &roles {
+                    Some(roles) => {
+                        let gated = gate_handlers(source, region.0, end, handlers, roles);
+                        unknowns.extend(gated.unknowns);
+                        if gated.withheld > 0 {
+                            omissions.push(json!({"reason":"handler-withheld","detail":format!(
+                                "Static recovery found {} that no switch or table tied to a cursor-loop interpreter-candidate site supports, so they are not claimed as guest opcodes. The tier is unchanged.",
+                                count_label(gated.withheld as u32, "opcode candidate")
+                            )}));
+                        }
+                        gated.handlers
+                    }
+                    None => handlers,
+                };
+                (handlers, model, unknowns, omissions, None, Vec::new())
             }
             "webassembly" => {
                 let extracted = wasm::handlers(bytes, result)?;
@@ -1332,9 +1407,8 @@ pub(crate) fn workspace(
         }
     }
     // Counted before coverage, which is complete only without unknowns.
-    let classification = result["frontend"].get("dispatch_classification");
     if runtime == "webassembly"
-        && let Some(sites) = classification.and_then(|value| value["sites"].as_array())
+        && let Some(roles) = &roles
     {
         let routed = handlers
             .iter()
@@ -1342,10 +1416,9 @@ pub(crate) fn workspace(
             .collect::<BTreeSet<_>>()
             .into_iter()
             .filter(|offset| {
-                sites.iter().any(|site| {
-                    site["location"]["byte_offset"].as_u64() == Some(*offset)
-                        && site["role"] != "interpreter-candidate"
-                })
+                roles
+                    .get(*offset as usize)
+                    .is_some_and(|role| role != vm::dispatch_shape::Role::InterpreterCandidate)
             })
             .count();
         if routed > 0 {
@@ -1446,7 +1519,7 @@ pub(crate) fn workspace(
         result
             .get("frontend")
             .and_then(|frontend| frontend.get("dispatch_inventory")),
-        classification.filter(|_| runtime == "webassembly"),
+        roles.as_ref().filter(|_| runtime == "webassembly"),
     );
     let machine = machine_state(&handlers);
     let attributions = crate::vm_reachability::attributions(&traversal, &handlers);
@@ -1485,7 +1558,7 @@ pub(crate) fn workspace(
     {
         workspace["dispatch_inventory"] = inventory.clone();
     }
-    if let Some(classification) = classification {
+    if let Some(classification) = result["frontend"].get("dispatch_classification") {
         workspace["dispatch_classification"] = classification.clone();
     }
     if let Some(class) = evidence_class {
@@ -1596,14 +1669,13 @@ mod tests {
         start: usize,
         end: usize,
     ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
-        let classification = vm::javascript_classification(source);
-        let recovery = static_handlers(source, start, end, Some(&classification));
-        (
-            recovery.handlers,
-            recovery.model,
-            recovery.unknowns,
-            recovery.omissions,
-        )
+        let roles = vm::dispatch_roles("javascript", source.as_bytes()).expect("roles");
+        let (handlers, model, mut unknowns, omissions) = static_handlers(source, start, end);
+        let gated = gate_handlers(source, start, end, handlers, &roles);
+        unknowns.extend(gated.unknowns);
+        unknowns.sort();
+        unknowns.dedup();
+        (gated.handlers, model, unknowns, omissions)
     }
 
     fn fixture(name: &str) -> String {
@@ -3690,6 +3762,180 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
     }
 
+    fn review_fixture(name: &str) -> String {
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tools/fixtures/dispatch-review")
+                .join(name),
+        )
+        .expect("review fixture")
+    }
+
+    /// Every owned input the differential invariant covers: repository
+    /// fixtures, dispatch-shape fixtures, review repro copies and generated
+    /// review inputs, as (name, bytes, kind).
+    fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut inputs = Vec::new();
+        for directory in [
+            "tools/fixtures/dispatch-shapes",
+            "tools/fixtures/dispatch-review",
+            "tools/fixtures/vm-dynamic-debug",
+            "tools/fixtures/vm-dynamic-debug/xor-decoded",
+            "tools/fixtures/vm-workspace-effects",
+            "tools/fixtures/native-vm-dispatch",
+            "tools/fixtures/vm-analysis-packs",
+            "apps/runtime-hook-demo",
+            "apps/runtime-hook-demo/ghostwire-worker",
+        ] {
+            let mut paths = fs::read_dir(root.join(directory))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let kind = match path.extension().and_then(|ext| ext.to_str()) {
+                    Some("js" | "mjs") => "javascript",
+                    Some("wasm") => "wasm",
+                    _ => continue,
+                };
+                inputs.push((
+                    path.strip_prefix(&root).unwrap().display().to_string(),
+                    fs::read(&path).unwrap(),
+                    kind,
+                ));
+            }
+        }
+        for name in ["wasm-dispatch.json", "wasm-ranked-dispatch.json"] {
+            let modules: Value = serde_json::from_str(
+                &fs::read_to_string(root.join("tools/fixtures/vm-dynamic-debug").join(name))
+                    .unwrap(),
+            )
+            .unwrap();
+            for (key, value) in modules.as_object().unwrap() {
+                if let Some(hex) = value.as_str()
+                    && let Ok(bytes) = hex::decode(hex)
+                {
+                    inputs.push((format!("{name}#{key}"), bytes, "wasm"));
+                }
+            }
+        }
+        for (name, source) in vm::review_inputs::javascript() {
+            inputs.push((format!("review:{name}"), source.into_bytes(), "javascript"));
+        }
+        for (name, bytes) in vm::review_inputs::wasm() {
+            inputs.push((format!("review:{name}"), bytes, "wasm"));
+        }
+        inputs
+    }
+
+    fn tier_and_score(bytes: &[u8], kind: &str, gate: bool) -> (Value, Value) {
+        GATE_DISABLED.with(|disabled| disabled.set(!gate));
+        let (_, analysis, _) = analyze_artifact(bytes, kind, &[]);
+        GATE_DISABLED.with(|disabled| disabled.set(false));
+        let result = &analysis["results"][0];
+        (result["tier"].clone(), result["vm_score"].clone())
+    }
+
+    /// Differential invariant: on every owned input, tier and score with the
+    /// opcode-claim gate equal those of the unchanged base recovery path,
+    /// which is the same pipeline with the gate off.
+    #[test]
+    fn classification_never_changes_tier_or_score_on_any_owned_input() {
+        let inputs = differential_inputs();
+        assert!(inputs.len() >= 90, "{} differential inputs", inputs.len());
+        let mut differences = Vec::new();
+        for (name, bytes, kind) in &inputs {
+            let gated = tier_and_score(bytes, kind, true);
+            let base = tier_and_score(bytes, kind, false);
+            if gated != base {
+                differences.push(format!("{name}: gated {gated:?}, base {base:?}"));
+            }
+        }
+        assert!(differences.is_empty(), "{}", differences.join("\n"));
+    }
+
+    /// Second review, blockers: tier and score are the unchanged base
+    /// recovery's. A table dispatched in a nested function keeps base's
+    /// likely-vm, and a loop dispatch beside a router stays a candidate.
+    #[test]
+    fn nested_and_loop_body_dispatch_keep_base_tiers() {
+        let (_, analysis, _) = analyze(&review_fixture("t1_nested_ops.js"), &[]);
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        assert_eq!(analysis["results"][0]["vm_score"], 65);
+        let (_, analysis, _) = analyze(&review_fixture("v2e_loopbody.js"), &[]);
+        assert_eq!(analysis["results"][0]["tier"], "candidate");
+        assert_eq!(analysis["results"][0]["vm_score"], 80);
+    }
+
+    fn handler_opcodes(document: &Value) -> Vec<u64> {
+        document["workspaces"][0]["handlers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|handler| handler["opcode"].as_u64())
+            .collect()
+    }
+
+    /// Second review: the gate reads the full classification, not the 256
+    /// listed sites, and an interpreter region is never starved of budget
+    /// by larger noise regions.
+    #[test]
+    fn listing_and_budget_never_starve_the_interpreter() {
+        for name in ["s2_listing", "s1b_budget"] {
+            let (_, analysis, document) = analyze(&vm::review_inputs::javascript_named(name), &[]);
+            assert_eq!(analysis["results"][0]["tier"], "likely-vm", "{name}");
+            assert_eq!(handler_opcodes(&document), [1, 2, 3], "{name}");
+            assert!(
+                !document["workspaces"][0]["unknowns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|unknown| unknown
+                        .as_str()
+                        .unwrap()
+                        .contains("not a cursor-advancing loop")),
+                "{name}"
+            );
+        }
+    }
+
+    /// Second review: an element table lists at most 64 segments and counts
+    /// the rest.
+    #[test]
+    fn element_segments_past_the_listing_bound_are_counted() {
+        let elems = (0..70)
+            .map(|i| format!("(elem (i32.const {i}) func $h)"))
+            .collect::<String>();
+        let bytes = wat::parse_str(format!(
+            r#"(module (memory 1)
+              (type $t (func (param i32) (result i32)))
+              (table 80 funcref)
+              (func $h (type $t) (local.get 0))
+              {elems}
+              (func (export "run") (param $code i32) (param $len i32) (result i32)
+                (local $pc i32) (local $acc i32)
+                (block $exit (loop $again
+                  (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+                  (local.set $acc (call_indirect (type $t) (local.get $acc)
+                    (i32.load8_u (i32.add (local.get $code) (local.get $pc)))))
+                  (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                  (br $again)))
+                (local.get $acc)))"#
+        ))
+        .unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let element = document["workspaces"][0]["handler_tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|table| table["kind"] == "element")
+            .unwrap()
+            .clone();
+        assert_eq!(element["segments"].as_array().unwrap().len(), 64);
+        assert_eq!(element["omitted_segment_count"], 6);
+    }
+
     /// Review regression: classification never changes a tier. Where the gate
     /// withholds recovered handlers, the tier stays and a distinct omission
     /// names the withholding; demotion still follows genuine recovery only.
@@ -3741,7 +3987,6 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){switch(v.kind){case 1:log(v);break;}}return handlers[k].call(null,x);}",
             "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){log(v);}return handlers[k](x);}",
             "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){const h=handlers[code[pc++]];h(stack);}}",
-            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};function inner(){while(pc<code.length){handlers[code[pc++]](stack);}}return inner;}",
             "function run(code,stack){let pc=0;handlers[1]=function(){stack.push(code[pc++])};handlers[2]=function(){stack.pop()};while(pc<code.length){stack.push(code[pc++]);}}",
         ] {
             let start = source.find('{').unwrap() + 1;
@@ -3760,11 +4005,16 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         if let Some(workspace) = document["workspaces"].as_array().unwrap().first() {
             assert_eq!(workspace["handlers"], json!([]));
         }
-        // The same table tied to a cursor-loop dispatch keeps its handlers.
-        let source = "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}";
-        let start = source.find('{').unwrap() + 1;
-        let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
-        assert_eq!(handlers.len(), 2);
+        // The same table tied to a cursor-loop dispatch keeps its handlers,
+        // including a dispatch loop in a nested function of the region.
+        for source in [
+            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}",
+            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};function inner(){while(pc<code.length){handlers[code[pc++]](stack);}}return inner;}",
+        ] {
+            let start = source.find('{').unwrap() + 1;
+            let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
+            assert_eq!(handlers.len(), 2, "{source}");
+        }
     }
 
     /// Review regression: per-region truncation must rank interpreter
@@ -3834,8 +4084,37 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             steps
         };
         let (small, large) = (work(1000), work(2000));
-        assert!(small <= 8 * 1000, "{small} steps for 1000 sites");
-        assert_eq!(large, 2 * small, "{small} then {large}");
+        assert!(small <= 16 * 1000, "{small} work units for 1000 sites");
+        assert!(large <= 2 * small, "{small} then {large}");
+        // All classifier work, including bracket pairing and buffer scans,
+        // stays linear in the input: a doubled input at most doubles it.
+        let total = |source: String| vm::javascript_classification_work(&source).1;
+        // Definitions and sites grow together: per-site buffer scans would
+        // make this quadratic.
+        let bufkind = |size: usize| {
+            total(format!(
+                "function big(c,x){{var p=0;{}while(p<c.length){{{}}}}}",
+                "c=x;".repeat(size),
+                "switch(c[p++]){case 1:case 2:case 3:p+=1}".repeat(size / 4)
+            ))
+        };
+        let pairs = |count: usize| {
+            total(format!(
+                "function big(s,x){{{}{}}}",
+                "if(/\\(/.test(s))x++;".repeat(count),
+                "if(/\\]/.test(s))x++;".repeat(count)
+            ))
+        };
+        for (name, measure) in [
+            ("pairing", &pairs as &dyn Fn(usize) -> u64),
+            ("buffer_kind", &bufkind),
+        ] {
+            let (small, large) = (measure(2000), measure(4000));
+            assert!(
+                large <= small * 2 + small / 5,
+                "{name}: {small} then {large} work units"
+            );
+        }
     }
 
     /// Case values become opcode handlers only at a cursor-loop interpreter
@@ -3850,11 +4129,16 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 .iter()
                 .any(|s| s.contains("not a cursor-advancing loop"))
         );
+        // Recovery itself finds nothing for a switch on an argument; the
+        // classification names it a router.
         let source = "function route(k,x){switch(k){case 1: return a(x); case 2: return b(x); case 3: return c(x);}}";
         let start = source.find('{').unwrap() + 1;
-        let (handlers, _, unknowns, _) = classified_handlers(source, start, source.len() - 1);
+        let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
         assert!(handlers.is_empty());
-        assert!(unknowns.iter().any(|s| s.contains("one-shot router")));
+        assert_eq!(
+            vm::javascript_classification(source)["role_counts"]["multiplexer"],
+            1
+        );
         let source = "while(pc<program.length){switch(program[pc++]){case 1: stack.push(1); break; case 2: return;}}";
         assert_eq!(classified_handlers(source, 0, source.len()).0.len(), 2);
     }

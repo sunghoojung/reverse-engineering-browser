@@ -1402,8 +1402,8 @@
         return Array.isArray(segments) && segments.length <= 64 && segments.every(segment =>
           vmWorkspaceExact(segment, ['segment_index', 'placement', 'offset', 'global_index', 'entry_count']) &&
           isSafeIntegerInRange(segment.segment_index, 0, 4294967295) &&
-          ['placed', 'relative', 'out-of-range', 'unresolved'].includes(segment.placement) &&
-          (['placed', 'out-of-range'].includes(segment.placement) ? isSafeIntegerInRange(segment.offset, 0, 4294967295) : segment.offset === null) &&
+          ['placed', 'relative', 'out-of-range', 'unreached', 'unresolved'].includes(segment.placement) &&
+          (['placed', 'out-of-range', 'unreached'].includes(segment.placement) ? isSafeIntegerInRange(segment.offset, 0, 4294967295) : segment.offset === null) &&
           (segment.placement === 'relative' ? isSafeIntegerInRange(segment.global_index, 0, 4294967295) : segment.global_index === null) &&
           isSafeIntegerInRange(segment.entry_count, 0, 4294967295));
       }
@@ -1415,6 +1415,12 @@
         if (isPlainObject(table) && table.segments !== undefined) {
           if (table.kind !== 'element' || !isVmElementSegments(table.segments)) return false;
           keys.push('segments');
+          // Producers that list segments also count the ones past the bound.
+          if (table.omitted_segment_count !== undefined) {
+            if (!isSafeIntegerInRange(table.omitted_segment_count, 0, 4294967295) ||
+              (table.omitted_segment_count > 0 && table.segments.length !== 64)) return false;
+            keys.push('omitted_segment_count');
+          }
         }
         if (!vmWorkspaceExact(table, keys) || !['br_table', 'call_indirect', 'element'].includes(table.kind) ||
           !isSafeIntegerInRange(table.omitted_cluster_count, 0, 4294967295) ||
@@ -1462,7 +1468,12 @@
       // The role is derived from the three axes; a document cannot assert it.
       function vmDispatchRole(site) {
         const selects = ['switch_on_value', 'handler_table', 'compare_chain'].includes(site.dispatch_kind);
-        if (selects && site.repeats === 'loop' && ['cursor_index', 'cursor_pointer', 'frame_slot'].includes(site.selector_source)) return 'interpreter-candidate';
+        // A text or argument scan reads characters, and a switch on a
+        // second-level lookup is a walk; neither fetches opcodes.
+        const text = ['string', 'arguments'].includes(site.buffer_kind);
+        const lookup = site.selector?.through_lookup === true && site.dispatch_kind !== 'handler_table';
+        if (selects && site.repeats === 'loop' && ['cursor_index', 'cursor_pointer', 'frame_slot'].includes(site.selector_source) &&
+          !text && !lookup) return 'interpreter-candidate';
         if (selects && site.repeats === 'once' && site.selector_source === 'call_argument') return 'multiplexer';
         return 'other';
       }
@@ -1475,7 +1486,7 @@
           site.role !== vmDispatchRole(site) || site.confidence !== 'structural' ||
           !vmDispatchInstructions.includes(site.instruction) ||
           !(site.arm_count === null || isSafeIntegerInRange(site.arm_count, 0, 4294967295)) ||
-          ![null, 'string', 'typed-array', 'array', 'unknown'].includes(site.buffer_kind)) return false;
+          ![null, 'string', 'typed-array', 'array', 'arguments', 'unknown'].includes(site.buffer_kind)) return false;
         const location = site.location;
         const javascript = runtime === 'javascript';
         if (!vmWorkspaceExact(location, ['function_index', 'function_body_offset', 'byte_offset', 'byte_size', 'line', 'column']) ||
@@ -1486,7 +1497,8 @@
             !isSafeIntegerInRange(location.column, 1, Number.MAX_SAFE_INTEGER)
             : !(location.function_index === null || isSafeIntegerInRange(location.function_index, 0, 4294967295)) ||
               location.line !== null || location.column !== null)) return false;
-        if (!vmWorkspaceExact(site.selector, ['expression', 'byte_offset']) ||
+        if (!vmWorkspaceExact(site.selector, ['expression', 'byte_offset', 'through_lookup']) ||
+          typeof site.selector.through_lookup !== 'boolean' ||
           typeof site.selector.expression !== 'string' || site.selector.expression.length === 0 ||
           !isBoundedText(site.selector.expression, 160) ||
           !(site.selector.byte_offset === null || isSafeIntegerInRange(site.selector.byte_offset, 0, Number.MAX_SAFE_INTEGER))) return false;
@@ -1509,7 +1521,7 @@
           !Array.isArray(classification.omissions) || classification.omissions.length > 16 ||
           !classification.omissions.every(omission => isPlainObject(omission) &&
             hasOnlyKeys(omission, new Set(['reason', 'detail', 'omitted_records'])) &&
-            ['classification-work-limit', 'classification-region-limit', 'classification-unavailable'].includes(omission.reason) &&
+            ['classification-work-limit', 'classification-trace-limit', 'classification-region-limit', 'classification-unavailable'].includes(omission.reason) &&
             typeof omission.detail === 'string' && omission.detail.length > 0 && isBoundedText(omission.detail, 240) &&
             (omission.omitted_records === undefined || isSafeIntegerInRange(omission.omitted_records, 1, Number.MAX_SAFE_INTEGER))) ||
           classification.classification_version !== 1 ||

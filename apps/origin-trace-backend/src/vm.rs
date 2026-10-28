@@ -16,6 +16,9 @@ use wasmparser::{Operator, Parser, Payload, TypeRef};
 pub(crate) mod capture_mode;
 #[path = "vm_dispatch_shape.rs"]
 pub(crate) mod dispatch_shape;
+#[cfg(test)]
+#[path = "vm_review_inputs.rs"]
+pub(crate) mod review_inputs;
 #[path = "vm_wasm_dispatch.rs"]
 mod wasm_dispatch;
 #[path = "vm_wasm_tables.rs"]
@@ -268,6 +271,7 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
     let mut sites = Vec::new();
     let mut budget = dispatch_shape::Budget::new(dispatch_shape::MAX_ARTIFACT_STEPS);
     let mut classification_omissions = Vec::new();
+    let mut scored = Vec::new();
     for (start, end) in order {
         if work + end - start > 64 * 1024 * 1024 {
             omissions.push(json!({"reason":"javascript-region-work-limit","observed_bytes":work,"total_bytes":work+end-start}));
@@ -282,15 +286,6 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
             bytes[a - start..b - start].fill(b' ');
         }
         let region = String::from_utf8(bytes).expect("masked nested source");
-        dispatch_shape::javascript::classify_region(
-            source,
-            &lines,
-            &region,
-            start,
-            parameters.get(&start).map_or(&[], Vec::as_slice),
-            &mut sites,
-            &mut budget,
-        );
         let mut observations = Vec::new();
         if let (Some(a), Some(b)) = (LOOP.find(&region), DISPATCH.find(&region)) {
             observations.push(observation(
@@ -332,6 +327,7 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
             o["function_region"] = json!({"byte_offset":start,"byte_size":end-start});
         }
         let (score, families) = rank(&observations);
+        scored.push((start, end, score, families));
         if score > best_rank.0
             || score == best_rank.0
                 && (families > best_rank.1 || families == best_rank.1 && start < best_rank.2)
@@ -339,6 +335,32 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
             best = observations;
             best_rank = (score, families, start);
         }
+    }
+    // Classification is a separate pass in pattern-rank order: regions with
+    // the strongest dispatch evidence are classified first, so large noise
+    // regions can never starve a real interpreter of the shared budget.
+    scored.sort_by_key(|(start, _, score, families)| {
+        (
+            std::cmp::Reverse(*score),
+            std::cmp::Reverse(*families),
+            *start,
+        )
+    });
+    for (start, end, _, _) in scored {
+        let mut bytes = masked.as_bytes()[start..end].to_vec();
+        for (a, b) in children.get(&(start, end)).into_iter().flatten() {
+            bytes[a - start..b - start].fill(b' ');
+        }
+        let region = String::from_utf8(bytes).expect("masked nested source");
+        dispatch_shape::javascript::classify_region(
+            source,
+            &lines,
+            &region,
+            start,
+            parameters.get(&start).map_or(&[], Vec::as_slice),
+            &mut sites,
+            &mut budget,
+        );
     }
     classification_omissions.extend(budget.omissions("artifact or function region"));
     #[cfg(test)]
@@ -363,6 +385,18 @@ thread_local! {
 pub(crate) fn javascript_classification_work(source: &str) -> (Value, u64) {
     let document = javascript_classification(source);
     (document, CLASSIFICATION_STEPS.with(std::cell::Cell::get))
+}
+
+/// Roles of every classified dispatch site of an artifact, recomputed in
+/// full from its bytes for the opcode-claim gate. The listed document is
+/// bounded; these roles are not.
+pub(crate) fn dispatch_roles(runtime: &str, bytes: &[u8]) -> Option<dispatch_shape::Roles> {
+    let classified = match runtime {
+        "javascript" => js(std::str::from_utf8(bytes).ok()?).ok()?.2,
+        "webassembly" => dispatch_shape::wasm(bytes, wasm_tables::Tables::parse(bytes).as_ref())?,
+        _ => return None,
+    };
+    Some(dispatch_shape::Roles::new(&classified))
 }
 
 /// The structural dispatch classification of one JavaScript source, as
@@ -1674,6 +1708,121 @@ mod dispatch_shape_tests {
         for kind in &kinds {
             assert_eq!(document["kind_counts"][kind.as_str().unwrap()], 0);
         }
+    }
+
+    fn classify_module(bytes: &[u8]) -> Value {
+        let classified =
+            dispatch_shape::wasm(bytes, wasm_tables::Tables::parse(bytes).as_ref()).unwrap();
+        dispatch_shape::document(&json!("9"), classified.sites, classified.omissions)
+    }
+
+    /// Review regression: a trace cap never yields a confident different
+    /// source. Constant writes before the loop must not crowd out the loop's
+    /// fetch, and a large function must not run out of symbolic nodes.
+    #[test]
+    fn trace_caps_never_yield_a_confident_wrong_source() {
+        for (name, bytes) in review_inputs::wasm() {
+            let document = classify_module(&bytes);
+            let site = &document["sites"][0];
+            assert_eq!(
+                (
+                    site["selector_source"].as_str().unwrap(),
+                    site["repeats"].as_str().unwrap(),
+                    site["role"].as_str().unwrap()
+                ),
+                ("cursor_index", "loop", "interpreter-candidate"),
+                "{name}: {site}"
+            );
+        }
+    }
+
+    /// Review regression: a selector with more reaching writes than one
+    /// query may trace is an honest unknown with a counted omission.
+    #[test]
+    fn exhausted_trace_budget_is_an_honest_counted_unknown() {
+        let writes = (0..5000)
+            .map(|i| {
+                format!("(local.set $op (i32.load8_u (i32.add (local.get $code) (i32.const {i}))))")
+            })
+            .collect::<String>();
+        let bytes = wat::parse_str(format!(
+            r#"(module (memory 1)
+              (func (param $code i32) (local $op i32)
+                {writes}
+                (block $b (block $a (br_table $a $b (local.get $op))))))"#
+        ))
+        .unwrap();
+        let document = classify_module(&bytes);
+        assert_eq!(document["sites"][0]["selector_source"], "unknown");
+        assert!(
+            document["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |omission| omission["reason"] == "classification-trace-limit"
+                        && omission["omitted_records"] == 1
+                ),
+            "{}",
+            document["omissions"]
+        );
+    }
+
+    /// Review regression: a memoized trace must cost the same depth and
+    /// steps as computing it, so a site's result does not depend on whether
+    /// another site traced part of its chain first.
+    #[test]
+    fn trace_results_do_not_depend_on_site_order() {
+        let chain = (1..=10)
+            .map(|i| format!("(local.set $a{i} (local.get $a{}))", i - 1))
+            .collect::<String>();
+        let locals = (0..=10)
+            .map(|i| format!("(local $a{i} i32)"))
+            .collect::<String>();
+        let function = |first: usize, second: usize| {
+            format!(
+                r#"(func (param $code i32) (param $len i32) (local $pc i32) {locals}
+                  (block $exit (loop $again
+                    (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+                    (local.set $a0 (i32.load8_u (i32.add (local.get $code) (local.get $pc))))
+                    (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                    {chain}
+                    (block $y (block $x (br_table $x $y (local.get $a{first}))))
+                    (block $w (block $v (br_table $v $w (local.get $a{second}))))
+                    (br $again))))"#
+            )
+        };
+        let bytes = wat::parse_str(format!(
+            "(module (memory 1) {} {})",
+            function(5, 10),
+            function(10, 5)
+        ))
+        .unwrap();
+        let document = classify_module(&bytes);
+        let result = |function: u64, local: &str| {
+            document["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|site| {
+                    site["location"]["function_index"] == function
+                        && site["selector"]["expression"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with(local)
+                })
+                .map(|site| {
+                    (
+                        site["selector_source"].clone(),
+                        site["repeats"].clone(),
+                        site["role"].clone(),
+                    )
+                })
+                .unwrap()
+        };
+        // local8 is $a5 and local13 is $a10, after code, len and pc.
+        assert_eq!(result(0, "local8"), result(1, "local8"));
+        assert_eq!(result(0, "local13"), result(1, "local13"));
     }
 
     #[test]

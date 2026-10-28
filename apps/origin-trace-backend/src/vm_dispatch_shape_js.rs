@@ -10,12 +10,14 @@
 use super::{Budget, Kind, MAX_QUERY_STEPS, MIN_COMPARE_ARMS, Repeats, Site, Source, priority};
 use regex::Regex;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::LazyLock,
 };
 
-const MAX_TRACE_DEPTH: u8 = 4;
+const MAX_TRACE_DEPTH: u8 = 8;
+/// Bindings of one buffer examined for `buffer_kind`; beyond, it is unknown.
+const MAX_BUFFER_DEFINITIONS: usize = 64;
 const MAX_VALUE_BYTES: usize = 200;
 const MAX_ALTERNATIVES: usize = 16;
 /// Classified sites per function region; further sites are counted as
@@ -273,6 +275,28 @@ struct Region<'a> {
     index: Index,
     steps: Cell<u64>,
     step_limit: Cell<u64>,
+    /// Work outside traced steps (bracket pairing, buffer scans), counted
+    /// into the artifact's total so cost tests see every operation.
+    overhead: Cell<u64>,
+    deepest: Cell<u8>,
+    /// A bound cut the current query short: its result is an honest unknown.
+    limited: Cell<bool>,
+    /// The depth bound cut the current computation; it is never memoized.
+    depth_cut: Cell<bool>,
+    identifier_memo: RefCell<HashMap<String, Memo>>,
+    buffer_memo: RefCell<HashMap<String, &'static str>>,
+}
+
+/// An identifier trace plus its fresh cost in steps and depth below itself.
+/// A hit replays both, so results never depend on query order. When the step
+/// budget cut the computation, `cost` is a lower bound: a hit that cannot
+/// afford it is limited, as recomputing would be, and any other recomputes.
+#[derive(Clone)]
+struct Memo {
+    traces: Vec<Trace>,
+    cost: u64,
+    height: u8,
+    exhausted: bool,
 }
 
 #[derive(Clone)]
@@ -284,6 +308,8 @@ struct Trace {
     anchor: Option<usize>,
     buffer: Option<String>,
     accessor: Option<String>,
+    /// The selector is a table read keyed by a cursor-loaded value.
+    through_lookup: bool,
 }
 
 impl Trace {
@@ -294,6 +320,7 @@ impl Trace {
             anchor: None,
             buffer: None,
             accessor: None,
+            through_lookup: false,
         }
     }
 }
@@ -305,40 +332,51 @@ impl<'a> Region<'a> {
             text,
             start,
             params,
-            pairs: Self::pairs(text),
+            pairs: HashMap::new(),
             loops: Intervals::default(),
             index: Index::default(),
             steps: Cell::new(0),
             step_limit: Cell::new(MAX_QUERY_STEPS),
+            overhead: Cell::new(0),
+            deepest: Cell::new(0),
+            limited: Cell::new(false),
+            depth_cut: Cell::new(false),
+            identifier_memo: RefCell::new(HashMap::new()),
+            buffer_memo: RefCell::new(HashMap::new()),
         };
+        let (pairs, work) = Self::pairs(text);
+        region.pairs = pairs;
+        region.overhead.set(work);
         region.loops = region.loop_intervals();
         region.index = region.build_index();
         region
     }
 
-    /// Every bracket pair in one pass. Unbalanced brackets have no pair.
-    fn pairs(text: &str) -> HashMap<usize, usize> {
+    /// Every bracket pair in one linear pass, one stack per bracket kind.
+    /// Unmatched brackets, such as ones inside regex literals the masker
+    /// keeps, pair with nothing and cost nothing extra.
+    fn pairs(text: &str) -> (HashMap<usize, usize>, u64) {
         let mut pairs = HashMap::new();
-        let mut stack: Vec<(u8, usize)> = Vec::new();
+        let mut stacks: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        let mut work = 0u64;
         for (index, byte) in text.bytes().enumerate() {
-            match byte {
-                b'(' | b'[' | b'{' => stack.push((byte, index)),
-                b')' | b']' | b'}' => {
-                    let open = match byte {
-                        b')' => b'(',
-                        b']' => b'[',
-                        _ => b'{',
-                    };
-                    if let Some(position) = stack.iter().rposition(|(kind, _)| *kind == open) {
-                        let (_, start) = stack[position];
-                        stack.truncate(position);
-                        pairs.insert(start, index);
-                    }
-                }
-                _ => (),
+            let (kind, opening) = match byte {
+                b'(' => (0, true),
+                b'[' => (1, true),
+                b'{' => (2, true),
+                b')' => (0, false),
+                b']' => (1, false),
+                b'}' => (2, false),
+                _ => continue,
+            };
+            work += 1;
+            if opening {
+                stacks[kind].push(index);
+            } else if let Some(start) = stacks[kind].pop() {
+                pairs.insert(start, index);
             }
         }
-        pairs
+        (pairs, work)
     }
 
     fn close(&self, open: usize) -> Option<usize> {
@@ -540,10 +578,17 @@ impl<'a> Region<'a> {
     fn step(&self) -> bool {
         let used = self.steps.get();
         if used >= self.step_limit.get() {
+            self.limited.set(true);
             return false;
         }
         self.steps.set(used + 1);
         true
+    }
+
+    fn reach(&self, depth: u8) {
+        if depth > self.deepest.get() {
+            self.deepest.set(depth);
+        }
     }
 
     fn strip<'b>(&self, mut expression: &'b str) -> &'b str {
@@ -566,7 +611,13 @@ impl<'a> Region<'a> {
 
     /// Every source that can reach an expression, one per producing binding.
     fn classify(&self, expression: &str, depth: u8) -> Vec<Trace> {
-        if depth > MAX_TRACE_DEPTH || !self.step() {
+        self.reach(depth);
+        if depth > MAX_TRACE_DEPTH {
+            self.limited.set(true);
+            self.depth_cut.set(true);
+            return vec![Trace::new(Source::Unknown)];
+        }
+        if !self.step() {
             return vec![Trace::new(Source::Unknown)];
         }
         let expression = self.strip(expression);
@@ -614,8 +665,13 @@ impl<'a> Region<'a> {
                 return vec![trace];
             }
             // An index nothing advances is a lookup by value, not a cursor:
-            // the selector comes from wherever the index comes from.
-            return self.identifier(&cursor, depth);
+            // the selector comes from wherever the index comes from. An index
+            // loaded at a cursor makes a second-level lookup.
+            let mut traces = self.identifier(&cursor, depth);
+            for trace in &mut traces {
+                trace.through_lookup |= trace.source.cursor_like();
+            }
+            return traces;
         }
         if MEMBER.is_match(expression) {
             let mut trace = Trace::new(Source::FrameSlot);
@@ -629,6 +685,53 @@ impl<'a> Region<'a> {
     }
 
     fn identifier(&self, name: &str, depth: u8) -> Vec<Trace> {
+        let memo = self.identifier_memo.borrow().get(name).cloned();
+        if let Some(memo) = memo {
+            // Replay what computing it fresh would cost here.
+            self.reach(depth.saturating_add(memo.height));
+            if depth.saturating_add(memo.height) > MAX_TRACE_DEPTH {
+                self.limited.set(true);
+                self.depth_cut.set(true);
+                return vec![Trace::new(Source::Unknown)];
+            }
+            let used = self.steps.get();
+            if used.saturating_add(memo.cost) >= self.step_limit.get()
+                && (memo.exhausted || used.saturating_add(memo.cost) > self.step_limit.get())
+            {
+                self.steps.set(self.step_limit.get());
+                self.limited.set(true);
+                return vec![Trace::new(Source::Unknown)];
+            }
+            if !memo.exhausted {
+                self.steps.set(used + memo.cost);
+                return memo.traces;
+            }
+        }
+        let outer_deepest = self.deepest.replace(depth);
+        let outer_limited = self.limited.replace(false);
+        let outer_depth_cut = self.depth_cut.replace(false);
+        let before = self.steps.get();
+        let traces = self.identifier_uncached(name, depth);
+        let limited = self.limited.get();
+        let depth_cut = self.depth_cut.get();
+        if !depth_cut {
+            self.identifier_memo.borrow_mut().insert(
+                name.to_owned(),
+                Memo {
+                    traces: traces.clone(),
+                    cost: self.steps.get() - before,
+                    height: self.deepest.get() - depth,
+                    exhausted: limited,
+                },
+            );
+        }
+        self.deepest.set(outer_deepest.max(self.deepest.get()));
+        self.limited.set(outer_limited || limited);
+        self.depth_cut.set(outer_depth_cut || depth_cut);
+        traces
+    }
+
+    fn identifier_uncached(&self, name: &str, depth: u8) -> Vec<Trace> {
         let parameter = self.params.iter().any(|param| param == name);
         let definitions = self.definitions(name);
         let mut traces = Vec::new();
@@ -661,13 +764,28 @@ impl<'a> Region<'a> {
                     trace.cursor = Some(name.to_owned());
                     trace.anchor = Some(*at);
                 }
-                if traces.len() < MAX_ALTERNATIVES
-                    && !traces.iter().any(|known: &Trace| {
-                        known.source == trace.source && known.anchor == trace.anchor
-                    })
-                {
-                    traces.push(trace);
+                // Constant writes differ only by where they land: one per
+                // enclosing loop explains every repeat decision.
+                let loop_of = |anchor: Option<usize>| {
+                    anchor.and_then(|at| self.loops.enclosing(at, true).first().copied())
+                };
+                let duplicate = traces.iter().any(|known: &Trace| {
+                    known.source == trace.source
+                        && known.through_lookup == trace.through_lookup
+                        && if trace.source == Source::Constant {
+                            loop_of(known.anchor) == loop_of(trace.anchor)
+                        } else {
+                            known.anchor == trace.anchor
+                        }
+                });
+                if duplicate {
+                    continue;
                 }
+                if traces.len() >= MAX_ALTERNATIVES {
+                    self.limited.set(true);
+                    break;
+                }
+                traces.push(trace);
             }
         }
         // Constant writes inside a loop make the argument only the seed of a
@@ -757,6 +875,9 @@ impl<'a> Region<'a> {
         if !trace.source.cursor_like() {
             return None;
         }
+        if trace.buffer.as_deref() == Some("arguments") {
+            return Some("arguments");
+        }
         if let Some(accessor) = &trace.accessor {
             return Some(match accessor.as_str() {
                 "charCodeAt" | "charAt" | "codePointAt" => "string",
@@ -770,12 +891,29 @@ impl<'a> Region<'a> {
         let Some(buffer) = &trace.buffer else {
             return Some("unknown");
         };
-        for (_, value_start, value) in self.definitions(buffer) {
+        // Once per buffer name, over a bounded prefix of its bindings.
+        if let Some(kind) = self.buffer_memo.borrow().get(buffer) {
+            self.overhead.set(self.overhead.get() + 1);
+            return Some(kind);
+        }
+        let kind = self.binding_kind(buffer);
+        self.buffer_memo.borrow_mut().insert(buffer.clone(), kind);
+        Some(kind)
+    }
+
+    fn binding_kind(&self, buffer: &str) -> &'static str {
+        let definitions = self.definitions(buffer);
+        if definitions.len() > MAX_BUFFER_DEFINITIONS {
+            self.overhead.set(self.overhead.get() + 1);
+            return "unknown";
+        }
+        for (_, value_start, value) in definitions {
+            self.overhead.set(self.overhead.get() + 1);
             if TYPED_ARRAY.is_match(value) {
-                return Some("typed-array");
+                return "typed-array";
             }
             if value.starts_with('[') {
-                return Some("array");
+                return "array";
             }
             // String literals are masked; the original byte shows the quote.
             if matches!(
@@ -783,16 +921,20 @@ impl<'a> Region<'a> {
                 Some(b'"' | b'\'' | b'`')
             ) || value.starts_with("String(")
             {
-                return Some("string");
+                return "string";
             }
         }
-        Some("unknown")
+        "unknown"
     }
 
-    /// Classify one site under a fresh per-query step budget.
-    fn site(&self, lines: &Lines, found: Found, budget: u64) -> (Site, u64) {
+    /// Classify one site under a fresh per-query step budget. A query a
+    /// bound cut short is an honest unknown, reported through the flag.
+    fn site(&self, lines: &Lines, found: Found, budget: u64) -> (Site, u64, bool) {
         self.steps.set(0);
         self.step_limit.set(budget.min(MAX_QUERY_STEPS));
+        self.deepest.set(0);
+        self.limited.set(false);
+        self.depth_cut.set(false);
         let traces = match found.kind {
             Kind::Threaded => {
                 let mut trace = Trace::new(Source::HandlerAddress);
@@ -802,7 +944,14 @@ impl<'a> Region<'a> {
             }
             _ => self.classify(&found.selector, 0),
         };
-        let (trace, repeats, loop_range) = self.choose(traces, found.at);
+        let limited = self.limited.get();
+        let (trace, repeats, loop_range) = if limited {
+            let trace = Trace::new(Source::Unknown);
+            let (repeats, range) = self.repeats(&trace, found.at);
+            (trace, repeats, range)
+        } else {
+            self.choose(traces, found.at)
+        };
         let absolute = self.start + found.at;
         let (line, column) = lines.locate(self.source, absolute);
         let buffer_kind = self.buffer_kind(&trace, found.string_cases);
@@ -819,12 +968,13 @@ impl<'a> Region<'a> {
             column: Some(column),
             selector_expression: found.expression,
             selector_offset: trace.anchor.map(|anchor| self.start + anchor),
+            through_lookup: trace.through_lookup,
             arm_count: found.arm_count,
             loop_range: loop_range.map(|(start, end)| (self.start + start, self.start + end)),
             buffer_kind,
             table: None,
         };
-        (site, self.steps.get())
+        (site, self.steps.get(), limited)
     }
 
     fn switches(&self) -> Vec<Found> {
@@ -1023,6 +1173,8 @@ pub(crate) fn classify_region(
     budget: &mut Budget,
 ) {
     let region = Region::new(source, text, start, params);
+    // Pairing work is charged before the region's sites draw on the budget.
+    budget.charge_overhead(region.overhead.replace(0));
     let mut candidates = region.switches();
     candidates.extend(region.indexed_calls());
     candidates.extend(region.ladders());
@@ -1037,9 +1189,11 @@ pub(crate) fn classify_region(
         if budget.refuse() {
             continue;
         }
-        let (site, used) = region.site(lines, candidate, budget.remaining());
+        let (site, used, limited) = region.site(lines, candidate, budget.remaining());
         budget.spend(used);
+        budget.count_limited(limited);
         classified += 1;
         sites.push(site);
     }
+    budget.charge_overhead(region.overhead.get());
 }

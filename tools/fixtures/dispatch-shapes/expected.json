@@ -161,7 +161,7 @@
           "dispatch_kind": "switch_on_value",
           "selector_source": "cursor_index",
           "repeats": "loop",
-          "role": "interpreter-candidate",
+          "role": "other",
           "buffer_kind": "string"
         }
       ]
@@ -349,6 +349,51 @@
           "repeats": "once",
           "role": "multiplexer",
           "buffer_kind": null
+        }
+      ]
+    },
+    {
+      "artifact": "text-walk.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 5,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "other",
+          "buffer_kind": "string"
+        }
+      ]
+    },
+    {
+      "artifact": "bfs-lookup.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 8,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "other",
+          "buffer_kind": "unknown"
+        }
+      ]
+    },
+    {
+      "artifact": "arguments-loop.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 5,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "other",
+          "buffer_kind": "arguments"
         }
       ]
     }

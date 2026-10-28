@@ -507,6 +507,11 @@ fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
         .filter_map(|(slot, entry)| entry.function().map(|function| (*slot, function)))
         .collect::<Vec<_>>();
     let (clusters, unique, omitted) = clusters_from_pairs(&pairs);
+    let table_segments = layout
+        .segments
+        .iter()
+        .filter(|segment| segment.table == Some(table_index))
+        .count();
     let segments = layout
         .segments
         .iter()
@@ -517,7 +522,9 @@ fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
                 "segment_index": segment.index,
                 "placement": segment.placement.label(),
                 "offset": match segment.placement {
-                    Placement::Placed(offset) | Placement::OutOfRange(offset) => Some(offset),
+                    Placement::Placed(offset)
+                    | Placement::OutOfRange(offset)
+                    | Placement::Unreached(offset) => Some(offset),
                     _ => None,
                 },
                 "global_index": match segment.placement {
@@ -542,6 +549,7 @@ fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
         "clusters": clusters,
         "omitted_cluster_count": omitted,
         "segments": segments,
+        "omitted_segment_count": table_segments.saturating_sub(MAX_LISTED_SEGMENTS),
     })
 }
 

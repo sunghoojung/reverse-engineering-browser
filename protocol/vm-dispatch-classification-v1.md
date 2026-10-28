@@ -9,6 +9,11 @@ it to every analyzed result as `frontend.dispatch_classification` in
 definition. A Rust test fails if a copy, including the OpenAPI components,
 drifts from the standalone schema.
 
+This contract lands as one unit with the commits that introduce and then
+correct it (526178a, 7258370 and their follow-up). No document was released
+against an earlier draft, so it keeps version 1; do not treat 526178a alone as
+a released contract.
+
 ## Why it exists
 
 Static VM analysis used to treat every dispatcher as a bytecode interpreter
@@ -23,12 +28,18 @@ opcode or decode logic runs.
 | `selector_source` | `cursor_index`, `cursor_pointer`, `frame_slot`, `call_argument`, `handler_address`, `constant`, `unknown` | Where is the selector value produced? |
 | `repeats` | `loop`, `once`, `unknown` | Is the selector re-derived each loop iteration from advanced state, or does the dispatch fire once per call? |
 
-`role` is derived from those three fields only. Consumers recompute it and
-reject a document whose role disagrees.
+`role` is derived from those three fields plus two recorded refinements,
+`buffer_kind` and `selector.through_lookup`. Consumers recompute it and reject
+a document whose role disagrees.
 
 - `interpreter-candidate`: `repeats=loop` with `cursor_index`,
   `cursor_pointer` or `frame_slot`, on `switch_on_value`, `handler_table` or
-  `compare_chain`.
+  `compare_chain`, except a cursor loop over text or call arguments
+  (`buffer_kind` `string` or `arguments`), whose cases are characters or
+  argument values, and a switch or ladder whose selector is a second-level
+  lookup (`through_lookup`, such as `types[q[head++]]`), which is a walk. A
+  handler table reads its handler through one lookup by design, so
+  `through_lookup` does not demote it.
 - `multiplexer`: `repeats=once` with `call_argument` on the same kinds. One call
   routes to one function. Its arms or constants are routing labels.
 - `other`: everything else, including threaded chains, flattened state
@@ -63,7 +74,8 @@ unknown; its operands never become the selector.
 - A table read at an index nothing advances is a lookup, not a cursor. It takes
   the source of its index: `call_argument` when every index is an unwritten
   argument, `unknown` when one comes from a call, as in a worklist drained by
-  `pop()`.
+  `pop()`. An index that was itself loaded at a cursor keeps the cursor source
+  and sets `through_lookup`.
 - A position reloaded from a fixed slot of a stable base (`pc = frame[k]`)
   before the fetch, or a selector read from such a slot, is `frame_slot`.
 - A scaled memory lookup (`table[op * 4]`) is traced to its index, so a
@@ -86,10 +98,19 @@ arithmetic over its own prior value (`pc + n`). A constant state write or a
 linked-list step does not count. A site outside every loop is `once`. A site in
 a loop whose selector the loop does not advance is `unknown`.
 
-Local traces are memoized only when complete. A trace cut short by a cycle
-through its own writes, the depth bound or the step budget is recomputed per
-site, so a site's classification never depends on the order sites are
-queried.
+Local traces are memoized with what computing them fresh costs: the steps
+they consume and how many levels below their own depth they reach. A memo hit
+charges both, so a site that reaches a memoized trace near the depth or step
+bound is limited exactly as if it had traced it itself, and a site's
+classification never depends on the order sites are queried. A trace the step
+budget cut short is kept with its consumed steps as a lower bound: a query that
+cannot afford them is limited at once, any other recomputes. A trace cut by a
+cycle through its own writes or by the depth bound is never kept.
+
+Constant and handler-address alternatives that differ only in where they were
+written merge per enclosing loop, so a run of constant writes before a loop
+cannot crowd out the loop's own fetch. Every write of a local is examined,
+charged as a trace step; there is no silent prefix.
 
 JavaScript, per comment- and literal-masked function region, with nested
 function bodies excluded:
@@ -112,9 +133,13 @@ function bodies excluded:
   every arithmetic advance by name. Loop bodies include braceless and
   statement-form bodies such as `do switch (...) {...} while (...)`.
 - `buffer_kind` flags a cursor buffer as `string` (string case labels, string
-  accessors or a string-literal binding), `typed-array`, `array` or `unknown`.
-  A tokenizer loop over a string stays `switch_on_value` / `cursor_index` /
-  `loop`; the flag adds no other claim.
+  accessors or a string-literal binding), `arguments` (the `arguments` object),
+  `typed-array`, `array` or `unknown`. It reads at most 64 bindings of the
+  buffer, once per buffer name. A tokenizer loop over a string keeps
+  `switch_on_value` / `cursor_index` / `loop` and is role `other`.
+- Bracket pairing is one linear pass with a stack per bracket kind, so
+  unmatched brackets inside regex literals, which the masker keeps, cost
+  nothing extra.
 
 These are syntactic matches inside one region, not data-flow proof. Anything
 outside the recognized forms stays `unknown`. `dispatch_kind: "unknown"` is
@@ -136,7 +161,10 @@ and type. Slots come from element segments placed at their evaluated offsets,
 evaluating defined globals through earlier globals. An offset that reads an
 imported global, directly or through a defined global, is relative and fills
 no slot. A segment ending past the table's declared minimum is out of range
-and fills no slot. A `ref.null` item empties its slot; any other non-`ref.func`
+and fills no slot. Instantiation applies active segments in order and traps at
+the first that does not fit, so every later active segment is `unreached` and
+fills no slot either; earlier placements only matter for an imported table,
+which keeps them. A `ref.null` item empties its slot; any other non-`ref.func`
 item stores a reference whose function is unknown, so it never matches a type
 and never erases knowledge silently.
 
@@ -148,32 +176,46 @@ site, and `omitted_site_count` names the classified sites that are not listed.
 ## Work bounds
 
 Classification work is bounded so a generated script or module cannot stall
-analysis. Each selector query has a step budget. Each artifact has a total step
-budget. Each JavaScript function region classifies at most 4096 sites. A site
-found past a bound is not classified and is counted in `omissions` as
-`classification-work-limit` with `omitted_records`. JavaScript regions beyond
-the detector's region work bound add `classification-region-limit`. A module
-whose sections do not decode for classification adds
-`classification-unavailable`. A bound is never silent.
+analysis, and every operation counts: traced steps, bracket pairing and buffer
+scans draw on one per-artifact budget. Each selector query also has its own
+step budget, and each JavaScript function region classifies at most 4096 sites.
+JavaScript regions are classified in pattern-rank order, strongest dispatch
+evidence first, so large noise regions cannot starve a real interpreter.
+
+- A site found after the artifact budget or the region site bound is spent is
+  not classified and is counted as `classification-work-limit` with
+  `omitted_records`. The opcode-claim gate reports such a site as not
+  classified because of the work limit, never as "not a cursor-advancing loop".
+- A site whose trace hit the depth, per-query step or alternatives bound, or
+  whose Wasm function ran out of symbolic nodes, is classified `unknown` and
+  counted as `classification-trace-limit`. A bound never yields a confident
+  different source.
+- JavaScript regions beyond the detector's region work bound add
+  `classification-region-limit`. A module whose sections do not decode for
+  classification adds `classification-unavailable`.
 
 ## Downstream use
 
-Only `interpreter-candidate` sites can carry guest-opcode claims. This is a
-requirement, not a blocklist:
+Only `interpreter-candidate` sites can carry guest-opcode claims. The
+classification is never an input to handler recovery, tier or score:
 
-- A JavaScript integer `switch` yields opcode handlers only when that switch
-  is an interpreter-candidate site. A numeric handler table (`t[3] = function`
-  or an object map) yields handlers only when the same region dispatches
-  through it, as `t[selector](...)` or `t[selector].call(...)`, at an
-  interpreter-candidate site. A table with no such dispatch, a dispatch through
-  a temporary (`h = t[op]; h()`), or a dispatch in another function yields
-  none. Operand-width guesses and owned-effect reachability walks therefore
-  never start from a router.
-- Classification never changes a tier or score. When recovery finds handlers
-  that no interpreter-candidate site supports, the workspace keeps the tier
-  and records `handler-withheld` instead of `handler-unavailable`. The
-  JavaScript `likely-vm` demotion still applies only when recovery itself finds
-  no handler.
+- JavaScript handler recovery is unchanged; it alone decides the tier and the
+  score. The opcode-claim gate is a pure post-filter on what recovery returns:
+  it removes claims and never adds one.
+- A recovered `switch` case survives only when that switch is an
+  interpreter-candidate site. A recovered table entry (`t[3] = function` or an
+  object map) survives only when the region dispatches through that table, as
+  `t[selector](...)` or `t[selector].call(...)`, including from a nested
+  function of the region, at an interpreter-candidate site. A dispatch through
+  a temporary (`h = t[op]; h()`) ties nothing. Operand-width guesses and
+  owned-effect reachability walks use only surviving handlers, so they never
+  start from a router.
+- The gate reads the roles of every classified site, recomputed in full from
+  the artifact bytes, never the bounded listed document.
+- When the gate removes handlers, the workspace records `handler-withheld`
+  with their count instead of `handler-unavailable`, and the tier stays what
+  recovery decided. A differential test runs every owned input with and
+  without the gate and requires equal tier and score.
 - A Wasm `br_table` arm keeps its physical selector, but a dispatch sample
   promotes it to `guest-opcode-isa` only at an interpreter candidate.
 - A multiplexer is shown as `router, no guest opcodes claimed`.
@@ -187,6 +229,14 @@ requirement, not a blocklist:
   The classifier does not follow calls.
 - Without flow order, an argument that is unconditionally overwritten before
   dispatch still counts as a reaching `call_argument` alternative.
+- A JavaScript rotated loop (`op = code[pc++]` before the loop and at its end)
+  classifies as an interpreter candidate, but handler recovery, which is
+  unchanged, yields no handlers for it, as it did before classification
+  existed. This is a known false negative of recovery, not of the
+  classification.
+- On the pinned public QuickJS debug build, 13 of 384 sites are interpreter
+  candidates, including the opcode dispatch at function 414; 7 sites are
+  trace-limited unknowns, among them byte-cursor format-string parsers.
 - JavaScript bindings are matched by name inside one region. Shadowed names,
   destructuring and cross-region aliases are not resolved. A handler table
   used through a temporary or from a nested function supplies no opcodes.

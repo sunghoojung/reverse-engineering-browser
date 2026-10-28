@@ -261,8 +261,10 @@ shifted every slot of an offset segment. `segments` lists each active segment
 with `placement` `placed`, `relative` (the offset reads an imported global,
 directly or through a defined global, so its slots are unknown and are not
 clustered), `out-of-range` (the segment ends past the table's declared
-minimum, so it is not placed) or `unresolved`. Passive and declared segments
-fill no table and are not listed. `entry_count` counts placed slots whose
+minimum, so it is not placed), `unreached` (an earlier segment is out of
+range, so instantiation traps before applying this one) or `unresolved`. At
+most 64 segments are listed; `omitted_segment_count` counts the rest. Passive
+and declared segments fill no table and are not listed. `entry_count` counts placed slots whose
 function is statically known; a `ref.null` item empties a slot and any other
 non-`ref.func` item leaves the slot's function unknown.
 
@@ -273,17 +275,18 @@ Producer 2.9.0 copies the analysis result's
 workspace. Only `interpreter-candidate` sites, a cursor-like selector re-derived
 in a loop, can carry guest-opcode claims:
 
-- JavaScript integer cases become `handlers` only at an interpreter-candidate
-  switch, and numeric handler tables only when the same region dispatches
-  through that table at an interpreter-candidate site. No such site means no
-  handlers. A router adds the residual unknown that its case values route one
-  call and are not guest opcodes. Other sites add that they are not a
-  cursor-advancing loop.
-- Classification never changes a tier. When recovery finds handlers that no
-  interpreter-candidate site supports, the workspace records the
-  `handler-withheld` omission with their count instead of
-  `handler-unavailable`, and the analysis keeps its tier. A JavaScript
-  `likely-vm` result is demoted only when recovery itself finds no handler.
+- JavaScript handler recovery is unchanged and alone decides tier and score.
+  The opcode-claim gate is a post-filter on its handlers: a switch case
+  survives only at an interpreter-candidate switch, a table entry only when the
+  region (nested functions included) dispatches through that table at an
+  interpreter-candidate site. Each removed claim adds why: a router, a site
+  that is not a cursor-advancing loop, or a site not classified because of the
+  work limit.
+- The gate reads the full classification recomputed from the artifact bytes,
+  not the 256 listed sites.
+- When the gate removes handlers, the workspace records the `handler-withheld`
+  omission with their count instead of `handler-unavailable`, and the analysis
+  keeps the tier recovery decided.
 - Wasm arms keep their physical selector indexes. A retained sample proves
   `guest-opcode-isa` through an arm only when the arm's site is an interpreter
   candidate. A residual unknown counts retained sites that are not.

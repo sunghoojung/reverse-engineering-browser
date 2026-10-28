@@ -142,6 +142,7 @@ final class Harness {
 
   // Native pointer input: AppKit routes the event through WKWebView hit testing.
   func click(_ selector: String, containing text: String? = nil) async throws {
+    try await activate()
     let textArgument = text.map { "'\($0.replacingOccurrences(of: "'", with: "\\'"))'" } ?? "null"
     let probe = "__rebUiProbe.center('\(selector.replacingOccurrences(of: "'", with: "\\'"))', \(textArgument)) || {}"
     // center() scrolls the target into view, which can still be moving when
@@ -335,6 +336,99 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  private func setVmAnalysisExpanded(_ ui: Harness, _ expanded: Bool) async throws {
+    let toggle = try await ui.json("""
+      ({...__rebUiProbe.box('#vm-analysis-toggle'),
+        expanded: document.querySelector('#vm-analysis-toggle')?.getAttribute('aria-expanded') === 'true'})
+      """)
+    if (toggle["visibleHeight"] as? Double ?? 0) > 0 && toggle["expanded"] as? Bool != expanded {
+      try await ui.click("#vm-analysis-toggle")
+    }
+  }
+
+  @MainActor
+  func test10VmAnalysisPaneAcrossDockTabs() async throws {
+    let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
+      ("normal", 1180, 790), ("narrow", 760, 560),
+      ("short", 1180, 560), ("narrow-tall", 760, 790),
+    ]
+    for size in sizes {
+      let ui = try await prepare(size)
+      try await show(ui, "vm")
+      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await setVmAnalysisExpanded(ui, true)
+      try await ui.click("#vm-list .vm-row", containing: "artifact 107")
+      try await setVmAnalysisExpanded(ui, false)
+      let tabs = try await ui.value("[...document.querySelectorAll('.vm-workbench-tabs [data-vm-panel]')].map(tab => tab.dataset.vmPanel)") as? [String] ?? []
+      XCTAssertGreaterThan(tabs.count, 1)
+      var initialHeight: Double?
+      for tab in tabs {
+        try await ui.click("[data-vm-panel='\(tab)']")
+        let pane = try await ui.json("""
+          (() => { const box = __rebUiProbe.box;
+            const toggle = document.querySelector('#vm-analysis-toggle');
+            const collapsed = box('#vm-analysis-toggle').visibleHeight > 0 && toggle?.getAttribute('aria-expanded') === 'false';
+            const top = collapsed ? box('#vm-analysis-toggle').top : box('#vm-findings-workspace > .vm-grid').top;
+            const bottom = box('.vm-workbench-inspector').top;
+            return {collapsed, top, bottom, height: bottom - top,
+              header: box('#vm-analysis-toggle'), tree: box('.vm-list-pane'), body: box('.vm-workbench-body')}; })()
+          """)
+        print("RENDERED_UI_ANALYSIS_PANE \(size.name) \(tab) \(pane)")
+        let height = pane["height"] as? Double ?? 0
+        if pane["collapsed"] as? Bool == true {
+          try await assertFullyVisible(ui, "#vm-analysis-toggle", "\(size.name) collapsed analysis header")
+          let header = pane["header"] as? [String: Double] ?? [:]
+          XCTAssertEqual(height, header["height"] ?? 0, accuracy: 1, "\(size.name): collapsed pane contains only its complete header")
+          for key in ["tree", "body"] {
+            let hidden = pane[key] as? [String: Double] ?? [:]
+            XCTAssertEqual(hidden["visibleHeight"] ?? -1, 0, "\(size.name): collapsed \(key) leaves no text fragments")
+          }
+        } else {
+          XCTAssertGreaterThanOrEqual(height, 120, "\(size.name): analysis needs space for its header and a complete row")
+          try await assertFullyVisible(ui, ".vm-workbench-listing .vm-workspace-heading", "\(size.name) analysis heading")
+          try await assertFullyVisible(ui, ".vm-workbench-listing .vm-handler-row", "\(size.name) analysis row")
+        }
+        if let initialHeight {
+          XCTAssertEqual(height, initialHeight, accuracy: 1, "\(size.name): changing dock tabs must not resize analysis")
+        } else { initialHeight = height }
+        if ["native-wasm", "host-links"].contains(tab) {
+          try await ui.screenshot("vm-analysis-\(tab)-\(size.name)")
+        }
+      }
+      if size.width <= 900 || size.height <= 650 {
+        let header = try await ui.json("__rebUiProbe.box('#vm-analysis-toggle')")
+        XCTAssertGreaterThan(header["visibleHeight"] as? Double ?? 0, 0, "\(size.name): compact analysis has an expandable header")
+        if (header["visibleHeight"] as? Double ?? 0) == 0 { continue }
+        try await setVmAnalysisExpanded(ui, true)
+        try await assertFullyVisible(ui, "#vm-analysis-toggle", "\(size.name) expanded analysis header")
+        try await assertFullyVisible(ui, ".vm-list-head", "\(size.name) Program Trees heading")
+        try await assertFullyVisible(ui, "#vm-list .vm-row", "\(size.name) first finding")
+        try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol")
+        let viewport = try await ui.json("__rebUiProbe.box('#vm-findings-workspace > .vm-grid')")
+        XCTAssertGreaterThanOrEqual(viewport["visibleHeight"] as? Double ?? 0, 120, "\(size.name): expanded analysis has a useful viewport")
+        try await ui.click("#vm-symbol-list .vm-symbol-row")
+        try await assertFullyVisible(ui, ".vm-workbench-listing .vm-handler-row", "\(size.name) reachable handler")
+        try await ui.screenshot("vm-analysis-expanded-\(size.name)")
+        try await ui.click("#vm-analysis-toggle")
+        // WebKit on macOS does not focus buttons on a pointer click. Reach
+        // the disclosure through native keyboard navigation before Space.
+        try await ui.tab(shift: true)
+        print("RENDERED_UI_ANALYSIS_FOCUS_BEFORE \(size.name) \(try await ui.json("__rebUiProbe.focusState()"))")
+        try await ui.tab()
+        let focus = try await ui.json("__rebUiProbe.focusState()")
+        print("RENDERED_UI_ANALYSIS_FOCUS \(size.name) \(focus)")
+        XCTAssertTrue((focus["element"] as? String ?? "").contains("#vm-analysis-toggle"), "\(size.name): keyboard reaches the analysis header")
+        XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): analysis header has visible keyboard focus")
+        try await ui.key(49, " ")
+        let expanded = try await ui.value("document.querySelector('#vm-analysis-toggle').getAttribute('aria-expanded')") as? String
+        XCTAssertEqual(expanded, "true", "\(size.name): Space expands the analysis header")
+        try await ui.key(49, " ")
+        try await assertFullyVisible(ui, "#vm-analysis-toggle", "\(size.name) keyboard collapse")
+      }
+    }
+  }
+
+  @MainActor
   func test11VmOpcodeHeaderSpacing() async throws {
     let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
       ("normal", 1180, 790), ("narrow", 760, 560),
@@ -344,6 +438,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await show(ui, "vm")
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
       _ = try await ui.json("__rebUiProbe.center('.vm-workspace-title') || {}")
       let spacing = try await ui.json("""
@@ -447,10 +542,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await show(ui, "vm")
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
       try await assertHandlerColumns(ui, size.name)
       try await ui.screenshot("vm-navigator-\(size.name)")
+      try await setVmAnalysisExpanded(ui, false)
       try await ui.click("[data-vm-panel='native-wasm']")
       let panel = "[data-vm-panel-content='native-wasm']"
       try await ui.waitUntil("!document.querySelector(\"\(panel)\")?.hidden", "native observations panel did not open")
@@ -475,7 +572,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertVmDock(ui, size)
       try await ui.screenshot("vm-native-guest-\(size.name)")
 
+      try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
+      try await setVmAnalysisExpanded(ui, false)
       try await ui.click("[data-vm-panel='native-wasm']")
       let physical = try await ui.value("document.querySelector(\"\(panel)\").innerText") as? String ?? ""
       XCTAssertTrue(physical.contains("guest PC unknown"), "\(size.name): physical rows never claim a guest PC: \(physical)")
@@ -497,7 +596,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await show(ui, "vm")
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
+      try await setVmAnalysisExpanded(ui, false)
       try await ui.click("[data-vm-panel='host-links']")
       let spacing = try await ui.json("""
         (() => { const panel = document.querySelector('[data-vm-panel-content="host-links"]');
@@ -531,6 +632,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await show(ui, "vm")
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
       let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
@@ -544,6 +646,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(focus["inViewport"] as? Bool, true, "\(size.name): keyboard navigation reveals the next control")
       XCTAssertNotEqual(focus["indicator"] as? String, "none", "\(size.name): navigation has visible focus")
 
+      try await setVmAnalysisExpanded(ui, false)
       try await ui.click("[data-vm-panel='host-links']")
       _ = try await ui.json("__rebUiProbe.center('.vm-workbench-tabs') || {}")
       try await ui.settle()

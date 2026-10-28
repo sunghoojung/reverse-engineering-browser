@@ -288,8 +288,9 @@
             <div id="vm-owned-controls" hidden></div>
             <div id="vm-findings-workspace" class="vm-findings-workspace">
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
+            <button id="vm-analysis-toggle" type="button" aria-expanded="true" aria-controls="vm-analysis-tree vm-analysis-handlers">Program Trees and handlers</button>
             <div class="vm-grid">
-              <aside class="vm-list-pane" aria-label="VM findings">
+              <aside id="vm-analysis-tree" class="vm-list-pane" aria-label="VM findings">
                 <div class="vm-list-head">Program Trees <span id="vm-count">0</span></div>
                 <div id="vm-list" class="vm-list" role="listbox" aria-label="Captured VM findings"></div>
                 <section id="vm-symbol-dock" class="vm-symbol-dock" aria-label="Handler symbols"><div class="vm-list-head">Symbol Tree <span>Handlers</span></div><div id="vm-symbol-list" class="vm-symbol-list"><p>Select a finding to browse its retained handlers.</p></div></section>

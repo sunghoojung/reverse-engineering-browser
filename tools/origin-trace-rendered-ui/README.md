@@ -48,6 +48,12 @@ and its section heading after exercising the disclosure. Separate 1180x560
 and 760x790 cases exercise the height and width breakpoints, compact trees,
 keyboard focus, and the example disclosure independently. Text bounds also
 verify that handler opcodes keep a readable gap before their operation labels.
+At all four window sizes, every dock tab must leave either a useful analysis
+pane with a complete heading and row or a complete collapsed analysis header,
+with no change in height between tabs. Compact cases also expand the header,
+navigate from the Symbol Tree to a complete handler row, and toggle it with
+Space. A separate geometry check rejects a blank band between the Opcode
+workspace header and its evidence notice.
 
 Environment passed to the hosted bundle through the `.xctestrun`:
 

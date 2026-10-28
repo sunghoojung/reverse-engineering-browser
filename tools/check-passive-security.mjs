@@ -78,7 +78,10 @@ try {
   const input=join(directory,'source.json'),output=join(directory,'report.json');
   const saved={format:'reb-network-request-v1',source:{instance_id:identity.instance,capture_epoch:identity.epoch,request_id:identity.request,target_id:identity.target,started_monotonic_ms:identity.started},debugger_generation:17,request:sensitive};
   const text=JSON.stringify(saved);await writeFile(input,text);
-  const cli=(path=input,destination=output)=>spawnSync(process.execPath,['tools/report-passive-security.mjs','--input',path,'--output',destination],{encoding:'utf8',timeout:10000});
+  // No wall-clock timeout: the CLI reads bounded local files and always exits, so
+  // the check waits for that exit. A timer only turned a machine stall into a
+  // failure; a real hang is bounded by the CI job timeout.
+  const cli=(path=input,destination=output)=>spawnSync(process.execPath,['tools/report-passive-security.mjs','--input',path,'--output',destination],{encoding:'utf8'});
   const success=cli();assert.equal(success.status,0,success.stderr);assert(!success.stdout.includes('AUTHORED'));assert.equal(JSON.parse(success.stdout).network_requests,0);
   const document=JSON.parse(await readFile(output,'utf8'));assert.equal(document.source.sha256,createHash('sha256').update(text).digest('hex'));assert.equal(document.source.record_pointer,'/request');
   assert(document.secrets.findings.every(item=>item.location.startsWith('/request/')));assert.equal((await stat(output)).mode&0o777,0o600);

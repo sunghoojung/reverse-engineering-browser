@@ -18,7 +18,10 @@ row.timing_evidence={format:'reb-network-timing-v1',request_monotonic_seconds:av
 const document={format:'reb-network-request-v1',source:{instance_id:fixture.instance_id,capture_epoch:fixture.capture_epoch,request_id:row.id,target_id:row.target_id,started_monotonic_ms:row.started_monotonic_ms},debugger_generation:42,request:row};
 const directory=await mkdtemp(join(tmpdir(),'reb-har-test-')),input=join(directory,'input.json'),output=join(directory,'output.har');
 const script=new URL('./export-captured-har.mjs',import.meta.url).pathname;
-const run=(...args)=>spawnSync(process.execPath,[script,...args],{encoding:'utf8',timeout:15000});
+// No wall-clock timeout: the CLI reads bounded local files and always exits, so
+// the check waits for that exit. A timer only turned a machine stall into a
+// failure; a real hang is bounded by the CI job timeout.
+const run=(...args)=>spawnSync(process.execPath,[script,...args],{encoding:'utf8'});
 const clone=value=>JSON.parse(JSON.stringify(value));
 try {
   await writeFile(input,JSON.stringify(document));

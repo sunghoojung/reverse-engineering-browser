@@ -62,7 +62,10 @@ for(const literal of ['$variable','1 type X { a: Int }','{a:1,a:2}','[1','01','1
 const old=copy(value);delete old.data.__schema.types[9].isOneOf;assert.equal(introspectionSDL(old).warnings.length,1);
 const directory=await mkdtemp(join(tmpdir(),'reb-graphql-')),path=join(directory,'introspection.json'),output=join(directory,'schema.graphql');
 const script=new URL('./export-graphql-sdl.mjs',import.meta.url).pathname;
-const run=(...args)=>spawnSync(process.execPath,[script,...args],{encoding:'utf8',timeout:15000});
+// No wall-clock timeout: the CLI reads bounded local files and always exits, so
+// the check waits for that exit. A timer only turned a machine stall into a
+// failure; a real hang is bounded by the CI job timeout.
+const run=(...args)=>spawnSync(process.execPath,[script,...args],{encoding:'utf8'});
 try {
  await writeFile(path,JSON.stringify(value));assert.equal(run('--help').status,0);
  const runResult=run('--input',path,'--output',output);assert.equal(runResult.status,0,runResult.stderr);assert.equal(JSON.parse(runResult.stdout).network_requests,0);

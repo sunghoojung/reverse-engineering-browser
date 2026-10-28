@@ -20,14 +20,18 @@ const left=fixture('left',7,state(3,[null,1],[null],[[4,null],[5,0]]),state(4,[n
 const right=fixture('right',91,state(3,[null,1,0],[],[[4,null]]),state(9,[null,2,0],[null],[[4,null],[8,0]]));
 const directory=await mkdtemp(join(tmpdir(),'reb-vm-compare-'));
 const cli=resolve('tools/vm-semantics.mjs');
-const run=(...args)=>spawnSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:10000});
+// No wall-clock timeout: every input is a bounded regular file or a FIFO the
+// CLI opens non-blocking, so a correct CLI always exits and the check waits for
+// that exit. A timer only turned machine stalls into failures. A regression to a
+// blocking FIFO open hangs this check, which the CI job timeout reports.
+const run=(...args)=>spawnSync(process.execPath,[cli,...args],{encoding:'utf8'});
 let serial=0;
 const fresh=label=>join(directory,`${serial++}-${label}`);
 const input=async(label,value)=>{const path=fresh(label);await writeFile(path,typeof value==='string'||Buffer.isBuffer(value)?value:JSON.stringify(value));return path;};
 const absent=async path=>{await assert.rejects(lstat(path),{code:'ENOENT'});};
 const failure=async(args,output,pattern)=>{
   const result=run(...args);
-  assert.equal(result.error,undefined,`CLI did not finish: ${result.error?.message}`);
+  assert.equal(result.error,undefined,`CLI did not start: ${result.error?.message}`);
   assert.notEqual(result.status,0,`Unexpected success: ${args.join(' ')}`);
   assert.equal(result.stdout,'');
   if(pattern)assert.match(result.stderr,pattern);

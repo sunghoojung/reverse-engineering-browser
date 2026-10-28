@@ -348,9 +348,9 @@ const shape = (offset, kind, source, repeats, role, extra = {}) => ({artifact_id
   location: {function_index: 0, function_body_offset: 40, byte_offset: offset, byte_size: 5, line: null, column: null},
   selector: {expression: 'local4 = i32.load8_u[(param0 + local2)]', byte_offset: offset - 4}, arm_count: 200,
   loop: repeats === 'once' ? null : {byte_offset: 41, byte_size: 300}, buffer_kind: null, table: null, ...extra});
-const classification = {classification_version: 1, site_count: 4, omitted_site_count: 0,
+const classification = {classification_version: 1, site_count: 4, omitted_site_count: 0, omissions: [],
   role_counts: {'interpreter-candidate': 2, multiplexer: 1, other: 1},
-  kind_counts: {switch_on_value: 2, handler_table: 1, compare_chain: 1, export_per_role: 0, threaded: 0},
+  kind_counts: {switch_on_value: 2, handler_table: 1, compare_chain: 1, export_per_role: 0, threaded: 0, unknown: 0},
   sites: [
     shape(45, 'switch_on_value', 'cursor_index', 'loop', 'interpreter-candidate'),
     shape(50, 'handler_table', 'cursor_index', 'loop', 'interpreter-candidate',
@@ -386,6 +386,33 @@ for (const mutate of [
   const malformed = structuredClone(shapedDocument); mutate(malformed.workspaces[0]);
   assert(!validateModule(malformed), String(mutate));
 }
+// Every schema dispatch_kind, including unknown, is accepted and counted.
+const unknownKind = structuredClone(shapedDocument);
+const unknownSite = unknownKind.workspaces[0].dispatch_classification;
+unknownSite.sites[2] = {...unknownSite.sites[2], dispatch_kind: 'unknown', selector_source: 'unknown'};
+unknownSite.kind_counts.switch_on_value = 1; unknownSite.kind_counts.unknown = 1;
+assert(validateModule(unknownKind), 'an unknown dispatch kind is a valid counted kind');
+const unknownMissing = structuredClone(unknownKind);
+delete unknownMissing.workspaces[0].dispatch_classification.kind_counts.unknown;
+assert(!validateModule(unknownMissing), 'kind_counts must name unknown');
+// Work the classifier refused is a visible, counted omission.
+const bounded = structuredClone(shapedDocument);
+bounded.workspaces[0].dispatch_classification.omissions = [{reason: 'classification-work-limit',
+  detail: 'The artifact classification work bound was reached.', omitted_records: 5}];
+bounded.workspaces[0].handler_tables[2].segments.push({segment_index: 2, placement: 'out-of-range', offset: 7, global_index: null, entry_count: 3});
+assert(validateModule(bounded), 'counted classification omissions and out-of-range segments are valid');
+const boundedText = renderApi.renderVmDispatchSites(bounded.workspaces[0]).textContent;
+assert(boundedText.includes('classification-work-limit: The artifact classification work bound was reached. 5 sites not classified.'), boundedText);
+assert(renderApi.renderVmHandlerTables(bounded.workspaces[0]).textContent.includes('segment 2 at slot 7 ends past the declared table size · 3 entries, not placed'));
+for (const mutate of [
+  value => { value.dispatch_classification.omissions[0].reason = 'silently-dropped'; },
+  value => { value.dispatch_classification.omissions[0].omitted_records = 0; },
+  value => { delete value.dispatch_classification.omissions; },
+  value => { value.handler_tables[2].segments[2].offset = null; },
+]) {
+  const malformed = structuredClone(bounded); mutate(malformed.workspaces[0]);
+  assert(!validateModule(malformed), String(mutate));
+}
 const shapedInventory = renderApi.renderVmDispatchSites(shapedWorkspace);
 const shapedSummaries = descendants(shapedInventory).filter(node => node.tagName === 'summary').map(node => node.textContent);
 assert.equal(shapedSummaries[0], '#1 · Default · f0 · br_table · 200 arms + default · 200 unique branch targets · byte 45 · handler-table candidate · switch_on_value / cursor_index / loop · cursor-loop interpreter candidate');
@@ -401,7 +428,7 @@ assert(shapedTables.textContent.includes('segment 0 at slot 1 · 3 entries'));
 assert(shapedTables.textContent.includes('segment 1 relative to imported global 0 · 2 entries, slots unknown'));
 const javascriptShape = {...javascript, dispatch_classification: {...classification, site_count: 1,
   role_counts: {'interpreter-candidate': 0, multiplexer: 1, other: 0},
-  kind_counts: {switch_on_value: 0, handler_table: 0, compare_chain: 1, export_per_role: 0, threaded: 0},
+  kind_counts: {switch_on_value: 0, handler_table: 0, compare_chain: 1, export_per_role: 0, threaded: 0, unknown: 0},
   sites: [{...shape(12, 'compare_chain', 'call_argument', 'once', 'multiplexer'), artifact_id: javascript.interpreter_artifact_id,
     instruction: 'if ladder', location: {function_index: null, function_body_offset: 3, byte_offset: 12, byte_size: 12, line: 7, column: 7}}]}};
 const javascriptStructure = renderApi.renderVmDispatchStructure(javascriptShape);

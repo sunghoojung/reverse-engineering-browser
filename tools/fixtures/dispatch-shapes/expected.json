@@ -5,66 +5,351 @@
       "artifact": "cursor-interpreter.wasm",
       "kind": "wasm",
       "sites": [
-        {"function_index": 0, "instruction": "br_table", "dispatch_kind": "switch_on_value", "selector_source": "cursor_index", "repeats": "loop", "role": "interpreter-candidate", "buffer_kind": null}
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": null
+        }
       ]
     },
     {
       "artifact": "frame-slot-interpreter.wasm",
       "kind": "wasm",
       "sites": [
-        {"function_index": 0, "instruction": "br_table", "dispatch_kind": "switch_on_value", "selector_source": "frame_slot", "repeats": "loop", "role": "interpreter-candidate", "buffer_kind": null}
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "frame_slot",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": null
+        }
       ]
     },
     {
       "artifact": "handler-table-interpreter.wasm",
       "kind": "wasm",
       "sites": [
-        {"function_index": 5, "instruction": "call_indirect", "dispatch_kind": "handler_table", "selector_source": "cursor_index", "repeats": "loop", "role": "interpreter-candidate", "buffer_kind": null,
-         "table": {"table_index": 0, "type_index": 0, "populated_slot_count": 5, "matching_slot_count": 4, "matching_slots": [1, 2, 3, 5]}}
+        {
+          "function_index": 5,
+          "instruction": "call_indirect",
+          "dispatch_kind": "handler_table",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": null,
+          "table": {
+            "table_index": 0,
+            "type_index": 0,
+            "populated_slot_count": 5,
+            "matching_slot_count": 4,
+            "matching_slots": [
+              1,
+              2,
+              3,
+              5
+            ]
+          }
+        }
       ]
     },
     {
       "artifact": "multiplexer.wasm",
       "kind": "wasm",
       "sites": [
-        {"function_index": 4, "instruction": "i32.eq ladder", "dispatch_kind": "compare_chain", "selector_source": "call_argument", "repeats": "once", "role": "multiplexer", "buffer_kind": null},
-        {"function_index": 5, "instruction": "br_table", "dispatch_kind": "switch_on_value", "selector_source": "call_argument", "repeats": "once", "role": "multiplexer", "buffer_kind": null}
+        {
+          "function_index": 4,
+          "instruction": "i32.eq ladder",
+          "dispatch_kind": "compare_chain",
+          "selector_source": "call_argument",
+          "repeats": "once",
+          "role": "multiplexer",
+          "buffer_kind": null
+        },
+        {
+          "function_index": 5,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "call_argument",
+          "repeats": "once",
+          "role": "multiplexer",
+          "buffer_kind": null
+        }
       ]
     },
     {
       "artifact": "ordinary-match.wasm",
       "kind": "wasm",
       "sites": [
-        {"function_index": 0, "instruction": "br_table", "dispatch_kind": "switch_on_value", "selector_source": "frame_slot", "repeats": "once", "role": "other", "buffer_kind": null},
-        {"function_index": 1, "instruction": "br_table", "dispatch_kind": "switch_on_value", "selector_source": "call_argument", "repeats": "unknown", "role": "other", "buffer_kind": null}
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "frame_slot",
+          "repeats": "once",
+          "role": "other",
+          "buffer_kind": null
+        },
+        {
+          "function_index": 1,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "call_argument",
+          "repeats": "unknown",
+          "role": "other",
+          "buffer_kind": null
+        }
       ]
     },
     {
       "artifact": "switch-interpreter.js",
       "kind": "javascript",
       "sites": [
-        {"line": 6, "instruction": "switch", "dispatch_kind": "switch_on_value", "selector_source": "cursor_index", "repeats": "loop", "role": "interpreter-candidate", "buffer_kind": "unknown"}
+        {
+          "line": 6,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown"
+        }
       ]
     },
     {
       "artifact": "handler-array-interpreter.js",
       "kind": "javascript",
       "sites": [
-        {"line": 12, "instruction": "indexed call", "dispatch_kind": "handler_table", "selector_source": "cursor_index", "repeats": "loop", "role": "interpreter-candidate", "buffer_kind": "unknown"}
+        {
+          "line": 12,
+          "instruction": "indexed call",
+          "dispatch_kind": "handler_table",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown"
+        }
       ]
     },
     {
       "artifact": "router.js",
       "kind": "javascript",
       "sites": [
-        {"line": 7, "instruction": "if ladder", "dispatch_kind": "compare_chain", "selector_source": "call_argument", "repeats": "once", "role": "multiplexer", "buffer_kind": null}
+        {
+          "line": 7,
+          "instruction": "if ladder",
+          "dispatch_kind": "compare_chain",
+          "selector_source": "call_argument",
+          "repeats": "once",
+          "role": "multiplexer",
+          "buffer_kind": null
+        }
       ]
     },
     {
       "artifact": "tokenizer.js",
       "kind": "javascript",
       "sites": [
-        {"line": 6, "instruction": "switch", "dispatch_kind": "switch_on_value", "selector_source": "cursor_index", "repeats": "loop", "role": "interpreter-candidate", "buffer_kind": "string"}
+        {
+          "line": 6,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "string"
+        }
+      ]
+    },
+    {
+      "artifact": "rotated-interpreter.wasm",
+      "kind": "wasm",
+      "sites": [
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": null
+        }
+      ]
+    },
+    {
+      "artifact": "worklist-dispatch.wasm",
+      "kind": "wasm",
+      "sites": [
+        {
+          "function_index": 1,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "unknown",
+          "repeats": "unknown",
+          "role": "other",
+          "buffer_kind": null
+        }
+      ]
+    },
+    {
+      "artifact": "normalized-multiplexer.wasm",
+      "kind": "wasm",
+      "sites": [
+        {
+          "function_index": 3,
+          "instruction": "i32.eq ladder",
+          "dispatch_kind": "compare_chain",
+          "selector_source": "call_argument",
+          "repeats": "once",
+          "role": "multiplexer",
+          "buffer_kind": null
+        },
+        {
+          "function_index": 4,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "call_argument",
+          "repeats": "once",
+          "role": "multiplexer",
+          "buffer_kind": null
+        }
+      ]
+    },
+    {
+      "artifact": "match-in-loop.wasm",
+      "kind": "wasm",
+      "sites": [
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "frame_slot",
+          "repeats": "unknown",
+          "role": "other",
+          "buffer_kind": null
+        }
+      ]
+    },
+    {
+      "artifact": "multi-site-interpreter.wasm",
+      "kind": "wasm",
+      "sites": [
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "call_argument",
+          "repeats": "once",
+          "role": "multiplexer",
+          "buffer_kind": null
+        },
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": null
+        },
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": null
+        }
+      ]
+    },
+    {
+      "artifact": "host-step.wasm",
+      "kind": "wasm",
+      "sites": [
+        {
+          "function_index": 0,
+          "instruction": "br_table",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "frame_slot",
+          "repeats": "once",
+          "role": "other",
+          "buffer_kind": null
+        }
+      ]
+    },
+    {
+      "artifact": "rotated-loop.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 8,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown"
+        }
+      ]
+    },
+    {
+      "artifact": "worklist.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 8,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "unknown",
+          "repeats": "unknown",
+          "role": "other",
+          "buffer_kind": null
+        }
+      ]
+    },
+    {
+      "artifact": "minified.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 3,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown"
+        },
+        {
+          "line": 4,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown"
+        }
+      ]
+    },
+    {
+      "artifact": "normalized-router.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 8,
+          "instruction": "if ladder",
+          "dispatch_kind": "compare_chain",
+          "selector_source": "call_argument",
+          "repeats": "once",
+          "role": "multiplexer",
+          "buffer_kind": null
+        }
       ]
     }
   ]

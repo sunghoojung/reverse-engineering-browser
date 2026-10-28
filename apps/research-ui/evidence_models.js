@@ -1402,8 +1402,8 @@
         return Array.isArray(segments) && segments.length <= 64 && segments.every(segment =>
           vmWorkspaceExact(segment, ['segment_index', 'placement', 'offset', 'global_index', 'entry_count']) &&
           isSafeIntegerInRange(segment.segment_index, 0, 4294967295) &&
-          ['placed', 'relative', 'unresolved'].includes(segment.placement) &&
-          (segment.placement === 'placed' ? isSafeIntegerInRange(segment.offset, 0, 4294967295) : segment.offset === null) &&
+          ['placed', 'relative', 'out-of-range', 'unresolved'].includes(segment.placement) &&
+          (['placed', 'out-of-range'].includes(segment.placement) ? isSafeIntegerInRange(segment.offset, 0, 4294967295) : segment.offset === null) &&
           (segment.placement === 'relative' ? isSafeIntegerInRange(segment.global_index, 0, 4294967295) : segment.global_index === null) &&
           isSafeIntegerInRange(segment.entry_count, 0, 4294967295));
       }
@@ -1455,7 +1455,7 @@
           (table.omitted_cluster_count === 0 ? counted === table.entry_count : counted <= table.entry_count);
       }
 
-      const vmDispatchKinds = ['switch_on_value', 'handler_table', 'compare_chain', 'export_per_role', 'threaded'];
+      const vmDispatchKinds = ['switch_on_value', 'handler_table', 'compare_chain', 'export_per_role', 'threaded', 'unknown'];
       const vmSelectorSources = ['cursor_index', 'cursor_pointer', 'frame_slot', 'call_argument', 'handler_address', 'constant', 'unknown'];
       const vmDispatchInstructions = ['br_table', 'call_indirect', 'return_call_indirect', 'i32.eq ladder', 'export', 'switch', 'indexed call', 'if ladder', 'self call'];
 
@@ -1505,7 +1505,13 @@
       }
 
       function isVmDispatchClassification(classification, workspace) {
-        if (!vmWorkspaceExact(classification, ['classification_version', 'site_count', 'omitted_site_count', 'role_counts', 'kind_counts', 'sites']) ||
+        if (!vmWorkspaceExact(classification, ['classification_version', 'site_count', 'omitted_site_count', 'role_counts', 'kind_counts', 'sites', 'omissions']) ||
+          !Array.isArray(classification.omissions) || classification.omissions.length > 16 ||
+          !classification.omissions.every(omission => isPlainObject(omission) &&
+            hasOnlyKeys(omission, new Set(['reason', 'detail', 'omitted_records'])) &&
+            ['classification-work-limit', 'classification-region-limit', 'classification-unavailable'].includes(omission.reason) &&
+            typeof omission.detail === 'string' && omission.detail.length > 0 && isBoundedText(omission.detail, 240) &&
+            (omission.omitted_records === undefined || isSafeIntegerInRange(omission.omitted_records, 1, Number.MAX_SAFE_INTEGER))) ||
           classification.classification_version !== 1 ||
           !isSafeIntegerInRange(classification.site_count, 0, 4294967295) ||
           !Array.isArray(classification.sites) || classification.sites.length > 256 ||

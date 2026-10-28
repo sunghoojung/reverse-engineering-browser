@@ -52,45 +52,74 @@ WebAssembly, per function body:
   module-level `export_per_role` record.
 
 The selector is traced through a symbolic operand stack. Validator arity from
-`wasmparser` keeps unmodeled operators from wiping it. A module that does not
-validate is still classified with untyped tracing, which drops to unknown
-instead of guessing.
+`wasmparser` keeps unmodeled operators from wiping it. In a function that does
+not validate, an operator without arity, including a call, drops the stack to
+unknown; its operands never become the selector.
 
-- A load through `base + index` with an advanced index (`pc = pc + n`) is
-  `cursor_index`; through one advanced pointer it is `cursor_pointer`.
+- A load through `base + index` with an arithmetically advanced index
+  (`pc = pc ± n`, through masks or width casts) is `cursor_index`; through one
+  advanced pointer it is `cursor_pointer`. A linked-list step, a reload or a
+  call result is not an advance.
+- A table read at an index nothing advances is a lookup, not a cursor. It takes
+  the source of its index: `call_argument` when every index is an unwritten
+  argument, `unknown` when one comes from a call, as in a worklist drained by
+  `pop()`.
 - A position reloaded from a fixed slot of a stable base (`pc = frame[k]`)
   before the fetch, or a selector read from such a slot, is `frame_slot`.
 - A scaled memory lookup (`table[op * 4]`) is traced to its index, so a
   handler-pointer or remap table inherits the source of the opcode.
-- A parameter that the function never writes is `call_argument`. Locals written
-  only with constants are `constant`, the shape of control-flow flattening.
+- A parameter is `call_argument`. Normalizing it in place (`key = key & 255`)
+  keeps that source, and a constant default written outside any loop (a bounds
+  guard) does not replace it. Constant writes inside a loop make it the seed of
+  a flattened state machine instead, which is `constant`.
+
+Every write that can reach the selector is a separate alternative. A rotated
+loop, which fetches the first opcode before the loop and the next at its latch,
+is therefore an interpreter candidate through the latch fetch. The site takes
+the alternative that a loop re-derives with a cursor-like selector, then any
+loop-derived one, then the strongest source.
 
 `repeats=loop` needs the producing load or write inside the enclosing loop and
 the loop to advance the state the selector comes from. A cursor local must be
-written in the loop. A frame slot must be stored back in the loop as arithmetic
-over its own prior value (`pc + n`). A constant state write or a linked-list
-step does not count. A site outside every loop is `once`. A site in a loop
-whose selector the loop does not advance is `unknown`.
+advanced in the loop. A frame slot must be stored back in the loop as
+arithmetic over its own prior value (`pc + n`). A constant state write or a
+linked-list step does not count. A site outside every loop is `once`. A site in
+a loop whose selector the loop does not advance is `unknown`.
+
+Local traces are memoized only when complete. A trace cut short by a cycle
+through its own writes, the depth bound or the step budget is recomputed per
+site, so a site's classification never depends on the order sites are
+queried.
 
 JavaScript, per comment- and literal-masked function region, with nested
 function bodies excluded:
 
-- `switch (selector)` is `switch_on_value`; `name[selector](...)` is
-  `handler_table`.
+- `switch (selector)` is `switch_on_value`; `name[selector](...)`, also through
+  `.call(...)` or `.apply(...)`, is `handler_table`.
 - `if (k === C)` tests or `k === C ?` ternaries on one name with at least three
   distinct integer constants are `compare_chain`.
 - `h = h(...)` inside a loop is `threaded` with `handler_address`.
 - `buf[i]`, `buf[i++]`, and `charCodeAt`, `charAt`, `codePointAt`, `getUint8`
-  style accessors are cursor reads. A position on an object (`code[f.pc++]`) or
-  a local copy of one is `frame_slot`; it repeats only when the loop advances it
-  (`++`, `+=`, `f.pc = f.pc + n`), not when it is merely assigned.
+  style accessors are cursor reads when the region advances `i` arithmetically
+  (`i++`, `i += n`, `i = i + n`). An index that is only assigned, such as
+  `id = queue.pop()`, is a lookup and takes the index's own source.
+- A position on an object (`code[f.pc++]`) or a local copy of one is
+  `frame_slot`; it repeats only when the loop advances it, not when it is
+  merely assigned.
+- An argument coerced in place (`k = k | 0`) stays `call_argument`.
+- Each region is indexed once: every binding, including each binding of a
+  comma declaration (`var op = code[pc++], a = code[pc]`), every write and
+  every arithmetic advance by name. Loop bodies include braceless and
+  statement-form bodies such as `do switch (...) {...} while (...)`.
 - `buffer_kind` flags a cursor buffer as `string` (string case labels, string
   accessors or a string-literal binding), `typed-array`, `array` or `unknown`.
   A tokenizer loop over a string stays `switch_on_value` / `cursor_index` /
   `loop`; the flag adds no other claim.
 
 These are syntactic matches inside one region, not data-flow proof. Anything
-outside the recognized forms stays `unknown`.
+outside the recognized forms stays `unknown`. `dispatch_kind: "unknown"` is
+reserved for a selection mechanism the classifier cannot name; the current
+producer does not emit it, and `kind_counts` always counts it.
 
 ## Record evidence
 
@@ -102,22 +131,49 @@ selector, the offset of the closest producing write or load, the arm or
 comparison count, and the loop range.
 
 `call_indirect` sites keep `table`: table index, type index, and the real table
-slots whose function signature equals the call type. Slots come from element
-segments placed at their evaluated offsets. A segment offset that reads an
-imported global is relative and fills no slot.
+slots whose function signature equals the call type, scanned once per table
+and type. Slots come from element segments placed at their evaluated offsets,
+evaluating defined globals through earlier globals. An offset that reads an
+imported global, directly or through a defined global, is relative and fills
+no slot. A segment ending past the table's declared minimum is out of range
+and fills no slot. A `ref.null` item empties its slot; any other non-`ref.func`
+item stores a reference whose function is unknown, so it never matches a type
+and never erases knowledge silently.
 
 The object lists at most 256 sites. Interpreter candidates and multiplexers
 are listed before other sites, so the bound never hides them behind ordinary
 branching. `site_count`, `role_counts` and `kind_counts` cover every classified
-site, and `omitted_site_count` names the rest.
+site, and `omitted_site_count` names the classified sites that are not listed.
+
+## Work bounds
+
+Classification work is bounded so a generated script or module cannot stall
+analysis. Each selector query has a step budget. Each artifact has a total step
+budget. Each JavaScript function region classifies at most 4096 sites. A site
+found past a bound is not classified and is counted in `omissions` as
+`classification-work-limit` with `omitted_records`. JavaScript regions beyond
+the detector's region work bound add `classification-region-limit`. A module
+whose sections do not decode for classification adds
+`classification-unavailable`. A bound is never silent.
 
 ## Downstream use
 
-Only `interpreter-candidate` sites can carry guest-opcode claims:
+Only `interpreter-candidate` sites can carry guest-opcode claims. This is a
+requirement, not a blocklist:
 
-- JavaScript integer case values and numeric handler tables become workspace
-  opcode handlers only at an interpreter candidate. Operand-width guesses and
-  owned-effect reachability walks therefore never start from a router.
+- A JavaScript integer `switch` yields opcode handlers only when that switch
+  is an interpreter-candidate site. A numeric handler table (`t[3] = function`
+  or an object map) yields handlers only when the same region dispatches
+  through it, as `t[selector](...)` or `t[selector].call(...)`, at an
+  interpreter-candidate site. A table with no such dispatch, a dispatch through
+  a temporary (`h = t[op]; h()`), or a dispatch in another function yields
+  none. Operand-width guesses and owned-effect reachability walks therefore
+  never start from a router.
+- Classification never changes a tier or score. When recovery finds handlers
+  that no interpreter-candidate site supports, the workspace keeps the tier
+  and records `handler-withheld` instead of `handler-unavailable`. The
+  JavaScript `likely-vm` demotion still applies only when recovery itself finds
+  no handler.
 - A Wasm `br_table` arm keeps its physical selector, but a dispatch sample
   promotes it to `guest-opcode-isa` only at an interpreter candidate.
 - A multiplexer is shown as `router, no guest opcodes claimed`.
@@ -129,8 +185,14 @@ Only `interpreter-candidate` sites can carry guest-opcode claims:
   buffers; Wasm has no equivalent signal.
 - An opcode fetched through a helper call (`op = next(state)`) is `unknown`.
   The classifier does not follow calls.
+- Without flow order, an argument that is unconditionally overwritten before
+  dispatch still counts as a reaching `call_argument` alternative.
 - JavaScript bindings are matched by name inside one region. Shadowed names,
-  destructuring and cross-region aliases are not resolved.
+  destructuring and cross-region aliases are not resolved. A handler table
+  used through a temporary or from a nested function supplies no opcodes.
+- The declared minimum is a lower bound for an imported table, so an imported
+  table's out-of-range segment may still fit at instantiation. It is reported,
+  not placed.
 
 Fixtures and their expected classifications are in
 [`tools/fixtures/dispatch-shapes`](../tools/fixtures/dispatch-shapes/README.md).

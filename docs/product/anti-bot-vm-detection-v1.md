@@ -411,7 +411,9 @@ dispatch that fires once on a call argument is a multiplexer: its constants
 route one call and are not opcodes. A large `br_table` outside a
 selector-advancing loop, such as a compiled `match`, is not an interpreter.
 Scoring, tiers and the profile digest are unchanged; the record is
-interpretation and never raises a tier. Opcode workspace producer `2.9.0`
-claims guest opcodes only at interpreter-candidate sites. The same revision
+interpretation and never changes a tier. Opcode workspace producer `2.9.0`
+claims guest opcodes only from a switch or handler table tied to an
+interpreter-candidate site; handlers that recovery finds elsewhere are
+reported as `handler-withheld`, and the tier stays as recovery alone decides. The same revision
 places Wasm element segments at their evaluated offsets, so element-table
 slots and `call_indirect` fanout use real table indexes.

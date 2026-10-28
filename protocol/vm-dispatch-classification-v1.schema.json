@@ -5,106 +5,388 @@
   "description": "Analyzer interpretation of stored artifact bytes. Each site states how control picks the next handler, where the selector value comes from, and whether the dispatch repeats in a selector-advancing loop. confidence is always structural. It never rewrites captured evidence and never raises a VM tier.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["classification_version", "site_count", "omitted_site_count", "role_counts", "kind_counts", "sites"],
+  "required": [
+    "classification_version",
+    "site_count",
+    "omitted_site_count",
+    "role_counts",
+    "kind_counts",
+    "sites",
+    "omissions"
+  ],
   "properties": {
-    "classification_version": {"const": 1},
-    "site_count": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-    "omitted_site_count": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "classification_version": {
+      "const": 1
+    },
+    "site_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "Classified sites. Sites found but refused by a work bound are counted in omissions, not here."
+    },
+    "omitted_site_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "Classified sites not listed: site_count minus the listed sites."
+    },
     "role_counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["interpreter-candidate", "multiplexer", "other"],
+      "required": [
+        "interpreter-candidate",
+        "multiplexer",
+        "other"
+      ],
       "properties": {
-        "interpreter-candidate": {"type": "integer", "minimum": 0},
-        "multiplexer": {"type": "integer", "minimum": 0},
-        "other": {"type": "integer", "minimum": 0}
+        "interpreter-candidate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "multiplexer": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "other": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "kind_counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["switch_on_value", "handler_table", "compare_chain", "export_per_role", "threaded"],
+      "required": [
+        "switch_on_value",
+        "handler_table",
+        "compare_chain",
+        "export_per_role",
+        "threaded",
+        "unknown"
+      ],
       "properties": {
-        "switch_on_value": {"type": "integer", "minimum": 0},
-        "handler_table": {"type": "integer", "minimum": 0},
-        "compare_chain": {"type": "integer", "minimum": 0},
-        "export_per_role": {"type": "integer", "minimum": 0},
-        "threaded": {"type": "integer", "minimum": 0}
+        "switch_on_value": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "handler_table": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compare_chain": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "export_per_role": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "threaded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
-    "sites": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/site"}}
+    "sites": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/site"
+      }
+    },
+    "omissions": {
+      "type": "array",
+      "maxItems": 16,
+      "description": "Classification work that a bound refused. Never silent: omitted_records counts dispatch sites found but not classified.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "detail"
+        ],
+        "properties": {
+          "reason": {
+            "enum": [
+              "classification-work-limit",
+              "classification-region-limit",
+              "classification-unavailable"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "omitted_records": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
   },
   "$defs": {
     "site": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["artifact_id", "dispatch_kind", "selector_source", "repeats", "role", "confidence", "instruction", "location", "selector", "arm_count", "loop", "buffer_kind", "table"],
+      "required": [
+        "artifact_id",
+        "dispatch_kind",
+        "selector_source",
+        "repeats",
+        "role",
+        "confidence",
+        "instruction",
+        "location",
+        "selector",
+        "arm_count",
+        "loop",
+        "buffer_kind",
+        "table"
+      ],
       "properties": {
-        "artifact_id": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)$", "maxLength": 20},
-        "dispatch_kind": {"enum": ["switch_on_value", "handler_table", "compare_chain", "export_per_role", "threaded", "unknown"]},
-        "selector_source": {"enum": ["cursor_index", "cursor_pointer", "frame_slot", "call_argument", "handler_address", "constant", "unknown"]},
-        "repeats": {"enum": ["loop", "once", "unknown"]},
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "dispatch_kind": {
+          "enum": [
+            "switch_on_value",
+            "handler_table",
+            "compare_chain",
+            "export_per_role",
+            "threaded",
+            "unknown"
+          ]
+        },
+        "selector_source": {
+          "enum": [
+            "cursor_index",
+            "cursor_pointer",
+            "frame_slot",
+            "call_argument",
+            "handler_address",
+            "constant",
+            "unknown"
+          ]
+        },
+        "repeats": {
+          "enum": [
+            "loop",
+            "once",
+            "unknown"
+          ]
+        },
         "role": {
-          "enum": ["interpreter-candidate", "multiplexer", "other"],
+          "enum": [
+            "interpreter-candidate",
+            "multiplexer",
+            "other"
+          ],
           "description": "Derived from the three axes. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table or compare_chain. multiplexer: repeats=once with call_argument on the same kinds; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
         },
-        "confidence": {"const": "structural"},
-        "instruction": {"enum": ["br_table", "call_indirect", "return_call_indirect", "i32.eq ladder", "export", "switch", "indexed call", "if ladder", "self call"]},
+        "confidence": {
+          "const": "structural"
+        },
+        "instruction": {
+          "enum": [
+            "br_table",
+            "call_indirect",
+            "return_call_indirect",
+            "i32.eq ladder",
+            "export",
+            "switch",
+            "indexed call",
+            "if ladder",
+            "self call"
+          ]
+        },
         "location": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["function_index", "function_body_offset", "byte_offset", "byte_size", "line", "column"],
+          "required": [
+            "function_index",
+            "function_body_offset",
+            "byte_offset",
+            "byte_size",
+            "line",
+            "column"
+          ],
           "properties": {
-            "function_index": {"type": ["integer", "null"], "minimum": 0, "maximum": 4294967295, "description": "Wasm function index (imports first); null for JavaScript and module-level records."},
-            "function_body_offset": {"type": ["integer", "null"], "minimum": 0, "description": "Wasm code entry offset, or JavaScript function region start."},
-            "byte_offset": {"type": "integer", "minimum": 0, "description": "Artifact byte offset of the dispatch instruction or first comparison."},
-            "byte_size": {"type": "integer", "minimum": 1},
-            "line": {"type": ["integer", "null"], "minimum": 1, "description": "JavaScript one-based line; null for Wasm."},
-            "column": {"type": ["integer", "null"], "minimum": 1, "description": "JavaScript one-based character column; null for Wasm."}
+            "function_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 4294967295,
+              "description": "Wasm function index (imports first); null for JavaScript and module-level records."
+            },
+            "function_body_offset": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "Wasm code entry offset, or JavaScript function region start."
+            },
+            "byte_offset": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Artifact byte offset of the dispatch instruction or first comparison."
+            },
+            "byte_size": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "description": "JavaScript one-based line; null for Wasm."
+            },
+            "column": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "description": "JavaScript one-based character column; null for Wasm."
+            }
           }
         },
         "selector": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["expression", "byte_offset"],
+          "required": [
+            "expression",
+            "byte_offset"
+          ],
           "properties": {
-            "expression": {"type": "string", "minLength": 1, "maxLength": 160, "description": "Bounded rendering of the instructions or source expression that produced the selector. Inert text."},
-            "byte_offset": {"type": ["integer", "null"], "minimum": 0, "description": "Offset of the closest producing write or load, when it is not the dispatch itself."}
+            "expression": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "description": "Bounded rendering of the instructions or source expression that produced the selector. Inert text."
+            },
+            "byte_offset": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "Offset of the closest producing write or load, when it is not the dispatch itself."
+            }
           }
         },
-        "arm_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 4294967295, "description": "br_table explicit arms, JavaScript case labels, comparisons in a ladder, type-matching table slots, or exported functions."},
+        "arm_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "br_table explicit arms, JavaScript case labels, comparisons in a ladder, type-matching table slots, or exported functions."
+        },
         "loop": {
           "anyOf": [
-            {"type": "null"},
+            {
+              "type": "null"
+            },
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["byte_offset", "byte_size"],
+              "required": [
+                "byte_offset",
+                "byte_size"
+              ],
               "properties": {
-                "byte_offset": {"type": "integer", "minimum": 0},
-                "byte_size": {"type": "integer", "minimum": 1}
+                "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "byte_size": {
+                  "type": "integer",
+                  "minimum": 1
+                }
               }
             }
           ],
           "description": "The selector-advancing loop for repeats=loop, otherwise the innermost enclosing loop; null outside loops."
         },
-        "buffer_kind": {"enum": ["string", "typed-array", "array", "unknown", null], "description": "JavaScript cursor buffers only. string flags a tokenizer-shaped loop; it adds no other claim."},
+        "buffer_kind": {
+          "enum": [
+            "string",
+            "typed-array",
+            "array",
+            "unknown",
+            null
+          ],
+          "description": "JavaScript cursor buffers only. string flags a tokenizer-shaped loop; it adds no other claim."
+        },
         "table": {
           "anyOf": [
-            {"type": "null"},
+            {
+              "type": "null"
+            },
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["table_index", "type_index", "populated_slot_count", "matching_slot_count", "matching_slots"],
+              "required": [
+                "table_index",
+                "type_index",
+                "populated_slot_count",
+                "matching_slot_count",
+                "matching_slots"
+              ],
               "properties": {
-                "table_index": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "type_index": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "populated_slot_count": {"type": ["integer", "null"], "minimum": 0},
-                "matching_slot_count": {"type": ["integer", "null"], "minimum": 0},
+                "table_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "type_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "populated_slot_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "matching_slot_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
                 "matching_slots": {
                   "anyOf": [
-                    {"type": "null"},
-                    {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "integer", "minimum": 0, "maximum": 4294967295}}
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "array",
+                      "maxItems": 32,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967295
+                      }
+                    }
                   ],
                   "description": "Real table slot indexes, after evaluated element offsets, whose function signature equals the call's type. A prefix of at most 32. Null when the table layout is unknown."
                 }

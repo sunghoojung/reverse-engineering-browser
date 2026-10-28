@@ -5868,7 +5868,7 @@
               "segments": {
                 "type": "array",
                 "maxItems": 64,
-                "description": "Producer 2.9.0 and later, element rows only: each active segment for this table with its evaluated placement. placed segments fill real slots at offset; relative segments read an imported global and fill no listed slot; unresolved offsets are outside the evaluated constant subset.",
+                "description": "Producer 2.9.0 and later, element rows only: each active segment for this table with its evaluated placement. placed segments fill real slots at offset; relative segments read an imported global, directly or through a defined global, and fill no listed slot; out-of-range segments end past the table's declared minimum and are not placed; unresolved offsets are outside the evaluated constant subset.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -5889,6 +5889,7 @@
                       "enum": [
                         "placed",
                         "relative",
+                        "out-of-range",
                         "unresolved"
                       ]
                     },
@@ -7579,7 +7580,8 @@
               "omitted_site_count",
               "role_counts",
               "kind_counts",
-              "sites"
+              "sites",
+              "omissions"
             ],
             "properties": {
               "classification_version": {
@@ -7588,12 +7590,14 @@
               "site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 4294967295
+                "maximum": 4294967295,
+                "description": "Classified sites. Sites found but refused by a work bound are counted in omissions, not here."
               },
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 4294967295
+                "maximum": 4294967295,
+                "description": "Classified sites not listed: site_count minus the listed sites."
               },
               "role_counts": {
                 "type": "object",
@@ -7626,7 +7630,8 @@
                   "handler_table",
                   "compare_chain",
                   "export_per_role",
-                  "threaded"
+                  "threaded",
+                  "unknown"
                 ],
                 "properties": {
                   "switch_on_value": {
@@ -7648,6 +7653,10 @@
                   "threaded": {
                     "type": "integer",
                     "minimum": 0
+                  },
+                  "unknown": {
+                    "type": "integer",
+                    "minimum": 0
                   }
                 }
               },
@@ -7656,6 +7665,37 @@
                 "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/dispatchClassificationSite"
+                }
+              },
+              "omissions": {
+                "type": "array",
+                "maxItems": 16,
+                "description": "Classification work that a bound refused. Never silent: omitted_records counts dispatch sites found but not classified.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reason",
+                    "detail"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "enum": [
+                        "classification-work-limit",
+                        "classification-region-limit",
+                        "classification-unavailable"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 240
+                    },
+                    "omitted_records": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
                 }
               }
             }
@@ -9185,7 +9225,8 @@
               "omitted_site_count",
               "role_counts",
               "kind_counts",
-              "sites"
+              "sites",
+              "omissions"
             ],
             "properties": {
               "classification_version": {
@@ -9194,12 +9235,14 @@
               "site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 4294967295
+                "maximum": 4294967295,
+                "description": "Classified sites. Sites found but refused by a work bound are counted in omissions, not here."
               },
               "omitted_site_count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 4294967295
+                "maximum": 4294967295,
+                "description": "Classified sites not listed: site_count minus the listed sites."
               },
               "role_counts": {
                 "type": "object",
@@ -9232,7 +9275,8 @@
                   "handler_table",
                   "compare_chain",
                   "export_per_role",
-                  "threaded"
+                  "threaded",
+                  "unknown"
                 ],
                 "properties": {
                   "switch_on_value": {
@@ -9254,6 +9298,10 @@
                   "threaded": {
                     "type": "integer",
                     "minimum": 0
+                  },
+                  "unknown": {
+                    "type": "integer",
+                    "minimum": 0
                   }
                 }
               },
@@ -9262,6 +9310,37 @@
                 "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/dispatchClassificationSite"
+                }
+              },
+              "omissions": {
+                "type": "array",
+                "maxItems": 16,
+                "description": "Classification work that a bound refused. Never silent: omitted_records counts dispatch sites found but not classified.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reason",
+                    "detail"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "enum": [
+                        "classification-work-limit",
+                        "classification-region-limit",
+                        "classification-unavailable"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 240
+                    },
+                    "omitted_records": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
                 }
               }
             }

@@ -495,14 +495,16 @@ fn call_indirect_handler_table(site: &Value, bytes: &[u8]) -> Value {
 
 /// Clusters key on real table slots: each active segment is placed at its
 /// evaluated offset and later segments overwrite earlier slots. A segment
-/// whose offset reads an imported global stays `relative` with no slots.
+/// whose offset reads an imported global stays `relative` with no slots, and
+/// one that ends past the declared table minimum is `out-of-range`. Clusters
+/// list only slots whose function is statically known.
 fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
     let pairs = layout
         .slots
         .get(&table_index)
         .into_iter()
         .flatten()
-        .filter_map(|(slot, function)| function.map(|function| (*slot, function)))
+        .filter_map(|(slot, entry)| entry.function().map(|function| (*slot, function)))
         .collect::<Vec<_>>();
     let (clusters, unique, omitted) = clusters_from_pairs(&pairs);
     let segments = layout
@@ -515,7 +517,7 @@ fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
                 "segment_index": segment.index,
                 "placement": segment.placement.label(),
                 "offset": match segment.placement {
-                    Placement::Placed(offset) => Some(offset),
+                    Placement::Placed(offset) | Placement::OutOfRange(offset) => Some(offset),
                     _ => None,
                 },
                 "global_index": match segment.placement {

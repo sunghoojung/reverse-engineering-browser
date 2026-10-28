@@ -13,7 +13,7 @@
 //! arms or constants route one call to one function and are not opcodes.
 use serde_json::{Value, json};
 use std::{
-    cell::RefCell,
+    cell::{Cell, OnceCell, RefCell},
     collections::{BTreeMap, BTreeSet},
 };
 use wasmparser::{
@@ -34,6 +34,12 @@ const MAX_EXPRESSION_CHARS: usize = 160;
 pub(crate) const MIN_COMPARE_ARMS: usize = 3;
 const MAX_LISTED_SLOTS: usize = 32;
 const MAX_DEFS_PER_LOCAL: usize = 64;
+/// Alternative reaching sources kept per local.
+const MAX_ALTERNATIVES: usize = 16;
+/// Trace steps for one selector query, and for a whole artifact. Past the
+/// artifact budget, remaining sites are counted in a visible omission.
+const MAX_QUERY_STEPS: u64 = 4096;
+pub(crate) const MAX_ARTIFACT_STEPS: u64 = 20_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -42,15 +48,18 @@ pub(crate) enum Kind {
     CompareChain,
     ExportPerRole,
     Threaded,
+    /// Reserved: a dispatch whose selection mechanism is not recognized.
+    Unknown,
 }
 
 impl Kind {
-    const ALL: [Kind; 5] = [
+    const ALL: [Kind; 6] = [
         Kind::SwitchOnValue,
         Kind::HandlerTable,
         Kind::CompareChain,
         Kind::ExportPerRole,
         Kind::Threaded,
+        Kind::Unknown,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -59,6 +68,7 @@ impl Kind {
             Self::CompareChain => "compare_chain",
             Self::ExportPerRole => "export_per_role",
             Self::Threaded => "threaded",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -188,7 +198,7 @@ pub(crate) fn bounded_expression(text: &str) -> String {
 /// The versioned classification object. Interpreter candidates and
 /// multiplexers are listed first so the bound never hides them behind
 /// ordinary branching; counts always cover every classified site.
-pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>) -> Value {
+pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec<Value>) -> Value {
     let mut role_counts = BTreeMap::<&str, usize>::new();
     let mut kind_counts = BTreeMap::<&str, usize>::new();
     for role in [Role::InterpreterCandidate, Role::Multiplexer, Role::Other] {
@@ -245,6 +255,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>) -> Value {
         "role_counts": role_counts,
         "kind_counts": kind_counts,
         "sites": listed,
+        "omissions": omissions,
     })
 }
 
@@ -332,7 +343,35 @@ struct Facts {
     loops: Vec<(usize, usize)>,
     dispatch: Vec<Dispatch>,
     compares: Vec<Compare>,
-    local_memo: RefCell<BTreeMap<u32, Trace>>,
+    local_memo: RefCell<BTreeMap<u32, Vec<Trace>>>,
+    in_progress: RefCell<Vec<u32>>,
+    steps: Cell<u64>,
+    step_limit: Cell<u64>,
+    store_keys: OnceCell<Vec<KeyedStore>>,
+}
+
+/// A memory slot as (rendered base, byte offset).
+type SlotKey = (String, u64);
+/// A store keyed by its slot: (offset, slot, stored value).
+type KeyedStore = (usize, SlotKey, NodeId);
+
+/// Sources ranked for a site that no loop re-derives.
+fn priority(source: Source) -> u8 {
+    match source {
+        Source::CursorIndex | Source::CursorPointer | Source::FrameSlot => 5,
+        Source::CallArgument => 4,
+        Source::HandlerAddress => 3,
+        Source::Constant => 2,
+        Source::Unknown => 0,
+    }
+}
+
+fn preferred(traces: &[Trace]) -> Trace {
+    traces
+        .iter()
+        .max_by_key(|trace| (priority(trace.source), std::cmp::Reverse(trace.anchor)))
+        .cloned()
+        .unwrap_or_else(|| Trace::new(Source::Unknown))
 }
 
 #[derive(Clone, Debug)]
@@ -471,6 +510,10 @@ impl Facts {
             dispatch: Vec::new(),
             compares: Vec::new(),
             local_memo: RefCell::new(BTreeMap::new()),
+            in_progress: RefCell::new(Vec::new()),
+            steps: Cell::new(0),
+            step_limit: Cell::new(MAX_QUERY_STEPS),
+            store_keys: OnceCell::new(),
         };
         if let Some(v) = validator.as_mut() {
             let mut locals = body.get_locals_reader().ok()?;
@@ -604,7 +647,12 @@ impl Facts {
                         size: end - start,
                         selector,
                     });
-                    let (params, results) = arity.unwrap_or((1, 0));
+                    let Some((params, results)) = arity else {
+                        // Without arity the call's operands and results are
+                        // unknown: drop to the frame floor, never guess.
+                        stack.truncate(floor);
+                        continue;
+                    };
                     for _ in 1..params {
                         pop(&mut stack);
                     }
@@ -625,7 +673,10 @@ impl Facts {
                     }
                 }
                 Operator::Call { function_index } => {
-                    let (params, results) = arity.unwrap_or((0, 0));
+                    let Some((params, results)) = arity else {
+                        stack.truncate(floor);
+                        continue;
+                    };
                     for _ in 0..params {
                         pop(&mut stack);
                     }
@@ -785,11 +836,57 @@ impl Facts {
             .map_or(&[], |defs| &defs[..defs.len().min(MAX_DEFS_PER_LOCAL)])
     }
 
-    /// A local some write derives from itself (`pc = pc + n`).
+    /// Masks and width conversions only; constant offsets stay.
+    fn strip_masks(&self, mut id: NodeId) -> NodeId {
+        for _ in 0..16 {
+            match self.nodes[id] {
+                Node::Bin { op, a, b }
+                    if self.is_const(b)
+                        && [".and", ".or", ".xor", ".shr_u", ".shr_s", ".rem_u"]
+                            .iter()
+                            .any(|suffix| op.ends_with(suffix)) =>
+                {
+                    id = a
+                }
+                Node::Un { op, a } if !op.ends_with("eqz") => id = a,
+                _ => break,
+            }
+        }
+        id
+    }
+
+    /// `local = local ± n`, through masks or width casts. A linked-list step
+    /// (`p = p->next`), a pop or a reload is not an arithmetic advance.
+    fn advances_itself(&self, def: NodeId, local: u32) -> bool {
+        match self.nodes[self.strip_masks(def)] {
+            Node::Bin { op, a, b } if op.ends_with(".add") || op.ends_with(".sub") => [a, b]
+                .iter()
+                .any(|side| matches!(self.nodes[self.strip_masks(*side)], Node::Local(l) if l == local)),
+            _ => false,
+        }
+    }
+
+    /// A local some write advances arithmetically (`pc = pc + n`).
     fn advanced(&self, local: u32) -> bool {
         self.definitions(local)
             .iter()
-            .any(|(_, def)| self.references(*def, local, 0))
+            .any(|(_, def)| self.advances_itself(*def, local))
+    }
+
+    fn in_any_loop(&self, offset: usize) -> bool {
+        self.loops
+            .iter()
+            .any(|(start, end)| *start < offset && offset < *end)
+    }
+
+    /// One unit of trace work against the current query's budget.
+    fn step(&self) -> bool {
+        let used = self.steps.get();
+        if used >= self.step_limit.get() {
+            return false;
+        }
+        self.steps.set(used + 1);
+        true
     }
 
     fn slot_key(&self, addr: NodeId, offset: u64) -> (String, u64) {
@@ -812,6 +909,18 @@ impl Facts {
             }
         }
         (self.render(base, 0), offset.wrapping_add(addend as u64))
+    }
+
+    /// Every store keyed once per function: (offset, slot, stored value).
+    fn store_keys(&self) -> &[KeyedStore] {
+        self.store_keys.get_or_init(|| {
+            self.stores
+                .iter()
+                .map(|(offset, addr, store_offset, value)| {
+                    (*offset, self.slot_key(*addr, *store_offset), *value)
+                })
+                .collect()
+        })
     }
 
     /// The fixed memory slot a local is reloaded from: one write loads a
@@ -837,97 +946,121 @@ impl Facts {
         })
     }
 
-    fn classify(&self, id: NodeId, depth: u8) -> Trace {
-        if depth > MAX_TRACE_DEPTH {
-            return Trace::new(Source::Unknown);
+    /// Every source that can reach a value, one alternative per producing
+    /// write. The flag is true when a cycle, the depth bound or the step
+    /// budget cut the trace short; such results are never memoized, so a
+    /// classification never depends on the order sites are queried.
+    fn classify(&self, id: NodeId, depth: u8) -> (Vec<Trace>, bool) {
+        if depth > MAX_TRACE_DEPTH || !self.step() {
+            return (vec![Trace::new(Source::Unknown)], true);
         }
         let core = self.strip(id);
         match self.nodes[core] {
-            Node::Const(_) => Trace::new(Source::Constant),
+            Node::Const(_) => (vec![Trace::new(Source::Constant)], false),
             Node::Local(local) => self.local(local, depth),
             Node::Load { .. } => self.load(core, depth),
             Node::Call { callee: None, at } => {
                 let mut trace = Trace::new(Source::HandlerAddress);
                 trace.anchor = Some(at);
-                trace
+                (vec![trace], false)
             }
-            _ => Trace::new(Source::Unknown),
+            _ => (vec![Trace::new(Source::Unknown)], false),
         }
     }
 
-    fn local(&self, local: u32, depth: u8) -> Trace {
-        if let Some(trace) = self.local_memo.borrow().get(&local) {
-            return trace.clone();
+    fn local(&self, local: u32, depth: u8) -> (Vec<Trace>, bool) {
+        if let Some(traces) = self.local_memo.borrow().get(&local) {
+            return (traces.clone(), false);
         }
-        // A cycle through this local resolves to unknown, never a guess.
-        self.local_memo
-            .borrow_mut()
-            .insert(local, Trace::new(Source::Unknown));
-        let trace = self.local_uncached(local, depth);
-        self.local_memo.borrow_mut().insert(local, trace.clone());
-        trace
+        if self.in_progress.borrow().contains(&local) {
+            return (vec![Trace::new(Source::Unknown)], true);
+        }
+        self.in_progress.borrow_mut().push(local);
+        let (traces, provisional) = self.local_uncached(local, depth);
+        self.in_progress.borrow_mut().pop();
+        if !provisional {
+            self.local_memo.borrow_mut().insert(local, traces.clone());
+        }
+        (traces, provisional)
     }
 
-    fn local_uncached(&self, local: u32, depth: u8) -> Trace {
+    fn local_uncached(&self, local: u32, depth: u8) -> (Vec<Trace>, bool) {
         let defs = self.definitions(local);
         let parameter = local < self.params;
-        if defs.is_empty() {
-            return Trace::new(if parameter {
-                Source::CallArgument
-            } else {
-                Source::Constant
-            });
+        let mut traces = Vec::new();
+        let mut provisional = false;
+        // The incoming argument reaches every use the function does not
+        // overwrite first; without flow order it is always an alternative.
+        if parameter {
+            traces.push(Trace::new(Source::CallArgument));
+        } else if defs.is_empty() {
+            traces.push(Trace::new(Source::Constant));
         }
-        let mut sources = Vec::new();
         for (at, def) in defs {
-            if self.references(*def, local, 0) {
+            if !self.step() {
+                provisional = true;
+                break;
+            }
+            // An advance (`pc + 1`), a normalization (`key & 255`) or another
+            // self-derived write adds no new value source.
+            if self.advances_itself(*def, local)
+                || matches!(self.nodes[self.strip(*def)], Node::Local(l) if l == local)
+                || self.references(*def, local, 0)
+            {
                 continue;
             }
-            let mut trace = self.classify(*def, depth + 1);
-            if trace.anchor.is_none() {
-                trace.anchor = Some(*at);
+            let (sources, cut) = self.classify(*def, depth + 1);
+            provisional |= cut;
+            for mut trace in sources {
+                if trace.anchor.is_none() {
+                    trace.anchor = Some(*at);
+                }
+                trace.definition = Some(*def);
+                match trace.source {
+                    Source::Constant => {
+                        trace.advancing = vec![local];
+                        trace.anchor = Some(*at);
+                    }
+                    Source::HandlerAddress => trace.advancing.push(local),
+                    _ => (),
+                }
+                if traces.len() < MAX_ALTERNATIVES
+                    && !traces.iter().any(|known: &Trace| {
+                        known.source == trace.source && known.anchor == trace.anchor
+                    })
+                {
+                    traces.push(trace);
+                }
             }
-            trace.definition = Some(*def);
-            if trace.source == Source::Constant {
-                trace.advancing.push(local);
-                trace.anchor = Some(*at);
-            }
-            sources.push(trace);
         }
-        if let Some(trace) = sources.iter().find(|trace| trace.source.cursor_like()) {
-            return trace.clone();
-        }
-        if let Some(trace) = sources
-            .iter()
-            .find(|trace| trace.source == Source::HandlerAddress)
+        // Constant writes inside a loop make the argument only the seed of a
+        // flattened state machine. Outside loops they are guards or defaults.
+        if parameter
+            && traces.iter().any(|trace| {
+                trace.source == Source::Constant
+                    && trace.anchor.is_some_and(|at| self.in_any_loop(at))
+            })
         {
-            let mut trace = trace.clone();
-            trace.advancing.push(local);
-            return trace;
+            traces.retain(|trace| trace.source != Source::CallArgument);
         }
-        // Constant writes, optionally seeded by an argument, form a state
-        // variable: control-flow flattening, not a cursor.
-        if !sources.is_empty() && sources.iter().all(|trace| trace.source == Source::Constant) {
-            let mut trace = Trace::new(Source::Constant);
-            trace.advancing.push(local);
-            trace.anchor = defs.iter().map(|(at, _)| *at).max();
-            trace.definition = sources[0].definition;
-            return trace;
+        if traces.is_empty() {
+            traces.push(Trace::new(Source::Unknown));
         }
-        Trace::new(Source::Unknown)
+        (traces, provisional)
     }
 
-    fn load(&self, core: NodeId, depth: u8) -> Trace {
+    fn load(&self, core: NodeId, depth: u8) -> (Vec<Trace>, bool) {
         let Node::Load {
             addr, offset, at, ..
         } = self.nodes[core]
         else {
-            return Trace::new(Source::Unknown);
+            return (vec![Trace::new(Source::Unknown)], false);
         };
         let mut terms = Vec::new();
         self.terms(addr, false, &mut terms, 0);
         let mut trace = Trace::new(Source::Unknown);
         trace.anchor = Some(at);
+        let mut provisional = false;
         let locals = terms
             .iter()
             .filter_map(|(term, _)| match self.nodes[*term] {
@@ -946,19 +1079,25 @@ impl Facts {
                     _ => false,
                 }
         }) {
-            let inner = self.classify(*inner, depth + 1);
-            if inner.source != Source::Unknown {
-                return inner;
+            let (inner, cut) = self.classify(*inner, depth + 1);
+            provisional |= cut;
+            if inner.iter().any(|trace| trace.source != Source::Unknown) {
+                return (inner, provisional);
             }
         }
-        if locals.iter().any(|local| self.advanced(*local)) {
+        let advanced = locals
+            .iter()
+            .copied()
+            .filter(|local| self.advanced(*local))
+            .collect::<Vec<_>>();
+        if !advanced.is_empty() {
             trace.source = if terms.len() >= 2 {
                 Source::CursorIndex
             } else {
                 Source::CursorPointer
             };
-            trace.advancing = locals;
-            return trace;
+            trace.advancing = advanced;
+            return (vec![trace], provisional);
         }
         // A pc reloaded from a saved slot before each fetch: frame_slot.
         let reloaded = locals
@@ -968,7 +1107,7 @@ impl Facts {
         if !reloaded.is_empty() {
             trace.source = Source::FrameSlot;
             trace.slots = reloaded;
-            return trace;
+            return (vec![trace], provisional);
         }
         if let Some((term, _)) = terms
             .iter()
@@ -982,12 +1121,38 @@ impl Facts {
             // A pointer loaded from memory, then dereferenced.
             trace.source = Source::FrameSlot;
             trace.slots = vec![(None, self.slot_key(inner, inner_offset))];
-            return trace;
+            return (vec![trace], provisional);
         }
-        if terms.len() >= 2 && !locals.is_empty() {
-            trace.source = Source::CursorIndex;
-            trace.advancing = locals;
-            return trace;
+        if terms.len() >= 2 {
+            // A table read at an index nothing advances is a lookup, not a
+            // cursor: its source is the source of the index values.
+            let mut sources = Vec::new();
+            for (term, _) in &terms {
+                match self.nodes[*term] {
+                    Node::Local(local) => {
+                        let (alternatives, cut) = self.local(local, depth + 1);
+                        provisional |= cut;
+                        sources.push(preferred(&alternatives).source);
+                    }
+                    Node::Global(_) => (),
+                    _ => sources.push(Source::Unknown),
+                }
+            }
+            trace.source = if sources.iter().all(|source| *source == Source::CallArgument) {
+                Source::CallArgument
+            } else if sources
+                .iter()
+                .all(|source| matches!(source, Source::CallArgument | Source::Constant))
+            {
+                trace.advancing = locals;
+                Source::Constant
+            } else {
+                Source::Unknown
+            };
+            if trace.source == Source::CallArgument {
+                trace.anchor = None;
+            }
+            return (vec![trace], provisional);
         }
         if terms
             .iter()
@@ -996,9 +1161,8 @@ impl Facts {
             // A field of an object or a fixed memory slot.
             trace.source = Source::FrameSlot;
             trace.slots = vec![(None, self.slot_key(addr, offset))];
-            return trace;
         }
-        trace
+        (vec![trace], provisional)
     }
 
     /// A stored value that adds to or subtracts from the slot's prior value,
@@ -1066,14 +1230,9 @@ impl Facts {
                         self.definitions(local)
                             .iter()
                             .any(|(offset, _)| inside(*offset))
-                    }) && self
-                        .stores
-                        .iter()
-                        .any(|(offset, addr, store_offset, value)| {
-                            inside(*offset)
-                                && self.slot_key(*addr, *store_offset) == *slot
-                                && self.slot_advance(*value, slot, *local, 0)
-                        })
+                    }) && self.store_keys().iter().any(|(offset, key, value)| {
+                        inside(*offset) && key == slot && self.slot_advance(*value, slot, *local, 0)
+                    })
                 }),
                 Source::Constant | Source::HandlerAddress => written,
                 _ => false,
@@ -1083,6 +1242,56 @@ impl Facts {
             }
         }
         (Repeats::Unknown, Some(innermost))
+    }
+
+    /// The reaching source that best explains a site: one re-derived in a
+    /// loop with a cursor-like selector, then any loop, then by source.
+    fn choose(&self, traces: Vec<Trace>, site: usize) -> (Trace, Repeats, Option<(usize, usize)>) {
+        let evaluated = traces
+            .into_iter()
+            .map(|trace| {
+                let (repeats, range) = self.repeats(&trace, site);
+                (trace, repeats, range)
+            })
+            .collect::<Vec<_>>();
+        let position = evaluated
+            .iter()
+            .position(|(trace, repeats, _)| *repeats == Repeats::Loop && trace.source.cursor_like())
+            .or_else(|| {
+                evaluated
+                    .iter()
+                    .position(|(_, repeats, _)| *repeats == Repeats::Loop)
+            })
+            .unwrap_or_else(|| {
+                let best = evaluated
+                    .iter()
+                    .map(|(trace, _, _)| priority(trace.source))
+                    .max()
+                    .unwrap_or(0);
+                evaluated
+                    .iter()
+                    .position(|(trace, _, _)| priority(trace.source) == best)
+                    .unwrap_or(0)
+            });
+        evaluated.into_iter().nth(position).unwrap_or((
+            Trace::new(Source::Unknown),
+            Repeats::Unknown,
+            None,
+        ))
+    }
+
+    /// Classify one selector under a fresh per-query step budget.
+    fn query(
+        &self,
+        selector: NodeId,
+        site: usize,
+        budget: u64,
+    ) -> (Trace, Repeats, Option<(usize, usize)>, u64) {
+        self.steps.set(0);
+        self.step_limit.set(budget.min(MAX_QUERY_STEPS));
+        let (traces, _) = self.classify(selector, 0);
+        let (trace, repeats, range) = self.choose(traces, site);
+        (trace, repeats, range, self.steps.get())
     }
 
     fn render(&self, id: NodeId, depth: u8) -> String {
@@ -1193,18 +1402,82 @@ impl Facts {
     }
 }
 
+/// Classified sites plus visible omissions for work the bounds refused.
+pub(crate) struct Classified {
+    pub sites: Vec<Site>,
+    pub omissions: Vec<Value>,
+}
+
+/// Remaining trace steps for one artifact and the sites left unclassified
+/// once it runs out. Unclassified sites are counted, never dropped silently.
+pub(crate) struct Budget {
+    limit: u64,
+    spent: u64,
+    unclassified: u64,
+}
+
+impl Budget {
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            spent: 0,
+            unclassified: 0,
+        }
+    }
+
+    /// Trace steps spent so far.
+    pub fn used(&self) -> u64 {
+        self.spent
+    }
+
+    /// A site was found but the budget is gone.
+    pub fn refuse(&mut self) -> bool {
+        if self.remaining() == 0 {
+            self.unclassified += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A site was found past a structural bound (such as sites per region).
+    pub fn count_unclassified(&mut self) {
+        self.unclassified += 1;
+    }
+
+    pub fn spend(&mut self, steps: u64) {
+        self.spent = self.spent.saturating_add(steps.max(1)).min(self.limit);
+    }
+
+    pub fn remaining(&self) -> u64 {
+        self.limit - self.used()
+    }
+
+    pub fn omissions(&self, scope: &str) -> Vec<Value> {
+        if self.unclassified == 0 {
+            return Vec::new();
+        }
+        vec![json!({
+            "reason": "classification-work-limit",
+            "detail": format!("The {scope} classification work bound was reached; these dispatch sites were found but not classified."),
+            "omitted_records": self.unclassified,
+        })]
+    }
+}
+
 /// Classify every `br_table`, `call_indirect`, `return_call_indirect` and
 /// equality ladder in a module. None only when the module does not decode.
 pub(crate) fn wasm(
     bytes: &[u8],
     tables: Option<&crate::vm::wasm_tables::Tables>,
-) -> Option<Vec<Site>> {
+) -> Option<Classified> {
     let mut validator = Some(Validator::new_with_features(WasmFeatures::all()));
     let mut imported = 0u32;
     let mut defined = 0u32;
     let mut sites = Vec::new();
     let mut exports = BTreeSet::new();
     let mut export_offset = None;
+    let mut budget = Budget::new(MAX_ARTIFACT_STEPS);
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.ok()?;
         let function = match validator.as_mut().map(|v| v.payload(&payload)) {
@@ -1251,12 +1524,12 @@ pub(crate) fn wasm(
                 let Some(facts) = Facts::simulate(&body, function, params) else {
                     continue;
                 };
-                classify_function(&facts, index, range.start, tables, &mut sites);
+                classify_function(&facts, index, range.start, tables, &mut sites, &mut budget);
             }
             _ => (),
         }
     }
-    if sites.is_empty() && exports.len() >= 2 {
+    if sites.is_empty() && budget.unclassified == 0 && exports.len() >= 2 {
         sites.push(Site {
             kind: Kind::ExportPerRole,
             source: Source::Unknown,
@@ -1277,7 +1550,10 @@ pub(crate) fn wasm(
             table: None,
         });
     }
-    Some(sites)
+    Some(Classified {
+        sites,
+        omissions: budget.omissions("module"),
+    })
 }
 
 fn classify_function(
@@ -1286,10 +1562,15 @@ fn classify_function(
     body_offset: usize,
     tables: Option<&crate::vm::wasm_tables::Tables>,
     sites: &mut Vec<Site>,
+    budget: &mut Budget,
 ) {
     for dispatch in &facts.dispatch {
-        let trace = facts.classify(dispatch.selector, 0);
-        let (repeats, loop_range) = facts.repeats(&trace, dispatch.offset);
+        if budget.refuse() {
+            continue;
+        }
+        let (trace, repeats, loop_range, used) =
+            facts.query(dispatch.selector, dispatch.offset, budget.remaining());
+        budget.spend(used);
         let (kind, instruction, arm_count, table) = match dispatch.op {
             DispatchOp::BrTable { arms } => {
                 (Kind::SwitchOnValue, "br_table", Some(u64::from(arms)), None)
@@ -1364,9 +1645,13 @@ fn classify_function(
         if constants.len() < MIN_COMPARE_ARMS {
             continue;
         }
+        if budget.refuse() {
+            continue;
+        }
         let first = compares[0];
-        let trace = facts.classify(first.subject, 0);
-        let (repeats, loop_range) = facts.repeats(&trace, first.offset);
+        let (trace, repeats, loop_range, used) =
+            facts.query(first.subject, first.offset, budget.remaining());
+        budget.spend(used);
         sites.push(Site {
             kind: Kind::CompareChain,
             source: trace.source,

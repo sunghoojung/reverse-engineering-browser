@@ -360,21 +360,12 @@ fn shallow_braces(region: &str) -> String {
 fn object_handlers(
     region: &str,
     base: usize,
+    names: BTreeSet<String>,
     blocked_tables: &BTreeSet<String>,
     handlers: &mut BTreeMap<u32, Value>,
     unknowns: &mut Vec<String>,
     handler_limit_hit: &mut bool,
 ) {
-    let mut names = BTreeSet::new();
-    for captures in INDEXED_DISPATCH.captures_iter(region) {
-        names.insert(captures[1].to_owned());
-    }
-    names.extend([
-        "handler".into(),
-        "handlers".into(),
-        "opcode".into(),
-        "opcodes".into(),
-    ]);
     for name in names {
         if blocked_tables.contains(&name) {
             continue;
@@ -431,13 +422,47 @@ fn not_interpreter_unknown(role: vm::dispatch_shape::Role) -> String {
     }
 }
 
-/// Opcode handlers come only from sites the structural classification calls
-/// interpreter candidates: a cursor-like selector re-derived in a loop.
+/// Static handler recovery for one JavaScript dispatch region.
+///
+/// Opcode handlers come only from a switch, or a numeric handler table,
+/// tied to a site the structural classification calls an interpreter
+/// candidate: a cursor-like selector re-derived in a loop. No such site
+/// means no handlers. `withheld` counts the candidates the same recovery
+/// finds without that requirement, so a caller can keep the tier, which is
+/// decided by recovery alone, and name what the classification withheld.
+struct Recovery {
+    handlers: Vec<Value>,
+    model: String,
+    unknowns: Vec<String>,
+    omissions: Vec<Value>,
+    withheld: usize,
+}
+
 fn static_handlers(
     source: &str,
     start: usize,
     end: usize,
     classification: Option<&Value>,
+) -> Recovery {
+    let (handlers, model, unknowns, omissions) =
+        recover_handlers(source, start, end, Some(classification));
+    let (ungated, _, _, _) = recover_handlers(source, start, end, None);
+    Recovery {
+        withheld: ungated.len().saturating_sub(handlers.len()),
+        handlers,
+        model,
+        unknowns,
+        omissions,
+    }
+}
+
+/// `gate` is `Some(classification)` to require interpreter-candidate sites,
+/// or `None` for recovery alone, which decides the tier.
+fn recover_handlers(
+    source: &str,
+    start: usize,
+    end: usize,
+    gate: Option<Option<&Value>>,
 ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
     let region = vm::mask(&source[start..end]);
     let outer = without_nested_functions(&region);
@@ -446,21 +471,45 @@ fn static_handlers(
     let mut omissions = Vec::new();
     let mut handler_limit_hit = false;
     let mut blocked_tables = BTreeSet::new();
+    let role = |at: usize| {
+        gate.map(|classification| vm::dispatch_shape::role_at(classification, (start + at) as u64))
+    };
     for captures in INDEXED_DISPATCH.captures_iter(&outer) {
         let at = captures.get(0).expect("dispatch match").start();
-        let role = vm::dispatch_shape::role_at(classification, (start + at) as u64);
-        if role != vm::dispatch_shape::Role::Multiplexer
+        if role(at) != Some(vm::dispatch_shape::Role::Multiplexer)
             && !direct_selector(&captures[2], &outer[..at], 0)
         {
             blocked_tables.insert(captures[1].to_owned());
             unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
-            continue;
-        }
-        if role != vm::dispatch_shape::Role::InterpreterCandidate {
-            blocked_tables.insert(captures[1].to_owned());
-            unknowns.push(not_interpreter_unknown(role));
         }
     }
+    // Tables whose own dispatch in this region is an interpreter candidate,
+    // including `table[op].call(...)`. Ungated recovery keeps the historical
+    // names: any indexed callee plus the conventional table names.
+    let tables = match gate {
+        Some(_) => {
+            let mut allowed = BTreeSet::new();
+            for captures in vm::dispatch_shape::javascript::INDEXED_CALL.captures_iter(&outer) {
+                let at = captures.get(0).expect("indexed call").start();
+                match role(at) {
+                    Some(vm::dispatch_shape::Role::InterpreterCandidate) => {
+                        allowed.insert(captures[1].to_owned());
+                    }
+                    Some(other) => unknowns.push(not_interpreter_unknown(other)),
+                    None => (),
+                }
+            }
+            allowed
+        }
+        None => {
+            let mut names = INDEXED_DISPATCH
+                .captures_iter(&outer)
+                .map(|captures| captures[1].to_owned())
+                .collect::<BTreeSet<_>>();
+            names.extend(["handler", "handlers", "opcode", "opcodes"].map(String::from));
+            names
+        }
+    };
     let mut previous_switch_end = 0;
     for switch_match in SWITCH.find_iter(&outer) {
         if switch_match.start() < previous_switch_end {
@@ -480,9 +529,8 @@ fn static_handlers(
             continue;
         };
         previous_switch_end = closing_brace + 1;
-        let role =
-            vm::dispatch_shape::role_at(classification, (start + switch_match.start()) as u64);
-        if role != vm::dispatch_shape::Role::Multiplexer
+        let site_role = role(switch_match.start());
+        if site_role != Some(vm::dispatch_shape::Role::Multiplexer)
             && !direct_selector(
                 &region[opening_paren + 1..closing_paren],
                 &outer[..switch_match.start()],
@@ -492,8 +540,10 @@ fn static_handlers(
             unknowns.push("A computed, position-dependent, or saved-state switch selector has no proven fixed opcode mapping.".into());
             continue;
         }
-        if role != vm::dispatch_shape::Role::InterpreterCandidate {
-            unknowns.push(not_interpreter_unknown(role));
+        if let Some(site_role) = site_role
+            && site_role != vm::dispatch_shape::Role::InterpreterCandidate
+        {
+            unknowns.push(not_interpreter_unknown(site_role));
             continue;
         }
         let body = &region[opening_brace + 1..closing_brace];
@@ -547,7 +597,9 @@ fn static_handlers(
         }
     }
     for captures in INDEXED_HANDLER.captures_iter(&region) {
-        if blocked_tables.contains(&captures[1]) {
+        if blocked_tables.contains(&captures[1])
+            || (gate.is_some() && !tables.contains(&captures[1]))
+        {
             continue;
         }
         let Some(opcode) = integer(&captures[2]) else {
@@ -576,6 +628,7 @@ fn static_handlers(
     object_handlers(
         &region,
         start,
+        tables,
         &blocked_tables,
         &mut handlers,
         &mut unknowns,
@@ -1088,13 +1141,27 @@ pub(crate) fn workspace(
                 {
                     return None;
                 }
-                let (handlers, model, unknowns, omissions) = static_handlers(
+                let recovery = static_handlers(
                     source,
                     region.0,
                     end,
                     result["frontend"].get("dispatch_classification"),
                 );
-                (handlers, model, unknowns, omissions, None, Vec::new())
+                let mut omissions = recovery.omissions;
+                if recovery.withheld > 0 {
+                    omissions.push(json!({"reason":"handler-withheld","detail":format!(
+                        "Static recovery found {} that no switch or table tied to a cursor-loop interpreter-candidate site supports, so they are not claimed as guest opcodes. The tier is unchanged.",
+                        count_label(recovery.withheld as u32, "opcode candidate")
+                    )}));
+                }
+                (
+                    recovery.handlers,
+                    recovery.model,
+                    recovery.unknowns,
+                    omissions,
+                    None,
+                    Vec::new(),
+                )
             }
             "webassembly" => {
                 let extracted = wasm::handlers(bytes, result)?;
@@ -1116,7 +1183,12 @@ pub(crate) fn workspace(
     {
         omissions.push(json!({"reason":"dispatch-inventory-limit","detail":"The module-wide count includes every decoded dispatch site; only the top 256 ranked sites are listed."}));
     }
-    if handlers.is_empty() {
+    // Withheld handlers are named separately: recovery did find them.
+    if handlers.is_empty()
+        && !omissions
+            .iter()
+            .any(|omission| omission["reason"] == "handler-withheld")
+    {
         omissions.push(json!({"reason":"handler-unavailable","detail":"No static integer handler candidate was visible in the dispatch region."}));
     }
     let owned = if runtime == "javascript" {
@@ -1525,7 +1597,13 @@ mod tests {
         end: usize,
     ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
         let classification = vm::javascript_classification(source);
-        static_handlers(source, start, end, Some(&classification))
+        let recovery = static_handlers(source, start, end, Some(&classification));
+        (
+            recovery.handlers,
+            recovery.model,
+            recovery.unknowns,
+            recovery.omissions,
+        )
     }
 
     fn fixture(name: &str) -> String {
@@ -3559,7 +3637,10 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             ("let a=bytes[ip++]; ++ip; return a+bytes[ip++];", 0),
             ("function helper(){return bytes[ip++];} return helper();", 0),
         ] {
-            let source = format!("handlers[1]=function(){{{body}}};");
+            // Operand widths are read only for tables an interpreter loop uses.
+            let source = format!(
+                "handlers[1]=function(){{{body}}};while(pc<program.length){{handlers[program[pc++]]();}}"
+            );
             let (handlers, _, _, _) = classified_handlers(&source, 0, source.len());
             assert_eq!(handlers[0]["operand_width"], expected, "{body}");
             assert!(
@@ -3590,13 +3671,9 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 let source =
                     format!("handlers[7]=function(){{}}; const selector={expression}; {dispatch}");
                 let (handlers, _, unknowns, _) = classified_handlers(&source, 0, source.len());
-                if dispatch.starts_with("switch") {
-                    // An unrelated literal table assignment remains independent.
-                    assert_eq!(handlers.len(), 1);
-                    assert!(handlers[0].get("handler_index").is_some());
-                } else {
-                    assert!(handlers.is_empty(), "{source}");
-                }
+                // A literal table that no interpreter-candidate dispatch uses
+                // supplies no opcodes, whatever the switch beside it does.
+                assert!(handlers.is_empty(), "{source}");
                 assert!(
                     unknowns
                         .iter()
@@ -3611,6 +3688,154 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             classified_handlers(source, 0, source.len()).0[0]["opcode"],
             9
         );
+    }
+
+    /// Review regression: classification never changes a tier. Where the gate
+    /// withholds recovered handlers, the tier stays and a distinct omission
+    /// names the withholding; demotion still follows genuine recovery only.
+    #[test]
+    fn classification_never_changes_tier_and_names_withheld_handlers() {
+        let statement_do = "function run(code, stack){var pc=0; do switch(code[pc++]){case 1: stack.push(code[pc++]); break; case 2: stack.pop(); break; case 3: return stack;} while(pc<code.length);}";
+        let (_, analysis, document) = analyze(statement_do, &[]);
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        assert_eq!(
+            document["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        // A helper-computed next pc is not an arithmetic cursor advance, so
+        // the switch is not an interpreter candidate and opcodes are withheld.
+        let helper_step = "function run(code, stack){var pc=0; while(pc<code.length){switch(code[pc]){case 1: stack.push(code[pc+1]); break; case 2: stack.pop(); break; case 3: return stack;} pc=next(code,pc);}}";
+        let (_, analysis, document) = analyze(helper_step, &[]);
+        let result = &analysis["results"][0];
+        let workspace = &document["workspaces"][0];
+        assert_eq!(result["tier"], "likely-vm", "{}", result["coverage"]);
+        assert_eq!(workspace["handlers"], json!([]));
+        let reasons = workspace["coverage"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|omission| omission["reason"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(reasons.contains(&"handler-withheld"), "{reasons:?}");
+        assert!(!reasons.contains(&"handler-unavailable"), "{reasons:?}");
+        assert!(
+            !result["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "handler-unavailable")
+        );
+        assert_schema(&document);
+    }
+
+    /// Review regression: opcode handlers come only from a table or switch
+    /// tied to a classified interpreter-candidate site. A `.call` dispatch, a
+    /// temporary, a nested function or no dispatch at all yields none.
+    #[test]
+    fn opcode_handlers_require_a_classified_interpreter_table_or_switch() {
+        for source in [
+            "function route(k,code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){stack.push(code[pc++]);}switch(k){case 9:break;}return handlers[k].call(null,stack);}",
+            "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){switch(v.kind){case 1:log(v);break;}}return handlers[k].call(null,x);}",
+            "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){log(v);}return handlers[k](x);}",
+            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){const h=handlers[code[pc++]];h(stack);}}",
+            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};function inner(){while(pc<code.length){handlers[code[pc++]](stack);}}return inner;}",
+            "function run(code,stack){let pc=0;handlers[1]=function(){stack.push(code[pc++])};handlers[2]=function(){stack.pop()};while(pc<code.length){stack.push(code[pc++]);}}",
+        ] {
+            let start = source.find('{').unwrap() + 1;
+            let end = source.rfind('}').unwrap();
+            let (handlers, _, _, _) = classified_handlers(source, start, end);
+            assert_eq!(handlers, Vec::<Value>::new(), "{source}");
+        }
+        let (_, analysis, document) = analyze(
+            "function route(k,code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){stack.push(code[pc++]);}switch(k){case 9:break;}return handlers[k].call(null,stack);}",
+            &[],
+        );
+        assert_eq!(
+            analysis["results"][0]["frontend"]["dispatch_classification"]["role_counts"]["interpreter-candidate"],
+            0
+        );
+        if let Some(workspace) = document["workspaces"].as_array().unwrap().first() {
+            assert_eq!(workspace["handlers"], json!([]));
+        }
+        // The same table tied to a cursor-loop dispatch keeps its handlers.
+        let source = "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}";
+        let start = source.find('{').unwrap() + 1;
+        let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
+        assert_eq!(handlers.len(), 2);
+    }
+
+    /// Review regression: per-region truncation must rank interpreter
+    /// candidates first and count every classified site.
+    #[test]
+    fn many_ordinary_calls_never_hide_an_interpreter_switch() {
+        let calls = (0..300).map(|i| format!("t[n{i}](x);")).collect::<String>();
+        let source = format!(
+            "function run(code, stack, t, x){{var pc=0; {calls} while(pc<code.length){{switch(code[pc++]){{case 1: stack.push(code[pc++]); break; case 2: stack.pop(); break; case 3: return stack;}}}}}}"
+        );
+        let (_, analysis, document) = analyze(&source, &[]);
+        let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
+        assert_eq!(classification["site_count"], 301);
+        assert_eq!(classification["omitted_site_count"], 301 - 256);
+        assert_eq!(classification["role_counts"]["interpreter-candidate"], 1);
+        assert!(
+            classification["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|site| site["instruction"] == "switch"
+                    && site["role"] == "interpreter-candidate")
+        );
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        assert_eq!(
+            document["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    /// Review regression: classifier work is bounded per region and per
+    /// artifact, and hitting the bound is a visible omission.
+    #[test]
+    fn javascript_classification_work_is_bounded_and_reported() {
+        let body = (0..8000)
+            .map(|i| format!("var v{i}=1;t[v{i}](x);"))
+            .collect::<String>();
+        let source = format!("function run(t,x){{{body}}}");
+        let classification = vm::javascript_classification(&source);
+        let omissions = classification["omissions"].as_array().expect("omissions");
+        assert!(
+            omissions
+                .iter()
+                .any(|omission| omission["reason"] == "classification-work-limit"),
+            "{omissions:?}"
+        );
+        let unclassified = omissions
+            .iter()
+            .filter_map(|omission| omission["omitted_records"].as_u64())
+            .sum::<u64>();
+        assert_eq!(
+            classification["site_count"].as_u64().unwrap() + unclassified,
+            8000
+        );
+        // Work, not wall time: steps per classified site stay constant as the
+        // region grows, so lookups are indexed rather than rescanned.
+        let work = |count: usize| {
+            let body = (0..count)
+                .map(|i| format!("var v{i}=1;t[v{i}](x);"))
+                .collect::<String>();
+            let (document, steps) =
+                vm::javascript_classification_work(&format!("function run(t,x){{{body}}}"));
+            assert_eq!(document["site_count"], count);
+            steps
+        };
+        let (small, large) = (work(1000), work(2000));
+        assert!(small <= 8 * 1000, "{small} steps for 1000 sites");
+        assert_eq!(large, 2 * small, "{small} then {large}");
     }
 
     /// Case values become opcode handlers only at a cursor-loop interpreter
@@ -3646,17 +3871,21 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             [7, 9]
         );
         assert!(unknowns.iter().any(|s| s.contains("computed")));
-        let source = "handlers[1]=x=>x,handlers[2]=()=>{};";
+        let source = "handlers[1]=x=>x,handlers[2]=()=>{};while(pc<program.length){handlers[program[pc++]]();}";
         let (handlers, _, _, _) = classified_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0]["opcode"], 2);
+        // Without a dispatch that uses the table, it supplies no opcodes.
+        let source = "handlers[1]=x=>x,handlers[2]=()=>{};";
+        assert!(classified_handlers(source, 0, source.len()).0.is_empty());
     }
 
     #[test]
     fn handler_cap_preserves_named_omission() {
-        let source = (0..1025)
+        let mut source = (0..1025)
             .map(|i| format!("handlers[{i}]=function(){{}};"))
             .collect::<String>();
+        source.push_str("while(pc<program.length){handlers[program[pc++]]();}");
         let (handlers, _, _, omissions) = classified_handlers(&source, 0, source.len());
         assert_eq!(handlers.len(), MAX_HANDLERS);
         assert_eq!(handlers.last().unwrap()["opcode"], 1023);

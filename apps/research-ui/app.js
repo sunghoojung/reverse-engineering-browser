@@ -1442,6 +1442,10 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         const roles = classification.role_counts;
         section.append(textElement('p', '', `${vmCountText(classification.site_count, 'classified site')}: ${vmCountText(roles['interpreter-candidate'], 'cursor-loop interpreter candidate')}, ${vmCountText(roles.multiplexer, 'router')}, ${roles.other} other. ${classification.sites.length} listed; ${classification.omitted_site_count} omitted from this bounded list.`));
+        for (const omission of classification.omissions) {
+          const count = omission.omitted_records === undefined ? '' : ` ${vmCountText(omission.omitted_records, 'site')} not classified.`;
+          section.append(textElement('p', 'vm-workspace-notice', `${omission.reason}: ${omission.detail}${count}`));
+        }
         section.append(textElement('p', '', 'Structural classification only: kind / selector source / repeats. A router dispatches once on a call argument; its arms and constants are routing labels and no guest opcodes are claimed. Only a cursor-loop interpreter candidate supplies opcode handlers.'));
         appendVmPagedRows(section, classification.sites, 'dispatch sites', site => {
           const row = document.createElement('details'); row.className = 'vm-effect-row';
@@ -1493,7 +1497,9 @@ const capturedExportPanel = installCapturedExportDialog({
               ? `segment ${segment.segment_index} at slot ${segment.offset} · ${segment.entry_count} entries`
               : segment.placement === 'relative'
                 ? `segment ${segment.segment_index} relative to imported global ${segment.global_index} · ${segment.entry_count} entries, slots unknown`
-                : `segment ${segment.segment_index} offset unresolved · ${segment.entry_count} entries, slots unknown`).join('; ')));
+                : segment.placement === 'out-of-range'
+                  ? `segment ${segment.segment_index} at slot ${segment.offset} ends past the declared table size · ${segment.entry_count} entries, not placed`
+                  : `segment ${segment.segment_index} offset unresolved · ${segment.entry_count} entries, slots unknown`).join('; ')));
           }
           return row;
         });

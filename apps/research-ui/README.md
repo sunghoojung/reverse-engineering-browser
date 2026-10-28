@@ -1586,8 +1586,11 @@ class, sample count, retained positions, and notes. These are handler candidates
 not invented guest instructions. The bottom analysis panels remain scoped to
 the finding; selecting a handler does not narrow or reclassify them. Detection
 scores and artifact identity stay in a compact strip; full detection evidence
-and provenance are available in a disclosure beneath the workspace. Smaller
-windows stack the listing and inspector without removing tools.
+and provenance are available in a disclosure beneath the workspace. Narrow or
+short windows put the program and symbol trees in a compact band above
+full-width evidence. The listing and inspector stack inside the evidence
+scroller; the example disclosure keeps its own row above the status bar.
+Analysis content scrolls within the dock and ends at its wrapping bottom tabs.
 
 ### Compact pack and ledger workspaces
 

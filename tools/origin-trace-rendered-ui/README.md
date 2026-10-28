@@ -41,6 +41,13 @@ No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not
 establish live browser capture.
 
+VM layout assertions check full-width compact evidence, complete footer and
+tab-strip visibility, and an exact boundary between the analysis scroller and
+its tabs. Native observation screenshots deliberately reveal a complete row
+and its section heading after exercising the disclosure. Separate 1180x560
+and 760x790 cases exercise the height and width breakpoints, compact trees,
+keyboard focus, and the example disclosure independently.
+
 Environment passed to the hosted bundle through the `.xctestrun`:
 
 - `REB_RENDERED_UI_OUTPUT`: screenshot directory

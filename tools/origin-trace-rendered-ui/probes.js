@@ -199,5 +199,14 @@
   const count = selector => [...document.querySelectorAll(selector)].filter(rendered).length;
   const exists = selector => document.querySelectorAll(selector).length;
 
-  window.__rebUiProbe = {layoutIssues, clippedText, scrollToEnd, focusState, center, inertness, scrollProbe, text, visibleText, count, exists, describe};
+  function box(selector) {
+    const node = document.querySelector(selector);
+    if (!node) return {};
+    const rect = node.getBoundingClientRect(), visible = visibleRect(node);
+    return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+      width: rect.width, height: rect.height, visibleHeight: visible.height, visibleWidth: visible.width,
+      scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight};
+  }
+
+  window.__rebUiProbe = {layoutIssues, clippedText, scrollToEnd, focusState, center, inertness, scrollProbe, text, visibleText, count, exists, describe, box};
 })();

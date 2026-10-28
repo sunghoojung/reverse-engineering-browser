@@ -282,6 +282,45 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  private func assertFullyVisible(_ ui: Harness, _ selector: String, _ context: String,
+                                  file: StaticString = #filePath, line: UInt = #line) async throws {
+    let box = try await ui.json("__rebUiProbe.box(\(String(reflecting: selector)))")
+    let height = box["height"] as? Double ?? 0
+    XCTAssertGreaterThan(height, 0, "\(context): missing \(selector)", file: file, line: line)
+    XCTAssertEqual(box["visibleHeight"] as? Double ?? -1, height, accuracy: 1,
+      "\(context): vertically clipped \(selector): \(box)", file: file, line: line)
+    XCTAssertEqual(box["visibleWidth"] as? Double ?? -1, box["width"] as? Double ?? 0, accuracy: 1,
+      "\(context): horizontally clipped \(selector): \(box)", file: file, line: line)
+  }
+
+  @MainActor
+  private func assertVmDock(_ ui: Harness, _ size: (name: String, width: CGFloat, height: CGFloat)) async throws {
+    let geometry = try await ui.json("""
+      (() => { const box = __rebUiProbe.box; return {
+        grid: box('#vm-findings-workspace > .vm-grid'), detail: box('#vm-detail'),
+        panels: box('.vm-workbench-panels'), tabs: box('.vm-workbench-tabs'),
+        footer: box('.vm-program-example > summary'), status: box('.statusbar')}; })()
+      """)
+    print("RENDERED_UI_VM_DOCK \(size.name) \(geometry)")
+    let grid = geometry["grid"] as? [String: Double] ?? [:]
+    let detail = geometry["detail"] as? [String: Double] ?? [:]
+    let panels = geometry["panels"] as? [String: Double] ?? [:]
+    let tabs = geometry["tabs"] as? [String: Double] ?? [:]
+    let footer = geometry["footer"] as? [String: Double] ?? [:]
+    let status = geometry["status"] as? [String: Double] ?? [:]
+    if size.width <= 900 || size.height <= 650 {
+      XCTAssertEqual(detail["width"] ?? -1, grid["width"] ?? 0, accuracy: 1,
+        "\(size.name): narrow findings give the full column to evidence")
+    }
+    XCTAssertEqual(panels["bottom"] ?? -1, tabs["top"] ?? 0, accuracy: 1,
+      "\(size.name): analysis scroller ends exactly at the tab strip")
+    XCTAssertLessThanOrEqual(footer["bottom"] ?? .infinity, status["top"] ?? 0,
+      "\(size.name): example footer ends before the status bar")
+    try await assertFullyVisible(ui, ".vm-program-example > summary", "\(size.name) example footer")
+    try await assertFullyVisible(ui, ".vm-workbench-tabs", "\(size.name) analysis tabs")
+  }
+
+  @MainActor
   func test1TrafficRequests() async throws {
     let expected = try Expectations.load()
     for size in windowSizes {
@@ -369,6 +408,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await show(ui, "vm")
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
+      try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
+      try await ui.screenshot("vm-navigator-\(size.name)")
       try await ui.click("[data-vm-panel='native-wasm']")
       let panel = "[data-vm-panel-content='native-wasm']"
       try await ui.waitUntil("!document.querySelector(\"\(panel)\")?.hidden", "native observations panel did not open")
@@ -377,16 +418,73 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(text.contains("18446744073709551615"), "\(size.name): wide guest instance identity renders exactly: \(text)")
       XCTAssertFalse(text.contains("No native guest samples retained"), "\(size.name): real C++ guest sample is retained")
       try await ui.click("\(panel) details.vm-effect-row summary")
+      let expanded = try await ui.value("document.querySelector(\"\(panel) details.vm-effect-row\").open") as? Bool
+      XCTAssertEqual(expanded, true, "\(size.name): native input expands retained guest evidence")
+      try await ui.click("\(panel) details.vm-effect-row summary")
+      // Photograph the complete retained row at a deliberate scroll position,
+      // not the incidental offset left by click() revealing its disclosure.
+      _ = try await ui.json("__rebUiProbe.center('.vm-workbench-tabs') || {}")
+      _ = try await ui.value("document.querySelector('.vm-workbench-panels').scrollTop = 0")
+      _ = try await ui.json("__rebUiProbe.center(\"\(panel) details.vm-effect-row summary\") || {}")
+      try await ui.settle()
+      try await assertFullyVisible(ui, "[data-vm-panel-content='native-wasm'] details.vm-effect-row summary", "\(size.name) guest row")
+      try await assertFullyVisible(ui, "[data-vm-panel-content='native-wasm'] h4:nth-of-type(2)", "\(size.name) guest heading")
       try await assertInert(ui, "\(size.name) vm")
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm native guest")
+      try await assertVmDock(ui, size)
       try await ui.screenshot("vm-native-guest-\(size.name)")
 
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
       try await ui.click("[data-vm-panel='native-wasm']")
       let physical = try await ui.value("document.querySelector(\"\(panel)\").innerText") as? String ?? ""
       XCTAssertTrue(physical.contains("guest PC unknown"), "\(size.name): physical rows never claim a guest PC: \(physical)")
+      _ = try await ui.json("__rebUiProbe.center('.vm-workbench-tabs') || {}")
+      _ = try await ui.value("document.querySelector('.vm-workbench-panels').scrollTop = 0")
+      _ = try await ui.json("__rebUiProbe.center(\"\(panel) details.vm-effect-row summary\") || {}")
+      try await ui.settle()
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm native physical")
+      try await assertFullyVisible(ui, "[data-vm-panel-content='native-wasm'] details.vm-effect-row summary", "\(size.name) native row")
+      try await assertFullyVisible(ui, "[data-vm-panel-content='native-wasm'] h4:first-of-type", "\(size.name) native heading")
+      try await assertVmDock(ui, size)
       try await ui.screenshot("vm-native-physical-\(size.name)")
+    }
+  }
+
+  @MainActor
+  func test9VmCompactTreesAndExample() async throws {
+    // Exercise both sides of the responsive rule independently of the
+    // minimum window, where width and height breakpoints apply together.
+    let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
+      ("short", 1180, 560), ("narrow-tall", 760, 790),
+    ]
+    for size in sizes {
+      let ui = try await prepare(size)
+      try await show(ui, "vm")
+      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await ui.click("#vm-list .vm-row", containing: "artifact 107")
+      try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
+      let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
+      XCTAssertLessThanOrEqual(tree["height"] as? Double ?? .infinity, 141,
+        "\(size.name): trees stay in a compact band above the evidence")
+      try await ui.screenshot("vm-navigator-\(size.name)")
+      try await ui.click("#vm-symbol-list .vm-symbol-row")
+      try await ui.tab()
+      let focus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(focus["inViewport"] as? Bool, true, "\(size.name): keyboard navigation reveals the next control")
+      XCTAssertNotEqual(focus["indicator"] as? String, "none", "\(size.name): navigation has visible focus")
+
+      try await ui.click("[data-vm-panel='host-links']")
+      _ = try await ui.json("__rebUiProbe.center('.vm-workbench-tabs') || {}")
+      try await ui.settle()
+      try await assertVmDock(ui, size)
+      try await ui.click(".vm-program-example > summary")
+      try await ui.waitUntil("document.querySelector('.vm-program-example').open", "example did not open")
+      try await assertFullyVisible(ui, ".vm-program-example > summary", "\(size.name) expanded example")
+      try await assertLayout(ui, ".vm-program-example", "\(size.name) expanded example")
+      try await ui.screenshot("vm-example-expanded-\(size.name)")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("!document.querySelector('.vm-program-example').open", "Space did not close the example")
+      try await assertFullyVisible(ui, ".vm-program-example > summary", "\(size.name) collapsed example")
     }
   }
 

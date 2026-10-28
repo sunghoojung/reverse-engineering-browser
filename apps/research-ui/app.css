@@ -3465,8 +3465,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
    only the handler body and the analysis dock share the remaining space. */
 #screen-vm .vm-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 0; margin: 0; }
 #screen-vm .vm-workspace > * { flex: none; }
-#screen-vm .vm-workspace > .vm-workbench-body { flex: 1.4 1 150px; }
-#screen-vm .vm-workspace > .vm-workbench-inspector { flex: 1 1 145px; }
+#screen-vm .vm-workspace > .vm-workbench-body { flex: 1 1 150px; }
+#screen-vm .vm-workspace > .vm-workbench-inspector { flex: 1.4 1 200px; }
 #screen-vm .vm-workspace:has(> .vm-workspace-notice) { grid-template-rows: auto auto minmax(150px, 1.4fr) minmax(145px, 1fr); }
 #screen-vm .vm-workspace-title { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 10px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
 #screen-vm .vm-workspace-title span { font-size: 9px; }
@@ -3533,10 +3533,14 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #screen-vm .vm-workbench-listing .vm-handler-head > :nth-child(5), #screen-vm .vm-workbench-listing .vm-handler-samples { display: none; }
 }
 @media (max-width: 900px), (max-height: 650px) {
-  #vm-findings-workspace:not([hidden]) { overflow: auto; display: block; }
-  #vm-findings-workspace > .vm-grid { min-height: 660px; overflow: visible; }
+  /* The evidence scrolls inside its row; the example footer keeps its own
+     space above the application status bar, including when the tabs wrap. */
+  #vm-findings-workspace > .vm-grid { display: block; min-height: 0; overflow: auto; }
   #screen-vm .vm-detail { overflow: visible; }
   #screen-vm .vm-workspace { min-height: 520px; }
+  #screen-vm .vm-workspace > .vm-workbench-body { flex: none; min-height: 320px; }
+  #screen-vm .vm-workspace > .vm-workbench-inspector { flex: none; }
+  #screen-vm .vm-workbench-panels { flex: none; max-height: min(360px, 40vh); }
   #screen-vm .vm-workbench-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(160px, 1fr) auto; }
   #screen-vm .vm-selection-inspector { border-left: 0; border-top: 1px solid var(--line); max-height: 160px; }
   #screen-vm .vm-selection-observations, #screen-vm .vm-selection-notes { display: inline-block; vertical-align: top; width: 48%; box-sizing: border-box; }
@@ -3654,12 +3658,14 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 @media (max-width: 900px), (max-height: 650px) {
   #screen-vm .vm-workbench-body { grid-template-columns: minmax(0, 1fr); }
   #screen-vm .vm-selection-inspector { border-left: 0; }
-}
-@media (max-width: 600px) {
-  #screen-vm .vm-list-pane { max-height: 260px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: 25px minmax(90px, 1fr); }
+  /* Compact trees precede full-width evidence instead of reserving an empty
+     sidebar alongside the entire vertically stacked workbench. */
+  #screen-vm .vm-list-pane { height: 140px; max-height: none; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: 25px minmax(0, 1fr); border-right: 0; border-bottom: 1px solid var(--line); }
   #screen-vm .vm-list-pane > .vm-list-head { grid-column: 1; grid-row: 1; }
   #screen-vm .vm-list { grid-column: 1; grid-row: 2; }
   #screen-vm .vm-symbol-dock { grid-column: 2; grid-row: 1 / 3; border-top: 0; border-left: 1px solid var(--line); }
+}
+@media (max-width: 600px) {
   #screen-vm .vm-workbench-tabs button { padding: 7px; }
   #screen-vm .vm-listing-toolbar { flex-wrap: wrap; }
   #screen-vm .vm-listing-count { flex-basis: 100%; padding: 1px 3px; }
